@@ -256,6 +256,115 @@ def test_tasknotes_api_fetch_uses_documented_query_shape(plugin_api, monkeypatch
     ]
 
 
+def test_tasknotes_discovery_builds_deterministic_board_query(plugin_api):
+    query = plugin_api._build_tasknotes_discovery_query("default")
+
+    assert query == {
+        "type": "group",
+        "id": "hermes-tasknotes-discovery",
+        "conjunction": "and",
+        "children": [
+            {
+                "type": "condition",
+                "id": "hermes-board",
+                "property": "user:hermesBoard",
+                "operator": "is",
+                "value": "default",
+            }
+        ],
+    }
+
+
+def test_tasknotes_discovery_enumerates_eligible_tasks_and_surfaces_cursor(plugin_api, monkeypatch):
+    requests: list = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "data": {
+                        "tasks": [
+                            {
+                                "title": "Eligible",
+                                "customProperties": {
+                                    "hermesBoard": "default",
+                                    "hermesTaskId": "t_eligible1",
+                                },
+                            },
+                            {
+                                "title": "Wrong board",
+                                "customProperties": {
+                                    "hermesBoard": "other",
+                                    "hermesTaskId": "t_wrongboard",
+                                },
+                            },
+                            {"title": "Missing id", "customProperties": {"hermesBoard": "default"}},
+                            {
+                                "title": "Path identity",
+                                "path": "TaskNotes/Tasks/default--t_path123.md",
+                            },
+                        ],
+                        "total": 4,
+                        "filtered": 4,
+                    }
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        assert timeout == 10
+        return FakeResponse()
+
+    monkeypatch.setattr(plugin_api.urllib.request, "urlopen", fake_urlopen)
+
+    result = plugin_api._discover_tasknotes_tasks("default", cursor="ignored-by-mvp")
+
+    assert [item["identity"] for item in result["tasks"]] == [
+        {"board": "default", "task_id": "t_eligible1"},
+        {"board": "default", "task_id": "t_path123"},
+    ]
+    assert result["cursor"] == {
+        "requestCursor": "ignored-by-mvp",
+        "nextCursor": None,
+        "querySupportsCursor": False,
+        "total": 4,
+        "filtered": 4,
+    }
+    body = json.loads(requests[0].data.decode("utf-8"))
+    assert body == plugin_api._build_tasknotes_discovery_query("default")
+
+
+def test_tasknotes_discovery_endpoint_is_read_only(client, plugin_api, monkeypatch):
+    monkeypatch.setattr(
+        plugin_api,
+        "_discover_tasknotes_tasks",
+        lambda board, cursor=None: {
+            "tasks": [{"identity": {"board": board, "task_id": "t_readonly"}, "task": {"title": "Read-only"}}],
+            "cursor": {
+                "requestCursor": cursor,
+                "nextCursor": None,
+                "querySupportsCursor": False,
+                "total": 1,
+                "filtered": 1,
+            },
+            "query": plugin_api._build_tasknotes_discovery_query(board),
+        },
+    )
+
+    response = client.get("/api/plugins/kanban/tasknotes/discovery?board=default&cursor=abc")
+
+    assert response.status_code == 200
+    assert response.json()["tasks"][0]["identity"] == {"board": "default", "task_id": "t_readonly"}
+    with kb.connect(board="default") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
 def test_tasknotes_in_progress_status_maps_to_hermes_running(plugin_api):
     assert plugin_api._tasknotes_status_to_queue_status({"status": "in-progress"}) == "running"
 

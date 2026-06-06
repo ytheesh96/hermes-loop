@@ -1867,13 +1867,8 @@ def _extract_tasknotes_webhook_identity(payload: dict[str, Any]) -> Optional[dic
     return None
 
 
-def _fetch_tasknotes_task_latest(identity: dict[str, str]) -> Optional[dict[str, Any]]:
-    """Fetch current TaskNotes state by board-qualified Hermes identity.
-
-    Webhook payloads are treated only as wake-up signals; this query is the
-    authoritative read before Hermes mutates its queue.
-    """
-    query = {
+def _build_tasknotes_identity_query(identity: dict[str, str]) -> dict[str, Any]:
+    return {
         "type": "group",
         "id": "hermes-tasknotes-webhook-fetch",
         "conjunction": "and",
@@ -1882,6 +1877,27 @@ def _fetch_tasknotes_task_latest(identity: dict[str, str]) -> Optional[dict[str,
             {"type": "condition", "id": "hermes-task-id", "property": "user:hermesTaskId", "operator": "is", "value": identity["task_id"]},
         ],
     }
+
+
+def _build_tasknotes_discovery_query(board: str) -> dict[str, Any]:
+    """Build the deterministic TaskNotes query used for read-only discovery.
+
+    TaskNotes exposes Hermes metadata as user-defined fields. Discovery can
+    filter reliably by board server-side, then Hermes applies the stricter
+    eligible-task identity check client-side so repeated polling is safe and
+    independent of dashboard board state.
+    """
+    return {
+        "type": "group",
+        "id": "hermes-tasknotes-discovery",
+        "conjunction": "and",
+        "children": [
+            {"type": "condition", "id": "hermes-board", "property": "user:hermesBoard", "operator": "is", "value": board},
+        ],
+    }
+
+
+def _tasknotes_api_post_query(query: dict[str, Any]) -> dict[str, Any]:
     body = json.dumps(query).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     token = _tasknotes_api_token()
@@ -1900,17 +1916,155 @@ def _fetch_tasknotes_task_latest(identity: dict[str, str]) -> Optional[dict[str,
         raise HTTPException(status_code=502, detail=f"TaskNotes API fetch failed: HTTP {exc.code}") from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"TaskNotes API fetch failed: {exc}") from exc
+    return payload if isinstance(payload, dict) else {}
+
+
+def _tasknotes_payload_tasks(payload: dict[str, Any]) -> list[Any]:
     tasks = None
+    data = payload.get("data")
+    if isinstance(data, dict):
+        tasks = data.get("tasks")
+    if tasks is None:
+        tasks = payload.get("tasks")
+    return tasks if isinstance(tasks, list) else []
+
+
+def _tasknotes_payload_count(payload: dict[str, Any], key: str) -> Optional[int]:
+    data = payload.get("data")
+    candidates: list[Any] = []
+    if isinstance(data, dict):
+        candidates.append(data.get(key))
+    candidates.append(payload.get(key))
+    for candidate in candidates:
+        if isinstance(candidate, int):
+            return candidate
+    return None
+
+
+def _tasknotes_identity_from_task(task: dict[str, Any]) -> Optional[dict[str, str]]:
+    """Return the explicit board-qualified Hermes identity for a TaskNotes task.
+
+    TaskNotes remains read-only: Hermes only accepts identities already present
+    as user fields or in the canonical mirror path. A bare task id is not
+    enough because Hermes queue task ids are board scoped.
+    """
+    custom = task.get("customProperties")
+    if isinstance(custom, dict):
+        board = custom.get("hermesBoard")
+        task_id = custom.get("hermesTaskId")
+        if isinstance(board, str) and board.strip() and isinstance(task_id, str) and task_id.strip():
+            return {"board": board.strip(), "task_id": task_id.strip()}
+    board = task.get("hermesBoard")
+    task_id = task.get("hermesTaskId")
+    if isinstance(board, str) and board.strip() and isinstance(task_id, str) and task_id.strip():
+        return {"board": board.strip(), "task_id": task_id.strip()}
+    task_path = task.get("path")
+    if isinstance(task_path, str):
+        import re
+        match = re.match(_TASKNOTES_IDENTITY_PATH_RE, task_path)
+        if match:
+            return {"board": match.group(1), "task_id": match.group(2)}
+    return None
+
+
+def _tasknotes_identity_key(identity: dict[str, str]) -> str:
+    return f"tasknotes:{identity['board']}:{identity['task_id']}"
+
+
+def _build_tasknotes_discovery_query(board: str) -> dict[str, Any]:
+    return {
+        "type": "group",
+        "id": "hermes-tasknotes-discovery",
+        "conjunction": "and",
+        "children": [
+            {
+                "type": "condition",
+                "id": "hermes-board",
+                "property": "user:hermesBoard",
+                "operator": "is",
+                "value": board,
+            }
+        ],
+    }
+
+
+def _tasknotes_query_request(query: dict[str, Any]) -> urllib.request.Request:
+    body = json.dumps(query).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    token = _tasknotes_api_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return urllib.request.Request(
+        f"{_tasknotes_api_base_url()}/api/tasks/query",
+        data=body,
+        headers=headers,
+        method="POST",
+    )
+
+
+def _tasknotes_tasks_from_payload(payload: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    tasks: Any = None
+    total = None
+    filtered = None
     if isinstance(payload, dict):
         data = payload.get("data")
         if isinstance(data, dict):
             tasks = data.get("tasks")
+            total = data.get("total")
+            filtered = data.get("filtered")
         if tasks is None:
             tasks = payload.get("tasks")
-    if isinstance(tasks, list) and tasks:
+        if total is None:
+            total = payload.get("total")
+        if filtered is None:
+            filtered = payload.get("filtered")
+    task_list = [task for task in tasks if isinstance(task, dict)] if isinstance(tasks, list) else []
+    return task_list, {"total": total, "filtered": filtered}
+
+
+def _fetch_tasknotes_task_latest(identity: dict[str, str]) -> Optional[dict[str, Any]]:
+    """Fetch current TaskNotes state by board-qualified Hermes identity.
+
+    Webhook payloads are treated only as wake-up signals; this query is the
+    authoritative read before Hermes mutates its queue.
+    """
+    tasks = _tasknotes_payload_tasks(_tasknotes_api_post_query(_build_tasknotes_identity_query(identity)))
+    if tasks:
         task = tasks[0]
         return task if isinstance(task, dict) else None
     return None
+
+
+def _discover_tasknotes_tasks(board: str, cursor: Optional[str] = None) -> dict[str, Any]:
+    """Enumerate TaskNotes tasks eligible for Hermes reconciliation.
+
+    The current TaskNotes query API does not document cursor/pagination
+    semantics. The cursor argument is accepted and echoed for forward
+    compatibility, but intentionally not sent to TaskNotes until the API
+    supports it. Callers therefore get stable diagnostics for periodic runs
+    without inventing hidden state.
+    """
+    query = _build_tasknotes_discovery_query(board)
+    payload = _tasknotes_api_post_query(query)
+    discovered: list[dict[str, Any]] = []
+    for task in _tasknotes_payload_tasks(payload):
+        if not isinstance(task, dict):
+            continue
+        identity = _extract_tasknotes_webhook_identity(task)
+        if identity is None or identity.get("board") != board:
+            continue
+        discovered.append({"identity": identity, "task": task})
+    return {
+        "tasks": discovered,
+        "cursor": {
+            "requestCursor": cursor,
+            "nextCursor": None,
+            "querySupportsCursor": False,
+            "total": _tasknotes_payload_count(payload, "total"),
+            "filtered": _tasknotes_payload_count(payload, "filtered"),
+        },
+        "query": query,
+    }
 
 
 def _tasknotes_task_title(task: dict[str, Any], identity: dict[str, str]) -> str:
@@ -2005,6 +2159,16 @@ def _coerce_tasknotes_priority(value: Any) -> Optional[int]:
         except ValueError:
             return None
     return None
+
+
+@router.get("/tasknotes/discovery")
+def discover_tasknotes_tasks(
+    board: str = Query(..., description="TaskNotes/Hermes board slug to discover"),
+    cursor: Optional[str] = Query(None, description="Forward-compatible TaskNotes query cursor diagnostics"),
+):
+    """Read-only TaskNotes API discovery path for periodic reconciliation."""
+    board = _resolve_board(board) or kanban_db.DEFAULT_BOARD
+    return _discover_tasknotes_tasks(board, cursor=cursor)
 
 
 @router.post("/tasknotes/webhook", status_code=202)
