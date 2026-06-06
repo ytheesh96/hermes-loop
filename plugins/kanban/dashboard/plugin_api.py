@@ -2025,7 +2025,7 @@ def _tasknotes_queue_task_id(identity: dict[str, str]) -> Optional[str]:
     conn = _conn(board=board)
     try:
         row = conn.execute(
-            "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' ORDER BY created_at DESC LIMIT 1",
+            "SELECT id FROM tasks WHERE idempotency_key = ? ORDER BY created_at DESC LIMIT 1",
             (_tasknotes_identity_key(identity),),
         ).fetchone()
         return row["id"] if row else None
@@ -2228,17 +2228,24 @@ def _sync_tasknotes_task_to_queue(identity: dict[str, str], task: dict[str, Any]
     board = _resolve_board(identity["board"])
     conn = _conn(board=board)
     try:
-        idempotency_key = f"tasknotes:{identity['board']}:{identity['task_id']}"
-        queue_task_id = kanban_db.create_task(
-            conn,
-            title=_tasknotes_task_title(task, identity),
-            body=_tasknotes_task_body(task),
-            assignee=_tasknotes_task_assignee(task),
-            created_by="tasknotes-webhook",
-            idempotency_key=idempotency_key,
-            initial_status="running",
-            board=board,
-        )
+        idempotency_key = _tasknotes_identity_key(identity)
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ? ORDER BY created_at DESC LIMIT 1",
+            (idempotency_key,),
+        ).fetchone()
+        if row:
+            queue_task_id = row["id"]
+        else:
+            queue_task_id = kanban_db.create_task(
+                conn,
+                title=_tasknotes_task_title(task, identity),
+                body=_tasknotes_task_body(task),
+                assignee=_tasknotes_task_assignee(task),
+                created_by="tasknotes-webhook",
+                idempotency_key=idempotency_key,
+                initial_status="running",
+                board=board,
+            )
         desired_status = _tasknotes_status_to_queue_status(task)
         conn.execute(
             "UPDATE tasks SET title = ?, body = ?, assignee = ?, priority = COALESCE(?, priority), "

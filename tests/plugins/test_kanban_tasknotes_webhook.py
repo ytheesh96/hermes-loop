@@ -579,6 +579,51 @@ def test_tasknotes_reconciliation_maps_same_task_id_to_board_qualified_queue_sta
     assert dict(other_row) == {"title": "Other board task", "status": "done"}
 
 
+def test_tasknotes_reconciliation_recovers_deleted_tasknotes_without_duplicate_archived_rows(
+    client, plugin_api, monkeypatch
+):
+    discovered = {
+        "tasks": [
+            {
+                "identity": {"board": "default", "task_id": "t_reconcile_deleted"},
+                "task": {
+                    "title": "Deleted TaskNotes task",
+                    "details": "Deleted upstream",
+                    "status": "deleted",
+                    "contexts": ["peacock"],
+                    "customProperties": {"hermesBoard": "default", "hermesTaskId": "t_reconcile_deleted"},
+                    "path": "TaskNotes/Tasks/default--t_reconcile_deleted.md",
+                },
+            }
+        ],
+        "cursor": {"requestCursor": None, "nextCursor": None, "querySupportsCursor": False, "total": 1, "filtered": 1},
+        "query": plugin_api._build_tasknotes_discovery_query("default"),
+    }
+    monkeypatch.setattr(plugin_api, "_fetch_tasknotes_eligible_tasks", lambda board, cursor=None: discovered)
+
+    first = client.post("/api/plugins/kanban/tasknotes/reconcile?board=default")
+    second = client.post("/api/plugins/kanban/tasknotes/reconcile?board=default")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_body = first.json()
+    second_body = second.json()
+    queue_task_id = first_body["seen"][0]["queue_task_id"]
+    assert first_body["recovered"] == [
+        {"identity": {"board": "default", "task_id": "t_reconcile_deleted"}, "queue_task_id": queue_task_id}
+    ]
+    assert second_body["recovered"] == []
+    assert second_body["seen"] == [
+        {"identity": {"board": "default", "task_id": "t_reconcile_deleted"}, "queue_task_id": queue_task_id, "existed": True}
+    ]
+    with kb.connect(board="default") as conn:
+        rows = conn.execute(
+            "SELECT id, status FROM tasks WHERE idempotency_key = ? ORDER BY created_at",
+            ("tasknotes:default:t_reconcile_deleted",),
+        ).fetchall()
+    assert [(row["id"], row["status"]) for row in rows] == [(queue_task_id, "archived")]
+
+
 def test_tasknotes_reconciliation_health_reports_last_run_and_cursor(client, plugin_api, monkeypatch):
     discovered = {
         "tasks": [],
