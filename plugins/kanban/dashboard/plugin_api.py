@@ -1821,6 +1821,11 @@ def _tasknotes_legacy_dashboard_sync_enabled() -> bool:
     return _env_enabled("HERMES_TASKNOTES_ENABLE_LEGACY_DASHBOARD_SYNC", default=False)
 
 
+def _require_tasknotes_legacy_dashboard_sync() -> None:
+    if not _tasknotes_legacy_dashboard_sync_enabled():
+        raise HTTPException(status_code=403, detail="TaskNotes legacy dashboard sync is disabled")
+
+
 def _tasknotes_writeback_fields() -> set[str]:
     raw = os.environ.get("HERMES_TASKNOTES_WRITEBACK_FIELDS")
     if raw is None:
@@ -2381,6 +2386,7 @@ def reconcile_tasknotes_tasks(
     cursor: Optional[str] = Query(None, description="Forward-compatible TaskNotes query cursor diagnostics"),
 ):
     board = _resolve_board(board) or kanban_db.DEFAULT_BOARD
+    _require_tasknotes_legacy_dashboard_sync()
     try:
         return _reconcile_tasknotes_queue(board, cursor=cursor)
     except HTTPException as exc:
@@ -2524,6 +2530,7 @@ def discover_tasknotes_tasks(
 ):
     """Read-only TaskNotes API discovery path for periodic reconciliation."""
     board = _resolve_board(board) or kanban_db.DEFAULT_BOARD
+    _require_tasknotes_legacy_dashboard_sync()
     return _discover_tasknotes_tasks(board, cursor=cursor)
 
 

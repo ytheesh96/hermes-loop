@@ -441,6 +441,7 @@ def test_tasknotes_discovery_supports_top_level_payload_and_does_not_send_cursor
 
 
 def test_tasknotes_discovery_endpoint_is_read_only(client, plugin_api, monkeypatch):
+    monkeypatch.setenv("HERMES_TASKNOTES_ENABLE_LEGACY_DASHBOARD_SYNC", "1")
     monkeypatch.setattr(
         plugin_api,
         "_discover_tasknotes_tasks",
@@ -465,7 +466,66 @@ def test_tasknotes_discovery_endpoint_is_read_only(client, plugin_api, monkeypat
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
 
 
+def test_tasknotes_discovery_requires_legacy_dashboard_sync_opt_in(client, plugin_api, monkeypatch):
+    monkeypatch.delenv("HERMES_TASKNOTES_ENABLE_LEGACY_DASHBOARD_SYNC", raising=False)
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_discover(board, cursor=None):
+        calls.append((board, cursor))
+        return {"tasks": [], "cursor": {}, "query": ""}
+
+    monkeypatch.setattr(plugin_api, "_discover_tasknotes_tasks", fake_discover)
+
+    response = client.get("/api/plugins/kanban/tasknotes/discovery?board=default&cursor=abc")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "TaskNotes legacy dashboard sync is disabled"
+    assert calls == []
+
+
+@pytest.mark.parametrize("value", [None, "0", "false", "no", "off", ""])
+def test_tasknotes_reconciliation_requires_legacy_dashboard_sync_opt_in(client, plugin_api, monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("HERMES_TASKNOTES_ENABLE_LEGACY_DASHBOARD_SYNC", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_TASKNOTES_ENABLE_LEGACY_DASHBOARD_SYNC", value)
+    calls: list[tuple[str, str | None]] = []
+    discovered = {
+        "tasks": [
+            {
+                "identity": {"board": "default", "task_id": "t_disabled_reconcile"},
+                "task": {
+                    "title": "Should not be reconciled",
+                    "status": "ready",
+                    "customProperties": {"hermesBoard": "default", "hermesTaskId": "t_disabled_reconcile"},
+                    "path": "TaskNotes/Tasks/default--t_disabled_reconcile.md",
+                },
+            }
+        ],
+        "cursor": {"requestCursor": None, "nextCursor": None, "querySupportsCursor": False, "total": 1, "filtered": 1},
+        "query": plugin_api._build_tasknotes_discovery_query("default"),
+    }
+
+    def fake_fetch(board, cursor=None):
+        calls.append((board, cursor))
+        return discovered
+
+    monkeypatch.setattr(plugin_api, "_fetch_tasknotes_eligible_tasks", fake_fetch)
+
+    response = client.post("/api/plugins/kanban/tasknotes/reconcile?board=default")
+    health = client.get("/api/plugins/kanban/tasknotes/reconcile/health?board=default")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "TaskNotes legacy dashboard sync is disabled"
+    assert calls == []
+    assert health.status_code == 200
+    assert health.json()["lastRun"] is None
+    with kb.connect(board="default") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
 def test_tasknotes_reconciliation_recovers_missed_webhook_without_duplicates(client, plugin_api, monkeypatch):
+    monkeypatch.setenv("HERMES_TASKNOTES_ENABLE_LEGACY_DASHBOARD_SYNC", "1")
     discovered = {
         "tasks": [
             {
@@ -508,6 +568,7 @@ def test_tasknotes_reconciliation_recovers_missed_webhook_without_duplicates(cli
 
 
 def test_tasknotes_reconciliation_deduplicates_repeated_tasknotes_identities(client, plugin_api, monkeypatch):
+    monkeypatch.setenv("HERMES_TASKNOTES_ENABLE_LEGACY_DASHBOARD_SYNC", "1")
     identity = {"board": "default", "task_id": "t_duplicate_note"}
     duplicate_task = {
         "title": "Duplicate TaskNotes row",
@@ -582,6 +643,7 @@ def test_tasknotes_reconciliation_maps_same_task_id_to_board_qualified_queue_sta
 def test_tasknotes_reconciliation_recovers_deleted_tasknotes_without_duplicate_archived_rows(
     client, plugin_api, monkeypatch
 ):
+    monkeypatch.setenv("HERMES_TASKNOTES_ENABLE_LEGACY_DASHBOARD_SYNC", "1")
     discovered = {
         "tasks": [
             {
@@ -625,6 +687,7 @@ def test_tasknotes_reconciliation_recovers_deleted_tasknotes_without_duplicate_a
 
 
 def test_tasknotes_reconciliation_health_reports_last_run_and_cursor(client, plugin_api, monkeypatch):
+    monkeypatch.setenv("HERMES_TASKNOTES_ENABLE_LEGACY_DASHBOARD_SYNC", "1")
     discovered = {
         "tasks": [],
         "cursor": {"requestCursor": "ignored", "nextCursor": None, "querySupportsCursor": False, "total": 0, "filtered": 0},
@@ -646,6 +709,8 @@ def test_tasknotes_reconciliation_health_reports_last_run_and_cursor(client, plu
 
 
 def test_tasknotes_reconciliation_health_reports_failed_run(client, plugin_api, monkeypatch):
+    monkeypatch.setenv("HERMES_TASKNOTES_ENABLE_LEGACY_DASHBOARD_SYNC", "1")
+
     def fail_discovery(board, cursor=None):
         raise plugin_api.HTTPException(status_code=502, detail="TaskNotes API fetch failed: timeout")
 
