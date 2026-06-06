@@ -1773,6 +1773,37 @@ def _tasknotes_api_token() -> str:
 
 _TASKNOTES_FALSEY_ENV_VALUES = {"", "0", "false", "no", "off"}
 _TASKNOTES_WRITEBACK_DEFAULT_FIELDS = ("title", "details", "priority", "status")
+_TASKNOTES_WRITEBACK_FIELD_ALIASES = {
+    "body": "details",
+    "description": "details",
+    "route": "assignee",
+    "routing": "assignee",
+    "blocked_by": "blockedBy",
+    "blockedby": "blockedBy",
+    "parents": "blockedBy",
+    "blockers": "blockedBy",
+    "dependencies": "blockedBy",
+    "children": "blocks",
+    "blocked": "blocks",
+    "artifact": "artifacts",
+    "attachments": "artifacts",
+    "latest_summary": "summary",
+    "concise_summary": "summary",
+    "custom_properties": "customProperties",
+    "customproperties": "customProperties",
+}
+_TASKNOTES_WRITEBACK_ALLOWED_FIELDS = {
+    "title",
+    "details",
+    "priority",
+    "status",
+    "assignee",
+    "summary",
+    "artifacts",
+    "blockedBy",
+    "blocks",
+    "customProperties",
+}
 
 
 def _env_enabled(name: str, *, default: bool) -> bool:
@@ -1794,9 +1825,15 @@ def _tasknotes_writeback_fields() -> set[str]:
     raw = os.environ.get("HERMES_TASKNOTES_WRITEBACK_FIELDS")
     if raw is None:
         return set(_TASKNOTES_WRITEBACK_DEFAULT_FIELDS)
-    fields = {part.strip() for part in raw.split(",") if part.strip()}
-    aliases = {"body": "details", "description": "details"}
-    return {aliases.get(field, field) for field in fields}
+    fields: set[str] = set()
+    for part in raw.split(","):
+        field = part.strip()
+        if not field:
+            continue
+        canonical = _TASKNOTES_WRITEBACK_FIELD_ALIASES.get(field, field)
+        if canonical in _TASKNOTES_WRITEBACK_ALLOWED_FIELDS:
+            fields.add(canonical)
+    return fields
 
 
 @router.get("/tasknotes/sync/mode")
@@ -2039,7 +2076,63 @@ def _tasknotes_identity_from_idempotency_key(idempotency_key: Optional[str]) -> 
     return {"board": parts[1], "task_id": parts[2]}
 
 
-def _tasknotes_writeback_payload(task: kanban_db.Task) -> dict[str, Any]:
+def _tasknotes_concise_text(value: Optional[str], *, limit: int = _CARD_SUMMARY_PREVIEW_CHARS) -> Optional[str]:
+    if not value:
+        return None
+    text = " ".join(value.split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _tasknotes_writeback_custom_properties(
+    conn: sqlite3.Connection,
+    task: kanban_db.Task,
+    fields: set[str],
+    latest: dict[str, Any],
+) -> dict[str, Any]:
+    existing = latest.get("customProperties")
+    custom: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    identity = _tasknotes_identity_from_idempotency_key(task.idempotency_key)
+    include_all = "customProperties" in fields
+    if identity:
+        custom["hermesBoard"] = identity["board"]
+        custom["hermesTaskId"] = identity["task_id"]
+    if include_all or "summary" in fields:
+        summary = _tasknotes_concise_text(kanban_db.latest_summary(conn, task.id))
+        if summary:
+            custom["hermesSummary"] = summary
+        else:
+            custom.pop("hermesSummary", None)
+    if include_all or "artifacts" in fields:
+        artifacts = [
+            {
+                "filename": att.filename,
+                "contentType": att.content_type,
+                "size": att.size,
+            }
+            for att in kanban_db.list_attachments(conn, task.id)
+        ]
+        if artifacts:
+            custom["hermesArtifacts"] = artifacts
+        else:
+            custom.pop("hermesArtifacts", None)
+    if include_all or "blockedBy" in fields or "blocks" in fields:
+        links = _links_for(conn, task.id)
+        if include_all or "blockedBy" in fields:
+            custom["blockedBy"] = links["parents"]
+        if include_all or "blocks" in fields:
+            custom["blocks"] = links["children"]
+    return custom
+
+
+def _tasknotes_writeback_payload(
+    task: kanban_db.Task,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+    latest: Optional[dict[str, Any]] = None,
+    status_override: Optional[str] = None,
+) -> dict[str, Any]:
     fields = _tasknotes_writeback_fields()
     payload: dict[str, Any] = {}
     if "title" in fields:
@@ -2049,9 +2142,12 @@ def _tasknotes_writeback_payload(task: kanban_db.Task) -> dict[str, Any]:
     if "priority" in fields:
         payload["priority"] = task.priority
     if "status" in fields:
-        payload["status"] = task.status
+        payload["status"] = status_override or task.status
     if "assignee" in fields:
         payload["assignee"] = task.assignee
+    custom_fields = {"summary", "artifacts", "blockedBy", "blocks", "customProperties"}
+    if conn is not None and latest is not None and fields.intersection(custom_fields):
+        payload["customProperties"] = _tasknotes_writeback_custom_properties(conn, task, fields, latest)
     return payload
 
 
@@ -2076,7 +2172,12 @@ def _tasknotes_api_patch_task(tasknotes_task_id: str, payload: dict[str, Any]) -
         raise HTTPException(status_code=502, detail=f"TaskNotes API writeback failed: {exc}") from exc
 
 
-def _writeback_tasknotes_task(task: Optional[kanban_db.Task]) -> None:
+def _writeback_tasknotes_task(
+    task: Optional[kanban_db.Task],
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+    status_override: Optional[str] = None,
+) -> None:
     """Push a dashboard-originated task mutation back to TaskNotes when safe.
 
     Only tasks created from TaskNotes have the board-qualified idempotency key
@@ -2094,14 +2195,28 @@ def _writeback_tasknotes_task(task: Optional[kanban_db.Task]) -> None:
     tasknotes_task_id = latest.get("id") or latest.get("taskId")
     if not isinstance(tasknotes_task_id, str) or not tasknotes_task_id.strip():
         return
-    payload = _tasknotes_writeback_payload(task)
+    payload = _tasknotes_writeback_payload(
+        task,
+        conn=conn,
+        latest=latest,
+        status_override=status_override,
+    )
     if payload:
         _tasknotes_api_patch_task(tasknotes_task_id.strip(), payload)
 
 
-def _writeback_tasknotes_task_by_id(conn: sqlite3.Connection, task_id: str) -> None:
+def _writeback_tasknotes_task_by_id(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    status_override: Optional[str] = None,
+) -> None:
     try:
-        _writeback_tasknotes_task(kanban_db.get_task(conn, task_id))
+        _writeback_tasknotes_task(
+            kanban_db.get_task(conn, task_id),
+            conn=conn,
+            status_override=status_override,
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -3819,7 +3934,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                 )
 
         updated = kanban_db.get_task(conn, task_id)
-        _writeback_tasknotes_task(updated)
+        _writeback_tasknotes_task(updated, conn=conn)
         response = {
             "task": _task_dict_with_loop_intake(conn, updated) if updated else None
         }
@@ -3839,6 +3954,13 @@ def delete_task(task_id: str, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
+        task = kanban_db.get_task(conn, task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        # TaskNotes does not expose a documented hard-delete writeback path in
+        # this integration. Mirror dashboard deletes as an archive/status update
+        # via the TaskNotes HTTP API before removing the local Hermes row.
+        _writeback_tasknotes_task(task, conn=conn, status_override="archived")
         ok = kanban_db.delete_task(conn, task_id)
         if not ok:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")

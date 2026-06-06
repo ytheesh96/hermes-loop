@@ -768,7 +768,7 @@ def test_dashboard_patch_writes_tasknotes_via_query_then_patch(client, plugin_ap
 
 
 def test_tasknotes_writeback_fields_are_configurable(client, plugin_api, monkeypatch):
-    monkeypatch.setenv("HERMES_TASKNOTES_WRITEBACK_FIELDS", "title,status")
+    monkeypatch.setenv("HERMES_TASKNOTES_WRITEBACK_FIELDS", "title,status,unknown")
     task_id = _create_tasknotes_queue_task(status="todo")
     requests = _capture_tasknotes_writeback(plugin_api, monkeypatch)
 
@@ -779,6 +779,84 @@ def test_tasknotes_writeback_fields_are_configurable(client, plugin_api, monkeyp
 
     assert response.status_code == 200
     assert json.loads(requests[1].data.decode("utf-8")) == {"title": "Only title", "status": "ready"}
+
+
+def test_tasknotes_writeback_custom_properties_include_summary_artifacts_and_links(client, plugin_api, monkeypatch):
+    monkeypatch.setenv("HERMES_TASKNOTES_WRITEBACK_FIELDS", "customProperties")
+    tasknotes_id = _create_tasknotes_queue_task(idempotency_key="tasknotes:default:t_custom")
+    parent_id = _create_tasknotes_queue_task(idempotency_key="plain-parent")
+    child_id = _create_tasknotes_queue_task(idempotency_key="plain-child")
+    with kb.connect(board="default") as conn:
+        kb.link_tasks(conn, parent_id, tasknotes_id)
+        kb.link_tasks(conn, tasknotes_id, child_id)
+        kb.add_attachment(
+            conn,
+            tasknotes_id,
+            filename="artifact.txt",
+            stored_path="/tmp/artifact.txt",
+            content_type="text/plain",
+            size=12,
+            uploaded_by="test",
+        )
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, outcome, summary) "
+            "VALUES (?, 'test', 'done', 1, 2, 'completed', ?)",
+            (tasknotes_id, "A concise handoff summary"),
+        )
+        conn.commit()
+    requests = _capture_tasknotes_writeback(plugin_api, monkeypatch)
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{tasknotes_id}?board=default",
+        json={"priority": 4},
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(requests[1].data.decode("utf-8"))
+    assert payload == {
+        "customProperties": {
+            "hermesBoard": "default",
+            "hermesTaskId": "t_custom",
+            "hermesSummary": "A concise handoff summary",
+            "hermesArtifacts": [{"filename": "artifact.txt", "contentType": "text/plain", "size": 12}],
+            "blockedBy": [parent_id],
+            "blocks": [child_id],
+        }
+    }
+
+
+def test_tasknotes_writeback_delete_archives_via_api_before_removing_local_task(client, plugin_api, monkeypatch):
+    task_id = _create_tasknotes_queue_task(idempotency_key="tasknotes:default:t_delete")
+    requests = _capture_tasknotes_writeback(plugin_api, monkeypatch)
+
+    response = client.delete(f"/api/plugins/kanban/tasks/{task_id}?board=default")
+
+    assert response.status_code == 200
+    assert [req.get_method() for req in requests] == ["POST", "PATCH"]
+    assert json.loads(requests[1].data.decode("utf-8"))["status"] == "archived"
+
+
+def test_tasknotes_writeback_api_failure_returns_bad_gateway(client, plugin_api, monkeypatch):
+    task_id = _create_tasknotes_queue_task(idempotency_key="tasknotes:default:t_failure")
+
+    def failing_urlopen(request, timeout):
+        if request.get_method() == "PATCH":
+            raise OSError("network down")
+        return type("Response", (), {
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, exc_type, exc, tb: False,
+            "read": lambda self: json.dumps({"data": {"tasks": [{"id": "tn-failure"}]}}).encode("utf-8"),
+        })()
+
+    monkeypatch.setattr(plugin_api.urllib.request, "urlopen", failing_urlopen)
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}?board=default",
+        json={"title": "Fails remotely"},
+    )
+
+    assert response.status_code == 502
+    assert "TaskNotes API writeback failed" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("value", ["0", "false", "no", "off", ""])
