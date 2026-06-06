@@ -1771,6 +1771,52 @@ def _tasknotes_api_token() -> str:
     return os.environ.get("HERMES_TASKNOTES_API_TOKEN", "").strip()
 
 
+_TASKNOTES_FALSEY_ENV_VALUES = {"", "0", "false", "no", "off"}
+_TASKNOTES_WRITEBACK_DEFAULT_FIELDS = ("title", "details", "priority", "status")
+
+
+def _env_enabled(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in _TASKNOTES_FALSEY_ENV_VALUES
+
+
+def _tasknotes_writeback_enabled() -> bool:
+    return _env_enabled("HERMES_TASKNOTES_WRITEBACK", default=True)
+
+
+def _tasknotes_legacy_dashboard_sync_enabled() -> bool:
+    return _env_enabled("HERMES_TASKNOTES_ENABLE_LEGACY_DASHBOARD_SYNC", default=False)
+
+
+def _tasknotes_writeback_fields() -> set[str]:
+    raw = os.environ.get("HERMES_TASKNOTES_WRITEBACK_FIELDS")
+    if raw is None:
+        return set(_TASKNOTES_WRITEBACK_DEFAULT_FIELDS)
+    fields = {part.strip() for part in raw.split(",") if part.strip()}
+    aliases = {"body": "details", "description": "details"}
+    return {aliases.get(field, field) for field in fields}
+
+
+@router.get("/tasknotes/sync/mode")
+def tasknotes_sync_mode():
+    writeback = _tasknotes_writeback_enabled()
+    legacy = _tasknotes_legacy_dashboard_sync_enabled()
+    if legacy:
+        mode = "legacy-dashboard-sync"
+    elif writeback:
+        mode = "api-writeback"
+    else:
+        mode = "disabled"
+    return {
+        "mode": mode,
+        "writebackEnabled": writeback,
+        "legacyDashboardSyncEnabled": legacy,
+        "writebackFields": sorted(_tasknotes_writeback_fields()),
+    }
+
+
 def _verify_tasknotes_signature(raw_body: bytes, signature: Optional[str]) -> None:
     secret = _tasknotes_webhook_secret()
     if not secret:
@@ -1982,6 +2028,84 @@ def _fetch_tasknotes_task_latest(identity: dict[str, str]) -> Optional[dict[str,
         task = tasks[0]
         return task if isinstance(task, dict) else None
     return None
+
+
+def _tasknotes_identity_from_idempotency_key(idempotency_key: Optional[str]) -> Optional[dict[str, str]]:
+    if not isinstance(idempotency_key, str):
+        return None
+    parts = idempotency_key.split(":", 2)
+    if len(parts) != 3 or parts[0] != "tasknotes" or not parts[1] or not parts[2]:
+        return None
+    return {"board": parts[1], "task_id": parts[2]}
+
+
+def _tasknotes_writeback_payload(task: kanban_db.Task) -> dict[str, Any]:
+    fields = _tasknotes_writeback_fields()
+    payload: dict[str, Any] = {}
+    if "title" in fields:
+        payload["title"] = task.title
+    if "details" in fields:
+        payload["details"] = task.body or ""
+    if "priority" in fields:
+        payload["priority"] = task.priority
+    if "status" in fields:
+        payload["status"] = task.status
+    if "assignee" in fields:
+        payload["assignee"] = task.assignee
+    return payload
+
+
+def _tasknotes_api_patch_task(tasknotes_task_id: str, payload: dict[str, Any]) -> None:
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    token = _tasknotes_api_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        f"{_tasknotes_api_base_url()}/api/tasks/{tasknotes_task_id}",
+        data=body,
+        headers=headers,
+        method="PATCH",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response.read()
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"TaskNotes API writeback failed: HTTP {exc.code}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"TaskNotes API writeback failed: {exc}") from exc
+
+
+def _writeback_tasknotes_task(task: Optional[kanban_db.Task]) -> None:
+    """Push a dashboard-originated task mutation back to TaskNotes when safe.
+
+    Only tasks created from TaskNotes have the board-qualified idempotency key
+    ``tasknotes:{board}:{task_id}``. For those rows, query TaskNotes first to
+    discover the current TaskNotes task id, then PATCH the configured fields.
+    """
+    if task is None or not _tasknotes_writeback_enabled():
+        return
+    identity = _tasknotes_identity_from_idempotency_key(task.idempotency_key)
+    if identity is None:
+        return
+    latest = _fetch_tasknotes_task_latest(identity)
+    if not latest:
+        return
+    tasknotes_task_id = latest.get("id") or latest.get("taskId")
+    if not isinstance(tasknotes_task_id, str) or not tasknotes_task_id.strip():
+        return
+    payload = _tasknotes_writeback_payload(task)
+    if payload:
+        _tasknotes_api_patch_task(tasknotes_task_id.strip(), payload)
+
+
+def _writeback_tasknotes_task_by_id(conn: sqlite3.Connection, task_id: str) -> None:
+    try:
+        _writeback_tasknotes_task(kanban_db.get_task(conn, task_id))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"TaskNotes API writeback failed: {exc}") from exc
 
 
 def _discover_tasknotes_tasks(board: str, cursor: Optional[str] = None) -> dict[str, Any]:
@@ -3452,6 +3576,7 @@ async def upload_task_attachment(
             uploaded_by=(uploaded_by or "dashboard"),
         )
         att = kanban_db.get_attachment(conn, att_id)
+        _writeback_tasknotes_task_by_id(conn, task_id)
         return {"attachment": _attachment_dict(att) if att else None}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -3494,6 +3619,7 @@ def remove_attachment(attachment_id: int, board: Optional[str] = Query(None)):
         att = kanban_db.delete_attachment(conn, attachment_id)
         if att is None:
             raise HTTPException(status_code=404, detail="attachment not found")
+        _writeback_tasknotes_task_by_id(conn, att.task_id)
         return {"ok": True, "id": attachment_id}
     finally:
         conn.close()
@@ -3693,6 +3819,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                 )
 
         updated = kanban_db.get_task(conn, task_id)
+        _writeback_tasknotes_task(updated)
         response = {
             "task": _task_dict_with_loop_intake(conn, updated) if updated else None
         }
@@ -3980,6 +4107,8 @@ def add_link(payload: LinkBody, board: Optional[str] = Query(None)):
             payload.child_id,
             allowed_child_statuses=allowed_child_statuses,
         )
+        _writeback_tasknotes_task_by_id(conn, payload.parent_id)
+        _writeback_tasknotes_task_by_id(conn, payload.child_id)
         return {"ok": True}
     except kanban_db.TaskStatusConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -4023,6 +4152,9 @@ def delete_link(
             child_id,
             allowed_child_statuses=allowed_child_statuses,
         )
+        if ok:
+            _writeback_tasknotes_task_by_id(conn, parent_id)
+            _writeback_tasknotes_task_by_id(conn, child_id)
         return {"ok": bool(ok)}
     except kanban_db.TaskStatusConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -4176,6 +4308,8 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                             entry.update(ok=False, error="model override refused")
                     except (ValueError, RuntimeError) as e:
                         entry.update(ok=False, error=str(e))
+                if entry.get("ok"):
+                    _writeback_tasknotes_task_by_id(conn, tid)
             except Exception as e:  # defensive — one bad id shouldn't kill the batch
                 entry.update(ok=False, error=str(e))
             results.append(entry)

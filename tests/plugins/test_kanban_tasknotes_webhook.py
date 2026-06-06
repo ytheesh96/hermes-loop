@@ -700,3 +700,136 @@ def test_tasknotes_status_fallback_is_ready_not_synthetic_running(plugin_api, ta
         ).fetchone()
     assert row is not None
     assert row["status"] == "ready"
+
+
+
+def _create_tasknotes_queue_task(*, title="Mirrored", body="Body", status="ready", priority=0, idempotency_key="tasknotes:default:t_writeback"):
+    with kb.connect(board="default") as conn:
+        task_id = kb.create_task(
+            conn,
+            title=title,
+            body=body,
+            assignee="peacock",
+            created_by="test",
+            initial_status="running",
+            priority=priority,
+            idempotency_key=idempotency_key,
+        )
+        conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
+        conn.commit()
+    return task_id
+
+
+def _capture_tasknotes_writeback(plugin_api, monkeypatch, *, tasknotes_id="tn-writeback"):
+    requests = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        if request.get_method() == "POST":
+            return FakeResponse({"data": {"tasks": [{"id": tasknotes_id}]}})
+        return FakeResponse({"ok": True})
+
+    monkeypatch.setattr(plugin_api.urllib.request, "urlopen", fake_urlopen)
+    return requests
+
+
+def test_dashboard_patch_writes_tasknotes_via_query_then_patch(client, plugin_api, monkeypatch):
+    task_id = _create_tasknotes_queue_task()
+    requests = _capture_tasknotes_writeback(plugin_api, monkeypatch)
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}?board=default",
+        json={"title": "Dashboard title", "body": "Dashboard body", "priority": 7},
+    )
+
+    assert response.status_code == 200
+    assert [req.get_method() for req in requests] == ["POST", "PATCH"]
+    assert requests[0].full_url == "http://tasknotes.local/api/tasks/query"
+    assert requests[1].full_url == "http://tasknotes.local/api/tasks/tn-writeback"
+    assert json.loads(requests[1].data.decode("utf-8")) == {
+        "title": "Dashboard title",
+        "details": "Dashboard body",
+        "priority": 7,
+        "status": "ready",
+    }
+
+
+def test_tasknotes_writeback_fields_are_configurable(client, plugin_api, monkeypatch):
+    monkeypatch.setenv("HERMES_TASKNOTES_WRITEBACK_FIELDS", "title,status")
+    task_id = _create_tasknotes_queue_task(status="todo")
+    requests = _capture_tasknotes_writeback(plugin_api, monkeypatch)
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}?board=default",
+        json={"title": "Only title", "body": "Not sent", "priority": 9, "status": "ready"},
+    )
+
+    assert response.status_code == 200
+    assert json.loads(requests[1].data.decode("utf-8")) == {"title": "Only title", "status": "ready"}
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", ""])
+def test_tasknotes_writeback_falsey_env_disables_api_call(client, plugin_api, monkeypatch, value):
+    monkeypatch.setenv("HERMES_TASKNOTES_WRITEBACK", value)
+    task_id = _create_tasknotes_queue_task(idempotency_key="tasknotes:default:t_disabled")
+    requests = _capture_tasknotes_writeback(plugin_api, monkeypatch)
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}?board=default",
+        json={"title": "Disabled"},
+    )
+
+    assert response.status_code == 200
+    assert requests == []
+
+
+def test_tasknotes_sync_mode_reports_writeback_and_legacy_pull_opt_in(client, plugin_api, monkeypatch):
+    response = client.get("/api/plugins/kanban/tasknotes/sync/mode")
+    assert response.status_code == 200
+    assert response.json()["mode"] == "api-writeback"
+    assert response.json()["writebackEnabled"] is True
+    assert response.json()["legacyDashboardSyncEnabled"] is False
+
+    monkeypatch.setenv("HERMES_TASKNOTES_ENABLE_LEGACY_DASHBOARD_SYNC", "1")
+    legacy = client.get("/api/plugins/kanban/tasknotes/sync/mode")
+    assert legacy.status_code == 200
+    assert legacy.json()["mode"] == "legacy-dashboard-sync"
+    assert legacy.json()["legacyDashboardSyncEnabled"] is True
+
+
+def test_tasknotes_writeback_only_for_tasknotes_idempotency_key_on_bulk_link_and_attachment(client, plugin_api, monkeypatch):
+    tasknotes_id = _create_tasknotes_queue_task(idempotency_key="tasknotes:default:t_bulk_link_attach")
+    plain_id = _create_tasknotes_queue_task(idempotency_key="plain-key")
+    requests = _capture_tasknotes_writeback(plugin_api, monkeypatch)
+
+    bulk = client.post(
+        "/api/plugins/kanban/tasks/bulk?board=default",
+        json={"ids": [tasknotes_id, plain_id], "priority": 3},
+    )
+    link = client.post(
+        "/api/plugins/kanban/links?board=default",
+        json={"parent_id": plain_id, "child_id": tasknotes_id},
+    )
+    upload = client.post(
+        f"/api/plugins/kanban/tasks/{tasknotes_id}/attachments?board=default",
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+
+    assert bulk.status_code == 200
+    assert link.status_code == 200
+    assert upload.status_code == 200
+    assert [req.get_method() for req in requests].count("PATCH") == 3
+    assert all(req.full_url == "http://tasknotes.local/api/tasks/tn-writeback" for req in requests if req.get_method() == "PATCH")
