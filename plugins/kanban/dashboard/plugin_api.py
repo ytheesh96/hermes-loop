@@ -2067,6 +2067,144 @@ def _discover_tasknotes_tasks(board: str, cursor: Optional[str] = None) -> dict[
     }
 
 
+def _fetch_tasknotes_eligible_tasks(board: str, cursor: Optional[str] = None) -> dict[str, Any]:
+    return _discover_tasknotes_tasks(board, cursor=cursor)
+
+
+def _tasknotes_queue_task_id(identity: dict[str, str]) -> Optional[str]:
+    board = _resolve_board(identity["board"])
+    conn = _conn(board=board)
+    try:
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' ORDER BY created_at DESC LIMIT 1",
+            (_tasknotes_identity_key(identity),),
+        ).fetchone()
+        return row["id"] if row else None
+    finally:
+        conn.close()
+
+
+def _ensure_tasknotes_reconciliation_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS tasknotes_reconciliation_runs ("
+        "id INTEGER PRIMARY KEY CHECK (id = 1), "
+        "status TEXT NOT NULL, "
+        "started_at INTEGER NOT NULL, "
+        "finished_at INTEGER NOT NULL, "
+        "eligible_count INTEGER NOT NULL, "
+        "seen_count INTEGER NOT NULL, "
+        "recovered_count INTEGER NOT NULL, "
+        "cursor_json TEXT, "
+        "error TEXT"
+        ")"
+    )
+
+
+def _record_tasknotes_reconciliation_health(board: str, result: dict[str, Any]) -> None:
+    conn = _conn(board=_resolve_board(board))
+    try:
+        _ensure_tasknotes_reconciliation_table(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO tasknotes_reconciliation_runs "
+            "(id, status, started_at, finished_at, eligible_count, seen_count, recovered_count, cursor_json, error) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                result["status"],
+                result["startedAt"],
+                result["finishedAt"],
+                result["eligibleTaskNotesCount"],
+                len(result.get("seen", [])),
+                len(result.get("recovered", [])),
+                json.dumps(result.get("cursor"), sort_keys=True),
+                result.get("error"),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _last_tasknotes_reconciliation_health(board: str) -> Optional[dict[str, Any]]:
+    conn = _conn(board=_resolve_board(board))
+    try:
+        _ensure_tasknotes_reconciliation_table(conn)
+        row = conn.execute(
+            "SELECT status, started_at, finished_at, eligible_count, seen_count, recovered_count, cursor_json, error "
+            "FROM tasknotes_reconciliation_runs WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return None
+        cursor = json.loads(row["cursor_json"] or "null")
+        return {
+            "status": row["status"],
+            "startedAt": row["started_at"],
+            "finishedAt": row["finished_at"],
+            "eligibleTaskNotesCount": row["eligible_count"],
+            "seenCount": row["seen_count"],
+            "recoveredCount": row["recovered_count"],
+            "cursor": cursor,
+            "error": row["error"],
+        }
+    finally:
+        conn.close()
+
+
+def _reconcile_tasknotes_queue(board: str, cursor: Optional[str] = None) -> dict[str, Any]:
+    started = int(time.time())
+    discovery = _fetch_tasknotes_eligible_tasks(board, cursor=cursor)
+    seen: list[dict[str, Any]] = []
+    recovered: list[dict[str, Any]] = []
+    for item in discovery.get("tasks", []):
+        if not isinstance(item, dict):
+            continue
+        identity = item.get("identity")
+        task = item.get("task")
+        if not isinstance(identity, dict) or not isinstance(task, dict):
+            continue
+        if identity.get("board") != board or not identity.get("task_id"):
+            continue
+        existing = _tasknotes_queue_task_id(identity)
+        queue_task_id = _sync_tasknotes_task_to_queue(identity, task)
+        if existing is None:
+            recovered.append({"identity": identity, "queue_task_id": queue_task_id})
+        seen.append({"identity": identity, "queue_task_id": queue_task_id, "existed": existing is not None})
+    result = {
+        "status": "ok",
+        "board": board,
+        "startedAt": started,
+        "finishedAt": int(time.time()),
+        "eligibleTaskNotesCount": len(discovery.get("tasks", [])),
+        "seen": seen,
+        "recovered": recovered,
+        "cursor": discovery.get("cursor", {"requestCursor": cursor, "nextCursor": None, "querySupportsCursor": False}),
+    }
+    _record_tasknotes_reconciliation_health(board, result)
+    return result
+
+
+@router.post("/tasknotes/reconcile")
+def reconcile_tasknotes_tasks(
+    board: str = Query(..., description="TaskNotes/Hermes board slug to reconcile"),
+    cursor: Optional[str] = Query(None, description="Forward-compatible TaskNotes query cursor diagnostics"),
+):
+    board = _resolve_board(board) or kanban_db.DEFAULT_BOARD
+    return _reconcile_tasknotes_queue(board, cursor=cursor)
+
+
+@router.get("/tasknotes/reconcile/health")
+def tasknotes_reconciliation_health(
+    board: str = Query(..., description="TaskNotes/Hermes board slug to inspect"),
+):
+    board = _resolve_board(board) or kanban_db.DEFAULT_BOARD
+    last_run = _last_tasknotes_reconciliation_health(board)
+    return {
+        "ok": last_run is not None and last_run.get("status") == "ok",
+        "board": board,
+        "lastRun": last_run,
+        "cursor": (last_run or {}).get("cursor"),
+    }
+
+
 def _tasknotes_task_title(task: dict[str, Any], identity: dict[str, str]) -> str:
     title = task.get("title")
     if isinstance(title, str) and title.strip():

@@ -365,6 +365,78 @@ def test_tasknotes_discovery_endpoint_is_read_only(client, plugin_api, monkeypat
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
 
 
+def test_tasknotes_reconciliation_recovers_missed_webhook_without_duplicates(client, plugin_api, monkeypatch):
+    discovered = {
+        "tasks": [
+            {
+                "identity": {"board": "default", "task_id": "t_reconcile_missed"},
+                "task": {
+                    "title": "Missed webhook task",
+                    "details": "Recovered by reconciliation",
+                    "status": "ready",
+                    "contexts": ["peacock"],
+                    "customProperties": {"hermesBoard": "default", "hermesTaskId": "t_reconcile_missed"},
+                    "path": "TaskNotes/Tasks/default--t_reconcile_missed.md",
+                },
+            }
+        ],
+        "cursor": {"requestCursor": None, "nextCursor": None, "querySupportsCursor": False, "total": 1, "filtered": 1},
+        "query": plugin_api._build_tasknotes_discovery_query("default"),
+    }
+    monkeypatch.setattr(plugin_api, "_fetch_tasknotes_eligible_tasks", lambda board, cursor=None: discovered)
+
+    first = client.post("/api/plugins/kanban/tasknotes/reconcile?board=default")
+    second = client.post("/api/plugins/kanban/tasknotes/reconcile?board=default")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_body = first.json()
+    second_body = second.json()
+    assert first_body["recovered"] == [
+        {"identity": {"board": "default", "task_id": "t_reconcile_missed"}, "queue_task_id": first_body["seen"][0]["queue_task_id"]}
+    ]
+    assert second_body["recovered"] == []
+    assert second_body["seen"][0]["identity"] == {"board": "default", "task_id": "t_reconcile_missed"}
+    assert second_body["seen"][0]["existed"] is True
+    assert second_body["cursor"]["querySupportsCursor"] is False
+    with kb.connect(board="default") as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE idempotency_key = ?",
+            ("tasknotes:default:t_reconcile_missed",),
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_tasknotes_reconciliation_health_reports_last_run_and_cursor(client, plugin_api, monkeypatch):
+    discovered = {
+        "tasks": [],
+        "cursor": {"requestCursor": "ignored", "nextCursor": None, "querySupportsCursor": False, "total": 0, "filtered": 0},
+        "query": plugin_api._build_tasknotes_discovery_query("default"),
+    }
+    monkeypatch.setattr(plugin_api, "_fetch_tasknotes_eligible_tasks", lambda board, cursor=None: discovered)
+
+    reconcile = client.post("/api/plugins/kanban/tasknotes/reconcile?board=default&cursor=ignored")
+    health = client.get("/api/plugins/kanban/tasknotes/reconcile/health?board=default")
+
+    assert reconcile.status_code == 200
+    assert health.status_code == 200
+    body = health.json()
+    assert body["ok"] is True
+    assert body["lastRun"]["status"] == "ok"
+    assert body["lastRun"]["eligibleTaskNotesCount"] == 0
+    assert body["lastRun"]["recoveredCount"] == 0
+    assert body["cursor"] == discovered["cursor"]
+
+
+def test_tasknotes_reconciliation_rejects_unqualified_identities(plugin_api):
+    assert plugin_api._extract_tasknotes_webhook_identity(
+        {"customProperties": {"hermesTaskId": "t_missing_board"}}
+    ) is None
+    assert plugin_api._extract_tasknotes_webhook_identity(
+        {"path": "TaskNotes/Tasks/default--not-a-hermes-task.md"}
+    ) is None
+
+
 def test_tasknotes_in_progress_status_maps_to_hermes_running(plugin_api):
     assert plugin_api._tasknotes_status_to_queue_status({"status": "in-progress"}) == "running"
 
