@@ -36,6 +36,8 @@ the port.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import math
@@ -43,11 +45,13 @@ import os
 import sqlite3
 import time
 import uuid
+import urllib.error
+import urllib.request
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -1738,6 +1742,338 @@ def get_workflow_overview(
         ),
         "errors": errors,
     }
+
+
+# ---------------------------------------------------------------------------
+# TaskNotes webhook receiver
+# ---------------------------------------------------------------------------
+
+_TASKNOTES_TASK_EVENTS = {
+    "task.created",
+    "task.updated",
+    "task.deleted",
+    "task.completed",
+    "task.archived",
+    "task.unarchived",
+}
+_TASKNOTES_IDENTITY_PATH_RE = r"TaskNotes/Tasks/([^/]+)--(t_[^/]+)\.md$"
+
+
+def _tasknotes_webhook_secret() -> str:
+    return os.environ.get("HERMES_TASKNOTES_WEBHOOK_SECRET", "").strip()
+
+
+def _tasknotes_api_base_url() -> str:
+    return os.environ.get("HERMES_TASKNOTES_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
+
+
+def _tasknotes_api_token() -> str:
+    return os.environ.get("HERMES_TASKNOTES_API_TOKEN", "").strip()
+
+
+def _verify_tasknotes_signature(raw_body: bytes, signature: Optional[str]) -> None:
+    secret = _tasknotes_webhook_secret()
+    if not secret:
+        return
+    if not signature:
+        raise HTTPException(status_code=401, detail="missing TaskNotes webhook signature")
+    expected = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    supplied = signature.strip()
+    if supplied.startswith("sha256="):
+        supplied = supplied[len("sha256="):]
+    if not hmac.compare_digest(expected, supplied):
+        raise HTTPException(status_code=401, detail="invalid TaskNotes webhook signature")
+
+
+def _ensure_tasknotes_delivery_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS tasknotes_webhook_deliveries ("
+        "delivery_id TEXT PRIMARY KEY, "
+        "event TEXT NOT NULL, "
+        "status TEXT NOT NULL, "
+        "hermes_board TEXT, "
+        "hermes_task_id TEXT, "
+        "queue_task_id TEXT, "
+        "received_at INTEGER NOT NULL, "
+        "processed_at INTEGER, "
+        "error TEXT, "
+        "payload_json TEXT"
+        ")"
+    )
+
+
+def _insert_tasknotes_delivery(
+    conn: sqlite3.Connection,
+    *,
+    delivery_id: str,
+    event: str,
+    payload: dict[str, Any],
+) -> bool:
+    _ensure_tasknotes_delivery_table(conn)
+    now = int(time.time())
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO tasknotes_webhook_deliveries "
+        "(delivery_id, event, status, received_at, payload_json) VALUES (?, ?, ?, ?, ?)",
+        (delivery_id, event, "received", now, json.dumps(payload, sort_keys=True)),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def _update_tasknotes_delivery(
+    conn: sqlite3.Connection,
+    *,
+    delivery_id: str,
+    status: str,
+    board: Optional[str] = None,
+    task_id: Optional[str] = None,
+    queue_task_id: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
+    _ensure_tasknotes_delivery_table(conn)
+    conn.execute(
+        "UPDATE tasknotes_webhook_deliveries SET status = ?, hermes_board = ?, "
+        "hermes_task_id = ?, queue_task_id = ?, processed_at = ?, error = ? "
+        "WHERE delivery_id = ?",
+        (status, board, task_id, queue_task_id, int(time.time()), error, delivery_id),
+    )
+    conn.commit()
+
+
+def _extract_tasknotes_webhook_identity(payload: dict[str, Any]) -> Optional[dict[str, str]]:
+    data = payload.get("data")
+    candidates: list[Any] = [payload, data]
+    if isinstance(data, dict):
+        candidates.extend(data.get(key) for key in ("task", "createdTask", "updatedTask", "deletedTask", "completedTask", "archivedTask", "unarchivedTask"))
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        custom = candidate.get("customProperties")
+        if isinstance(custom, dict):
+            board = custom.get("hermesBoard")
+            task_id = custom.get("hermesTaskId")
+            if isinstance(board, str) and board.strip() and isinstance(task_id, str) and task_id.strip():
+                return {"board": board.strip(), "task_id": task_id.strip()}
+        board = candidate.get("hermesBoard")
+        task_id = candidate.get("hermesTaskId")
+        if isinstance(board, str) and board.strip() and isinstance(task_id, str) and task_id.strip():
+            return {"board": board.strip(), "task_id": task_id.strip()}
+        path = candidate.get("path")
+        if isinstance(path, str):
+            import re
+            match = re.match(_TASKNOTES_IDENTITY_PATH_RE, path)
+            if match:
+                return {"board": match.group(1), "task_id": match.group(2)}
+    return None
+
+
+def _fetch_tasknotes_task_latest(identity: dict[str, str]) -> Optional[dict[str, Any]]:
+    """Fetch current TaskNotes state by board-qualified Hermes identity.
+
+    Webhook payloads are treated only as wake-up signals; this query is the
+    authoritative read before Hermes mutates its queue.
+    """
+    query = {
+        "type": "group",
+        "id": "hermes-tasknotes-webhook-fetch",
+        "conjunction": "and",
+        "children": [
+            {"type": "condition", "id": "hermes-board", "property": "user:hermesBoard", "operator": "is", "value": identity["board"]},
+            {"type": "condition", "id": "hermes-task-id", "property": "user:hermesTaskId", "operator": "is", "value": identity["task_id"]},
+        ],
+    }
+    body = json.dumps(query).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    token = _tasknotes_api_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        f"{_tasknotes_api_base_url()}/api/tasks/query",
+        data=body,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8") or "null")
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"TaskNotes API fetch failed: HTTP {exc.code}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"TaskNotes API fetch failed: {exc}") from exc
+    tasks = None
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            tasks = data.get("tasks")
+        if tasks is None:
+            tasks = payload.get("tasks")
+    if isinstance(tasks, list) and tasks:
+        task = tasks[0]
+        return task if isinstance(task, dict) else None
+    return None
+
+
+def _tasknotes_task_title(task: dict[str, Any], identity: dict[str, str]) -> str:
+    title = task.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    return f"TaskNotes task {identity['board']}/{identity['task_id']}"
+
+
+def _tasknotes_task_body(task: dict[str, Any]) -> Optional[str]:
+    for key in ("details", "body", "description"):
+        value = task.get(key)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _tasknotes_task_assignee(task: dict[str, Any]) -> Optional[str]:
+    assignee = task.get("assignee")
+    if isinstance(assignee, str) and assignee.strip():
+        return assignee.strip()
+    contexts = task.get("contexts")
+    if isinstance(contexts, list):
+        for value in contexts:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _tasknotes_status_to_queue_status(task: dict[str, Any]) -> Optional[str]:
+    status = task.get("status")
+    if not isinstance(status, str):
+        return "ready"
+    normalized = status.strip().lower()
+    if not normalized:
+        return "ready"
+    if normalized in kanban_db.VALID_STATUSES:
+        return normalized
+    if normalized in {"in-progress", "in progress", "started"}:
+        return "running"
+    if normalized in {"completed", "complete"}:
+        return "done"
+    if normalized in {"deleted", "cancelled", "canceled"}:
+        return "archived"
+    if normalized in {"open", "active"}:
+        return "ready"
+    return "ready"
+
+
+def _sync_tasknotes_task_to_queue(identity: dict[str, str], task: dict[str, Any]) -> str:
+    board = _resolve_board(identity["board"])
+    conn = _conn(board=board)
+    try:
+        idempotency_key = f"tasknotes:{identity['board']}:{identity['task_id']}"
+        queue_task_id = kanban_db.create_task(
+            conn,
+            title=_tasknotes_task_title(task, identity),
+            body=_tasknotes_task_body(task),
+            assignee=_tasknotes_task_assignee(task),
+            created_by="tasknotes-webhook",
+            idempotency_key=idempotency_key,
+            initial_status="running",
+            board=board,
+        )
+        desired_status = _tasknotes_status_to_queue_status(task)
+        conn.execute(
+            "UPDATE tasks SET title = ?, body = ?, assignee = ?, priority = COALESCE(?, priority), "
+            "status = COALESCE(?, status) WHERE id = ?",
+            (
+                _tasknotes_task_title(task, identity),
+                _tasknotes_task_body(task),
+                _tasknotes_task_assignee(task),
+                _coerce_tasknotes_priority(task.get("priority")),
+                desired_status,
+                queue_task_id,
+            ),
+        )
+        conn.commit()
+        kanban_db.recompute_ready(conn)
+        conn.commit()
+        return queue_task_id
+    finally:
+        conn.close()
+
+
+def _coerce_tasknotes_priority(value: Any) -> Optional[int]:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+@router.post("/tasknotes/webhook", status_code=202)
+async def receive_tasknotes_webhook(request: Request):
+    raw_body = await request.body()
+    _verify_tasknotes_signature(raw_body, request.headers.get("X-TaskNotes-Signature"))
+    delivery_id = request.headers.get("X-TaskNotes-Delivery-ID") or hashlib.sha256(raw_body).hexdigest()
+    try:
+        payload = json.loads(raw_body.decode("utf-8") or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="malformed JSON payload") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="webhook payload must be a JSON object")
+    event = payload.get("event")
+    if not isinstance(event, str):
+        raise HTTPException(status_code=400, detail="webhook event is required")
+
+    if event not in _TASKNOTES_TASK_EVENTS:
+        conn = _conn()
+        try:
+            _insert_tasknotes_delivery(conn, delivery_id=delivery_id, event=event, payload=payload)
+            _update_tasknotes_delivery(conn, delivery_id=delivery_id, status="ignored", error="unsupported-event")
+        finally:
+            conn.close()
+        return {"accepted": True, "processed": False, "ignored": "unsupported-event"}
+
+    identity = _extract_tasknotes_webhook_identity(payload)
+    if identity is None:
+        raise HTTPException(status_code=400, detail="TaskNotes webhook payload does not include hermesBoard/hermesTaskId")
+    board = _resolve_board(identity["board"])
+    conn = _conn(board=board)
+    try:
+        if not _insert_tasknotes_delivery(conn, delivery_id=delivery_id, event=event, payload=payload):
+            return {"accepted": True, "processed": False, "duplicate": True}
+        latest_task = _fetch_tasknotes_task_latest(identity)
+        if latest_task is None:
+            _update_tasknotes_delivery(
+                conn,
+                delivery_id=delivery_id,
+                status="missing",
+                board=identity["board"],
+                task_id=identity["task_id"],
+                error="TaskNotes API returned no matching task",
+            )
+            return {"accepted": True, "processed": False, "missing": True}
+        queue_task_id = _sync_tasknotes_task_to_queue(identity, latest_task)
+        _update_tasknotes_delivery(
+            conn,
+            delivery_id=delivery_id,
+            status="processed",
+            board=identity["board"],
+            task_id=identity["task_id"],
+            queue_task_id=queue_task_id,
+        )
+        return {"accepted": True, "processed": True, "queue_task_id": queue_task_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _update_tasknotes_delivery(
+            conn,
+            delivery_id=delivery_id,
+            status="failed",
+            board=identity["board"],
+            task_id=identity["task_id"],
+            error=str(exc),
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
