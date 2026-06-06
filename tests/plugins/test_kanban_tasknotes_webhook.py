@@ -275,6 +275,58 @@ def test_tasknotes_discovery_builds_deterministic_board_query(plugin_api):
     }
 
 
+def test_tasknotes_identity_fetch_uses_board_qualified_query_and_bearer_token(plugin_api, monkeypatch):
+    requests: list = []
+    monkeypatch.setenv("HERMES_TASKNOTES_API_TOKEN", "token-123")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"data": {"tasks": []}}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        assert timeout == 10
+        return FakeResponse()
+
+    monkeypatch.setattr(plugin_api.urllib.request, "urlopen", fake_urlopen)
+
+    assert plugin_api._fetch_tasknotes_task_latest({"board": "default", "task_id": "t_boardscoped"}) is None
+
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.full_url == "http://tasknotes.local/api/tasks/query"
+    assert request.get_method() == "POST"
+    assert request.headers["Authorization"] == "Bearer token-123"
+    assert request.headers["Content-type"] == "application/json"
+    assert json.loads(request.data.decode("utf-8")) == {
+        "type": "group",
+        "id": "hermes-tasknotes-webhook-fetch",
+        "conjunction": "and",
+        "children": [
+            {
+                "type": "condition",
+                "id": "hermes-board",
+                "property": "user:hermesBoard",
+                "operator": "is",
+                "value": "default",
+            },
+            {
+                "type": "condition",
+                "id": "hermes-task-id",
+                "property": "user:hermesTaskId",
+                "operator": "is",
+                "value": "t_boardscoped",
+            },
+        ],
+    }
+
+
 def test_tasknotes_discovery_enumerates_eligible_tasks_and_surfaces_cursor(plugin_api, monkeypatch):
     requests: list = []
 
@@ -338,6 +390,54 @@ def test_tasknotes_discovery_enumerates_eligible_tasks_and_surfaces_cursor(plugi
     }
     body = json.loads(requests[0].data.decode("utf-8"))
     assert body == plugin_api._build_tasknotes_discovery_query("default")
+
+
+def test_tasknotes_discovery_supports_top_level_payload_and_does_not_send_cursor(plugin_api, monkeypatch):
+    requests: list = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "tasks": [
+                        {
+                            "title": "Root payload task",
+                            "hermesBoard": "default",
+                            "hermesTaskId": "t_root_payload",
+                        },
+                        {
+                            "title": "Missing frontmatter task",
+                            "path": "TaskNotes/Tasks/inbox.md",
+                        },
+                    ],
+                    "total": 2,
+                    "filtered": 2,
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        return FakeResponse()
+
+    monkeypatch.setattr(plugin_api.urllib.request, "urlopen", fake_urlopen)
+
+    result = plugin_api._discover_tasknotes_tasks("default", cursor="next-page-token")
+
+    assert [item["identity"] for item in result["tasks"]] == [{"board": "default", "task_id": "t_root_payload"}]
+    assert result["cursor"] == {
+        "requestCursor": "next-page-token",
+        "nextCursor": None,
+        "querySupportsCursor": False,
+        "total": 2,
+        "filtered": 2,
+    }
+    assert "next-page-token" not in requests[0].data.decode("utf-8")
 
 
 def test_tasknotes_discovery_endpoint_is_read_only(client, plugin_api, monkeypatch):
@@ -407,6 +507,78 @@ def test_tasknotes_reconciliation_recovers_missed_webhook_without_duplicates(cli
     assert count == 1
 
 
+def test_tasknotes_reconciliation_deduplicates_repeated_tasknotes_identities(client, plugin_api, monkeypatch):
+    identity = {"board": "default", "task_id": "t_duplicate_note"}
+    duplicate_task = {
+        "title": "Duplicate TaskNotes row",
+        "status": "ready",
+        "contexts": ["peacock"],
+        "customProperties": {"hermesBoard": "default", "hermesTaskId": "t_duplicate_note"},
+        "path": "TaskNotes/Tasks/default--t_duplicate_note.md",
+    }
+    discovered = {
+        "tasks": [
+            {"identity": identity, "task": duplicate_task},
+            {"identity": dict(identity), "task": dict(duplicate_task)},
+        ],
+        "cursor": {"requestCursor": None, "nextCursor": None, "querySupportsCursor": False, "total": 2, "filtered": 2},
+        "query": plugin_api._build_tasknotes_discovery_query("default"),
+    }
+    monkeypatch.setattr(plugin_api, "_fetch_tasknotes_eligible_tasks", lambda board, cursor=None: discovered)
+
+    response = client.post("/api/plugins/kanban/tasknotes/reconcile?board=default")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["eligibleTaskNotesCount"] == 2
+    assert body["seen"] == [
+        {"identity": identity, "queue_task_id": body["seen"][0]["queue_task_id"], "existed": False}
+    ]
+    assert body["recovered"] == [{"identity": identity, "queue_task_id": body["seen"][0]["queue_task_id"]}]
+    with kb.connect(board="default") as conn:
+        rows = conn.execute(
+            "SELECT title, idempotency_key FROM tasks WHERE idempotency_key = ?",
+            ("tasknotes:default:t_duplicate_note",),
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["title"] == "Duplicate TaskNotes row"
+
+
+def test_tasknotes_reconciliation_maps_same_task_id_to_board_qualified_queue_state(plugin_api):
+    kb.init_db(board="other")
+    default_queue_id = plugin_api._sync_tasknotes_task_to_queue(
+        {"board": "default", "task_id": "t_shared_id"},
+        {
+            "title": "Default board task",
+            "status": "ready",
+            "customProperties": {"hermesBoard": "default", "hermesTaskId": "t_shared_id"},
+        },
+    )
+    other_queue_id = plugin_api._sync_tasknotes_task_to_queue(
+        {"board": "other", "task_id": "t_shared_id"},
+        {
+            "title": "Other board task",
+            "status": "done",
+            "customProperties": {"hermesBoard": "other", "hermesTaskId": "t_shared_id"},
+        },
+    )
+
+    assert default_queue_id != other_queue_id
+    assert plugin_api._tasknotes_queue_task_id({"board": "default", "task_id": "t_shared_id"}) == default_queue_id
+    assert plugin_api._tasknotes_queue_task_id({"board": "other", "task_id": "t_shared_id"}) == other_queue_id
+    with kb.connect(board="default") as default_conn, kb.connect(board="other") as other_conn:
+        default_row = default_conn.execute(
+            "SELECT title, status FROM tasks WHERE idempotency_key = ?",
+            ("tasknotes:default:t_shared_id",),
+        ).fetchone()
+        other_row = other_conn.execute(
+            "SELECT title, status FROM tasks WHERE idempotency_key = ?",
+            ("tasknotes:other:t_shared_id",),
+        ).fetchone()
+    assert dict(default_row) == {"title": "Default board task", "status": "ready"}
+    assert dict(other_row) == {"title": "Other board task", "status": "done"}
+
+
 def test_tasknotes_reconciliation_health_reports_last_run_and_cursor(client, plugin_api, monkeypatch):
     discovered = {
         "tasks": [],
@@ -426,6 +598,27 @@ def test_tasknotes_reconciliation_health_reports_last_run_and_cursor(client, plu
     assert body["lastRun"]["eligibleTaskNotesCount"] == 0
     assert body["lastRun"]["recoveredCount"] == 0
     assert body["cursor"] == discovered["cursor"]
+
+
+def test_tasknotes_reconciliation_health_reports_failed_run(client, plugin_api, monkeypatch):
+    def fail_discovery(board, cursor=None):
+        raise plugin_api.HTTPException(status_code=502, detail="TaskNotes API fetch failed: timeout")
+
+    monkeypatch.setattr(plugin_api, "_fetch_tasknotes_eligible_tasks", fail_discovery)
+
+    reconcile = client.post("/api/plugins/kanban/tasknotes/reconcile?board=default&cursor=after-1")
+    health = client.get("/api/plugins/kanban/tasknotes/reconcile/health?board=default")
+
+    assert reconcile.status_code == 502
+    assert health.status_code == 200
+    body = health.json()
+    assert body["ok"] is False
+    assert body["cursor"] == {"requestCursor": "after-1", "nextCursor": None, "querySupportsCursor": False}
+    assert body["lastRun"]["status"] == "failed"
+    assert body["lastRun"]["eligibleTaskNotesCount"] == 0
+    assert body["lastRun"]["seenCount"] == 0
+    assert body["lastRun"]["recoveredCount"] == 0
+    assert body["lastRun"]["error"] == "TaskNotes API fetch failed: timeout"
 
 
 def test_tasknotes_reconciliation_rejects_unqualified_identities(plugin_api):

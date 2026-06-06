@@ -1971,57 +1971,6 @@ def _tasknotes_identity_key(identity: dict[str, str]) -> str:
     return f"tasknotes:{identity['board']}:{identity['task_id']}"
 
 
-def _build_tasknotes_discovery_query(board: str) -> dict[str, Any]:
-    return {
-        "type": "group",
-        "id": "hermes-tasknotes-discovery",
-        "conjunction": "and",
-        "children": [
-            {
-                "type": "condition",
-                "id": "hermes-board",
-                "property": "user:hermesBoard",
-                "operator": "is",
-                "value": board,
-            }
-        ],
-    }
-
-
-def _tasknotes_query_request(query: dict[str, Any]) -> urllib.request.Request:
-    body = json.dumps(query).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    token = _tasknotes_api_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return urllib.request.Request(
-        f"{_tasknotes_api_base_url()}/api/tasks/query",
-        data=body,
-        headers=headers,
-        method="POST",
-    )
-
-
-def _tasknotes_tasks_from_payload(payload: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    tasks: Any = None
-    total = None
-    filtered = None
-    if isinstance(payload, dict):
-        data = payload.get("data")
-        if isinstance(data, dict):
-            tasks = data.get("tasks")
-            total = data.get("total")
-            filtered = data.get("filtered")
-        if tasks is None:
-            tasks = payload.get("tasks")
-        if total is None:
-            total = payload.get("total")
-        if filtered is None:
-            filtered = payload.get("filtered")
-    task_list = [task for task in tasks if isinstance(task, dict)] if isinstance(tasks, list) else []
-    return task_list, {"total": total, "filtered": filtered}
-
-
 def _fetch_tasknotes_task_latest(identity: dict[str, str]) -> Optional[dict[str, Any]]:
     """Fetch current TaskNotes state by board-qualified Hermes identity.
 
@@ -2154,6 +2103,7 @@ def _reconcile_tasknotes_queue(board: str, cursor: Optional[str] = None) -> dict
     discovery = _fetch_tasknotes_eligible_tasks(board, cursor=cursor)
     seen: list[dict[str, Any]] = []
     recovered: list[dict[str, Any]] = []
+    processed_identity_keys: set[str] = set()
     for item in discovery.get("tasks", []):
         if not isinstance(item, dict):
             continue
@@ -2163,6 +2113,10 @@ def _reconcile_tasknotes_queue(board: str, cursor: Optional[str] = None) -> dict
             continue
         if identity.get("board") != board or not identity.get("task_id"):
             continue
+        identity_key = _tasknotes_identity_key(identity)
+        if identity_key in processed_identity_keys:
+            continue
+        processed_identity_keys.add(identity_key)
         existing = _tasknotes_queue_task_id(identity)
         queue_task_id = _sync_tasknotes_task_to_queue(identity, task)
         if existing is None:
@@ -2188,7 +2142,25 @@ def reconcile_tasknotes_tasks(
     cursor: Optional[str] = Query(None, description="Forward-compatible TaskNotes query cursor diagnostics"),
 ):
     board = _resolve_board(board) or kanban_db.DEFAULT_BOARD
-    return _reconcile_tasknotes_queue(board, cursor=cursor)
+    try:
+        return _reconcile_tasknotes_queue(board, cursor=cursor)
+    except HTTPException as exc:
+        now = int(time.time())
+        error = str(exc.detail)
+        _record_tasknotes_reconciliation_health(
+            board,
+            {
+                "status": "failed",
+                "startedAt": now,
+                "finishedAt": now,
+                "eligibleTaskNotesCount": 0,
+                "seen": [],
+                "recovered": [],
+                "cursor": {"requestCursor": cursor, "nextCursor": None, "querySupportsCursor": False},
+                "error": error,
+            },
+        )
+        raise
 
 
 @router.get("/tasknotes/reconcile/health")
