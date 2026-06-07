@@ -811,9 +811,13 @@ def _capture_tasknotes_writeback(plugin_api, monkeypatch, *, tasknotes_id="tn-wr
     return requests
 
 
-def test_dashboard_patch_writes_tasknotes_via_query_then_patch(client, plugin_api, monkeypatch):
+def test_dashboard_patch_writes_tasknotes_via_query_then_put_with_encoded_id(client, plugin_api, monkeypatch):
     task_id = _create_tasknotes_queue_task()
-    requests = _capture_tasknotes_writeback(plugin_api, monkeypatch)
+    requests = _capture_tasknotes_writeback(
+        plugin_api,
+        monkeypatch,
+        tasknotes_id="TaskNotes/Tasks/default--t_slash.md",
+    )
 
     response = client.patch(
         f"/api/plugins/kanban/tasks/{task_id}?board=default",
@@ -821,9 +825,9 @@ def test_dashboard_patch_writes_tasknotes_via_query_then_patch(client, plugin_ap
     )
 
     assert response.status_code == 200
-    assert [req.get_method() for req in requests] == ["POST", "PATCH"]
+    assert [req.get_method() for req in requests] == ["POST", "PUT"]
     assert requests[0].full_url == "http://tasknotes.local/api/tasks/query"
-    assert requests[1].full_url == "http://tasknotes.local/api/tasks/tn-writeback"
+    assert requests[1].full_url == "http://tasknotes.local/api/tasks/TaskNotes%2FTasks%2Fdefault--t_slash.md"
     assert json.loads(requests[1].data.decode("utf-8")) == {
         "title": "Dashboard title",
         "details": "Dashboard body",
@@ -897,7 +901,7 @@ def test_tasknotes_writeback_delete_archives_via_api_before_removing_local_task(
     response = client.delete(f"/api/plugins/kanban/tasks/{task_id}?board=default")
 
     assert response.status_code == 200
-    assert [req.get_method() for req in requests] == ["POST", "PATCH"]
+    assert [req.get_method() for req in requests] == ["POST", "PUT"]
     assert json.loads(requests[1].data.decode("utf-8"))["status"] == "archived"
 
 
@@ -905,7 +909,7 @@ def test_tasknotes_writeback_api_failure_returns_bad_gateway(client, plugin_api,
     task_id = _create_tasknotes_queue_task(idempotency_key="tasknotes:default:t_failure")
 
     def failing_urlopen(request, timeout):
-        if request.get_method() == "PATCH":
+        if request.get_method() == "PUT":
             raise OSError("network down")
         return type("Response", (), {
             "__enter__": lambda self: self,
@@ -974,5 +978,5 @@ def test_tasknotes_writeback_only_for_tasknotes_idempotency_key_on_bulk_link_and
     assert bulk.status_code == 200
     assert link.status_code == 200
     assert upload.status_code == 200
-    assert [req.get_method() for req in requests].count("PATCH") == 3
-    assert all(req.full_url == "http://tasknotes.local/api/tasks/tn-writeback" for req in requests if req.get_method() == "PATCH")
+    assert [req.get_method() for req in requests].count("PUT") == 3
+    assert all(req.full_url == "http://tasknotes.local/api/tasks/tn-writeback" for req in requests if req.get_method() == "PUT")

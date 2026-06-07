@@ -46,6 +46,7 @@ import sqlite3
 import time
 import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict
 from pathlib import Path
@@ -2156,17 +2157,18 @@ def _tasknotes_writeback_payload(
     return payload
 
 
-def _tasknotes_api_patch_task(tasknotes_task_id: str, payload: dict[str, Any]) -> None:
+def _tasknotes_api_put_task(tasknotes_task_id: str, payload: dict[str, Any]) -> None:
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     token = _tasknotes_api_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    encoded_task_id = urllib.parse.quote(tasknotes_task_id, safe="")
     request = urllib.request.Request(
-        f"{_tasknotes_api_base_url()}/api/tasks/{tasknotes_task_id}",
+        f"{_tasknotes_api_base_url()}/api/tasks/{encoded_task_id}",
         data=body,
         headers=headers,
-        method="PATCH",
+        method="PUT",
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -2187,7 +2189,7 @@ def _writeback_tasknotes_task(
 
     Only tasks created from TaskNotes have the board-qualified idempotency key
     ``tasknotes:{board}:{task_id}``. For those rows, query TaskNotes first to
-    discover the current TaskNotes task id, then PATCH the configured fields.
+    discover the current TaskNotes task id, then PUT the configured fields.
     """
     if task is None or not _tasknotes_writeback_enabled():
         return
@@ -2207,7 +2209,7 @@ def _writeback_tasknotes_task(
         status_override=status_override,
     )
     if payload:
-        _tasknotes_api_patch_task(tasknotes_task_id.strip(), payload)
+        _tasknotes_api_put_task(tasknotes_task_id.strip(), payload)
 
 
 def _writeback_tasknotes_task_by_id(
