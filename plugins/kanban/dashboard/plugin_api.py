@@ -1942,7 +1942,11 @@ def _extract_tasknotes_webhook_identity(payload: dict[str, Any]) -> Optional[dic
             board = custom.get("hermesBoard")
             task_id = custom.get("hermesTaskId")
             if isinstance(board, str) and board.strip() and isinstance(task_id, str) and task_id.strip():
-                return {"board": board.strip(), "task_id": task_id.strip()}
+                identity = {"board": board.strip(), "task_id": task_id.strip()}
+                path = candidate.get("path")
+                if isinstance(path, str) and path.strip():
+                    identity["tasknotes_id"] = path.strip()
+                return identity
         board = candidate.get("hermesBoard")
         task_id = candidate.get("hermesTaskId")
         if isinstance(board, str) and board.strip() and isinstance(task_id, str) and task_id.strip():
@@ -2008,6 +2012,39 @@ def _tasknotes_api_post_query(query: dict[str, Any]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _tasknotes_api_get_task(tasknotes_task_id: str) -> dict[str, Any]:
+    headers: dict[str, str] = {}
+    token = _tasknotes_api_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    encoded_task_id = urllib.parse.quote(tasknotes_task_id, safe="")
+    request = urllib.request.Request(
+        f"{_tasknotes_api_base_url()}/api/tasks/{encoded_task_id}",
+        headers=headers,
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8") or "null")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return {}
+        raise HTTPException(status_code=502, detail=f"TaskNotes API fetch failed: HTTP {exc.code}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"TaskNotes API fetch failed: {exc}") from exc
+    return payload if isinstance(payload, dict) else {}
+
+
+def _tasknotes_payload_task(payload: dict[str, Any]) -> Optional[dict[str, Any]]:
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return data
+    task = payload.get("task")
+    if isinstance(task, dict):
+        return task
+    return None
+
+
 def _tasknotes_payload_tasks(payload: dict[str, Any]) -> list[Any]:
     tasks = None
     data = payload.get("data")
@@ -2070,6 +2107,9 @@ def _fetch_tasknotes_task_latest(identity: dict[str, str]) -> Optional[dict[str,
     if tasks:
         task = tasks[0]
         return task if isinstance(task, dict) else None
+    tasknotes_task_id = identity.get("tasknotes_id")
+    if isinstance(tasknotes_task_id, str) and tasknotes_task_id.strip():
+        return _tasknotes_payload_task(_tasknotes_api_get_task(tasknotes_task_id.strip()))
     return None
 
 
@@ -2080,6 +2120,42 @@ def _tasknotes_identity_from_idempotency_key(idempotency_key: Optional[str]) -> 
     if len(parts) != 3 or parts[0] != "tasknotes" or not parts[1] or not parts[2]:
         return None
     return {"board": parts[1], "task_id": parts[2]}
+
+
+def _tasknotes_identity_with_delivery_task_id(
+    conn: Optional[sqlite3.Connection],
+    task: kanban_db.Task,
+    identity: dict[str, str],
+) -> dict[str, str]:
+    if conn is None or identity.get("tasknotes_id"):
+        return identity
+    try:
+        _ensure_tasknotes_delivery_table(conn)
+        row = conn.execute(
+            "SELECT payload_json FROM tasknotes_webhook_deliveries "
+            "WHERE queue_task_id = ? AND status = 'processed' "
+            "ORDER BY processed_at DESC, received_at DESC LIMIT 1",
+            (task.id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return identity
+    if row is None:
+        return identity
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return identity
+    delivery_identity = _extract_tasknotes_webhook_identity(payload if isinstance(payload, dict) else {})
+    if (
+        isinstance(delivery_identity, dict)
+        and delivery_identity.get("board") == identity.get("board")
+        and delivery_identity.get("task_id") == identity.get("task_id")
+        and isinstance(delivery_identity.get("tasknotes_id"), str)
+    ):
+        enriched = dict(identity)
+        enriched["tasknotes_id"] = delivery_identity["tasknotes_id"]
+        return enriched
+    return identity
 
 
 def _tasknotes_concise_text(value: Optional[str], *, limit: int = _CARD_SUMMARY_PREVIEW_CHARS) -> Optional[str]:
@@ -2196,6 +2272,7 @@ def _writeback_tasknotes_task(
     identity = _tasknotes_identity_from_idempotency_key(task.idempotency_key)
     if identity is None:
         return
+    identity = _tasknotes_identity_with_delivery_task_id(conn, task, identity)
     latest = _fetch_tasknotes_task_latest(identity)
     if not latest:
         return

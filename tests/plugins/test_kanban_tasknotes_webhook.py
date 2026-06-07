@@ -95,7 +95,7 @@ def test_tasknotes_webhook_fetches_latest_task_before_queue_mutation(client, plu
 
     assert response.status_code == 202
     assert response.json()["processed"] is True
-    assert calls == [{"board": "default", "task_id": "t_api12345"}]
+    assert calls == [{"board": "default", "task_id": "t_api12345", "tasknotes_id": "TaskNotes/Tasks/default--t_api12345.md"}]
     with kb.connect(board="default") as conn:
         row = conn.execute(
             "SELECT title, body, assignee, idempotency_key FROM tasks WHERE idempotency_key = ?",
@@ -105,6 +105,65 @@ def test_tasknotes_webhook_fetches_latest_task_before_queue_mutation(client, plu
     assert row["title"] == "Authoritative title from API"
     assert row["body"] == "Authoritative body"
     assert row["assignee"] == "peacock"
+
+
+def test_tasknotes_webhook_falls_back_to_api_get_when_identity_query_misses(client, plugin_api, monkeypatch):
+    requests: list = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        if request.get_method() == "POST":
+            return FakeResponse({"data": {"tasks": []}})
+        return FakeResponse({
+            "success": True,
+            "data": {
+                "title": "Fetched by path fallback",
+                "details": "Fallback body",
+                "status": "ready",
+                "priority": "4",
+                "customProperties": {"hermesBoard": "default", "hermesTaskId": "t_pathfallback"},
+                "path": "TaskNotes/Tasks/folder/task #1.md",
+            },
+        })
+
+    monkeypatch.setattr(plugin_api.urllib.request, "urlopen", fake_urlopen)
+    payload = {
+        "event": "task.updated",
+        "data": {
+            "updatedTask": {
+                "customProperties": {"hermesBoard": "default", "hermesTaskId": "t_pathfallback"},
+                "path": "TaskNotes/Tasks/folder/task #1.md",
+            }
+        },
+    }
+
+    response = _post_webhook(client, payload)
+
+    assert response.status_code == 202
+    assert response.json()["processed"] is True
+    assert [req.get_method() for req in requests] == ["POST", "GET"]
+    assert requests[1].full_url == "http://tasknotes.local/api/tasks/TaskNotes%2FTasks%2Ffolder%2Ftask%20%231.md"
+    with kb.connect(board="default") as conn:
+        row = conn.execute(
+            "SELECT title, body FROM tasks WHERE idempotency_key = ?",
+            ("tasknotes:default:t_pathfallback",),
+        ).fetchone()
+    assert row is not None
+    assert row["title"] == "Fetched by path fallback"
+    assert row["body"] == "Fallback body"
 
 
 def test_tasknotes_webhook_duplicate_delivery_does_not_mutate_queue_twice(client, plugin_api, monkeypatch):
@@ -785,7 +844,7 @@ def _create_tasknotes_queue_task(*, title="Mirrored", body="Body", status="ready
     return task_id
 
 
-def _capture_tasknotes_writeback(plugin_api, monkeypatch, *, tasknotes_id="tn-writeback"):
+def _capture_tasknotes_writeback(plugin_api, monkeypatch, *, tasknotes_id="tn-writeback", query_tasks=None):
     requests = []
 
     class FakeResponse:
@@ -804,7 +863,10 @@ def _capture_tasknotes_writeback(plugin_api, monkeypatch, *, tasknotes_id="tn-wr
     def fake_urlopen(request, timeout):
         requests.append(request)
         if request.get_method() == "POST":
-            return FakeResponse({"data": {"tasks": [{"id": tasknotes_id}]}})
+            tasks = [{"id": tasknotes_id}] if query_tasks is None else query_tasks
+            return FakeResponse({"data": {"tasks": tasks}})
+        if request.get_method() == "GET":
+            return FakeResponse({"success": True, "data": {"id": tasknotes_id}})
         return FakeResponse({"ok": True})
 
     monkeypatch.setattr(plugin_api.urllib.request, "urlopen", fake_urlopen)
@@ -848,6 +910,47 @@ def test_tasknotes_writeback_fields_are_configurable(client, plugin_api, monkeyp
 
     assert response.status_code == 200
     assert json.loads(requests[1].data.decode("utf-8")) == {"title": "Only title", "status": "ready"}
+
+
+def test_tasknotes_writeback_uses_delivery_path_fallback_when_identity_query_misses(client, plugin_api, monkeypatch):
+    task_id = _create_tasknotes_queue_task(idempotency_key="tasknotes:default:t_delivery_path")
+    with kb.connect(board="default") as conn:
+        plugin_api._ensure_tasknotes_delivery_table(conn)
+        conn.execute(
+            "INSERT INTO tasknotes_webhook_deliveries "
+            "(delivery_id, event, payload_json, status, received_at, processed_at, hermes_board, hermes_task_id, queue_task_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "delivery-path",
+                "task.updated",
+                json.dumps({
+                    "data": {
+                        "updatedTask": {
+                            "customProperties": {"hermesBoard": "default", "hermesTaskId": "t_delivery_path"},
+                            "path": "TaskNotes/Tasks/folder/task #1.md",
+                        }
+                    }
+                }),
+                "processed",
+                1,
+                2,
+                "default",
+                "t_delivery_path",
+                task_id,
+            ),
+        )
+        conn.commit()
+    requests = _capture_tasknotes_writeback(plugin_api, monkeypatch, tasknotes_id="TaskNotes/Tasks/folder/task #1.md", query_tasks=[])
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}?board=default",
+        json={"title": "Fallback writeback", "body": "Fallback body"},
+    )
+
+    assert response.status_code == 200
+    assert [req.get_method() for req in requests] == ["POST", "GET", "PUT"]
+    assert requests[1].full_url == "http://tasknotes.local/api/tasks/TaskNotes%2FTasks%2Ffolder%2Ftask%20%231.md"
+    assert requests[2].full_url == "http://tasknotes.local/api/tasks/TaskNotes%2FTasks%2Ffolder%2Ftask%20%231.md"
 
 
 def test_tasknotes_writeback_custom_properties_include_summary_artifacts_and_links(client, plugin_api, monkeypatch):
