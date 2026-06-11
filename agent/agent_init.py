@@ -1546,6 +1546,10 @@ def init_agent(
     # In-memory todo list for task planning (one per agent/session)
     from tools.todo_tool import TodoStore
     agent._todo_store = TodoStore()
+
+    # In-memory work map for richer graph-style planning and handoff state.
+    from tools.work_map_tool import WorkMapStore
+    agent._work_map_store = WorkMapStore()
     
     # Load config once for memory, skills, and compression sections
     try:

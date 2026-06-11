@@ -4025,6 +4025,29 @@ class AIAgent:
                 return True
         return False
 
+    def _hydrate_work_map_store(self, history: List[Dict[str, Any]]) -> None:
+        """Recover work-map state from conversation history."""
+        last_work_map_response = None
+        for msg in reversed(history):
+            if msg.get("role") != "tool":
+                continue
+            content = msg.get("content", "")
+            if '"work_map"' not in content:
+                continue
+            try:
+                data = json.loads(content)
+                if "work_map" in data and isinstance(data["work_map"], list):
+                    last_work_map_response = data["work_map"]
+                    break
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        if last_work_map_response:
+            self._work_map_store.write(last_work_map_response, merge=False)
+            if not self.quiet_mode:
+                self._vprint(f"{self.log_prefix}🗺️  Restored {len(last_work_map_response)} work-map item(s) from history")
+        _set_interrupt(False)
+
     @property
     def is_interrupted(self) -> bool:
         """Check if an interrupt has been requested."""

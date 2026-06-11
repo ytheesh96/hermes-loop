@@ -51,12 +51,13 @@ _HERMES_CORE_TOOLS = [
     # Text-to-speech
     "text_to_speech",
     # Planning & memory
-    "todo", "memory",
+    "todo", "work_map", "memory",
     # NOTE: the desktop Project tools (project_list/create/switch) are
     # deliberately NOT here. They only make sense where a GUI can follow the
     # move, so they live in the `project` toolset and are enabled solely by the
     # GUI gateway (tui_gateway/server.py::_load_enabled_toolsets) — keeping them
     # off every CLI/messaging/cron schema (narrow waist).
+
     # Session history search
     "session_search",
     # Clarifying questions
@@ -208,7 +209,7 @@ TOOLSETS = {
     
     "todo": {
         "description": "Task planning and tracking for multi-step work",
-        "tools": ["todo"],
+        "tools": ["todo", "work_map"],
         "includes": []
     },
     
@@ -373,7 +374,7 @@ TOOLSETS = {
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
-            "todo", "memory",
+            "todo", "work_map", "memory",
             "session_search", "clarify",
             "execute_code", "delegate_task",
             "loop_graph",
@@ -406,7 +407,7 @@ TOOLSETS = {
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
-            "todo", "memory",
+            "todo", "work_map", "memory",
             "session_search",
             "execute_code", "delegate_task",
             "loop_graph",
@@ -433,7 +434,7 @@ TOOLSETS = {
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
             # Planning & memory
-            "todo", "memory",
+            "todo", "work_map", "memory",
             # Session history search
             "session_search",
             # Code execution + delegation

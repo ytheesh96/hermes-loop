@@ -813,6 +813,12 @@ class CLICommandsMixin:
                     self.agent._todo_store = TodoStore()
                 except Exception:
                     pass
+            if hasattr(self.agent, "_work_map_store"):
+                try:
+                    from tools.work_map_tool import WorkMapStore
+                    self.agent._work_map_store = WorkMapStore()
+                except Exception:
+                    pass
             if hasattr(self.agent, "_invalidate_system_prompt"):
                 self.agent._invalidate_system_prompt()
 

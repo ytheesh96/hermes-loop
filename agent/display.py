@@ -499,6 +499,16 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
         preview = f"{label} {line_label}".strip()
         return _truncate_preview(preview, max_len) if preview else None
 
+    if tool_name == "work_map":
+        work_map_arg = args.get("work_map")
+        merge = args.get("merge", False)
+        if work_map_arg is None:
+            return "reading work map"
+        elif merge:
+            return f"updating {len(work_map_arg)} item(s)"
+        else:
+            return f"tracking {len(work_map_arg)} item(s)"
+
     if tool_name == "session_search":
         query = _oneline(args.get("query", ""))
         return f"recall: \"{query[:25]}{'...' if len(query) > 25 else ''}\""
@@ -1432,6 +1442,39 @@ def _get_cute_tool_message(
             if total > 0 and done > 0:
                 return _wrap(f"┊ 📋 plan      {done}/{total} task(s)  {dur}")
             return _wrap(f"┊ 📋 plan      {len(todos_arg)} task(s)  {dur}")
+    if tool_name == "work_map":
+        items = args.get("work_map")
+        merge = args.get("merge", False)
+        total = 0
+        completed = 0
+        blocked = 0
+        if result:
+            try:
+                data = safe_json_loads(result)
+                if data:
+                    s = data.get("summary", {})
+                    total = s.get("total", 0)
+                    completed = s.get("completed", 0)
+                    blocked = s.get("blocked", 0)
+            except Exception:
+                pass
+        if items is None:
+            if total > 0:
+                return _wrap(f"┊ 🗺️  map       {completed}/{total} item(s)  {dur}")
+            return _wrap(f"┊ 🗺️  map       reading work map  {dur}")
+        if merge:
+            if total > 0:
+                label = f"update {completed}/{total} ✓"
+                if blocked:
+                    label += f" · {blocked} blocked"
+                return _wrap(f"┊ 🗺️  map       {label}  {dur}")
+            return _wrap(f"┊ 🗺️  map       update {len(items)} item(s)  {dur}")
+        if total > 0:
+            label = f"{completed}/{total} item(s)"
+            if blocked:
+                label += f" · {blocked} blocked"
+            return _wrap(f"┊ 🗺️  map       {label}  {dur}")
+        return _wrap(f"┊ 🗺️  map       {len(items)} item(s)  {dur}")
     if tool_name == "session_search":
         return _wrap(f"┊ 🔍 recall    \"{_trunc(args.get('query', ''), 35)}\"  {dur}")
     if tool_name == "memory":

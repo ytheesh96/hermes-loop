@@ -1148,6 +1148,9 @@ def _summarize_tool_result_unguarded(tool_name: str, tool_args: str, tool_conten
         if isinstance(data, dict) and "root_task_id" in data and content_len <= 20_000:
             return content
 
+    if tool_name == "work_map":
+        return "[work_map] updated work map"
+
     if tool_name == "clarify":
         return "[clarify] asked user a question"
 

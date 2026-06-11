@@ -516,6 +516,9 @@ def build_turn_context(
     if conversation_history and not agent._todo_store.has_items():
         agent._hydrate_todo_store(conversation_history)
 
+    if conversation_history and hasattr(agent, "_work_map_store") and not agent._work_map_store.has_items():
+        agent._hydrate_work_map_store(conversation_history)
+
     # Hydrate per-session nudge counters from persisted history (issue #22357).
     if conversation_history and agent._user_turn_count == 0:
         prior_user_turns = sum(

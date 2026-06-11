@@ -2513,6 +2513,17 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 ),
                 next_args,
             )
+    elif function_name == "work_map":
+        def _execute(next_args: dict) -> Any:
+            from tools.work_map_tool import work_map_tool as _work_map_tool
+            return _finish_agent_tool(
+                _work_map_tool(
+                    work_map=next_args.get("work_map"),
+                    merge=next_args.get("merge", False),
+                    store=agent._work_map_store,
+                ),
+                next_args,
+            )
     elif function_name == "session_search":
         def _execute(next_args: dict) -> Any:
             session_db = agent._get_session_db_for_recall()

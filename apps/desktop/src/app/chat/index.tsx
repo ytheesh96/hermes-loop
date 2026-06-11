@@ -8,6 +8,7 @@ import { useLocation } from 'react-router-dom'
 import type { LoopWorkflowRef } from '@/app/chat/loop-state'
 import type { SubmitTextOptions } from '@/app/session/hooks/use-prompt-actions/utils'
 import { Thread } from '@/components/assistant-ui/thread'
+import { HoistedWorkMapPanel, workMapFromMessageContent } from '@/components/assistant-ui/work-map-tool'
 import { Backdrop } from '@/components/Backdrop'
 import { COMPOSER_HEART_CONFIG, HeartField } from '@/components/chat/vibe-hearts'
 import { $sessionTileDragging, $sessionTileEdgeHover } from '@/components/pane-shell/tree/store'
@@ -231,6 +232,10 @@ function ChatRuntimeBoundary({
   const storeMessages = useStore(useSessionView().$messages)
   const messages = suppressMessages ? NO_MESSAGES : storeMessages
   const runtimeMessageRepository = useRuntimeMessageRepository(messages)
+  const currentWorkMap = useMemo(
+    () => workMapFromMessageContent(messages.flatMap(message => message.parts)),
+    [messages]
+  )
 
   const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     isDisabled: readOnly,
@@ -250,7 +255,20 @@ function ChatRuntimeBoundary({
         })
   })
 
-  return <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
+        {currentWorkMap.length > 0 && (
+          <aside className="hidden h-full w-[22rem] shrink-0 overflow-y-auto border-l border-(--ui-stroke-tertiary) bg-(--ui-chat-surface-background)/95 xl:block">
+            <div className="p-3">
+              <HoistedWorkMapPanel workMap={currentWorkMap} />
+            </div>
+          </aside>
+        )}
+      </div>
+    </AssistantRuntimeProvider>
+  )
 }
 
 export function ChatView({
