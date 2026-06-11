@@ -373,6 +373,27 @@ def compression_skipped_due_to_lock(agent: Any) -> bool:
     return _sig is True or isinstance(_sig, str)
 
 
+def _append_planning_snapshots(compressed: list[dict[str, Any]], agent: Any) -> None:
+    """Append active planning-state snapshots after context compression.
+
+    The compressor may summarize or prune old tool-result messages, so any
+    active in-memory planning surface must be re-injected explicitly into the
+    compressed conversation just like todo state. Keep this best-effort: missing
+    stores or empty snapshots should never abort compression.
+    """
+    for attr in ("_todo_store", "_work_map_store"):
+        store = getattr(agent, attr, None)
+        if store is None or not hasattr(store, "format_for_injection"):
+            continue
+        try:
+            snapshot = store.format_for_injection()
+        except Exception:
+            logger.debug("%s.format_for_injection failed during compression", attr, exc_info=True)
+            continue
+        if snapshot:
+            compressed.append({"role": "user", "content": snapshot})
+
+
 def _compression_lock_holder(agent: Any) -> str:
     """Build a unique holder id for the lock: pid:tid:agent-instance:uuid.
 
