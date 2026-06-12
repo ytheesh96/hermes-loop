@@ -1,4 +1,4 @@
-import { type CSSProperties, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 
 import { StatusRow } from '@/components/chat/status-row'
 import { StatusSection } from '@/components/chat/status-section'
@@ -24,22 +24,36 @@ function statusIndicatorClass(status: string): string {
   const value = status.toLowerCase()
 
   if (value === 'running' || value === 'in_progress' || value === 'claimed') {
-    return 'size-1.5 bg-(--ui-accent) shadow-[0_0_0.625rem_color-mix(in_srgb,var(--ui-accent)_45%,transparent)]'
+    return 'size-2.5 animate-spin rounded-full border border-(--ui-accent)/30 border-t-(--ui-accent)'
   }
 
-  if (value === 'blocked' || value === 'stale') {
-    return 'size-1.5 bg-amber-500'
+  if (value === 'blocked' || value === 'error' || value === 'failed' || value === 'stale') {
+    return 'size-1.5 rounded-full bg-destructive'
   }
 
-  if (value === 'error' || value === 'failed') {
-    return 'size-1.5 bg-destructive'
+  if (value === 'done' || value === 'complete' || value === 'completed') {
+    return 'text-[0.65rem] leading-none text-emerald-500/90'
   }
 
-  if (value === 'done') {
-    return 'size-1.5 bg-emerald-500/80'
+  if (value === 'archived' || value === 'cancelled' || value === 'canceled') {
+    return 'text-[0.65rem] leading-none text-(--ui-text-quaternary)'
   }
 
-  return 'size-1 bg-(--ui-text-quaternary) opacity-80'
+  return 'size-2 rounded-full border border-(--ui-text-quaternary) opacity-80'
+}
+
+function statusIndicatorGlyph(status: string): string {
+  const value = status.toLowerCase()
+
+  if (value === 'done' || value === 'complete' || value === 'completed') {
+    return '✓'
+  }
+
+  if (value === 'archived' || value === 'cancelled' || value === 'canceled') {
+    return '∕'
+  }
+
+  return ''
 }
 
 function LoopStatusIndicator({ row }: { row: LoopRow }) {
@@ -49,7 +63,9 @@ function LoopStatusIndicator({ row }: { row: LoopRow }) {
       className="grid w-3.5 shrink-0 place-items-center overflow-hidden"
       role="img"
     >
-      <span aria-hidden="true" className={cn('rounded-full', statusIndicatorClass(row.status))} />
+      <span aria-hidden="true" className={statusIndicatorClass(row.status)}>
+        {statusIndicatorGlyph(row.status)}
+      </span>
     </span>
   )
 }
@@ -78,25 +94,33 @@ interface LoopStackRowProps {
 
 function LoopStackRow({ onSelect, row, selected }: LoopStackRowProps) {
   return (
-    <div
-      data-testid={`loop-card-${row.taskId}`}
-      style={{ '--loop-depth': row.depth, paddingLeft: `calc(0.5rem + ${row.depth} * 1rem)` } as CSSProperties}
-    >
+    <div data-testid={`loop-card-${row.taskId}`}>
       <StatusRow
         className={cn(selected && 'bg-(--ui-row-hover-background)')}
         leading={<LoopStatusIndicator row={row} />}
         onActivate={() => onSelect(row.taskId)}
       >
-        <span
-          className={cn(
-            'min-w-0 max-w-[18rem] truncate text-[0.73rem] leading-4',
-            row.active || row.frontier ? 'font-medium text-foreground/92' : selected ? 'text-foreground/92' : 'text-muted-foreground/75'
-          )}
-        >
-          {row.title}
+        <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+          <span
+            className={cn(
+              'min-w-0 max-w-[14rem] truncate text-[0.73rem] leading-4',
+              row.active || row.frontier
+                ? 'font-medium text-foreground/92'
+                : selected
+                  ? 'text-foreground/92'
+                  : 'text-muted-foreground/75'
+            )}
+          >
+            {row.title}
+          </span>
           {(row.parentCount > 0 || row.childCount > 0) && (
-            <span className="ml-1 text-[0.65rem] font-normal text-(--ui-text-quaternary)">
+            <span className="shrink-0 text-[0.62rem] font-normal leading-none text-(--ui-text-quaternary)">
               {row.parentCount}↑/{row.childCount}↓
+            </span>
+          )}
+          {row.assignee && (
+            <span className="ml-auto max-w-[5rem] shrink-0 truncate text-[0.62rem] font-normal leading-none text-(--ui-text-quaternary)">
+              {row.assignee}
             </span>
           )}
         </span>

@@ -4,6 +4,7 @@ export type LoopPanelStatus = 'error' | 'ready' | 'stale'
 
 export interface LoopRow {
   active: boolean
+  assignee?: string
   childCount: number
   depth: number
   frontier: boolean
@@ -40,6 +41,7 @@ export interface TenantLoopTask {
   parent_count?: number
   parents_count?: number
   priority?: number
+  profile?: null | string
   started_at?: null | number
   status: string
   title: string
@@ -263,9 +265,11 @@ function tenantRowFromTask(task: TenantLoopTask, depths: Map<string, number>, ta
   const children = taskChildren(task, taskIds)
   const status = normalizedStatus(task.status)
   const unfinishedRunnable = isUnfinishedRunnableTask(task)
+  const assignee = (task.assignee || task.profile || '').trim()
 
   return {
     active: ACTIVE_STATUSES.has(status) || Boolean(task.current_run_id),
+    assignee: assignee || undefined,
     childCount: children.length || task.child_count || task.children_count || 0,
     depth: depths.get(task.id) || 0,
     frontier: unfinishedRunnable && parents.length === 0 ? true : unfinishedRunnable,

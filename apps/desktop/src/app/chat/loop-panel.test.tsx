@@ -152,6 +152,60 @@ describe('tenant-backed loop mapping', () => {
 })
 
 describe('LoopPanel', () => {
+  it('renders tenant-backed rows as compact flat glyph-only composer rows', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      latest_event_id: 9,
+      tenant: 'tenant-debug-id',
+      tasks: [
+        {
+          assignee: 'reviewer-qa',
+          created_at: 3,
+          id: 't_review',
+          included_parent_ids: ['t_running'],
+          priority: 0,
+          status: 'todo',
+          title: 'Review closure'
+        },
+        {
+          assignee: 'peacock',
+          created_at: 2,
+          id: 't_running',
+          included_child_ids: ['t_review'],
+          included_parent_ids: ['t_parent'],
+          priority: 0,
+          status: 'running',
+          title: 'Build tenant row'
+        },
+        {
+          assignee: 'planner',
+          created_at: 1,
+          id: 't_parent',
+          included_child_ids: ['t_running'],
+          priority: 0,
+          status: 'ready',
+          title: 'Plan tenant row'
+        }
+      ]
+    })
+
+    render(<LoopTaskStack onSelectTaskId={() => undefined} state={state} />)
+
+    expect(screen.getByTestId('loop-card-t_parent').textContent).toContain('0↑/1↓')
+    expect(screen.getByTestId('loop-card-t_running').textContent).toContain('1↑/1↓')
+    expect(screen.getByTestId('loop-card-t_running').textContent).toContain('peacock')
+    expect(screen.getAllByLabelText('Status: running').length).toBe(1)
+    expect(screen.queryByText(/running|ready|todo|frontier|active/i)).toBeNull()
+    expect(screen.queryByText('tenant-debug-id')).toBeNull()
+    expect(screen.queryByText('t_running')).toBeNull()
+    expect(screen.getByTestId('loop-card-t_running').getAttribute('style') || '').not.toContain('padding-left')
+    expect(screen.getByTestId('loop-card-t_running').getAttribute('style') || '').not.toContain('--loop-depth')
+    expect(screen.getAllByTestId(/loop-card-/).map(row => row.getAttribute('data-testid'))).toEqual([
+      'loop-card-t_parent',
+      'loop-card-t_running',
+      'loop-card-t_review'
+    ])
+  })
+
   it('renders rows, opens useful draft details on click, and hides raw JSON behind debug', () => {
     const state = deriveLoopPanelState([
       toolMessage({
@@ -175,7 +229,7 @@ describe('LoopPanel', () => {
     expect(screen.queryByText(/triage/i)).toBeNull()
     expect(screen.queryByText('active')).toBeNull()
     expect(screen.queryByText('frontier')).toBeNull()
-    expect(screen.getByTestId('loop-card-t_child').getAttribute('style')).toContain('--loop-depth: 1')
+    expect(screen.getByTestId('loop-card-t_child').getAttribute('style')).toBeNull()
     expect(screen.getByTestId('loop-panel').className).toContain('hidden xl:flex')
     expect(screen.queryByText(/"nodes"/)).toBeNull()
 
