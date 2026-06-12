@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { ChatMessage } from '@/lib/chat-messages'
 
 import { LoopPanel, LoopTaskStack } from './loop-panel'
-import { deriveLoopPanelState, type LoopPanelState } from './loop-state'
+import { deriveLoopPanelState, deriveLoopPanelStateFromTenantSource, type LoopPanelState } from './loop-state'
 
 const toolMessage = (result: unknown, args: Record<string, unknown> = { action: 'read', root_task_id: 't_root' }): ChatMessage => ({
   id: `msg-${Math.random()}`,
@@ -43,12 +43,124 @@ function LoopHarness({ state }: { state: LoopPanelState }) {
   return (
     <>
       <LoopTaskStack onSelectTaskId={selectTask} selectedTaskId={selectedTaskId} state={state} />
-      <LoopPanel hidden={panelHidden} onHide={hidePanel} open={panelOpen} selectedTaskId={selectedTaskId} state={state} />
+      <LoopPanel
+        hidden={panelHidden}
+        onHide={hidePanel}
+        onSelectTaskId={selectTask}
+        open={panelOpen}
+        selectedTaskId={selectedTaskId}
+        state={state}
+      />
     </>
   )
 }
 
+function DetailFetchHarness({ state }: { state: LoopPanelState }) {
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>('t_child')
+  const selectedTaskDetail =
+    selectedTaskId === 't_external'
+      ? {
+          task: {
+            id: 't_external',
+            title: 'External parent',
+            status: 'ready',
+            body: 'Fetched external body',
+            included_child_ids: ['t_child'],
+            included_parent_ids: []
+          },
+          comments: []
+        }
+      : null
+
+  return (
+    <LoopPanel
+      onSelectTaskId={setSelectedTaskId}
+      open={true}
+      selectedTaskDetail={selectedTaskDetail}
+      selectedTaskId={selectedTaskId}
+      state={state}
+    />
+  )
+}
+
 describe('deriveLoopPanelState', () => {
+  it('maps tenant-backed session source rows without reordering the backend/composer list', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-1',
+      lineage_session_ids: ['sess-root', 'sess-1'],
+      tenant: 'tenant-a',
+      tenants: ['tenant-a'],
+      include_archived: false,
+      latest_event_id: 42,
+      now: 100,
+      links: [
+        { parent_id: 't_parent', child_id: 't_child' },
+        { parent_id: 't_external', child_id: 't_child' }
+      ],
+      external_links: [{ parent_id: 't_external', child_id: 't_child' }],
+      tasks: [
+        {
+          id: 't_child',
+          title: 'Build child',
+          status: 'running',
+          tenant: 'tenant-a',
+          assignee: 'peacock',
+          body: 'Implementation details',
+          latest_summary: 'in progress',
+          comment_count: 2,
+          latest_run: { status: 'running' },
+          included_parent_ids: ['t_parent'],
+          included_child_ids: []
+        },
+        {
+          id: 't_parent',
+          title: 'Design parent',
+          status: 'done',
+          tenant: 'tenant-a',
+          included_parent_ids: [],
+          included_child_ids: ['t_child']
+        }
+      ]
+    })
+
+    expect(state?.rootTaskId).toBe('tenant-a')
+    expect(state?.revision).toBe(42)
+    expect(state?.rawJson).toContain('"session_id": "sess-1"')
+    expect(state?.rows.map(row => row.taskId)).toEqual(['t_child', 't_parent'])
+    expect(state?.rows[0]).toMatchObject({
+      active: true,
+      assignee: 'peacock',
+      body: 'Implementation details',
+      childCount: 0,
+      commentCount: 2,
+      latestSummary: 'in progress',
+      parentCount: 1,
+      parents: ['t_parent'],
+      status: 'running',
+      taskId: 't_child',
+      title: 'Build child'
+    })
+  })
+
+  it('caps tenant depth derivation for malformed cyclic links', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-cycle',
+      latest_event_id: 1,
+      tasks: [
+        {
+          id: 't_cycle',
+          title: 'Cyclic task',
+          status: 'ready',
+          included_parent_ids: ['t_cycle'],
+          included_child_ids: ['t_cycle']
+        }
+      ]
+    })
+
+    expect(state?.rows[0]?.depth).toBeLessThanOrEqual(1)
+    expect(state?.rows[0]?.parents).toEqual(['t_cycle'])
+  })
+
   it('renders the latest triage-backed graph rows in dependency-derived order', () => {
     const state = deriveLoopPanelState([
       toolMessage({
@@ -82,7 +194,7 @@ describe('deriveLoopPanelState', () => {
 })
 
 describe('LoopPanel', () => {
-  it('renders rows, opens useful draft details on click, and hides raw JSON behind debug', () => {
+  it('renders rows, opens useful draft details on click, and omits raw JSON/debug affordances in normal view', () => {
     const state = deriveLoopPanelState([
       toolMessage({
         ok: true,
@@ -112,7 +224,10 @@ describe('LoopPanel', () => {
     fireEvent.click(screen.getByText('Build child'))
     expect(screen.getByTestId('loop-panel').className).not.toContain('hidden xl:flex')
     expect(screen.getByTestId('loop-panel').className).not.toContain('fixed')
-    expect(screen.getByTestId('loop-panel').className).toContain('w-[min(20rem,45vw)]')
+    expect(screen.getByTestId('loop-panel').getAttribute('data-layout')).toBe('docked')
+    expect(screen.getByTestId('loop-panel').getAttribute('data-modal')).toBe('false')
+    expect(screen.getByTestId('loop-panel').getAttribute('data-state')).toBe('open')
+    expect(screen.getByTestId('loop-panel').className).toContain('w-[min(22rem,45vw)]')
     expect(screen.queryByRole('button', { name: /dismiss loop panel overlay/i })).toBeNull()
     expect(screen.getByText('Loop details')).toBeTruthy()
     expect(screen.getByText('t_child')).toBeTruthy()
@@ -125,8 +240,142 @@ describe('LoopPanel', () => {
     fireEvent.click(screen.getByText('Design parent'))
     expect(screen.getByTestId('loop-panel')).toBeTruthy()
     expect(screen.getByText('t_parent')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /show debug json/i })).toBeNull()
+    expect(screen.queryByText(/"nodes"/)).toBeNull()
+  })
 
+  it('renders debug JSON only when explicitly enabled for development diagnostics', () => {
+    const state = deriveLoopPanelState([
+      toolMessage({
+        ok: true,
+        root_task_id: 't_root',
+        graph_revision: 3,
+        nodes: [{ task_id: 't_child', title: 'Build child', status: 'triage', parents: [], depth: 0, active: true }]
+      })
+    ])
+
+    render(<LoopPanel enableDebugJson open selectedTaskId="t_child" state={state} />)
+
+    expect(screen.queryByText(/"nodes"/)).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: /show debug json/i }))
     expect(screen.getByText(/"nodes"/)).toBeTruthy()
+  })
+
+  it('renders rich task detail sections from tenant metadata and navigates dependency links', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-1',
+      tenant: 'tenant-a',
+      latest_event_id: 99,
+      tasks: [
+        {
+          id: 't_parent',
+          title: 'Design parent',
+          status: 'done',
+          assignee: 'planner',
+          body: 'Parent body',
+          result: 'parent result',
+          latest_summary: 'parent complete',
+          comment_count: 0,
+          included_child_ids: ['t_child'],
+          included_parent_ids: [],
+          workspace_kind: 'scratch',
+          workspace_path: '/tmp/parent'
+        },
+        {
+          id: 't_child',
+          title: 'Build child',
+          status: 'blocked',
+          assignee: 'peacock',
+          body: 'Implement the detail panel',
+          result: 'child result',
+          latest_summary: 'blocked on review',
+          comment_count: 2,
+          current_run_id: 42,
+          included_child_ids: ['t_grandchild'],
+          included_parent_ids: ['t_parent'],
+          latest_run: { id: 42, profile: 'peacock', status: 'running', outcome: null, summary: 'worker running' },
+          workspace_kind: 'worktree',
+          workspace_path: '/worktrees/t_child'
+        },
+        {
+          id: 't_grandchild',
+          title: 'Review child',
+          status: 'ready',
+          assignee: 'reviewer-qa',
+          included_child_ids: [],
+          included_parent_ids: ['t_child']
+        }
+      ]
+    })
+
+    render(<LoopHarness state={state!} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Status: blocked Build child/i }))
+
+    expect(screen.getByRole('heading', { name: /Build child/i })).toBeTruthy()
+    expect(screen.getByText('t_child')).toBeTruthy()
+    expect(screen.getByText('Implement the detail panel')).toBeTruthy()
+    expect(screen.getByText('Comments')).toBeTruthy()
+    expect(screen.getByText('2 comments available in task detail')).toBeTruthy()
+    expect(screen.getByText('Latest run')).toBeTruthy()
+    expect(screen.getByText(/Run #42 · running · peacock/)).toBeTruthy()
+    expect(screen.getByText('Result')).toBeTruthy()
+    expect(screen.getByText('child result')).toBeTruthy()
+    expect(screen.getByText('Summary')).toBeTruthy()
+    expect(screen.getByText('blocked on review')).toBeTruthy()
+    expect(screen.getByText('Metadata')).toBeTruthy()
+    expect(screen.getByText('Assignee: peacock')).toBeTruthy()
+    expect(screen.getByText('Workspace: worktree')).toBeTruthy()
+    expect(screen.getByText('/worktrees/t_child')).toBeTruthy()
+    expect(screen.getByText('Safe actions')).toBeTruthy()
+    expect(screen.getByText('Task actions will appear here when enabled.')).toBeTruthy()
+    expect(screen.queryByText(/"tasks"/)).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /select parent task t_parent/i }))
+    expect(screen.getByRole('heading', { name: /Design parent/i })).toBeTruthy()
+    expect(screen.getByText('Parent body')).toBeTruthy()
+    expect(screen.getByText('No comments yet.')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /select child task t_child/i }))
+    expect(screen.getByRole('heading', { name: /Build child/i })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /select child task t_grandchild/i }))
+    expect(screen.getByRole('heading', { name: /Review child/i })).toBeTruthy()
+    expect(screen.getByText('No description provided.')).toBeTruthy()
+  })
+
+  it('uses fetched task detail when selecting a dependency that is not in the flat composer rows', () => {
+    const state: LoopPanelState = {
+      message: '',
+      rawJson: '{}',
+      revision: 1,
+      rootTaskId: 'tenant-a',
+      status: 'ready',
+      rows: [
+        {
+          active: true,
+          childCount: 0,
+          children: [],
+          commentCount: 0,
+          depth: 0,
+          frontier: true,
+          parentCount: 1,
+          parents: ['t_external'],
+          status: 'running',
+          taskId: 't_child',
+          title: 'Build child'
+        }
+      ]
+    }
+
+    render(<DetailFetchHarness state={state} />)
+
+    expect(screen.getByRole('heading', { name: /Build child/i })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /select parent task t_external/i }))
+
+    expect(screen.getByRole('heading', { name: /External parent/i })).toBeTruthy()
+    expect(screen.getByText('Fetched external body')).toBeTruthy()
+    expect(screen.getByText('t_external')).toBeTruthy()
   })
 })
