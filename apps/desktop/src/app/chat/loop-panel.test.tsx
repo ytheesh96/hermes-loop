@@ -111,8 +111,9 @@ describe('LoopPanel', () => {
 
     fireEvent.click(screen.getByText('Build child'))
     expect(screen.getByTestId('loop-panel').className).not.toContain('hidden xl:flex')
-    expect(screen.getByTestId('loop-panel').className).toContain('fixed')
-    expect(screen.getByRole('button', { name: /dismiss loop panel overlay/i })).toBeTruthy()
+    expect(screen.getByTestId('loop-panel').className).not.toContain('fixed')
+    expect(screen.getByTestId('loop-panel').className).toContain('w-[min(20rem,45vw)]')
+    expect(screen.queryByRole('button', { name: /dismiss loop panel overlay/i })).toBeNull()
     expect(screen.getByText('Loop details')).toBeTruthy()
     expect(screen.getByText('t_child')).toBeTruthy()
     expect(screen.getByText('Parents: t_parent')).toBeTruthy()

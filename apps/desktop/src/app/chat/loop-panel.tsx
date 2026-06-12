@@ -149,23 +149,13 @@ export function LoopPanel({ hidden = false, onHide, open = false, selectedTaskId
   }
 
   return (
-    <>
-      {open && onHide && (
-        <button
-          aria-label="Dismiss Loop panel overlay"
-          className="fixed inset-0 z-30 bg-black/20 backdrop-blur-[1px] xl:hidden"
-          onClick={onHide}
-          type="button"
-        />
+    <aside
+      className={cn(
+        'flex w-[min(20rem,45vw)] shrink-0 flex-col border-l border-(--ui-stroke-secondary) bg-(--ui-sidebar-background) p-3 text-(--ui-text-secondary)',
+        !open && 'hidden xl:flex'
       )}
-      <aside
-        className={cn(
-          'fixed inset-y-2 right-2 z-40 flex w-80 max-w-[calc(100vw-1rem)] flex-col rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-sidebar-background) p-3 text-(--ui-text-secondary) shadow-2xl',
-          'xl:static xl:inset-auto xl:max-h-none xl:max-w-none xl:shrink-0 xl:rounded-none xl:border-y-0 xl:border-r-0 xl:shadow-none',
-          !open && 'hidden xl:flex'
-        )}
-        data-testid="loop-panel"
-      >
+      data-testid="loop-panel"
+    >
         <div className="mb-3 flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 className="m-0 text-sm font-semibold text-(--ui-text-primary)">Loop</h2>
@@ -232,7 +222,6 @@ export function LoopPanel({ hidden = false, onHide, open = false, selectedTaskId
             </pre>
           )}
         </div>
-      </aside>
-    </>
+    </aside>
   )
 }
