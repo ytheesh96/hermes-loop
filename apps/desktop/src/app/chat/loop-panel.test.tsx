@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useState } from 'react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { ChatMessage } from '@/lib/chat-messages'
 
@@ -34,8 +34,8 @@ function LoopHarness({ state }: { state: LoopPanelState }) {
   const [panelOpen, setPanelOpen] = useState(false)
   const [panelHidden, setPanelHidden] = useState(false)
 
-  function selectTask(taskId: string) {
-    setSelectedTaskId(taskId)
+  function selectTask(row: LoopPanelState['rows'][number]) {
+    setSelectedTaskId(row.taskId)
     setPanelOpen(true)
     setPanelHidden(false)
   }
@@ -47,7 +47,7 @@ function LoopHarness({ state }: { state: LoopPanelState }) {
 
   return (
     <>
-      <LoopTaskStack onSelectTaskId={selectTask} selectedTaskId={selectedTaskId} state={state} />
+      <LoopTaskStack onSelectTask={selectTask} selectedTaskId={selectedTaskId} state={state} />
       <LoopPanel hidden={panelHidden} onHide={hidePanel} open={panelOpen} selectedTaskId={selectedTaskId} state={state} />
     </>
   )
@@ -152,6 +152,28 @@ describe('tenant-backed loop mapping', () => {
 })
 
 describe('LoopPanel', () => {
+  it('emits the clicked row payload so the docked side-panel shell can open the selected task', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'session-1',
+      tasks: [
+        { id: 't_parent', title: 'Design parent', status: 'done', included_child_ids: ['t_child'] },
+        { id: 't_child', title: 'Build child', status: 'ready', included_parent_ids: ['t_parent'] }
+      ]
+    })
+
+    const selectTask = vi.fn()
+
+    render(<LoopTaskStack onSelectTask={selectTask} selectedTaskId={null} state={state} />)
+
+    fireEvent.click(screen.getByText(/Build child/))
+    fireEvent.click(screen.getByText(/Build child/))
+    fireEvent.click(screen.getByText(/Design parent/))
+
+    expect(selectTask).toHaveBeenNthCalledWith(1, expect.objectContaining({ taskId: 't_child', title: 'Build child' }))
+    expect(selectTask).toHaveBeenNthCalledWith(2, expect.objectContaining({ taskId: 't_child', title: 'Build child' }))
+    expect(selectTask).toHaveBeenNthCalledWith(3, expect.objectContaining({ taskId: 't_parent', title: 'Design parent' }))
+  })
+
   it('renders rows, opens useful draft details on click, and hides raw JSON behind debug', () => {
     const state = deriveLoopPanelState([
       toolMessage({

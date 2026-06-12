@@ -55,7 +55,7 @@ import type { ChatBarState } from './composer/types'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { useFileDropZone } from './hooks/use-file-drop-zone'
 import { LoopPanel, LoopTaskStack } from './loop-panel'
-import { deriveLoopPanelState, deriveLoopPanelStateFromTenantSource } from './loop-state'
+import { deriveLoopPanelState, deriveLoopPanelStateFromTenantSource, type LoopRow } from './loop-state'
 import { SessionActionsMenu } from './sidebar/session-actions-menu'
 import { lastVisibleMessageIsUser, threadLoadingState } from './thread-loading'
 
@@ -275,20 +275,21 @@ export function ChatView({
   )
 
   const loopPanelState = tenantLoopPanelState?.rows.length ? tenantLoopPanelState : transcriptLoopPanelState
-  const [selectedLoopTaskId, setSelectedLoopTaskId] = useState<string | null>(null)
+  const [selectedLoopTask, setSelectedLoopTask] = useState<LoopRow | null>(null)
+  const selectedLoopTaskId = selectedLoopTask?.taskId || null
   const [loopPanelOpen, setLoopPanelOpen] = useState(false)
   const [loopPanelHidden, setLoopPanelHidden] = useState(false)
 
   const loopPanelRootKey = loopPanelState?.rootTaskId || ''
 
   useEffect(() => {
-    setSelectedLoopTaskId(null)
+    setSelectedLoopTask(null)
     setLoopPanelOpen(false)
     setLoopPanelHidden(false)
   }, [loopPanelRootKey])
 
-  const handleSelectLoopTaskId = useCallback((taskId: string) => {
-    setSelectedLoopTaskId(taskId)
+  const handleSelectLoopTask = useCallback((row: LoopRow) => {
+    setSelectedLoopTask(row)
     setLoopPanelOpen(true)
     setLoopPanelHidden(false)
   }, [])
@@ -441,7 +442,7 @@ export function ChatView({
                   statusStackLead={
                     loopPanelState?.rows.length ? (
                       <LoopTaskStack
-                        onSelectTaskId={handleSelectLoopTaskId}
+                        onSelectTask={handleSelectLoopTask}
                         selectedTaskId={selectedLoopTaskId}
                         state={loopPanelState}
                       />
