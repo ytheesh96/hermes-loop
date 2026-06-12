@@ -69,6 +69,12 @@ function idsFromTask(task: TenantLoopTask, key: 'children' | 'parents'): string[
   return Array.isArray(explicit) ? explicit : []
 }
 
+function latestRunFromTaskDetail(detail?: LoopTaskDetail | null): NonNullable<LoopTaskDetail['runs']>[number] | null {
+  const runs = detail?.runs || []
+
+  return runs.length ? runs[runs.length - 1]! : null
+}
+
 function detailRowFromTaskDetail(detail?: LoopTaskDetail | null, selectedTaskId?: null | string): LoopRow | null {
   const task = detail?.task
 
@@ -78,7 +84,7 @@ function detailRowFromTaskDetail(detail?: LoopTaskDetail | null, selectedTaskId?
 
   const parents = detail?.links?.parents || idsFromTask(task, 'parents')
   const children = detail?.links?.children || idsFromTask(task, 'children')
-  const latestRun = task.latest_run || detail?.runs?.[0] || null
+  const latestRun = task.latest_run || latestRunFromTaskDetail(detail)
   const status = task.status?.trim().toLowerCase() || 'todo'
 
   return {

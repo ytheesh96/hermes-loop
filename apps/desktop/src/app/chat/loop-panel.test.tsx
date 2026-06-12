@@ -68,7 +68,11 @@ function DetailFetchHarness({ state }: { state: LoopPanelState }) {
             included_child_ids: ['t_child'],
             included_parent_ids: []
           },
-          comments: []
+          comments: [],
+          runs: [
+            { id: 1, profile: 'old-worker', status: 'done', summary: 'oldest run' },
+            { id: 2, profile: 'new-worker', status: 'running', summary: 'newest run' }
+          ]
         }
       : null
 
@@ -217,7 +221,8 @@ describe('LoopPanel', () => {
     expect(screen.queryByText(/triage/i)).toBeNull()
     expect(screen.queryByText('active')).toBeNull()
     expect(screen.queryByText('frontier')).toBeNull()
-    expect(screen.getByTestId('loop-card-t_child').getAttribute('style')).toContain('--loop-depth: 1')
+    expect(screen.getByTestId('loop-card-t_parent').style.paddingLeft).toBe('')
+    expect(screen.getByTestId('loop-card-t_child').style.paddingLeft).toBe('')
     expect(screen.getByTestId('loop-panel').className).toContain('hidden xl:flex')
     expect(screen.queryByText(/"nodes"/)).toBeNull()
 
@@ -377,5 +382,9 @@ describe('LoopPanel', () => {
     expect(screen.getByRole('heading', { name: /External parent/i })).toBeTruthy()
     expect(screen.getByText('Fetched external body')).toBeTruthy()
     expect(screen.getByText('t_external')).toBeTruthy()
+    expect(screen.getByText(/Run #2 · running · new-worker/)).toBeTruthy()
+    expect(screen.getAllByText('newest run').length).toBeGreaterThanOrEqual(1)
+    expect(screen.queryByText(/Run #1 · done · old-worker/)).toBeNull()
+    expect(screen.queryByText('oldest run')).toBeNull()
   })
 })
