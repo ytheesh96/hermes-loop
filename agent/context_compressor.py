@@ -537,6 +537,20 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
     if tool_name == "todo":
         return "[todo] updated task list"
 
+    if tool_name == "loop_graph":
+        # The desktop Loop side panel hydrates from the structured
+        # loop_graph result stored in session history.  Replacing even small
+        # graph reads with a one-line summary makes continuation sessions lose
+        # their visible Loop rows after context compression.  Loop graph
+        # responses are intentionally compact; keep parseable JSON intact while
+        # still falling back to the generic summary for malformed/huge output.
+        try:
+            data = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            data = None
+        if isinstance(data, dict) and "root_task_id" in data and content_len <= 20_000:
+            return content
+
     if tool_name == "clarify":
         return "[clarify] asked user a question"
 

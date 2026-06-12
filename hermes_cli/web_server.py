@@ -6436,6 +6436,105 @@ def _open_session_db_for_profile(profile: Optional[str]):
     return SessionDB(db_path=Path(home) / "state.db")
 
 
+def _parse_json_record(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _loop_graph_call_args(call: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(call, dict):
+        return None
+    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    tool_name = call.get("name") or call.get("tool_name") or function.get("name")
+    if tool_name != "loop_graph":
+        return None
+    args = (
+        _parse_json_record(function.get("arguments"))
+        or _parse_json_record(call.get("arguments"))
+        or _parse_json_record(call.get("args"))
+    )
+    return args or None
+
+
+def _loop_graph_call_id(call: Any) -> str:
+    if not isinstance(call, dict):
+        return ""
+    return str(call.get("id") or call.get("tool_call_id") or call.get("call_id") or "")
+
+
+def _content_is_structured_loop_graph_result(content: Any) -> bool:
+    record = _parse_json_record(content)
+    return bool(record.get("root_task_id") and ("nodes" in record or "graph_revision" in record or record.get("ok") is False))
+
+
+def _read_loop_graph_for_dashboard(args: Dict[str, Any]) -> Optional[str]:
+    action = str(args.get("action") or "read").strip().lower()
+    root_task_id = str(args.get("root_task_id") or "").strip()
+    if action != "read" or not root_task_id:
+        return None
+    include_nodes = bool(args.get("include_nodes", False))
+
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import loop_graph as graph
+
+    conn = kb.connect(board=args.get("board"))
+    try:
+        result = graph.read_graph(conn, root_task_id, include_nodes=include_nodes)
+        return json.dumps(result, ensure_ascii=False)
+    finally:
+        conn.close()
+
+
+def _hydrate_compacted_loop_graph_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Restore compacted loop_graph reads for the desktop Loop side panel.
+
+    Context compression can replace a small structured result like
+    ``{"root_task_id": ..., "nodes": [...]}`` with a summary string such as
+    ``[loop_graph] action=read ...``. That summary is fine for model context,
+    but the desktop side panel needs the structured graph. The tool-call args
+    remain in the preceding assistant message, so replay read-only loop_graph
+    calls at API load time without mutating the transcript on disk.
+    """
+    loop_calls_by_id: Dict[str, Dict[str, Any]] = {}
+    changed = False
+    hydrated: List[Dict[str, Any]] = []
+
+    for msg in messages:
+        if msg.get("role") == "assistant" and isinstance(msg.get("tool_calls"), list):
+            for call in msg.get("tool_calls") or []:
+                call_id = _loop_graph_call_id(call)
+                args = _loop_graph_call_args(call)
+                if call_id and args:
+                    loop_calls_by_id[call_id] = args
+
+        if (
+            msg.get("role") == "tool"
+            and msg.get("tool_name") == "loop_graph"
+            and not _content_is_structured_loop_graph_result(msg.get("content"))
+        ):
+            args = loop_calls_by_id.get(str(msg.get("tool_call_id") or ""))
+            if args:
+                try:
+                    content = _read_loop_graph_for_dashboard(args)
+                except Exception as exc:
+                    _log.debug("Failed to hydrate compacted loop_graph result: %s", exc)
+                    content = None
+                if content:
+                    msg = {**msg, "content": content}
+                    changed = True
+
+        hydrated.append(msg)
+
+    return hydrated if changed else messages
+
+
 @app.get("/api/sessions/{session_id}")
 async def get_session_detail(session_id: str, profile: Optional[str] = None):
     db = _open_session_db_for_profile(profile)
@@ -6473,6 +6572,7 @@ async def get_session_messages(session_id: str, profile: Optional[str] = None):
             raise HTTPException(status_code=404, detail="Session not found")
         sid = db.resolve_resume_session_id(sid)
         messages = db.get_messages(sid)
+        messages = _hydrate_compacted_loop_graph_messages(messages)
         return {"session_id": sid, "messages": messages}
     finally:
         db.close()
