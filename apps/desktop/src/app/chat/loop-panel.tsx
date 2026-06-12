@@ -90,10 +90,15 @@ function LoopStackRow({ onSelect, row, selected }: LoopStackRowProps) {
         <span
           className={cn(
             'min-w-0 max-w-[18rem] truncate text-[0.73rem] leading-4',
-            selected ? 'text-foreground/92' : 'text-muted-foreground/75'
+            row.active || row.frontier ? 'font-medium text-foreground/92' : selected ? 'text-foreground/92' : 'text-muted-foreground/75'
           )}
         >
           {row.title}
+          {(row.parentCount > 0 || row.childCount > 0) && (
+            <span className="ml-1 text-[0.65rem] font-normal text-(--ui-text-quaternary)">
+              {row.parentCount}↑/{row.childCount}↓
+            </span>
+          )}
         </span>
       </StatusRow>
     </div>
@@ -203,6 +208,7 @@ export function LoopPanel({ hidden = false, onHide, open = false, selectedTaskId
                 </div>
                 <div className="font-mono text-(--ui-text-tertiary)">{selected.taskId}</div>
                 <div>Parents: {selected.parents.length ? selected.parents.join(', ') : 'none'}</div>
+                <div>Links: {selected.parentCount} parents · {selected.childCount} children</div>
               </div>
             </section>
           ) : (

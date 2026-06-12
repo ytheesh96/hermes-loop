@@ -1,5 +1,6 @@
 import { JsonRpcGatewayClient } from '@hermes/shared'
 
+import type { TenantLoopSource } from '@/app/chat/loop-state'
 import type {
   ActionResponse,
   ActionStatusResponse,
@@ -228,6 +229,15 @@ export function deleteSession(id: string, profile?: string | null): Promise<{ ok
     ...(profile ? { profile } : {}),
     path: `/api/sessions/${encodeURIComponent(id)}`,
     method: 'DELETE'
+  })
+}
+
+export function getLoopSessionSource(sessionId: string, profile?: string | null): Promise<TenantLoopSource> {
+  const query = new URLSearchParams({ session_id: sessionId })
+
+  return window.hermesDesktop.api<TenantLoopSource>({
+    ...(profile ? { profile } : profileScoped()),
+    path: `/api/plugins/kanban/session-source?${query.toString()}`
   })
 }
 

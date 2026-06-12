@@ -15,14 +15,14 @@ import { Backdrop } from '@/components/Backdrop'
 import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
-import { getGlobalModelOptions, type HermesGateway } from '@/hermes'
+import { getGlobalModelOptions, getLoopSessionSource, type HermesGateway } from '@/hermes'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { quickModelOptions, sessionTitle, toRuntimeMessage } from '@/lib/chat-runtime'
 import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import { cn } from '@/lib/utils'
 import type { ComposerAttachment } from '@/store/composer'
 import { $pinnedSessionIds } from '@/store/layout'
-import { $gatewaySwapTarget } from '@/store/profile'
+import { $activeGatewayProfile, $gatewaySwapTarget } from '@/store/profile'
 import {
   $activeSessionId,
   $awaitingResponse,
@@ -55,7 +55,7 @@ import type { ChatBarState } from './composer/types'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { useFileDropZone } from './hooks/use-file-drop-zone'
 import { LoopPanel, LoopTaskStack } from './loop-panel'
-import { deriveLoopPanelState } from './loop-state'
+import { deriveLoopPanelState, deriveLoopPanelStateFromTenantSource } from './loop-state'
 import { SessionActionsMenu } from './sidebar/session-actions-menu'
 import { lastVisibleMessageIsUser, threadLoadingState } from './thread-loading'
 
@@ -192,6 +192,7 @@ export function ChatView({
   const freshDraftReady = useStore($freshDraftReady)
   const gatewayState = useStore($gatewayState)
   const gatewaySwapTarget = useStore($gatewaySwapTarget)
+  const activeGatewayProfile = useStore($activeGatewayProfile)
   const gatewayOpen = gatewayState === 'open'
   const introPersonality = useStore($introPersonality)
   const introSeed = useStore($introSeed)
@@ -257,7 +258,23 @@ export function ChatView({
     [contextSuggestions, currentModel, currentProvider, gatewayOpen, quickModels]
   )
 
-  const loopPanelState = useMemo(() => deriveLoopPanelState(messages), [messages])
+  const loopSourceSessionId = selectedSessionId || activeSessionId || routedSessionId || ''
+
+  const loopSourceQuery = useQuery({
+    queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId],
+    queryFn: () => getLoopSessionSource(loopSourceSessionId, activeGatewayProfile),
+    enabled: gatewayOpen && Boolean(loopSourceSessionId),
+    staleTime: 2_000
+  })
+
+  const transcriptLoopPanelState = useMemo(() => deriveLoopPanelState(messages), [messages])
+
+  const tenantLoopPanelState = useMemo(
+    () => deriveLoopPanelStateFromTenantSource(loopSourceQuery.data),
+    [loopSourceQuery.data]
+  )
+
+  const loopPanelState = tenantLoopPanelState?.rows.length ? tenantLoopPanelState : transcriptLoopPanelState
   const [selectedLoopTaskId, setSelectedLoopTaskId] = useState<string | null>(null)
   const [loopPanelOpen, setLoopPanelOpen] = useState(false)
   const [loopPanelHidden, setLoopPanelHidden] = useState(false)
