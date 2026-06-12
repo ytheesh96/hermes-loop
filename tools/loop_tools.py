@@ -71,16 +71,18 @@ LOOP_GRAPH_SCHEMA = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["read", "patch"]},
-            "root_task_id": {"type": "string", "description": "Kanban task id for the Loop root."},
+            "root_task_id": {"type": "string", "description": "Loop identity / session tenant id (legacy field name; not a Kanban root task)."},
             "include_nodes": {"type": "boolean", "description": "For read only, include compact dependency-derived nodes."},
             "expected_revision": {"type": "integer", "description": "For patch, graph_revision from the last read."},
             "mutation_id": {"type": "string", "description": "For patch, caller-stable idempotency key for this mutation."},
             "operations": {
                 "type": "array",
                 "description": (
-                    "Patch ops: add_node, update_node, archive_node, set_parents, mark_node, validate. "
-                    "add_node supports client_id/title/body/parents/suggested_owner/active/frontier; "
-                    "set_parents uses task_id plus parent task ids or earlier client_ids."
+                    "Patch ops: add_node, update_node, archive_node, set_parents, mark_node, "
+                    "resolve_handoff, validate. add_node supports client_id/title/body/parents/"
+                    "suggested_owner/active/frontier; set_parents uses task_id plus parent task ids "
+                    "or earlier client_ids; resolve_handoff records foreground approval/rejection "
+                    "without promoting downstream rows."
                 ),
                 "items": {"type": "object"},
             },

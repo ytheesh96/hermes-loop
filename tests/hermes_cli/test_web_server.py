@@ -736,6 +736,67 @@ class TestWebServerEndpoints:
         assert loop_payload["nodes"][0]["title"] == "Visible inherited row"
         assert payload["messages"][2]["content"] == "child turn"
 
+    def test_get_session_loop_tasks_reads_kanban_by_session_tenant_lineage(self):
+        """Desktop can list current-session Loop rows directly from Kanban tenant data."""
+        import time as _time
+
+        from hermes_state import SessionDB
+        from hermes_cli import kanban_db as kb
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="tenant-root", source="cli")
+            db.end_session("tenant-root", "compression")
+            now = _time.time()
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
+                (now - 10, now - 5, "tenant-root"),
+            )
+            db.create_session(session_id="tenant-tip", source="cli", parent_session_id="tenant-root")
+            db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 4, "tenant-tip"))
+            db._conn.commit()
+        finally:
+            db.close()
+
+        conn = kb.connect(board="developer")
+        try:
+            first_id = kb.create_task(
+                conn,
+                title="First visible tenant task",
+                tenant="tenant-root",
+                created_by="loop:tenant-root",
+                triage=True,
+            )
+            second_id = kb.create_task(
+                conn,
+                title="Dependent visible tenant task",
+                tenant="tenant-root",
+                created_by="loop:tenant-root",
+                parents=[first_id],
+                triage=True,
+            )
+            kb.create_task(conn, title="Other tenant task", tenant="other-session", triage=True)
+        finally:
+            conn.close()
+
+        resp = self.client.get("/api/sessions/tenant-tip/loop-tasks", params={"board": "developer"})
+        assert resp.status_code == 200
+        payload = resp.json()
+
+        assert payload["source"] == "kanban_tenant"
+        assert payload["root_task_id"] == "tenant:tenant-tip"
+        assert payload["tenant_ids"] == ["tenant-tip", "tenant-root"]
+        node_ids = [node["task_id"] for node in payload["nodes"]]
+        assert node_ids == [first_id, second_id]
+        assert [node["title"] for node in payload["nodes"]] == [
+            "First visible tenant task",
+            "Dependent visible tenant task",
+        ]
+        assert payload["nodes"][0]["children"] == [second_id]
+        assert payload["nodes"][1]["parents"] == [first_id]
+        assert payload["nodes"][1]["children"] == []
+        assert payload["nodes"][1]["depth"] == 1
+
     def test_get_sessions_archived_is_boolean(self):
         from hermes_state import SessionDB
 

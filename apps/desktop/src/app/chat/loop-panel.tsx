@@ -1,4 +1,4 @@
-import { type CSSProperties, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 
 import { StatusRow } from '@/components/chat/status-row'
 import { StatusSection } from '@/components/chat/status-section'
@@ -20,36 +20,61 @@ function statusCopy(status: LoopPanelStatus): string {
   return 'Live draft'
 }
 
-function statusIndicatorClass(status: string): string {
+type LoopStatusKind = 'blocked' | 'done' | 'pending' | 'running' | 'slashed'
+
+function statusIndicatorKind(status: string): LoopStatusKind {
   const value = status.toLowerCase()
 
   if (value === 'running' || value === 'in_progress' || value === 'claimed') {
-    return 'size-1.5 bg-(--ui-accent) shadow-[0_0_0.625rem_color-mix(in_srgb,var(--ui-accent)_45%,transparent)]'
+    return 'running'
   }
 
-  if (value === 'blocked' || value === 'stale') {
-    return 'size-1.5 bg-amber-500'
+  if (value === 'done' || value === 'complete' || value === 'completed') {
+    return 'done'
   }
 
-  if (value === 'error' || value === 'failed') {
-    return 'size-1.5 bg-destructive'
+  if (value === 'cancelled' || value === 'canceled' || value === 'archived') {
+    return 'slashed'
   }
 
-  if (value === 'done') {
-    return 'size-1.5 bg-emerald-500/80'
+  if (value === 'blocked' || value === 'error' || value === 'failed' || value === 'stale') {
+    return 'blocked'
   }
 
-  return 'size-1 bg-(--ui-text-quaternary) opacity-80'
+  return 'pending'
+}
+
+function StatusGlyph({ kind }: { kind: LoopStatusKind }) {
+  if (kind === 'running') {
+    return <span aria-hidden="true" className="size-3 rounded-full border border-(--ui-accent)/25 border-t-(--ui-accent) animate-spin" />
+  }
+
+  if (kind === 'done') {
+    return <Codicon className="text-emerald-500/90" name="check" size="0.78rem" />
+  }
+
+  if (kind === 'slashed') {
+    return <Codicon className="text-(--ui-text-tertiary)" name="circle-slash" size="0.78rem" />
+  }
+
+  if (kind === 'blocked') {
+    return <span aria-hidden="true" className="size-1.5 rounded-full bg-destructive" />
+  }
+
+  return <span aria-hidden="true" className="size-3.5 rounded-full border border-foreground/35 bg-transparent" />
 }
 
 function LoopStatusIndicator({ row }: { row: LoopRow }) {
+  const kind = statusIndicatorKind(row.status)
+
   return (
     <span
       aria-label={`Status: ${row.status}`}
       className="grid w-3.5 shrink-0 place-items-center overflow-hidden"
+      data-status-kind={kind}
       role="img"
     >
-      <span aria-hidden="true" className={cn('rounded-full', statusIndicatorClass(row.status))} />
+      <StatusGlyph kind={kind} />
     </span>
   )
 }
@@ -78,10 +103,7 @@ interface LoopStackRowProps {
 
 function LoopStackRow({ onSelect, row, selected }: LoopStackRowProps) {
   return (
-    <div
-      data-testid={`loop-card-${row.taskId}`}
-      style={{ '--loop-depth': row.depth, paddingLeft: `calc(0.5rem + ${row.depth} * 1rem)` } as CSSProperties}
-    >
+    <div data-testid={`loop-card-${row.taskId}`}>
       <StatusRow
         className={cn(selected && 'bg-(--ui-row-hover-background)')}
         leading={<LoopStatusIndicator row={row} />}
@@ -129,6 +151,22 @@ export function LoopTaskStack({ onSelectTaskId, selectedTaskId, state }: LoopTas
       ))}
     </StatusSection>
   )
+}
+
+function dependencyListLabel(values: string[] | undefined): string {
+  if (!values) {
+    return 'unavailable'
+  }
+
+  return values.length ? values.join(', ') : 'none'
+}
+
+function LoopDetailLine({ label, value }: { label: string; value?: string }) {
+  if (!value) {
+    return null
+  }
+
+  return <div>{label}: {value}</div>
 }
 
 interface LoopPanelProps {
@@ -201,8 +239,17 @@ export function LoopPanel({ hidden = false, onHide, open = false, selectedTaskId
                   <LoopStatusIndicator row={selected} />
                   <span className="min-w-0 truncate">{selected.title}</span>
                 </div>
-                <div className="font-mono text-(--ui-text-tertiary)">{selected.taskId}</div>
-                <div>Parents: {selected.parents.length ? selected.parents.join(', ') : 'none'}</div>
+                <LoopDetailLine label="Task ID" value={selected.taskId} />
+                <LoopDetailLine label="Status" value={selected.status} />
+                <LoopDetailLine label="Board" value={selected.board} />
+                <LoopDetailLine label="Tenant" value={selected.tenant} />
+                <LoopDetailLine label="Root" value={selected.rootTaskId || state.rootTaskId} />
+                <div>Parents: {dependencyListLabel(selected.parents)}</div>
+                <div>Dependents: {dependencyListLabel(selected.children)}</div>
+                <LoopDetailLine label="Attention" value={selected.attention} />
+                <LoopDetailLine label="Verification" value={selected.verificationState} />
+                <LoopDetailLine label="Handoff summary" value={selected.handoff?.summary} />
+                <LoopDetailLine label="Handoff reason" value={selected.handoff?.reason} />
               </div>
             </section>
           ) : (

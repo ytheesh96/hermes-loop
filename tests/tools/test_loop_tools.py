@@ -22,18 +22,7 @@ def loop_env(monkeypatch, tmp_path):
 
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
-    conn = kb.connect()
-    try:
-        root = kb.create_task(
-            conn,
-            title="Loop root",
-            assignee=None,
-            triage=True,
-            tenant="tenant-a",
-        )
-    finally:
-        conn.close()
-    return root
+    return "tenant-a"
 
 
 def _call(args):
@@ -118,7 +107,13 @@ def test_patch_creates_real_triage_tasks_with_dependencies_and_compact_response(
         assert first is not None and first.status == "triage" and first.assignee is None
         assert second is not None and second.status == "triage" and second.assignee is None
         assert second.tenant == "tenant-a"
+        assert first.created_by == "loop:tenant-a"
+        assert second.created_by == "loop:tenant-a"
+        assert kb.parent_ids(conn, first.id) == []
         assert kb.parent_ids(conn, second.id) == [first.id]
+        loop_rows = [t for t in kb.list_tasks(conn, status="triage") if t.tenant == "tenant-a"]
+        assert {t.id for t in loop_rows} == {first.id, second.id}
+        assert not any(t.title in {"Loop root", "Loop root container"} for t in loop_rows)
         assert "Loop provenance" in (first.body or "")
         assert "suggested_owner: researcher-a" in (first.body or "")
     finally:
@@ -190,14 +185,13 @@ def test_patch_rejects_mutation_targets_outside_requested_root(loop_env, op_name
     conn = kb.connect()
     try:
         unrelated = kb.create_task(conn, title="Unrelated triage", assignee=None, triage=True)
-        other_root = kb.create_task(conn, title="Other root", assignee=None, triage=True)
     finally:
         conn.close()
 
     other_created = _call(
         {
             "action": "patch",
-            "root_task_id": other_root,
+            "root_task_id": "tenant-b",
             "expected_revision": 0,
             "mutation_id": "m-root-b",
             "operations": [{"op": "add_node", "client_id": "b", "title": "Root B node"}],
@@ -205,7 +199,7 @@ def test_patch_rejects_mutation_targets_outside_requested_root(loop_env, op_name
     )
     other_node = other_created["created"][0]["task_id"]
 
-    for target in [unrelated, root, other_node]:
+    for target in [unrelated, other_node]:
         operation = {"op": op_name, "task_id": target}
         if op_name == "update_node":
             operation["title"] = "Should not change"
@@ -230,16 +224,14 @@ def test_patch_rejects_mutation_targets_outside_requested_root(loop_env, op_name
     conn = kb.connect()
     try:
         unrelated_task = kb.get_task(conn, unrelated)
-        root_task = kb.get_task(conn, root)
         other_task = kb.get_task(conn, other_node)
         assert unrelated_task is not None and unrelated_task.title == "Unrelated triage"
-        assert root_task is not None and root_task.title == "Loop root"
         assert other_task is not None and other_task.title == "Root B node"
     finally:
         conn.close()
 
 
-@pytest.mark.parametrize("parent_kind", ["external", "root", "other_root"])
+@pytest.mark.parametrize("parent_kind", ["external", "other_root"])
 def test_add_node_rejects_parents_outside_requested_root(loop_env, parent_kind):
     root = loop_env
     created = _call(
@@ -257,14 +249,13 @@ def test_add_node_rejects_parents_outside_requested_root(loop_env, parent_kind):
     conn = kb.connect()
     try:
         external = kb.create_task(conn, title="External triage", assignee=None, triage=True)
-        other_root = kb.create_task(conn, title="Other Loop root", assignee=None, triage=True)
     finally:
         conn.close()
 
     other_created = _call(
         {
             "action": "patch",
-            "root_task_id": other_root,
+            "root_task_id": "tenant-b",
             "expected_revision": 0,
             "mutation_id": "m-other-root-parent-source",
             "operations": [{"op": "add_node", "client_id": "b", "title": "Root B node"}],
@@ -272,7 +263,6 @@ def test_add_node_rejects_parents_outside_requested_root(loop_env, parent_kind):
     )
     parent_id = {
         "external": external,
-        "root": root,
         "other_root": other_created["created"][0]["task_id"],
     }[parent_kind]
 
@@ -342,19 +332,19 @@ def test_patch_replays_duplicate_mutation_that_started_before_first_commit(loop_
     from hermes_cli import kanban_db as kb
     from hermes_cli import loop_graph as graph
 
-    original_append_root_event = graph._append_root_event
+    original_append_graph_event = graph._append_graph_event
     first_thread_entered_commit = threading.Event()
     release_first_thread = threading.Event()
     results = []
     errors = []
 
-    def slow_first_commit(conn, root_task_id, payload):
+    def slow_first_commit(conn, root_task_id, task_ids, payload):
         if payload.get("mutation_id") == "m-concurrent":
             first_thread_entered_commit.set()
             release_first_thread.wait(timeout=5)
-        return original_append_root_event(conn, root_task_id, payload)
+        return original_append_graph_event(conn, root_task_id, task_ids, payload)
 
-    monkeypatch.setattr(graph, "_append_root_event", slow_first_commit)
+    monkeypatch.setattr(graph, "_append_graph_event", slow_first_commit)
 
     def apply_from_thread():
         conn = kb.connect()
@@ -471,3 +461,140 @@ def test_read_returns_revision_and_optional_dependency_derived_nodes(loop_env):
     assert [node["depth"] for node in read["nodes"]] == [0, 1]
     assert read["nodes"][0]["active"] is True
     assert read["nodes"][1]["frontier"] is True
+
+
+def _node_by_task(graph: dict, task_id: str) -> dict:
+    for node in graph.get("nodes") or []:
+        if node.get("task_id") == task_id:
+            return node
+    raise AssertionError(f"node {task_id} not found: {graph}")
+
+
+def test_read_folds_pending_foreground_handoff_into_node_and_index(loop_env):
+    root = loop_env
+
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        worker = kb.create_task(conn, title="Contract tests", assignee="worker", created_by=f"loop:{root}")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                worker,
+                "loop_node_state",
+                {"root_task_id": root, "client_id": "contract-tests", "active": True, "frontier": True},
+            )
+        assert kb.claim_task(conn, worker, claimer="worker-host:1") is not None
+        assert kb.complete_task(conn, worker, summary="tests define handoff contract")
+    finally:
+        conn.close()
+
+    read = _call({"action": "read", "root_task_id": root, "include_nodes": True})
+    node = _node_by_task(read, worker)
+    assert node["attention"] == "needs-orchestrator"
+    assert node["verification_state"] == "needs-orchestrator"
+    assert node["handoff"]["handoff_kind"] == "worker_completed"
+    assert node["handoff"]["summary"] == "tests define handoff contract"
+    assert read["pending_handoffs"] == [
+        {
+            "task_id": worker,
+            "node_id": "contract-tests",
+            "handoff_kind": "worker_completed",
+            "verification_state": "needs-orchestrator",
+            "summary": "tests define handoff contract",
+        }
+    ]
+
+
+def test_resolve_handoff_clears_attention_without_releasing_downstream(loop_env):
+    root = loop_env
+
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(conn, title="Parent worker", assignee="worker", created_by=f"loop:{root}")
+        child = kb.create_task(conn, title="Downstream worker", assignee="worker", created_by=f"loop:{root}", parents=[parent])
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                parent,
+                "loop_node_state",
+                {"root_task_id": root, "client_id": "parent-worker", "active": True, "frontier": True},
+            )
+            kb._append_event(
+                conn,
+                child,
+                "loop_node_state",
+                {"root_task_id": root, "client_id": "downstream-worker", "active": False, "frontier": False},
+            )
+        assert kb.claim_task(conn, parent, claimer="worker-host:2") is not None
+        assert kb.complete_task(conn, parent, summary="done but awaiting foreground")
+        handoff = next(event for event in kb.list_events(conn, parent) if event.kind == "loop_foreground_handoff")
+    finally:
+        conn.close()
+
+    before = _call({"action": "read", "root_task_id": root, "include_nodes": True})
+    patched = _call(
+        {
+            "action": "patch",
+            "root_task_id": root,
+            "expected_revision": before["graph_revision"],
+            "mutation_id": "resolve-parent-handoff",
+            "operations": [
+                {
+                    "op": "resolve_handoff",
+                    "task_id": parent,
+                    "handoff_run_id": handoff.run_id,
+                    "handoff_kind": "worker_completed",
+                    "verification_state": "approved",
+                    "attention": None,
+                    "resolution_summary": "foreground accepted evidence",
+                }
+            ],
+        }
+    )
+    after = _call({"action": "read", "root_task_id": root, "include_nodes": True})
+
+    conn = kb.connect()
+    try:
+        parent_task = kb.get_task(conn, parent)
+        child_task = kb.get_task(conn, child)
+    finally:
+        conn.close()
+
+    assert patched["ok"] is True
+    assert patched["resolved_handoffs"] == [parent]
+    node = _node_by_task(after, parent)
+    assert node.get("attention") is None
+    assert node["verification_state"] == "approved"
+    assert node["handoff"]["resolution_summary"] == "foreground accepted evidence"
+    assert after["pending_handoffs"] == []
+    assert parent_task is not None and parent_task.status == "done"
+    assert child_task is not None and child_task.status == "todo"
+
+
+def test_resolve_handoff_rejects_non_loop_target(loop_env):
+    root = loop_env
+
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        plain = kb.create_task(conn, title="Plain task", assignee="worker")
+    finally:
+        conn.close()
+
+    before = _call({"action": "read", "root_task_id": root, "include_nodes": True})
+    out = _call(
+        {
+            "action": "patch",
+            "root_task_id": root,
+            "expected_revision": before["graph_revision"],
+            "mutation_id": "reject-plain",
+            "operations": [{"op": "resolve_handoff", "task_id": plain, "verification_state": "approved"}],
+        }
+    )
+    assert out["ok"] is False
+    assert out["error"] == "wrong_root"

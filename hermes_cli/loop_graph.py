@@ -16,8 +16,12 @@ from hermes_cli import kanban_db as kb
 
 LOOP_EVENT_KIND = "loop_mutation"
 LOOP_NODE_EVENT_KIND = "loop_node_state"
+LOOP_HANDOFF_EVENT_KIND = "loop_foreground_handoff"
+LOOP_HANDOFF_RESOLUTION_EVENT_KIND = "loop_foreground_handoff_resolution"
 _SAFE_MUTATION_STATUSES = {"triage"}
 _DONE_LIKE = {"done", "archived"}
+_ALLOWED_HANDOFF_VERIFICATION_STATES = {"approved", "rejected", "needs-user", "done"}
+_ALLOWED_HANDOFF_ATTENTION = {None, "needs-orchestrator", "needs-user"}
 
 
 class LoopError(Exception):
@@ -45,18 +49,32 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 def graph_revision(conn: sqlite3.Connection, root_task_id: str) -> int:
     ensure_schema(conn)
     row = conn.execute(
-        "SELECT MAX(id) AS rev FROM task_events WHERE task_id = ? AND kind = ?",
-        (root_task_id, LOOP_EVENT_KIND),
+        """
+        SELECT MAX(e.id) AS rev
+          FROM task_events e
+          JOIN tasks t ON t.id = e.task_id
+         WHERE t.created_by = ?
+        """,
+        (f"loop:{root_task_id}",),
     ).fetchone()
     return int(row["rev"] or 0) if row else 0
 
 
-def _append_root_event(conn: sqlite3.Connection, root_task_id: str, payload: dict[str, Any]) -> int:
+def _append_graph_event(
+    conn: sqlite3.Connection,
+    root_task_id: str,
+    task_ids: list[str],
+    payload: dict[str, Any],
+) -> int:
+    """Append a mutation event to a real Loop task; no container/root row exists."""
+    target_id = next((task_id for task_id in task_ids if task_id), None)
+    if not target_id:
+        return graph_revision(conn, root_task_id)
     now = int(time.time())
     conn.execute(
         "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
         "VALUES (?, NULL, ?, ?, ?)",
-        (root_task_id, LOOP_EVENT_KIND, json.dumps(payload, ensure_ascii=False), now),
+        (target_id, LOOP_EVENT_KIND, json.dumps(payload, ensure_ascii=False), now),
     )
     return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
@@ -87,11 +105,11 @@ def _task_or_error(conn: sqlite3.Connection, task_id: str):
     return task
 
 
-def _assert_root(conn: sqlite3.Connection, root_task_id: str):
-    root = _task_or_error(conn, root_task_id)
-    if root.status == "archived":
-        raise LoopError("root_archived", f"root task {root_task_id} is archived")
-    return root
+def _assert_loop_identity(root_task_id: str) -> str:
+    root_task_id = str(root_task_id or "").strip()
+    if not root_task_id:
+        raise LoopError("validation_failed", "root_task_id is required")
+    return root_task_id
 
 
 def _assert_safe_node(task) -> None:
@@ -259,6 +277,89 @@ def _latest_node_flags(conn: sqlite3.Connection, task_ids: set[str], root_task_i
     return flags
 
 
+def _event_payload(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _compact_handoff(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    handoff: dict[str, Any] = {
+        "task_id": task_id,
+        "handoff_kind": payload.get("handoff_kind"),
+        "attention": payload.get("attention"),
+        "verification_state": payload.get("verification_state"),
+    }
+    if "run_id" in payload:
+        handoff["run_id"] = payload.get("run_id")
+    for key in ("summary", "reason", "worker_session_id", "artifacts", "created_cards", "resolution_summary"):
+        if key in payload:
+            handoff[key] = payload[key]
+    return handoff
+
+
+def _latest_handoffs_for_tasks(
+    conn: sqlite3.Connection,
+    task_ids: set[str],
+    root_task_id: str,
+) -> dict[str, dict[str, Any]]:
+    if not task_ids:
+        return {}
+    placeholders = ",".join("?" for _ in task_ids)
+    rows = conn.execute(
+        f"""
+        SELECT task_id, kind, payload, run_id
+          FROM task_events
+         WHERE task_id IN ({placeholders})
+           AND kind IN (?, ?)
+         ORDER BY id ASC
+        """,
+        (*task_ids, LOOP_HANDOFF_EVENT_KIND, LOOP_HANDOFF_RESOLUTION_EVENT_KIND),
+    ).fetchall()
+    handoffs: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        payload = _event_payload(row)
+        if payload.get("root_task_id") != root_task_id:
+            continue
+        task_id = row["task_id"]
+        if row["kind"] == LOOP_HANDOFF_EVENT_KIND:
+            handoffs[task_id] = dict(payload)
+        elif row["kind"] == LOOP_HANDOFF_RESOLUTION_EVENT_KIND:
+            current = dict(handoffs.get(task_id, {}))
+            current.update(payload)
+            handoffs[task_id] = current
+    return handoffs
+
+
+def latest_handoff_for_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    root_task_id: str,
+) -> Optional[dict[str, Any]]:
+    """Return compact latest Loop foreground handoff state for one task."""
+    payload = _latest_handoffs_for_tasks(conn, {task_id}, root_task_id).get(task_id)
+    return _compact_handoff(task_id, payload) if payload else None
+
+
+def handoff_is_pending(handoff: Optional[dict[str, Any]]) -> bool:
+    """Whether a compact handoff still needs foreground attention."""
+    if not handoff:
+        return False
+    return bool(handoff.get("attention")) or handoff.get("verification_state") == "needs-orchestrator"
+
+
+def _assert_handoff_target(conn: sqlite3.Connection, task_id: str, root_task_id: str):
+    task = _task_or_error(conn, task_id)
+    if task.created_by != f"loop:{root_task_id}":
+        raise LoopError(
+            "wrong_root",
+            f"resolve_handoff target {task_id} is non-Loop or not a node for root {root_task_id}",
+        )
+    return task
+
+
 def _would_cycle_with_replacement(
     conn: sqlite3.Connection,
     child_id: str,
@@ -314,7 +415,7 @@ def read_graph(
     include_nodes: bool = False,
 ) -> dict[str, Any]:
     ensure_schema(conn)
-    _assert_root(conn, root_task_id)
+    root_task_id = _assert_loop_identity(root_task_id)
     rev = graph_revision(conn, root_task_id)
     out: dict[str, Any] = {"ok": True, "root_task_id": root_task_id, "graph_revision": rev}
     if not include_nodes:
@@ -323,6 +424,7 @@ def read_graph(
     rows = _graph_task_rows(conn, root_task_id)
     task_ids = {row["id"] for row in rows}
     flags = _latest_node_flags(conn, task_ids, root_task_id)
+    handoff_payloads = _latest_handoffs_for_tasks(conn, task_ids, root_task_id)
     parent_map = {tid: kb.parent_ids(conn, tid) for tid in task_ids}
     children: dict[str, list[str]] = {tid: [] for tid in task_ids}
     for child, parents in parent_map.items():
@@ -344,23 +446,92 @@ def read_graph(
         return value
 
     nodes = []
+    pending_handoffs: list[dict[str, Any]] = []
     for row in rows:
         tid = row["id"]
         state = flags.get(tid, {"active": False, "frontier": False})
-        nodes.append(
-            {
-                "task_id": tid,
-                "title": row["title"],
-                "status": row["status"],
-                "parents": parent_map.get(tid, []),
-                "depth": depth(tid),
-                "active": bool(state.get("active")),
-                "frontier": bool(state.get("frontier")),
-            }
-        )
+        node = {
+            "task_id": tid,
+            "title": row["title"],
+            "status": row["status"],
+            "parents": parent_map.get(tid, []),
+            "depth": depth(tid),
+            "active": bool(state.get("active")),
+            "frontier": bool(state.get("frontier")),
+            "root_task_id": root_task_id,
+        }
+        if state.get("client_id"):
+            node["node_id"] = state["client_id"]
+        handoff_payload = handoff_payloads.get(tid)
+        if handoff_payload:
+            handoff = _compact_handoff(tid, handoff_payload)
+            node["attention"] = handoff.get("attention")
+            node["verification_state"] = handoff.get("verification_state")
+            node["handoff"] = handoff
+            if handoff_is_pending(handoff):
+                pending: dict[str, Any] = {
+                    "task_id": tid,
+                    "node_id": state.get("client_id"),
+                    "handoff_kind": handoff.get("handoff_kind"),
+                    "verification_state": handoff.get("verification_state"),
+                }
+                for key in ("summary", "reason"):
+                    if handoff.get(key) is not None:
+                        pending[key] = handoff[key]
+                pending_handoffs.append(pending)
+        nodes.append(node)
     nodes.sort(key=lambda n: (n["depth"], rows.index(next(r for r in rows if r["id"] == n["task_id"]))))
     out["nodes"] = nodes
+    out["pending_handoffs"] = pending_handoffs
     return out
+
+
+def _resolve_handoff_in_txn(
+    conn: sqlite3.Connection,
+    root_task_id: str,
+    op: dict[str, Any],
+) -> str:
+    task_id = str(op.get("task_id") or "").strip()
+    if not task_id:
+        raise LoopError("validation_failed", "resolve_handoff.task_id is required")
+    _assert_handoff_target(conn, task_id, root_task_id)
+
+    verification_state = op.get("verification_state")
+    if verification_state not in _ALLOWED_HANDOFF_VERIFICATION_STATES:
+        allowed = ", ".join(sorted(_ALLOWED_HANDOFF_VERIFICATION_STATES))
+        raise LoopError("validation_failed", f"resolve_handoff.verification_state must be one of: {allowed}")
+    attention = op.get("attention", None)
+    if attention not in _ALLOWED_HANDOFF_ATTENTION:
+        raise LoopError(
+            "validation_failed",
+            "resolve_handoff.attention must be null, needs-orchestrator, or needs-user",
+        )
+
+    latest_payload = _latest_handoffs_for_tasks(conn, {task_id}, root_task_id).get(task_id)
+    if not latest_payload:
+        raise LoopError("validation_failed", "resolve_handoff target has no pending Loop handoff")
+    if op.get("handoff_run_id") is not None and latest_payload.get("run_id") != op.get("handoff_run_id"):
+        raise LoopError("stale_revision", "resolve_handoff stale run guard failed")
+    if op.get("handoff_kind") is not None and latest_payload.get("handoff_kind") != op.get("handoff_kind"):
+        raise LoopError("stale_revision", "resolve_handoff stale kind guard failed")
+
+    payload: dict[str, Any] = {
+        "root_task_id": root_task_id,
+        "handoff_kind": latest_payload.get("handoff_kind"),
+        "attention": attention,
+        "verification_state": verification_state,
+    }
+    if "run_id" in latest_payload:
+        payload["run_id"] = latest_payload.get("run_id")
+    for key in ("summary", "reason", "worker_session_id", "artifacts", "created_cards"):
+        if key in latest_payload:
+            payload[key] = latest_payload[key]
+    if op.get("reason") is not None:
+        payload["reason"] = op.get("reason")
+    if op.get("resolution_summary") is not None:
+        payload["resolution_summary"] = op.get("resolution_summary")
+    kb._append_event(conn, task_id, LOOP_HANDOFF_RESOLUTION_EVENT_KIND, payload, run_id=payload.get("run_id"))
+    return task_id
 
 
 def apply_patch(
@@ -372,7 +543,7 @@ def apply_patch(
     operations: list[dict[str, Any]],
 ) -> dict[str, Any]:
     ensure_schema(conn)
-    root = _assert_root(conn, root_task_id)
+    root_task_id = _assert_loop_identity(root_task_id)
     if not mutation_id or not str(mutation_id).strip():
         raise LoopError("validation_failed", "mutation_id is required")
     mutation_id = str(mutation_id).strip()
@@ -399,6 +570,7 @@ def apply_patch(
     created: list[dict[str, str]] = []
     updated: list[str] = []
     archived: list[str] = []
+    resolved_handoffs: list[str] = []
     client_to_task: dict[str, str] = {}
 
     with kb.write_txn(conn):
@@ -445,7 +617,7 @@ def apply_patch(
                     title=title,
                     body=body,
                     root_task_id=root_task_id,
-                    tenant=root.tenant,
+                    tenant=root_task_id,
                     parents=parents,
                     idempotency_key=(f"loop:{root_task_id}:{client_id}" if client_id else None),
                 )
@@ -519,6 +691,8 @@ def apply_patch(
                     frontier=op.get("frontier") if "frontier" in op else None,
                 )
                 updated.append(task_id)
+            elif kind == "resolve_handoff":
+                resolved_handoffs.append(_resolve_handoff_in_txn(conn, root_task_id, op))
             elif kind == "validate":
                 # Validation-only op; all prior operations in this patch have already
                 # been checked. Keep it as a no-op so callers can force a revision check.
@@ -526,16 +700,21 @@ def apply_patch(
             else:
                 raise LoopError("validation_failed", f"unknown operation {kind!r}")
 
-        new_revision = _append_root_event(
-            conn,
-            root_task_id,
-            {
-                "mutation_id": mutation_id,
-                "created": created,
-                "updated": updated,
-                "archived": archived,
-            },
-        )
+        root_event_payload = {
+            "mutation_id": mutation_id,
+            "created": created,
+            "updated": updated,
+            "archived": archived,
+        }
+        if resolved_handoffs:
+            root_event_payload["resolved_handoffs"] = resolved_handoffs
+        touched_task_ids = [
+            *[item["task_id"] for item in created],
+            *updated,
+            *archived,
+            *resolved_handoffs,
+        ]
+        new_revision = _append_graph_event(conn, root_task_id, touched_task_ids, root_event_payload)
         result = {
             "ok": True,
             "root_task_id": root_task_id,
@@ -547,6 +726,8 @@ def apply_patch(
             "duplicate": False,
             "validation": "ok",
         }
+        if resolved_handoffs:
+            result["resolved_handoffs"] = resolved_handoffs
         conn.execute(
             "INSERT INTO loop_mutations (root_task_id, mutation_id, result_json, created_at) "
             "VALUES (?, ?, ?, ?)",

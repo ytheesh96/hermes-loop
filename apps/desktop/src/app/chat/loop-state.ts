@@ -4,12 +4,22 @@ export type LoopPanelStatus = 'error' | 'ready' | 'stale'
 
 export interface LoopRow {
   active: boolean
+  attention: string
+  board: string
+  children?: string[]
   depth: number
   frontier: boolean
+  handoff?: {
+    reason?: string
+    summary?: string
+  }
   parents: string[]
+  rootTaskId: string
   status: string
   taskId: string
+  tenant: string
   title: string
+  verificationState: string
 }
 
 export interface LoopPanelState {
@@ -92,14 +102,29 @@ function rowFromNode(value: unknown): LoopRow | null {
     return null
   }
 
+  const handoff = parseRecord(node.handoff)
+  const childrenValue = node.children ?? node.dependents
+
   return {
     active: booleanField(node, 'active'),
+    attention: stringField(node, 'attention'),
+    board: stringField(node, 'board'),
+    children: Array.isArray(childrenValue) ? childrenValue.map(item => String(item)).filter(Boolean) : undefined,
     depth: numberField(node, 'depth'),
     frontier: booleanField(node, 'frontier'),
+    handoff: handoff
+      ? {
+          reason: stringField(handoff, 'reason'),
+          summary: stringField(handoff, 'summary') || stringField(handoff, 'resolution_summary')
+        }
+      : undefined,
     parents: stringArrayField(node, 'parents'),
+    rootTaskId: stringField(node, 'root_task_id'),
     status: stringField(node, 'status') || 'triage',
     taskId,
-    title: title || taskId
+    tenant: stringField(node, 'tenant'),
+    title: title || taskId,
+    verificationState: stringField(node, 'verification_state')
   }
 }
 
@@ -136,6 +161,28 @@ function loopToolParts(messages: readonly ChatMessage[]): Extract<ChatMessagePar
         part.type === 'tool-call' && part.toolName === 'loop_graph' && part.result !== undefined
     )
   )
+}
+
+export function loopPanelStateFromResult(resultValue: unknown, args?: unknown): LoopPanelState | null {
+  const result = parseRecord(resultValue)
+
+  if (!result) {
+    return null
+  }
+
+  const status = statusFrom(result)
+  const rootTaskId = rootTaskIdFrom(args, result)
+  const revision = numberField(result, 'graph_revision') || numberField(result, 'current_revision') || 0
+  const rows = rowsFrom(result)
+
+  return {
+    message: messageFrom(status, result),
+    rawJson: rawJson(result),
+    revision,
+    rootTaskId,
+    rows,
+    status
+  }
 }
 
 export function deriveLoopPanelState(messages: readonly ChatMessage[]): LoopPanelState | null {

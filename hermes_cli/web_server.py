@@ -6595,7 +6595,12 @@ def _latest_loop_graph_snapshot_for_dashboard(messages: List[Dict[str, Any]]) ->
 
     call, tool_msg, args = latest
     content = tool_msg.get("content")
-    if args:
+    # Preserve structured transcript snapshots as the source of truth when
+    # inheriting across compression boundaries. Re-reading is only needed when
+    # compression replaced the JSON payload with a text summary; otherwise a
+    # root id that names the graph/tenant (not a real root task row) can refresh
+    # to an empty graph and erase the UI seed captured in the parent session.
+    if args and not _content_is_structured_loop_graph_result(content):
         try:
             refreshed = _read_loop_graph_for_dashboard(args)
         except Exception as exc:
@@ -6657,6 +6662,152 @@ def _inherited_loop_graph_snapshot_for_dashboard(db: Any, session_id: str) -> Li
     return []
 
 
+def _session_tenant_lineage_ids(db: Any, session_id: str) -> List[str]:
+    """Return the current session id plus compression ancestors for tenant lookup."""
+    sid = db.resolve_session_id(session_id)
+    if not sid:
+        raise HTTPException(status_code=404, detail="Session not found")
+    sid = db.resolve_resume_session_id(sid)
+    current = db.get_session(sid)
+    if not current:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    tenant_ids: List[str] = []
+    seen = set()
+    for _ in range(100):
+        current_id = str(current.get("id") or "")
+        if not current_id or current_id in seen:
+            break
+        seen.add(current_id)
+        tenant_ids.append(current_id)
+        parent_id = _compression_parent_id(db, current)
+        if not parent_id:
+            break
+        parent = db.get_session(parent_id)
+        if not parent:
+            break
+        current = parent
+    return tenant_ids
+
+
+def _loop_tasks_for_session_tenants(tenant_ids: List[str], board: Optional[str] = None) -> Dict[str, Any]:
+    """Build a Loop-panel-compatible Kanban task list from session tenant ids."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import loop_graph as graph
+
+    if not tenant_ids:
+        return {"ok": True, "source": "kanban_tenant", "root_task_id": "tenant:", "graph_revision": 0, "nodes": [], "pending_handoffs": []}
+
+    if board:
+        board_slugs = [board]
+    else:
+        board_slugs = [str(meta.get("slug") or "") for meta in kb.list_boards(include_archived=False)]
+        board_slugs = [slug for slug in board_slugs if slug]
+
+    placeholders = ", ".join("?" for _ in tenant_ids)
+    all_nodes: List[Dict[str, Any]] = []
+    pending_handoffs: List[Dict[str, Any]] = []
+    max_revision = 0
+
+    for board_slug in board_slugs:
+        conn = kb.connect(board=board_slug)
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM tasks
+                WHERE tenant IN ({placeholders}) AND status != 'archived'
+                ORDER BY priority DESC, created_at ASC, id ASC
+                """,
+                tenant_ids,
+            ).fetchall()
+            if not rows:
+                continue
+
+            tasks = [kb.Task.from_row(row) for row in rows]
+            visible_tasks = tasks
+            visible_ids = {task.id for task in visible_tasks}
+            parent_map = {task.id: kb.parent_ids(conn, task.id) for task in visible_tasks}
+            child_map: Dict[str, List[str]] = {task.id: [] for task in visible_tasks}
+            for child_id, parent_ids in parent_map.items():
+                for parent_id in parent_ids:
+                    if parent_id in child_map:
+                        child_map[parent_id].append(child_id)
+            depth_cache: Dict[str, int] = {}
+
+            def depth(task_id: str, visiting: Optional[set[str]] = None) -> int:
+                if task_id in depth_cache:
+                    return depth_cache[task_id]
+                visiting = visiting or set()
+                if task_id in visiting:
+                    return 0
+                visiting.add(task_id)
+                parents = [pid for pid in parent_map.get(task_id, []) if pid in visible_ids]
+                value = 0 if not parents else 1 + max(depth(pid, visiting) for pid in parents)
+                depth_cache[task_id] = value
+                return value
+
+            for task in visible_tasks:
+                root_task_id = None
+                if task.created_by and str(task.created_by).startswith("loop:"):
+                    root_task_id = str(task.created_by).split(":", 1)[1]
+                handoff = graph.latest_handoff_for_task(conn, task.id, root_task_id) if root_task_id else None
+                node: Dict[str, Any] = {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "status": task.status,
+                    "parents": parent_map.get(task.id, []),
+                    "children": sorted(child_map.get(task.id, [])),
+                    "depth": depth(task.id),
+                    "active": False,
+                    "frontier": False,
+                    "board": board_slug,
+                    "tenant": task.tenant,
+                    "created_by": task.created_by,
+                }
+                if root_task_id:
+                    node["root_task_id"] = root_task_id
+                if handoff:
+                    node["attention"] = handoff.get("attention")
+                    node["verification_state"] = handoff.get("verification_state")
+                    node["handoff"] = handoff
+                    if graph.handoff_is_pending(handoff):
+                        pending: Dict[str, Any] = {
+                            "task_id": task.id,
+                            "handoff_kind": handoff.get("handoff_kind"),
+                            "verification_state": handoff.get("verification_state"),
+                        }
+                        for key in ("summary", "reason"):
+                            if handoff.get(key) is not None:
+                                pending[key] = handoff[key]
+                        pending_handoffs.append(pending)
+                all_nodes.append(node)
+
+            revision_row = conn.execute(
+                f"""
+                SELECT MAX(e.id) AS rev
+                FROM task_events e
+                JOIN tasks t ON t.id = e.task_id
+                WHERE t.tenant IN ({placeholders})
+                """,
+                tenant_ids,
+            ).fetchone()
+            max_revision = max(max_revision, int(revision_row["rev"] or 0) if revision_row else 0)
+        finally:
+            conn.close()
+
+    all_nodes.sort(key=lambda node: (str(node.get("board") or ""), int(node.get("depth") or 0), str(node.get("task_id") or "")))
+    return {
+        "ok": True,
+        "source": "kanban_tenant",
+        "root_task_id": f"tenant:{tenant_ids[0]}",
+        "graph_revision": max_revision,
+        "tenant_ids": tenant_ids,
+        "boards": board_slugs,
+        "pending_handoffs": pending_handoffs,
+        "nodes": all_nodes,
+    }
+
+
 @app.get("/api/sessions/{session_id}")
 async def get_session_detail(session_id: str, profile: Optional[str] = None):
     db = _open_session_db_for_profile(profile)
@@ -6702,6 +6853,61 @@ async def get_session_messages(session_id: str, profile: Optional[str] = None):
         return {"session_id": sid, "messages": messages}
     finally:
         db.close()
+
+
+class LoopGraphPatchRequest(BaseModel):
+    expected_revision: int
+    mutation_id: str
+    operations: List[Dict[str, Any]] = []
+
+
+@app.get("/api/loop-graph/{root_task_id}")
+async def read_loop_graph_endpoint(root_task_id: str, include_nodes: bool = False, board: Optional[str] = None):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import loop_graph as graph
+
+    conn = kb.connect(board=board)
+    try:
+        return graph.read_graph(conn, root_task_id, include_nodes=include_nodes)
+    except graph.LoopError as exc:
+        raise HTTPException(status_code=400, detail=graph.error_response(exc, conn, root_task_id)) from exc
+    finally:
+        conn.close()
+
+
+@app.patch("/api/loop-graph/{root_task_id}")
+async def patch_loop_graph_endpoint(root_task_id: str, body: LoopGraphPatchRequest, board: Optional[str] = None):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import loop_graph as graph
+
+    conn = kb.connect(board=board)
+    try:
+        return graph.apply_patch(
+            conn,
+            root_task_id,
+            expected_revision=body.expected_revision,
+            mutation_id=body.mutation_id,
+            operations=body.operations,
+        )
+    except graph.LoopError as exc:
+        raise HTTPException(status_code=400, detail=graph.error_response(exc, conn, root_task_id)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.get("/api/sessions/{session_id}/loop-tasks")
+async def get_session_loop_tasks(session_id: str, board: Optional[str] = None, profile: Optional[str] = None):
+    db = _open_session_db_for_profile(profile)
+    try:
+        tenant_ids = _session_tenant_lineage_ids(db, session_id)
+    finally:
+        db.close()
+    try:
+        return _loop_tasks_for_session_tenants(tenant_ids, board=board)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.delete("/api/sessions/{session_id}")

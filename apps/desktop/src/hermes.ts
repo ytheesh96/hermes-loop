@@ -17,6 +17,7 @@ import type {
   HermesConfig,
   HermesConfigRecord,
   LogsResponse,
+  LoopTasksResponse,
   MessagingPlatformsResponse,
   MessagingPlatformTestResponse,
   MessagingPlatformUpdate,
@@ -71,6 +72,8 @@ export type {
   HermesConfig,
   HermesConfigRecord,
   LogsResponse,
+  LoopTaskNode,
+  LoopTasksResponse,
   MessagingEnvVarInfo,
   MessagingHomeChannel,
   MessagingPlatformInfo,
@@ -220,6 +223,15 @@ export function getSessionMessages(id: string, profile?: string | null): Promise
   return window.hermesDesktop.api<SessionMessagesResponse>({
     ...(profile ? { profile } : {}),
     path: `/api/sessions/${encodeURIComponent(id)}/messages${suffix}`
+  })
+}
+
+export function getSessionLoopTasks(id: string, profile?: string | null): Promise<LoopTasksResponse> {
+  const suffix = profile ? `?profile=${encodeURIComponent(profile)}` : ''
+
+  return window.hermesDesktop.api<LoopTasksResponse>({
+    ...(profile ? { profile } : profileScoped()),
+    path: `/api/sessions/${encodeURIComponent(id)}/loop-tasks${suffix}`
   })
 }
 

@@ -640,6 +640,56 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
         conn.close()
 
 
+class LoopGraphPatchBody(BaseModel):
+    expected_revision: int
+    mutation_id: str
+    operations: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@router.get("/loop-graph/{root_task_id}")
+def read_loop_graph(
+    root_task_id: str,
+    include_nodes: bool = Query(False),
+    board: Optional[str] = Query(None),
+):
+    board = _resolve_board(board)
+    from hermes_cli import loop_graph as graph
+
+    conn = _conn(board=board)
+    try:
+        return graph.read_graph(conn, root_task_id, include_nodes=include_nodes)
+    except graph.LoopError as e:
+        raise HTTPException(status_code=400, detail=graph.error_response(e, conn, root_task_id))
+    finally:
+        conn.close()
+
+
+@router.patch("/loop-graph/{root_task_id}")
+def patch_loop_graph(
+    root_task_id: str,
+    request: LoopGraphPatchBody,
+    board: Optional[str] = Query(None),
+):
+    board = _resolve_board(board)
+    from hermes_cli import loop_graph as graph
+
+    conn = _conn(board=board)
+    try:
+        return graph.apply_patch(
+            conn,
+            root_task_id,
+            expected_revision=request.expected_revision,
+            mutation_id=request.mutation_id,
+            operations=request.operations,
+        )
+    except graph.LoopError as e:
+        raise HTTPException(status_code=400, detail=graph.error_response(e, conn, root_task_id))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Attachments — upload / list / download / delete (#35338)
 # ---------------------------------------------------------------------------

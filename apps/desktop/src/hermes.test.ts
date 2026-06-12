@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { getSessionMessages, listAllProfileSessions, listSessions } from './hermes'
+import { getSessionLoopTasks, getSessionMessages, listAllProfileSessions, listSessions } from './hermes'
 
 const emptySessionsResponse = {
   limit: 0,
@@ -55,6 +55,16 @@ describe('Hermes REST session helpers', () => {
     expect(api).toHaveBeenCalledWith({
       path: '/api/sessions/session-1/messages?profile=xiaoxuxu',
       profile: 'xiaoxuxu'
+    })
+  })
+
+  it('lists Loop tasks from the current session tenant', async () => {
+    api.mockResolvedValue({ graph_revision: 0, nodes: [], ok: true, root_task_id: 'tenant:session-1' })
+
+    await getSessionLoopTasks('session-1')
+
+    expect(api).toHaveBeenCalledWith({
+      path: '/api/sessions/session-1/loop-tasks'
     })
   })
 })

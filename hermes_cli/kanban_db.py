@@ -2721,6 +2721,66 @@ def _append_event(
     )
 
 
+def _loop_root_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Return the Loop root id for a Loop-created task, else ``None``."""
+    row = conn.execute("SELECT created_by FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None:
+        return None
+    created_by = (row["created_by"] or "").strip()
+    prefix = "loop:"
+    if not created_by.startswith(prefix):
+        return None
+    root_task_id = created_by[len(prefix) :].strip()
+    return root_task_id or None
+
+
+def _append_loop_foreground_handoff_event(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    root_task_id: str,
+    handoff_kind: str,
+    run_id: Optional[int],
+    summary: Optional[str] = None,
+    reason: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    created_cards: Optional[Iterable[str]] = None,
+) -> None:
+    """Write compact foreground handoff state for Loop-backed worker rows.
+
+    V1 stores this Loop-specific attention state in the existing task event log;
+    non-Loop tasks never reach this helper and no generic inbox table is added.
+    """
+    payload: dict[str, Any] = {
+        "root_task_id": root_task_id,
+        "handoff_kind": handoff_kind,
+        "attention": "needs-orchestrator",
+        "verification_state": "needs-orchestrator",
+    }
+    if run_id is not None:
+        payload["run_id"] = run_id
+    if summary is not None:
+        payload["summary"] = summary
+    if reason is not None:
+        payload["reason"] = reason
+    if isinstance(metadata, dict):
+        worker_session_id = metadata.get("worker_session_id")
+        if isinstance(worker_session_id, str) and worker_session_id.strip():
+            payload["worker_session_id"] = worker_session_id.strip()
+        artifacts = metadata.get("artifacts")
+        if isinstance(artifacts, (list, tuple)):
+            cleaned_artifacts = [
+                str(p).strip() for p in artifacts if isinstance(p, str) and str(p).strip()
+            ]
+            if cleaned_artifacts:
+                payload["artifacts"] = cleaned_artifacts
+    if created_cards:
+        cards = [str(card).strip() for card in created_cards if str(card).strip()]
+        if cards:
+            payload["created_cards"] = cards
+    _append_event(conn, task_id, "loop_foreground_handoff", payload, run_id=run_id)
+
+
 def _end_run(
     conn: sqlite3.Connection,
     task_id: str,
@@ -3660,6 +3720,7 @@ def complete_task(
             )
         if cur.rowcount != 1:
             return False
+        loop_root_task_id = _loop_root_for_task(conn, task_id)
         run_id = _end_run(
             conn, task_id,
             outcome="completed", status="done",
@@ -3708,6 +3769,17 @@ def complete_task(
             completed_payload,
             run_id=run_id,
         )
+        if loop_root_task_id:
+            _append_loop_foreground_handoff_event(
+                conn,
+                task_id,
+                root_task_id=loop_root_task_id,
+                handoff_kind="worker_completed",
+                run_id=run_id,
+                summary=summary if summary is not None else result,
+                metadata=metadata,
+                created_cards=verified_cards,
+            )
     # Prose-scan the summary + result for t_<hex> references that do
     # not resolve. Advisory — does not block the completion. Runs in
     # its own txn so the completion itself is already durable by the
@@ -3735,7 +3807,10 @@ def complete_task(
     # care about", and a success resets that question.
     _clear_failure_counter(conn, task_id)
     # Recompute ready status for dependents (separate txn so children see done).
-    recompute_ready(conn)
+    # Loop-backed rows hand control back to foreground first; downstream rows
+    # remain gated until a separate foreground release/dispatch action.
+    if not loop_root_task_id:
+        recompute_ready(conn)
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
     return True
@@ -4147,6 +4222,7 @@ def block_task(
             )
         if cur.rowcount != 1:
             return False
+        loop_root_task_id = _loop_root_for_task(conn, task_id)
         run_id = _end_run(
             conn, task_id,
             outcome="blocked", status="blocked",
@@ -4161,6 +4237,15 @@ def block_task(
                 summary=reason,
             )
         _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
+        if loop_root_task_id:
+            _append_loop_foreground_handoff_event(
+                conn,
+                task_id,
+                root_task_id=loop_root_task_id,
+                handoff_kind="worker_blocked",
+                run_id=run_id,
+                reason=reason,
+            )
         return True
 
 

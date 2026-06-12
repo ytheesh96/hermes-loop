@@ -15,7 +15,7 @@ import { Backdrop } from '@/components/Backdrop'
 import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
-import { getGlobalModelOptions, type HermesGateway } from '@/hermes'
+import { getGlobalModelOptions, getSessionLoopTasks, type HermesGateway } from '@/hermes'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { quickModelOptions, sessionTitle, toRuntimeMessage } from '@/lib/chat-runtime'
 import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
@@ -55,7 +55,7 @@ import type { ChatBarState } from './composer/types'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { useFileDropZone } from './hooks/use-file-drop-zone'
 import { LoopPanel, LoopTaskStack } from './loop-panel'
-import { deriveLoopPanelState } from './loop-state'
+import { deriveLoopPanelState, loopPanelStateFromResult } from './loop-state'
 import { SessionActionsMenu } from './sidebar/session-actions-menu'
 import { lastVisibleMessageIsUser, threadLoadingState } from './thread-loading'
 
@@ -257,7 +257,21 @@ export function ChatView({
     [contextSuggestions, currentModel, currentProvider, gatewayOpen, quickModels]
   )
 
-  const loopPanelState = useMemo(() => deriveLoopPanelState(messages), [messages])
+  const messageLoopPanelState = useMemo(() => deriveLoopPanelState(messages), [messages])
+  const loopTenantSessionId = activeSessionId || selectedSessionId || routedSessionId || ''
+  const tenantLoopTasksQuery = useQuery({
+    queryKey: ['session-loop-tasks', loopTenantSessionId],
+    queryFn: () => getSessionLoopTasks(loopTenantSessionId),
+    enabled: Boolean(loopTenantSessionId),
+    refetchInterval: loopTenantSessionId ? (busy ? 2_000 : 10_000) : false,
+    retry: false,
+    staleTime: 1_000
+  })
+  const tenantLoopPanelState = useMemo(
+    () => loopPanelStateFromResult(tenantLoopTasksQuery.data),
+    [tenantLoopTasksQuery.data]
+  )
+  const loopPanelState = tenantLoopPanelState?.rows.length ? tenantLoopPanelState : messageLoopPanelState
   const [selectedLoopTaskId, setSelectedLoopTaskId] = useState<string | null>(null)
   const [loopPanelOpen, setLoopPanelOpen] = useState(false)
   const [loopPanelHidden, setLoopPanelHidden] = useState(false)
