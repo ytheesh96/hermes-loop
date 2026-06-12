@@ -1,11 +1,11 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useState } from 'react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { ChatMessage } from '@/lib/chat-messages'
 
 import { LoopPanel, LoopTaskStack } from './loop-panel'
-import { deriveLoopPanelState, type LoopPanelState, loopPanelStateFromResult } from './loop-state'
+import { deriveLoopPanelState, deriveLoopPanelStateFromTenantSource, type LoopPanelState } from './loop-state'
 
 const toolMessage = (result: unknown, args: Record<string, unknown> = { action: 'read', root_task_id: 't_root' }): ChatMessage => ({
   id: `msg-${Math.random()}`,
@@ -43,12 +43,188 @@ function LoopHarness({ state }: { state: LoopPanelState }) {
   return (
     <>
       <LoopTaskStack onSelectTaskId={selectTask} selectedTaskId={selectedTaskId} state={state} />
-      <LoopPanel hidden={panelHidden} onHide={hidePanel} open={panelOpen} selectedTaskId={selectedTaskId} state={state} />
+      <LoopPanel
+        hidden={panelHidden}
+        onHide={hidePanel}
+        onSelectTaskId={selectTask}
+        open={panelOpen}
+        selectedTaskId={selectedTaskId}
+        state={state}
+      />
     </>
   )
 }
 
+function DetailFetchHarness({ state }: { state: LoopPanelState }) {
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>('t_child')
+  const selectedTaskDetail =
+    selectedTaskId === 't_external'
+      ? {
+          task: {
+            id: 't_external',
+            title: 'External parent',
+            status: 'ready',
+            body: 'Fetched external body',
+            included_child_ids: ['t_child'],
+            included_parent_ids: []
+          },
+          comments: [],
+          runs: [
+            { id: 1, profile: 'old-worker', status: 'done', summary: 'oldest run' },
+            { id: 2, profile: 'new-worker', status: 'running', summary: 'newest run' }
+          ]
+        }
+      : null
+
+  return (
+    <LoopPanel
+      onSelectTaskId={setSelectedTaskId}
+      open={true}
+      selectedTaskDetail={selectedTaskDetail}
+      selectedTaskId={selectedTaskId}
+      state={state}
+    />
+  )
+}
+
+function actionState() {
+  return deriveLoopPanelStateFromTenantSource({
+    session_id: 'sess-actions',
+    tenant: 'tenant-a',
+    include_archived: true,
+    latest_event_id: 17,
+    tasks: [
+      {
+        id: 't_triage',
+        title: 'Needs decomposition',
+        status: 'triage',
+        tenant: 'tenant-a',
+        included_child_ids: [],
+        included_parent_ids: []
+      },
+      {
+        id: 't_blocked',
+        title: 'Blocked task',
+        status: 'blocked',
+        tenant: 'tenant-a',
+        included_child_ids: [],
+        included_parent_ids: []
+      },
+      {
+        id: 't_scheduled',
+        title: 'Parked task',
+        status: 'scheduled',
+        tenant: 'tenant-a',
+        included_child_ids: [],
+        included_parent_ids: []
+      },
+      {
+        id: 't_todo',
+        title: 'Ready to start',
+        status: 'todo',
+        tenant: 'tenant-a',
+        included_child_ids: [],
+        included_parent_ids: []
+      },
+      {
+        id: 't_done',
+        title: 'Finished task',
+        status: 'done',
+        tenant: 'tenant-a',
+        included_child_ids: [],
+        included_parent_ids: [],
+        latest_run: { id: 9, profile: 'reviewer-qa', status: 'done', summary: 'accepted' }
+      },
+      {
+        id: 't_archived',
+        title: 'Archived task',
+        status: 'archived',
+        tenant: 'tenant-a',
+        included_child_ids: [],
+        included_parent_ids: []
+      }
+    ]
+  })!
+}
+
 describe('deriveLoopPanelState', () => {
+  it('maps tenant-backed session source rows without reordering the backend/composer list', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-1',
+      lineage_session_ids: ['sess-root', 'sess-1'],
+      tenant: 'tenant-a',
+      tenants: ['tenant-a'],
+      include_archived: false,
+      latest_event_id: 42,
+      now: 100,
+      links: [
+        { parent_id: 't_parent', child_id: 't_child' },
+        { parent_id: 't_external', child_id: 't_child' }
+      ],
+      external_links: [{ parent_id: 't_external', child_id: 't_child' }],
+      tasks: [
+        {
+          id: 't_child',
+          title: 'Build child',
+          status: 'running',
+          tenant: 'tenant-a',
+          assignee: 'peacock',
+          body: 'Implementation details',
+          latest_summary: 'in progress',
+          comment_count: 2,
+          latest_run: { status: 'running' },
+          included_parent_ids: ['t_parent'],
+          included_child_ids: []
+        },
+        {
+          id: 't_parent',
+          title: 'Design parent',
+          status: 'done',
+          tenant: 'tenant-a',
+          included_parent_ids: [],
+          included_child_ids: ['t_child']
+        }
+      ]
+    })
+
+    expect(state?.rootTaskId).toBe('tenant-a')
+    expect(state?.revision).toBe(42)
+    expect(state?.rawJson).toContain('"session_id": "sess-1"')
+    expect(state?.rows.map(row => row.taskId)).toEqual(['t_child', 't_parent'])
+    expect(state?.rows[0]).toMatchObject({
+      active: true,
+      assignee: 'peacock',
+      body: 'Implementation details',
+      childCount: 0,
+      commentCount: 2,
+      latestSummary: 'in progress',
+      parentCount: 1,
+      parents: ['t_parent'],
+      status: 'running',
+      taskId: 't_child',
+      title: 'Build child'
+    })
+  })
+
+  it('caps tenant depth derivation for malformed cyclic links', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-cycle',
+      latest_event_id: 1,
+      tasks: [
+        {
+          id: 't_cycle',
+          title: 'Cyclic task',
+          status: 'ready',
+          included_parent_ids: ['t_cycle'],
+          included_child_ids: ['t_cycle']
+        }
+      ]
+    })
+
+    expect(state?.rows[0]?.depth).toBeLessThanOrEqual(1)
+    expect(state?.rows[0]?.parents).toEqual(['t_cycle'])
+  })
+
   it('renders the latest triage-backed graph rows in dependency-derived order', () => {
     const state = deriveLoopPanelState([
       toolMessage({
@@ -68,20 +244,6 @@ describe('deriveLoopPanelState', () => {
     expect(state?.rows.map(row => row.depth)).toEqual([0, 0, 1])
   })
 
-  it('renders tenant-backed Kanban rows without a loop_graph tool message', () => {
-    const state = loopPanelStateFromResult({
-      ok: true,
-      source: 'kanban_tenant',
-      root_task_id: 'tenant:session-1',
-      graph_revision: 42,
-      nodes: [{ task_id: 't_tenant', title: 'Tenant row', status: 'triage', parents: [], depth: 0 }]
-    })
-
-    expect(state?.rootTaskId).toBe('tenant:session-1')
-    expect(state?.revision).toBe(42)
-    expect(state?.rows.map(row => row.title)).toEqual(['Tenant row'])
-  })
-
   it('keeps stale/error tool results visible without adopting giant JSON as rows', () => {
     const state = deriveLoopPanelState([
       toolMessage({ ok: true, root_task_id: 't_root', graph_revision: 7, nodes: [] }),
@@ -96,42 +258,15 @@ describe('deriveLoopPanelState', () => {
 })
 
 describe('LoopPanel', () => {
-  it('renders rows as a flat dependency-ordered list and exposes rich details outside debug JSON', () => {
+  it('renders rows, opens useful draft details on click, and omits raw JSON/debug affordances in normal view', () => {
     const state = deriveLoopPanelState([
       toolMessage({
         ok: true,
         root_task_id: 't_root',
         graph_revision: 3,
         nodes: [
-          {
-            task_id: 't_parent',
-            title: 'Design parent',
-            status: 'ready',
-            parents: [],
-            children: ['t_child'],
-            board: 'developer',
-            tenant: 'tenant-1',
-            root_task_id: 't_root',
-            attention: 'review',
-            verification_state: 'requested',
-            handoff: { task_id: 't_parent', summary: 'Parent handoff summary', reason: 'Needs UX approval' },
-            depth: 0,
-            frontier: true
-          },
-          {
-            task_id: 't_child',
-            title: 'Build child',
-            status: 'triage',
-            parents: ['t_parent'],
-            board: 'developer',
-            tenant: 'tenant-1',
-            root_task_id: 't_root',
-            attention: 'implementation',
-            verification_state: 'pending',
-            handoff: { task_id: 't_child', summary: 'Child handoff summary', reason: 'Needs tests' },
-            depth: 1,
-            active: true
-          }
+          { task_id: 't_parent', title: 'Design parent', status: 'triage', parents: [], depth: 0, frontier: true },
+          { task_id: 't_child', title: 'Build child', status: 'triage', parents: ['t_parent'], depth: 1, active: true }
         ]
       })
     ])
@@ -142,80 +277,256 @@ describe('LoopPanel', () => {
     expect(screen.getByText('Loop 0/2')).toBeTruthy()
     expect(screen.getAllByText('Design parent').length).toBeGreaterThan(0)
     expect(screen.getByText('Build child')).toBeTruthy()
-    expect(screen.getAllByText('Design parent')[0].compareDocumentPosition(screen.getByText('Build child'))).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING
-    )
+    expect(screen.getAllByLabelText('Status: triage').length).toBeGreaterThanOrEqual(2)
+    expect(screen.queryByText(/triage/i)).toBeNull()
     expect(screen.queryByText('active')).toBeNull()
     expect(screen.queryByText('frontier')).toBeNull()
-
-    const parentCard = screen.getByTestId('loop-card-t_parent')
-    const childCard = screen.getByTestId('loop-card-t_child')
-    expect(parentCard.getAttribute('style') || '').not.toContain('--loop-depth')
-    expect(childCard.getAttribute('style') || '').not.toContain('--loop-depth')
-    expect(parentCard.getAttribute('style')).toBe(childCard.getAttribute('style'))
-
+    expect(screen.getByTestId('loop-card-t_parent').style.paddingLeft).toBe('')
+    expect(screen.getByTestId('loop-card-t_child').style.paddingLeft).toBe('')
     expect(screen.getByTestId('loop-panel').className).toContain('hidden xl:flex')
     expect(screen.queryByText(/"nodes"/)).toBeNull()
 
     fireEvent.click(screen.getByText('Build child'))
     expect(screen.getByTestId('loop-panel').className).not.toContain('hidden xl:flex')
     expect(screen.getByTestId('loop-panel').className).not.toContain('fixed')
-    expect(screen.getByTestId('loop-panel').className).toContain('w-[min(20rem,45vw)]')
+    expect(screen.getByTestId('loop-panel').getAttribute('data-layout')).toBe('docked')
+    expect(screen.getByTestId('loop-panel').getAttribute('data-modal')).toBe('false')
+    expect(screen.getByTestId('loop-panel').getAttribute('data-state')).toBe('open')
+    expect(screen.getByTestId('loop-panel').className).toContain('w-[min(22rem,45vw)]')
     expect(screen.queryByRole('button', { name: /dismiss loop panel overlay/i })).toBeNull()
     expect(screen.getByText('Loop details')).toBeTruthy()
-    expect(screen.getByText('Task ID: t_child')).toBeTruthy()
-    expect(screen.getByText('Status: triage')).toBeTruthy()
-    expect(screen.getByText('Board: developer')).toBeTruthy()
-    expect(screen.getByText('Tenant: tenant-1')).toBeTruthy()
-    expect(screen.getByText('Root: t_root')).toBeTruthy()
+    expect(screen.getByText('t_child')).toBeTruthy()
     expect(screen.getByText('Parents: t_parent')).toBeTruthy()
-    expect(screen.getByText('Dependents: unavailable')).toBeTruthy()
-    expect(screen.getByText('Attention: implementation')).toBeTruthy()
-    expect(screen.getByText('Verification: pending')).toBeTruthy()
-    expect(screen.getByText('Handoff summary: Child handoff summary')).toBeTruthy()
-    expect(screen.getByText('Handoff reason: Needs tests')).toBeTruthy()
+    expect(screen.queryByText(/triage/i)).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: /hide loop panel/i }))
     expect(screen.queryByTestId('loop-panel')).toBeNull()
 
     fireEvent.click(screen.getByText('Design parent'))
     expect(screen.getByTestId('loop-panel')).toBeTruthy()
-    expect(screen.getByText('Task ID: t_parent')).toBeTruthy()
-    expect(screen.getByText('Dependents: t_child')).toBeTruthy()
+    expect(screen.getByText('t_parent')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /show debug json/i })).toBeNull()
+    expect(screen.queryByText(/"nodes"/)).toBeNull()
+  })
 
+  it('renders debug JSON only when explicitly enabled for development diagnostics', () => {
+    const state = deriveLoopPanelState([
+      toolMessage({
+        ok: true,
+        root_task_id: 't_root',
+        graph_revision: 3,
+        nodes: [{ task_id: 't_child', title: 'Build child', status: 'triage', parents: [], depth: 0, active: true }]
+      })
+    ])
+
+    render(<LoopPanel enableDebugJson open selectedTaskId="t_child" state={state} />)
+
+    expect(screen.queryByText(/"nodes"/)).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: /show debug json/i }))
     expect(screen.getByText(/"nodes"/)).toBeTruthy()
   })
 
-  it('uses composer status glyph semantics for loop row statuses', () => {
-    const statusesByKind = {
-      blocked: ['blocked', 'error', 'failed'],
-      done: ['done', 'complete', 'completed'],
-      pending: ['triage', 'todo', 'ready', 'open'],
-      running: ['running', 'in_progress', 'claimed'],
-      slashed: ['cancelled', 'canceled', 'archived']
-    }
-
-    const nodes = Object.entries(statusesByKind).flatMap(([kind, statuses]) =>
-      statuses.map(status => ({
-        task_id: `t_${kind}_${status}`,
-        title: `${kind} ${status}`,
-        status,
-        parents: [],
-        depth: 0
-      }))
-    )
-
-    const state = loopPanelStateFromResult({ ok: true, root_task_id: 't_root', graph_revision: 1, nodes })
+  it('renders rich task detail sections from tenant metadata and navigates dependency links', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-1',
+      tenant: 'tenant-a',
+      latest_event_id: 99,
+      tasks: [
+        {
+          id: 't_parent',
+          title: 'Design parent',
+          status: 'done',
+          assignee: 'planner',
+          body: 'Parent body',
+          result: 'parent result',
+          latest_summary: 'parent complete',
+          comment_count: 0,
+          included_child_ids: ['t_child'],
+          included_parent_ids: [],
+          workspace_kind: 'scratch',
+          workspace_path: '/tmp/parent'
+        },
+        {
+          id: 't_child',
+          title: 'Build child',
+          status: 'blocked',
+          assignee: 'peacock',
+          body: 'Implement the detail panel',
+          result: 'child result',
+          latest_summary: 'blocked on review',
+          comment_count: 2,
+          current_run_id: 42,
+          included_child_ids: ['t_grandchild'],
+          included_parent_ids: ['t_parent'],
+          latest_run: { id: 42, profile: 'peacock', status: 'running', outcome: null, summary: 'worker running' },
+          workspace_kind: 'worktree',
+          workspace_path: '/worktrees/t_child'
+        },
+        {
+          id: 't_grandchild',
+          title: 'Review child',
+          status: 'ready',
+          assignee: 'reviewer-qa',
+          included_child_ids: [],
+          included_parent_ids: ['t_child']
+        },
+        {
+          id: 't_orphan',
+          title: 'Loose task',
+          status: 'ready',
+          assignee: 'reviewer-qa',
+          included_child_ids: [],
+          included_parent_ids: []
+        }
+      ]
+    })
 
     render(<LoopHarness state={state!} />)
 
-    for (const [kind, statuses] of Object.entries(statusesByKind)) {
-      for (const status of statuses) {
-        for (const indicator of screen.getAllByLabelText(`Status: ${status}`)) {
-          expect(indicator.getAttribute('data-status-kind')).toBe(kind)
+    fireEvent.click(screen.getByRole('button', { name: /Status: blocked Build child/i }))
+
+    expect(screen.getByRole('heading', { name: /Build child/i })).toBeTruthy()
+    expect(screen.getByText('t_child')).toBeTruthy()
+    expect(screen.getByText('Implement the detail panel')).toBeTruthy()
+    expect(screen.getByText('Comments')).toBeTruthy()
+    expect(screen.getByText('2 comments available in task detail')).toBeTruthy()
+    expect(screen.getByText('Latest run')).toBeTruthy()
+    expect(screen.getByText(/Run #42 · running · peacock/)).toBeTruthy()
+    expect(screen.getByText('Result')).toBeTruthy()
+    expect(screen.getByText('child result')).toBeTruthy()
+    expect(screen.getByText('Summary')).toBeTruthy()
+    expect(screen.getByText('blocked on review')).toBeTruthy()
+    expect(screen.getByText('Metadata')).toBeTruthy()
+    expect(screen.getByText('Assignee: peacock')).toBeTruthy()
+    expect(screen.getByText('Workspace: worktree')).toBeTruthy()
+    expect(screen.getByText('/worktrees/t_child')).toBeTruthy()
+    expect(screen.getByText('Safe actions')).toBeTruthy()
+    expect(screen.getByText('Task actions will appear here when enabled.')).toBeTruthy()
+    expect(screen.queryByText(/"tasks"/)).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /select parent task t_parent/i }))
+    expect(screen.getByRole('heading', { name: /Design parent/i })).toBeTruthy()
+    expect(screen.getByText('Parent body')).toBeTruthy()
+    expect(screen.getByText('No comments yet.')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /select child task t_child/i }))
+    expect(screen.getByRole('heading', { name: /Build child/i })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /select child task t_grandchild/i }))
+    expect(screen.getByRole('heading', { name: /Review child/i })).toBeTruthy()
+    expect(screen.getByText('No description provided.')).toBeTruthy()
+    expect(screen.getByText('No child tasks.')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /Status: ready Loose task/i }))
+    expect(screen.getByRole('heading', { name: /Loose task/i })).toBeTruthy()
+    expect(screen.getByText('No description provided.')).toBeTruthy()
+    expect(screen.getByText('No parent tasks.')).toBeTruthy()
+    expect(screen.getByText('No child tasks.')).toBeTruthy()
+    expect(screen.getByText('No run recorded yet.')).toBeTruthy()
+    expect(screen.getByText('No result recorded.')).toBeTruthy()
+    expect(screen.getByText('No summary recorded.')).toBeTruthy()
+    expect(screen.getByText('Assignee: reviewer-qa')).toBeTruthy()
+    expect(screen.getByText('Workspace: unknown')).toBeTruthy()
+  })
+
+  it('uses fetched task detail when selecting a dependency that is not in the flat composer rows', () => {
+    const state: LoopPanelState = {
+      message: '',
+      rawJson: '{}',
+      revision: 1,
+      rootTaskId: 'tenant-a',
+      status: 'ready',
+      rows: [
+        {
+          active: true,
+          childCount: 0,
+          children: [],
+          commentCount: 0,
+          depth: 0,
+          frontier: true,
+          parentCount: 1,
+          parents: ['t_external'],
+          status: 'running',
+          taskId: 't_child',
+          title: 'Build child'
         }
-      }
+      ]
     }
+
+    render(<DetailFetchHarness state={state} />)
+
+    expect(screen.getByRole('heading', { name: /Build child/i })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /select parent task t_external/i }))
+
+    expect(screen.getByRole('heading', { name: /External parent/i })).toBeTruthy()
+    expect(screen.getByText('Fetched external body')).toBeTruthy()
+    expect(screen.getByText('t_external')).toBeTruthy()
+    expect(screen.getByText(/Run #2 · running · new-worker/)).toBeTruthy()
+    expect(screen.getAllByText('newest run').length).toBeGreaterThanOrEqual(1)
+    expect(screen.queryByText(/Run #1 · done · old-worker/)).toBeNull()
+    expect(screen.queryByText('oldest run')).toBeNull()
+  })
+
+  it('renders status-specific safe actions and dispatches only on explicit clicks', () => {
+    const state = actionState()
+    const onTaskAction = vi.fn()
+    const { rerender } = render(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_triage" state={state} />)
+
+    expect(onTaskAction).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: /decompose t_triage/i }).textContent).toBe('⚗ Decompose')
+    expect(screen.getByRole('button', { name: /block t_triage/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /park t_triage/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /open details for t_triage/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /open kanban for t_triage/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /start t_triage/i })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /decompose t_triage/i }))
+    expect(onTaskAction).toHaveBeenCalledWith('decompose', expect.objectContaining({ taskId: 't_triage' }))
+
+    rerender(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_blocked" state={state} />)
+    expect(screen.getByRole('button', { name: /unblock t_blocked/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /park t_blocked/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /^Block t_blocked$/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /decompose t_blocked/i })).toBeNull()
+
+    rerender(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_scheduled" state={state} />)
+    expect(screen.getByRole('button', { name: /start t_scheduled/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /block t_scheduled/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /park t_scheduled/i })).toBeNull()
+
+    rerender(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_todo" state={state} />)
+    expect(screen.getByRole('button', { name: /start t_todo/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /block t_todo/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /park t_todo/i })).toBeTruthy()
+
+    rerender(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_done" state={state} />)
+    expect(screen.getByRole('button', { name: /open details for t_done/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /open logs for t_done/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /block t_done/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /park t_done/i })).toBeNull()
+
+    rerender(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_archived" state={state} />)
+    expect(screen.getByRole('button', { name: /open details for t_archived/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /block t_archived/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /park t_archived/i })).toBeNull()
+  })
+
+  it('keeps missing or archived selections sticky instead of silently selecting another row', () => {
+    const state = actionState()
+    const onTaskAction = vi.fn()
+    const { rerender } = render(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_missing" state={state} />)
+
+    expect(screen.getByText('Selected task unavailable')).toBeTruthy()
+    expect(screen.getByText(/t_missing/)).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: /Needs decomposition/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /decompose t_missing/i })).toBeNull()
+    expect(onTaskAction).not.toHaveBeenCalled()
+
+    rerender(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_archived" state={state} />)
+    expect(screen.getByRole('heading', { name: /Archived task/i })).toBeTruthy()
+    expect(screen.getByText('No run recorded yet.')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /block t_archived/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /park t_archived/i })).toBeNull()
   })
 })

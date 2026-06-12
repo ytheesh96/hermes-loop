@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { getSessionLoopTasks, getSessionMessages, listAllProfileSessions, listSessions } from './hermes'
+import { getLoopSessionSource, getLoopTaskDetail, getSessionMessages, listAllProfileSessions, listSessions, updateLoopTaskStatus } from './hermes'
 
 const emptySessionsResponse = {
   limit: 0,
@@ -58,13 +58,35 @@ describe('Hermes REST session helpers', () => {
     })
   })
 
-  it('lists Loop tasks from the current session tenant', async () => {
-    api.mockResolvedValue({ graph_revision: 0, nodes: [], ok: true, root_task_id: 'tenant:session-1' })
+  it('reads Loop panel source and focused task details through the profile-scoped kanban API', async () => {
+    api.mockResolvedValue({ tasks: [] })
 
-    await getSessionLoopTasks('session-1')
+    await getLoopSessionSource('session-1', 'peacock')
+    await getLoopTaskDetail('t_child', 'peacock')
+
+    expect(api).toHaveBeenNthCalledWith(1, {
+      path: '/api/plugins/kanban/session-source?session_id=session-1',
+      profile: 'peacock'
+    })
+    expect(api).toHaveBeenNthCalledWith(2, {
+      path: '/api/plugins/kanban/tasks/t_child',
+      profile: 'peacock'
+    })
+  })
+
+  it('patches Loop task status actions through the profile-scoped kanban API', async () => {
+    api.mockResolvedValue({ task: null })
+
+    await updateLoopTaskStatus('t_blocked', 'blocked', 'peacock', { blockReason: 'Blocked from Loop side panel' })
 
     expect(api).toHaveBeenCalledWith({
-      path: '/api/sessions/session-1/loop-tasks'
+      body: {
+        block_reason: 'Blocked from Loop side panel',
+        status: 'blocked'
+      },
+      method: 'PATCH',
+      path: '/api/plugins/kanban/tasks/t_blocked',
+      profile: 'peacock'
     })
   })
 })

@@ -1,5 +1,6 @@
 import { JsonRpcGatewayClient } from '@hermes/shared'
 
+import type { LoopTaskDetail, TenantLoopSource } from '@/app/chat/loop-state'
 import type {
   ActionResponse,
   ActionStatusResponse,
@@ -17,7 +18,6 @@ import type {
   HermesConfig,
   HermesConfigRecord,
   LogsResponse,
-  LoopTasksResponse,
   MessagingPlatformsResponse,
   MessagingPlatformTestResponse,
   MessagingPlatformUpdate,
@@ -72,8 +72,6 @@ export type {
   HermesConfig,
   HermesConfigRecord,
   LogsResponse,
-  LoopTaskNode,
-  LoopTasksResponse,
   MessagingEnvVarInfo,
   MessagingHomeChannel,
   MessagingPlatformInfo,
@@ -226,20 +224,44 @@ export function getSessionMessages(id: string, profile?: string | null): Promise
   })
 }
 
-export function getSessionLoopTasks(id: string, profile?: string | null): Promise<LoopTasksResponse> {
-  const suffix = profile ? `?profile=${encodeURIComponent(profile)}` : ''
-
-  return window.hermesDesktop.api<LoopTasksResponse>({
-    ...(profile ? { profile } : profileScoped()),
-    path: `/api/sessions/${encodeURIComponent(id)}/loop-tasks${suffix}`
-  })
-}
-
 export function deleteSession(id: string, profile?: string | null): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
     ...(profile ? { profile } : {}),
     path: `/api/sessions/${encodeURIComponent(id)}`,
     method: 'DELETE'
+  })
+}
+
+export function getLoopSessionSource(sessionId: string, profile?: string | null): Promise<TenantLoopSource> {
+  const query = new URLSearchParams({ session_id: sessionId })
+
+  return window.hermesDesktop.api<TenantLoopSource>({
+    ...(profile ? { profile } : profileScoped()),
+    path: `/api/plugins/kanban/session-source?${query.toString()}`
+  })
+}
+
+export function getLoopTaskDetail(taskId: string, profile?: string | null): Promise<LoopTaskDetail> {
+  return window.hermesDesktop.api<LoopTaskDetail>({
+    ...(profile ? { profile } : profileScoped()),
+    path: `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`
+  })
+}
+
+export function updateLoopTaskStatus(
+  taskId: string,
+  status: string,
+  profile?: string | null,
+  options?: { blockReason?: string }
+): Promise<{ task: TenantLoopSource['tasks'] extends (infer T)[] | undefined ? T | null : unknown }> {
+  return window.hermesDesktop.api({
+    ...(profile ? { profile } : profileScoped()),
+    path: `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`,
+    method: 'PATCH',
+    body: {
+      status,
+      ...(options?.blockReason ? { block_reason: options.blockReason } : {})
+    }
   })
 }
 

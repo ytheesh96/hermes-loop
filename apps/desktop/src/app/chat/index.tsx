@@ -5,7 +5,7 @@ import {
   type ThreadMessage
 } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type * as React from 'react'
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
@@ -15,14 +15,14 @@ import { Backdrop } from '@/components/Backdrop'
 import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
-import { getGlobalModelOptions, getSessionLoopTasks, type HermesGateway } from '@/hermes'
+import { getGlobalModelOptions, getLoopSessionSource, getLoopTaskDetail, type HermesGateway, updateLoopTaskStatus } from '@/hermes'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { quickModelOptions, sessionTitle, toRuntimeMessage } from '@/lib/chat-runtime'
 import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import { cn } from '@/lib/utils'
 import type { ComposerAttachment } from '@/store/composer'
 import { $pinnedSessionIds } from '@/store/layout'
-import { $gatewaySwapTarget } from '@/store/profile'
+import { $activeGatewayProfile, $gatewaySwapTarget } from '@/store/profile'
 import {
   $activeSessionId,
   $awaitingResponse,
@@ -54,8 +54,8 @@ import { droppedFileInlineRefs, type SessionDragPayload, sessionInlineRef } from
 import type { ChatBarState } from './composer/types'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { useFileDropZone } from './hooks/use-file-drop-zone'
-import { LoopPanel, LoopTaskStack } from './loop-panel'
-import { deriveLoopPanelState, loopPanelStateFromResult } from './loop-state'
+import { LoopPanel, type LoopTaskAction, LoopTaskStack } from './loop-panel'
+import { deriveLoopPanelState, deriveLoopPanelStateFromTenantSource, type LoopRow } from './loop-state'
 import { SessionActionsMenu } from './sidebar/session-actions-menu'
 import { lastVisibleMessageIsUser, threadLoadingState } from './thread-loading'
 
@@ -192,6 +192,8 @@ export function ChatView({
   const freshDraftReady = useStore($freshDraftReady)
   const gatewayState = useStore($gatewayState)
   const gatewaySwapTarget = useStore($gatewaySwapTarget)
+  const activeGatewayProfile = useStore($activeGatewayProfile)
+  const queryClient = useQueryClient()
   const gatewayOpen = gatewayState === 'open'
   const introPersonality = useStore($introPersonality)
   const introSeed = useStore($introSeed)
@@ -257,26 +259,46 @@ export function ChatView({
     [contextSuggestions, currentModel, currentProvider, gatewayOpen, quickModels]
   )
 
-  const messageLoopPanelState = useMemo(() => deriveLoopPanelState(messages), [messages])
-  const loopTenantSessionId = activeSessionId || selectedSessionId || routedSessionId || ''
-  const tenantLoopTasksQuery = useQuery({
-    queryKey: ['session-loop-tasks', loopTenantSessionId],
-    queryFn: () => getSessionLoopTasks(loopTenantSessionId),
-    enabled: Boolean(loopTenantSessionId),
-    refetchInterval: loopTenantSessionId ? (busy ? 2_000 : 10_000) : false,
-    retry: false,
-    staleTime: 1_000
+  const loopSourceSessionId = selectedSessionId || activeSessionId || routedSessionId || ''
+
+  const loopSourceQuery = useQuery({
+    queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId],
+    queryFn: () => getLoopSessionSource(loopSourceSessionId, activeGatewayProfile),
+    enabled: gatewayOpen && Boolean(loopSourceSessionId),
+    staleTime: 2_000
   })
+
+  const transcriptLoopPanelState = useMemo(() => deriveLoopPanelState(messages), [messages])
+
   const tenantLoopPanelState = useMemo(
-    () => loopPanelStateFromResult(tenantLoopTasksQuery.data),
-    [tenantLoopTasksQuery.data]
+    () => deriveLoopPanelStateFromTenantSource(loopSourceQuery.data),
+    [loopSourceQuery.data]
   )
-  const loopPanelState = tenantLoopPanelState?.rows.length ? tenantLoopPanelState : messageLoopPanelState
+
+  const loopPanelState = tenantLoopPanelState?.rows.length ? tenantLoopPanelState : transcriptLoopPanelState
   const [selectedLoopTaskId, setSelectedLoopTaskId] = useState<string | null>(null)
   const [loopPanelOpen, setLoopPanelOpen] = useState(false)
   const [loopPanelHidden, setLoopPanelHidden] = useState(false)
 
   const loopPanelRootKey = loopPanelState?.rootTaskId || ''
+
+  const selectedLoopTaskDetailQuery = useQuery({
+    queryKey: ['loop-task-detail', activeGatewayProfile, selectedLoopTaskId, loopPanelState?.revision || 0],
+    queryFn: () => getLoopTaskDetail(selectedLoopTaskId!, activeGatewayProfile),
+    enabled: gatewayOpen && loopPanelOpen && Boolean(selectedLoopTaskId) && Boolean(tenantLoopPanelState?.rows.length),
+    staleTime: 2_000
+  })
+
+  const loopTaskStatusMutation = useMutation({
+    mutationFn: ({ status, taskId }: { status: string; taskId: string }) =>
+      updateLoopTaskStatus(taskId, status, activeGatewayProfile, {
+        blockReason: status === 'blocked' ? 'Blocked from Loop side panel' : undefined
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId] })
+      await queryClient.invalidateQueries({ queryKey: ['loop-task-detail', activeGatewayProfile] })
+    }
+  })
 
   useEffect(() => {
     setSelectedLoopTaskId(null)
@@ -294,6 +316,31 @@ export function ChatView({
     setLoopPanelOpen(false)
     setLoopPanelHidden(true)
   }, [])
+
+  const handleLoopTaskAction = useCallback(
+    (action: LoopTaskAction, row: LoopRow) => {
+      if (action === 'details' || action === 'kanban' || action === 'logs') {
+        handleSelectLoopTaskId(row.taskId)
+        return
+      }
+
+      const nextStatusByAction: Partial<Record<LoopTaskAction, string>> = {
+        block: 'blocked',
+        decompose: 'ready',
+        park: 'scheduled',
+        start: 'ready',
+        unblock: 'ready'
+      }
+      const nextStatus = nextStatusByAction[action]
+
+      if (!nextStatus) {
+        return
+      }
+
+      loopTaskStatusMutation.mutate({ status: nextStatus, taskId: row.taskId })
+    },
+    [handleSelectLoopTaskId, loopTaskStatusMutation]
+  )
 
   const runtimeMessageRepository = useMemo(() => {
     const items: { message: ThreadMessage; parentId: string | null }[] = []
@@ -454,7 +501,10 @@ export function ChatView({
         <LoopPanel
           hidden={loopPanelHidden}
           onHide={handleHideLoopPanel}
+          onSelectTaskId={handleSelectLoopTaskId}
+          onTaskAction={handleLoopTaskAction}
           open={loopPanelOpen}
+          selectedTaskDetail={selectedLoopTaskDetailQuery.data}
           selectedTaskId={selectedLoopTaskId}
           state={loopPanelState}
         />
