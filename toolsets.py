@@ -71,6 +71,9 @@ _HERMES_CORE_TOOLS = [
     "kanban_complete", "kanban_block", "kanban_heartbeat",
     "kanban_comment", "kanban_create", "kanban_link",
     "kanban_unblock",
+    # Loop graph editing — one compact tool, default-enabled but gated by
+    # loop.enabled so users can remove the schema surface if needed.
+    "loop_graph",
     # Computer use (macOS, gated on cua-driver being installed via check_fn)
     "computer_use",
 ]
@@ -359,6 +362,7 @@ TOOLSETS = {
             "todo", "memory",
             "session_search", "clarify",
             "execute_code", "delegate_task",
+            "loop_graph",
         ],
         "includes": [],
         # Posture toolset: selected per-session by agent/coding_context.py,
@@ -389,6 +393,7 @@ TOOLSETS = {
             "todo", "memory",
             "session_search",
             "execute_code", "delegate_task",
+            "loop_graph",
         ],
         "includes": []
     },
@@ -419,6 +424,8 @@ TOOLSETS = {
             "execute_code", "delegate_task",
             # Cronjob management
             "cronjob",
+            # Loop graph editing (gated by loop.enabled)
+            "loop_graph",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
             "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
 

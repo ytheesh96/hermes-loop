@@ -34,6 +34,30 @@ describe('buildToolView image handling', () => {
   })
 })
 
+describe('buildToolView Loop compact rendering', () => {
+  it('summarizes graph results without putting raw node JSON in the default detail', () => {
+    const view = buildToolView(
+      part({
+        args: { action: 'read', root_task_id: 't_root' },
+        result: {
+          ok: true,
+          root_task_id: 't_root',
+          graph_revision: 4,
+          nodes: [{ task_id: 't_child', title: 'Child task', parents: ['t_parent'], depth: 1, status: 'triage' }]
+        },
+        toolName: 'loop_graph'
+      }),
+      ''
+    )
+
+    expect(view.title).toBe('Updated Loop')
+    expect(view.subtitle).toContain('1 row')
+    expect(view.subtitle).toContain('rev 4')
+    expect(view.detail).toBe('')
+    expect(view.rawResult).toContain('t_child')
+  })
+})
+
 describe('buildToolView terminal exit-code status', () => {
   const terminal = (result: Record<string, unknown>) =>
     buildToolView(part({ result, toolName: 'terminal' }), '')

@@ -1,6 +1,6 @@
+import { translateNow } from '@/i18n'
 import { normalizeExternalUrl } from '@/lib/external-link'
 import { extractToolErrorMessage, formatToolResultSummary } from '@/lib/tool-result-summary'
-import { translateNow } from '@/i18n'
 
 export type ToolTone = 'agent' | 'browser' | 'default' | 'file' | 'image' | 'terminal' | 'web'
 export type ToolStatus = 'error' | 'running' | 'success' | 'warning'
@@ -109,6 +109,7 @@ const TOOL_META: Record<string, ToolMeta> = {
   vision_analyze: { done: 'Analyzed image', pending: 'Analyzing image', icon: 'eye', tone: 'image' },
   web_extract: { done: 'Read webpage', pending: 'Reading webpage', icon: 'globe', tone: 'web' },
   web_search: { done: 'Searched web', pending: 'Searching web', icon: 'search', tone: 'web' },
+  loop_graph: { done: 'Updated Loop', pending: 'Updating Loop', icon: 'type-hierarchy-sub', tone: 'agent' },
   write_file: { done: 'Edited file', pending: 'Editing file', icon: 'edit', tone: 'file' }
 }
 
@@ -981,6 +982,32 @@ function toolSubtitle(
 ): string {
   const toolName = part.toolName
 
+  if (toolName === 'loop_graph') {
+    const error = firstStringField(resultRecord, ['error'])
+    const message = firstStringField(resultRecord, ['message'])
+
+    if (error) {
+      return message ? `${error}: ${compactPreview(message, 96)}` : error
+    }
+
+    const action = firstStringField(argsRecord, ['action']) || 'read'
+    const revision = numberValue(resultRecord.graph_revision)
+    const nodes = Array.isArray(resultRecord.nodes) ? resultRecord.nodes.length : null
+    const created = Array.isArray(resultRecord.created) ? resultRecord.created.length : null
+    const updated = Array.isArray(resultRecord.updated) ? resultRecord.updated.length : null
+    const archived = Array.isArray(resultRecord.archived) ? resultRecord.archived.length : null
+
+    const rows = [
+      nodes !== null && `${nodes} row${nodes === 1 ? '' : 's'}`,
+      created !== null && `${created} created`,
+      updated !== null && `${updated} updated`,
+      archived !== null && `${archived} archived`,
+      revision !== null && `rev ${revision}`
+    ].filter(Boolean)
+
+    return rows.length ? rows.join(' · ') : `Loop ${action}`
+  }
+
   if (toolName === 'browser_navigate') {
     const url =
       firstStringField(argsRecord, ['url', 'target']) ||
@@ -1100,6 +1127,10 @@ function toolDetailText(
   argsRecord: Record<string, unknown>,
   resultRecord: Record<string, unknown>
 ): string {
+  if (part.toolName === 'loop_graph') {
+    return ''
+  }
+
   if (part.toolName === 'browser_snapshot') {
     const snapshot = firstStringField(resultRecord, ['snapshot'])
 
