@@ -1394,13 +1394,14 @@ def _preferred_gateway_pid(
     normalized = [pid for pid in gateway_pids if pid > 0]
     if not normalized:
         return None
-    if preferred_pid in normalized:
-        return preferred_pid
-
     service_pids = _get_service_pids()
     for pid in normalized:
         if pid in service_pids:
             return pid
+
+    if preferred_pid in normalized:
+        return preferred_pid
+
     return normalized[0]
 
 

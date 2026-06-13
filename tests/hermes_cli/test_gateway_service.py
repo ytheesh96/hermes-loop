@@ -954,6 +954,29 @@ class TestLaunchdServiceRecovery:
         assert stopped == [202, 303]
         assert calls == [(202, False), (303, False)]
 
+    def test_stop_duplicate_gateways_preserves_managed_pid_over_stale_preferred_pid(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(gateway_cli, "find_gateway_pids", lambda: [321, 999])
+        monkeypatch.setattr(gateway_cli, "_get_service_pids", lambda: {999})
+        monkeypatch.setattr(
+            gateway_cli,
+            "terminate_pid",
+            lambda pid, force=False: calls.append((pid, force)),
+        )
+
+        probe = gateway_cli.probe_gateway_single_process_state(preferred_pid=321)
+        stopped = gateway_cli.stop_duplicate_gateway_processes(preferred_pid=321)
+
+        assert probe == {
+            "ok": False,
+            "gateway_pids": [321, 999],
+            "managed_pids": [999],
+            "duplicate_pids": [321],
+            "preferred_pid": 999,
+        }
+        assert stopped == [321]
+        assert calls == [(321, False)]
+
     def test_launchd_restart_stops_duplicates_after_successful_kickstart(self, monkeypatch):
         calls = []
         target = f"{gateway_cli._launchd_domain()}/{gateway_cli.get_launchd_label()}"
