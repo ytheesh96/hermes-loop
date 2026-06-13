@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState
 } from 'react'
 
@@ -710,10 +711,18 @@ export function LoopPanel({
   const [debugOpen, setDebugOpen] = useState(false)
   const [navigationStack, setNavigationStack] = useState<LoopRow[]>([])
   const [focusedTaskId, setFocusedTaskId] = useState<null | string>(selectedTaskId || null)
+  const internalFocusTaskIdRef = useRef<null | string>(null)
   const [panelWidth, setPanelWidth] = useState(LOOP_PANEL_DEFAULT_WIDTH)
 
   useEffect(() => {
-    setFocusedTaskId(selectedTaskId || null)
+    const nextSelectedTaskId = selectedTaskId || null
+
+    if (internalFocusTaskIdRef.current === nextSelectedTaskId) {
+      internalFocusTaskIdRef.current = null
+      return
+    }
+
+    setFocusedTaskId(nextSelectedTaskId)
     setNavigationStack([])
   }, [selectedTaskId])
 
@@ -736,6 +745,7 @@ export function LoopPanel({
 
   const focusDrawerTask = useCallback((taskId: string) => {
     setFocusedTaskId(taskId)
+    internalFocusTaskIdRef.current = taskId
     if (onFocusTaskId) {
       onFocusTaskId(taskId)
     } else {
