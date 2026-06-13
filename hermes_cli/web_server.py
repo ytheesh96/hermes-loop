@@ -6941,6 +6941,45 @@ async def list_loop_handoffs_endpoint(
         conn.close()
 
 
+@app.get("/api/loop-handoffs/{handoff_id}")
+async def get_loop_handoff_details_endpoint(handoff_id: int, board: Optional[str] = None):
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect(board=board)
+    try:
+        try:
+            return kb.get_loop_handoff_details(conn, handoff_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.post("/api/loop-handoffs/{handoff_id}/auto-action")
+async def review_loop_handoff_auto_action_endpoint(handoff_id: int, body: Dict[str, Any], board: Optional[str] = None):
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect(board=board)
+    try:
+        try:
+            return kb.review_loop_handoff_autonomous_action(
+                conn,
+                handoff_id,
+                action=str(body.get("action") or ""),
+                actor=str(body.get("actor") or "dashboard-reviewer"),
+                reason=body.get("reason"),
+                evidence_passed=bool(body.get("evidence_passed")),
+                prohibited_flags=body.get("prohibited_flags") or [],
+                followups=body.get("followups") or [],
+                repair_attempts=int(body.get("repair_attempts") or 0),
+                max_repair_attempts=int(body.get("max_repair_attempts") or kb._LOOP_HANDOFF_REPAIR_LIMIT),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
 @app.delete("/api/sessions/{session_id}")
 async def delete_session_endpoint(session_id: str, profile: Optional[str] = None):
     # ``profile`` deletes a session belonging to another (local) profile by
