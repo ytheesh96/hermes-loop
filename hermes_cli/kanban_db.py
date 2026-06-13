@@ -3153,6 +3153,191 @@ def claim_loop_handoff_batch(
     return out
 
 
+_LOOP_HANDOFF_REVIEW_SOURCE = "kanban-loop-review"
+
+
+def loop_handoff_reviewer_session_id(tenant: Optional[str], root_task_id: str) -> str:
+    """Stable foreground-review session id for one tenant/root handoff lane.
+
+    The scheduler uses the tenant/root pair as the serialization key because
+    ``claim_loop_handoff_batch`` already prevents concurrent active batches for
+    that scope. Hashing keeps the id compact and safe for every SessionDB
+    consumer while preserving a deterministic mapping for resume/reconnect.
+    """
+    key = f"{tenant or ''}\0{root_task_id}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+    return f"loop-review-{digest}"
+
+
+def _loop_handoff_review_session_title(tenant: Optional[str], root_task_id: str) -> str:
+    tenant_label = tenant or "default"
+    raw = f"Loop review {tenant_label}/{root_task_id}"
+    return raw[:100]
+
+
+def _ensure_loop_handoff_review_session(session_db: Any, *, tenant: Optional[str], root_task_id: str) -> str:
+    session_id = loop_handoff_reviewer_session_id(tenant, root_task_id)
+    model_config = {
+        "_kanban_loop_review": {
+            "tenant": tenant,
+            "root_task_id": root_task_id,
+            "session_key": "tenant/root",
+        }
+    }
+    session_db.create_session(
+        session_id,
+        _LOOP_HANDOFF_REVIEW_SOURCE,
+        model_config=model_config,
+    )
+    try:
+        session_db.reopen_session(session_id)
+    except Exception:
+        pass
+    try:
+        session_db.set_session_title(
+            session_id,
+            _loop_handoff_review_session_title(tenant, root_task_id),
+        )
+    except Exception:
+        pass
+    return session_id
+
+
+def _render_loop_handoff_review_message(
+    *,
+    tenant: Optional[str],
+    root_task_id: str,
+    batch_id: str,
+    handoffs: list[dict[str, Any]],
+) -> str:
+    packets = [handoff.get("proof_packet") or {} for handoff in handoffs]
+    payload = {
+        "kind": "kanban_loop_handoff_review_batch",
+        "tenant": tenant,
+        "root_task_id": root_task_id,
+        "review_batch_id": batch_id,
+        "handoff_count": len(handoffs),
+        "instructions": [
+            "Review the compact proof packets in topological order.",
+            "Approve/release only when the provided evidence satisfies the task acceptance criteria.",
+            "Escalate instead of acting on prohibited, destructive, external, secret, or ambiguous changes.",
+        ],
+        "proof_packets": packets,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _pending_loop_handoff_review_scopes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT tenant, root_task_id, MIN(created_at) AS first_created_at, MIN(id) AS first_id
+          FROM loop_handoffs
+         WHERE state IN ('recorded', 'queued', 'batched')
+         GROUP BY tenant, root_task_id
+         ORDER BY first_created_at ASC, first_id ASC
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def claim_next_loop_handoff_review_batch(
+    conn: sqlite3.Connection,
+    *,
+    session_db: Any = None,
+    limit: int = 10,
+) -> Optional[dict[str, Any]]:
+    """Scheduler entrypoint: claim one queued Loop handoff batch into a review session.
+
+    This is the production caller for ``claim_loop_handoff_batch``. It creates
+    or resumes a stable foreground session keyed by tenant/root, injects one
+    compact proof-packet message, and audits the source task events with the
+    reviewer session id plus the injected message id (stored as
+    ``review_run_id`` for this foreground-review run).
+    """
+    if session_db is None:
+        from hermes_state import SessionDB
+
+        session_db = SessionDB()
+
+    for scope in _pending_loop_handoff_review_scopes(conn):
+        tenant = str(scope.get("tenant") or scope["root_task_id"])
+        root_task_id = scope["root_task_id"]
+        reviewer_session_id = _ensure_loop_handoff_review_session(
+            session_db,
+            tenant=tenant,
+            root_task_id=root_task_id,
+        )
+        batch_id = f"loop-review:{tenant or 'default'}:{root_task_id}:{int(time.time())}"
+        handoffs = claim_loop_handoff_batch(
+            conn,
+            tenant=tenant,
+            root_task_id=root_task_id,
+            reviewer_session_id=reviewer_session_id,
+            limit=limit,
+            batch_id=batch_id,
+        )
+        if not handoffs:
+            continue
+
+        message = _render_loop_handoff_review_message(
+            tenant=tenant,
+            root_task_id=root_task_id,
+            batch_id=batch_id,
+            handoffs=handoffs,
+        )
+        review_message_id = session_db.append_message(
+            reviewer_session_id,
+            "user",
+            message,
+            observed=True,
+        )
+        ids = [int(handoff["id"]) for handoff in handoffs]
+        placeholders = ",".join("?" for _ in ids)
+        now = int(time.time())
+        with write_txn(conn):
+            conn.execute(
+                f"UPDATE loop_handoffs SET review_run_id = ?, updated_at = ? WHERE id IN ({placeholders})",
+                (review_message_id, now, *ids),
+            )
+            for handoff in handoffs:
+                payload = {
+                    "handoff_id": handoff["id"],
+                    "root_task_id": root_task_id,
+                    "tenant": tenant,
+                    "reviewer_session_id": reviewer_session_id,
+                    "review_batch_id": batch_id,
+                    "review_run_id": review_message_id,
+                    "source_run_id": handoff.get("run_id"),
+                    "source_event_id": handoff.get("source_event_id"),
+                }
+                _append_event(
+                    conn,
+                    handoff["task_id"],
+                    "loop_handoff_review_session",
+                    payload,
+                    run_id=handoff.get("run_id"),
+                )
+        refreshed = list_loop_handoffs(conn, tenant=tenant, root_task_id=root_task_id, state="assigned")
+        refreshed_by_id = {int(handoff["id"]): handoff for handoff in refreshed}
+        original_by_id = {int(handoff["id"]): handoff for handoff in handoffs}
+        ordered = []
+        for pos, i in enumerate(ids):
+            row = dict(refreshed_by_id.get(i, handoffs[pos]))
+            if i in original_by_id and "proof_packet" in original_by_id[i]:
+                row["proof_packet"] = original_by_id[i]["proof_packet"]
+            ordered.append(row)
+        return {
+            "ok": True,
+            "tenant": tenant,
+            "root_task_id": root_task_id,
+            "reviewer_session_id": reviewer_session_id,
+            "review_batch_id": batch_id,
+            "review_message_id": review_message_id,
+            "handoffs": ordered,
+        }
+    return None
+
+
 def _extract_acceptance_criteria(body: Optional[str]) -> Optional[str]:
     if not body:
         return None

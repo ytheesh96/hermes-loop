@@ -6972,7 +6972,7 @@ async def review_loop_handoff_auto_action_endpoint(handoff_id: int, body: Dict[s
                 prohibited_flags=body.get("prohibited_flags") or [],
                 followups=body.get("followups") or [],
                 repair_attempts=int(body.get("repair_attempts") or 0),
-                max_repair_attempts=kb._LOOP_HANDOFF_REPAIR_LIMIT,
+                max_repair_attempts=int(body.get("max_repair_attempts") or kb._LOOP_HANDOFF_REPAIR_LIMIT),
             )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
