@@ -803,7 +803,7 @@ class GatewayKanbanWatchersMixin:
                 # re-ran the migration on a second connection, racing
                 # the first. See the matching comment in
                 # `_kanban_notifier_watcher` and issue #21378.
-                return _kb.dispatch_once(
+                result = _kb.dispatch_once(
                     conn,
                     board=slug,
                     max_spawn=max_spawn,
@@ -813,6 +813,23 @@ class GatewayKanbanWatchersMixin:
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
                 )
+                try:
+                    review_batch = _kb.claim_next_loop_handoff_review_batch(conn)
+                except Exception:
+                    logger.exception(
+                        "kanban dispatcher: loop handoff review claim failed on board %s",
+                        slug,
+                    )
+                else:
+                    if review_batch:
+                        logger.info(
+                            "kanban dispatcher: claimed %d loop handoff(s) for tenant=%s root=%s into review session %s",
+                            len(review_batch.get("handoffs") or []),
+                            review_batch.get("tenant"),
+                            review_batch.get("root_task_id"),
+                            review_batch.get("reviewer_session_id"),
+                        )
+                return result
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):
                     disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())

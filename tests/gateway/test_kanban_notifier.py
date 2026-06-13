@@ -35,6 +35,19 @@ async def _run_one_notifier_tick(monkeypatch, runner):
     await runner._kanban_notifier_watcher(interval=1)
 
 
+async def _run_one_dispatcher_tick(monkeypatch, runner):
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay):
+        if delay == 5:
+            return None
+        runner._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    await runner._kanban_dispatcher_watcher()
+
+
 def _make_runner(adapter):
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._running = True
@@ -67,6 +80,52 @@ def _unseen_terminal_events(tid):
         return events
     finally:
         conn.close()
+
+
+def test_gateway_dispatcher_claims_loop_handoff_review_batch(tmp_path, monkeypatch):
+    from hermes_state import SessionDB
+
+    db_path = tmp_path / "dispatcher-loop-review.db"
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="loop worker",
+            assignee="worker",
+            created_by="loop:t_looproot",
+            tenant="tenant-a",
+        )
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                task_id,
+                "loop_node_state",
+                {"root_task_id": "t_looproot", "client_id": "worker", "active": True, "frontier": True},
+            )
+        assert kb.claim_task(conn, task_id, claimer="worker:1") is not None
+        assert kb.complete_task(conn, task_id, summary="ready for review", metadata={"tests_run": ["pytest -q"]})
+
+    runner = _make_runner(RecordingAdapter())
+    asyncio.run(_run_one_dispatcher_tick(monkeypatch, runner))
+
+    session_db = SessionDB()
+    with kb.connect() as conn:
+        handoff = kb.list_loop_handoffs(conn, task_id=task_id)[0]
+        events = [event for event in kb.list_events(conn, task_id) if event.kind == "loop_handoff_review_session"]
+        messages = session_db.get_messages(handoff["reviewer_session_id"])
+
+    assert handoff["state"] == "assigned"
+    assert handoff["reviewer_session_id"] == kb.loop_handoff_reviewer_session_id("tenant-a", "t_looproot")
+    assert handoff["review_run_id"] is not None
+    assert events and events[-1].payload["source_run_id"] == handoff["run_id"]
+    assert messages and "kanban_loop_handoff_review_batch" in messages[0]["content"]
 
 
 def test_kanban_notifier_dedupes_board_slugs_pointing_to_same_db(tmp_path, monkeypatch):

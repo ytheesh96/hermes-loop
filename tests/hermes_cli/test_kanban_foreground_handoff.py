@@ -325,6 +325,40 @@ def test_claimed_reviewer_batch_includes_compact_proof_packets_and_detail_ref(ka
     assert len(details["events"]) >= 1
 
 
+def test_scheduler_claims_next_handoff_into_stable_review_session(kanban_home):
+    from hermes_state import SessionDB
+
+    session_db = SessionDB()
+    with kb.connect() as conn:
+        parent_id = _loop_node(conn, title="loop parent", tenant="tenant-a")
+        child_id = _loop_node(conn, title="loop child", parents=(parent_id,), tenant="tenant-a")
+        other_id = _loop_node(conn, title="other root", root_task_id="t_otherroot", tenant="tenant-a")
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child_id,))
+        for task_id in (parent_id, child_id, other_id):
+            assert kb.claim_task(conn, task_id, claimer=f"worker:{task_id}") is not None
+            assert kb.complete_task(conn, task_id, summary=f"done {task_id}", metadata={"tests_run": ["pytest -q"]})
+
+        first = kb.claim_next_loop_handoff_review_batch(conn, session_db=session_db, limit=10)
+        blocked_same_root = kb.claim_next_loop_handoff_review_batch(conn, session_db=session_db, limit=10)
+        messages = session_db.get_messages(first["reviewer_session_id"])
+        handoffs = kb.list_loop_handoffs(conn, tenant="tenant-a", root_task_id="t_looproot")
+        events = [event for event in kb.list_events(conn, parent_id) if event.kind == "loop_handoff_review_session"]
+
+    assert first["tenant"] == "tenant-a"
+    assert first["root_task_id"] == "t_looproot"
+    assert first["reviewer_session_id"] == kb.loop_handoff_reviewer_session_id("tenant-a", "t_looproot")
+    assert [handoff["task_id"] for handoff in first["handoffs"]] == [parent_id, child_id]
+    assert first["review_message_id"] is not None
+    assert {handoff["reviewer_session_id"] for handoff in handoffs} == {first["reviewer_session_id"]}
+    assert {handoff["review_run_id"] for handoff in handoffs} == {first["review_message_id"]}
+    assert messages and messages[0]["role"] == "user"
+    assert "loop_handoff_proof_packet" in messages[0]["content"]
+    assert str(first["handoffs"][0]["id"]) in messages[0]["content"]
+    assert blocked_same_root["root_task_id"] == "t_otherroot"
+    assert events and events[-1].payload["reviewer_session_id"] == first["reviewer_session_id"]
+    assert events[-1].payload["review_run_id"] == first["review_message_id"]
+
+
 def test_autonomous_approve_release_is_audited_and_promotes_downstream(kanban_home):
     with kb.connect() as conn:
         parent_id = _loop_node(conn, title="loop parent", tenant="tenant-a")
