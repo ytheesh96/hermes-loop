@@ -368,6 +368,63 @@ def test_session_source_defaults_to_hermes_session_id_when_query_omits_session_i
     assert drop not in {task["id"] for task in data["tasks"]}
 
 
+def test_session_source_recovers_missed_worker_activity_with_scoped_revision(client, kanban_home):
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="durable worker activity",
+            assignee="peacock",
+            tenant="tenant-live",
+            session_id="source-session",
+        )
+        initial = client.get(
+            "/api/plugins/kanban/session-source",
+            params={"session_id": "source-session", "tenant": "tenant-live"},
+        )
+        assert initial.status_code == 200, initial.text
+        initial_revision = initial.json()["source_revision"]
+
+        assert kb.claim_task(conn, task_id, claimer="worker-host:123") is not None
+        assert kb.heartbeat_worker(conn, task_id, note="halfway")
+        assert kb.complete_task(conn, task_id, summary="finished safely")
+    finally:
+        conn.close()
+
+    reopened = client.get(
+        "/api/plugins/kanban/session-source",
+        params={
+            "session_id": "source-session",
+            "tenant": "tenant-live",
+            "since_event_id": initial_revision,
+        },
+    )
+
+    assert reopened.status_code == 200, reopened.text
+    data = reopened.json()
+    assert data["source_revision"] == data["latest_event_id"]
+    assert data["source_revision"] > initial_revision
+    assert data["changed_since"] == initial_revision
+    [task] = data["tasks"]
+    assert task["id"] == task_id
+    assert task["status"] == "done"
+    assert task["latest_run"]["status"] == "done"
+    assert task["latest_run"]["outcome"] == "completed"
+    assert task["worker_activity"] == {
+        "run_id": task["latest_run"]["id"],
+        "status": "done",
+        "outcome": "completed",
+        "profile": "peacock",
+        "started_at": task["latest_run"]["started_at"],
+        "ended_at": task["latest_run"]["ended_at"],
+        "last_heartbeat_at": task["latest_run"]["last_heartbeat_at"],
+        "latest_event_id": data["latest_event_id"],
+        "latest_event_kind": "completed",
+        "summary_preview": "finished safely",
+        "error_preview": None,
+    }
+
+
 def test_session_source_can_infer_tenant_from_lineage_tasks(client):
     conn = kb.connect()
     try:

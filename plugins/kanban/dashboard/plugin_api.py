@@ -603,6 +603,86 @@ def _latest_runs_for_tasks(
     return out
 
 
+def _latest_event_id_for_tasks(
+    conn: sqlite3.Connection,
+    task_ids: list[str],
+) -> int:
+    """Return the scoped task_events revision for a session-source payload."""
+    if not task_ids:
+        return 0
+    placeholders = ",".join("?" for _ in task_ids)
+    row = conn.execute(
+        f"SELECT COALESCE(MAX(id), 0) AS m FROM task_events WHERE task_id IN ({placeholders})",
+        tuple(task_ids),
+    ).fetchone()
+    return int(row["m"] if row else 0)
+
+
+def _preview_text(value: Any, *, max_chars: int = 200) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).replace("\x00", "").strip().splitlines()[0].strip()
+    if not text:
+        return None
+    return text[: max(0, max_chars)]
+
+
+def _worker_activity_for_tasks(
+    conn: sqlite3.Connection,
+    task_ids: list[str],
+    latest_runs: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Reconstruct compact worker status from durable runs/events only.
+
+    This is the reload/late-open fallback for the live kanban.worker stream:
+    it deliberately exposes status, timings, outcome, and a sanitized summary
+    preview, not raw tool output or arbitrary event payloads.
+    """
+    if not task_ids:
+        return {}
+    placeholders = ",".join("?" for _ in task_ids)
+    event_rows = conn.execute(
+        f"""
+        SELECT * FROM (
+            SELECT e.*, ROW_NUMBER() OVER (
+                PARTITION BY e.task_id ORDER BY e.id DESC
+            ) AS rn
+            FROM task_events e
+            WHERE e.task_id IN ({placeholders})
+              AND e.kind IN (
+                'claimed', 'spawned', 'heartbeat', 'completed', 'blocked',
+                'failed', 'reclaimed', 'spawn_failed', 'crashed', 'timed_out',
+                'stale', 'protocol_violation', 'rate_limited', 'gave_up'
+              )
+        ) ranked
+        WHERE rn = 1
+        """,
+        tuple(task_ids),
+    ).fetchall()
+    latest_events = {row["task_id"]: row for row in event_rows}
+    out: dict[str, dict[str, Any]] = {}
+    for task_id, run in latest_runs.items():
+        event = latest_events.get(task_id)
+        status = run.get("status")
+        outcome = run.get("outcome")
+        summary_preview = _preview_text(run.get("summary"))
+        error_preview = _preview_text(run.get("error"))
+        out[task_id] = {
+            "run_id": run.get("id"),
+            "status": status,
+            "outcome": outcome,
+            "profile": run.get("profile"),
+            "started_at": run.get("started_at"),
+            "ended_at": run.get("ended_at"),
+            "last_heartbeat_at": run.get("last_heartbeat_at"),
+            "latest_event_id": int(event["id"]) if event is not None else None,
+            "latest_event_kind": event["kind"] if event is not None else None,
+            "summary_preview": summary_preview,
+            "error_preview": error_preview,
+        }
+    return out
+
+
 @router.get("/session-source")
 def get_session_source(
     session_id: Optional[str] = Query(
@@ -615,6 +695,10 @@ def get_session_source(
     ),
     include_archived: bool = Query(False),
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+    since_event_id: Optional[int] = Query(
+        None,
+        description="Client's last seen source revision; response reports whether scoped task_events changed.",
+    ),
 ):
     """Return real Kanban tasks for the current Loop compression lineage.
 
@@ -716,6 +800,8 @@ def get_session_source(
 
         summary_map = kanban_db.latest_summaries(conn, task_ids)
         latest_runs = _latest_runs_for_tasks(conn, task_ids)
+        worker_activity = _worker_activity_for_tasks(conn, task_ids, latest_runs)
+        source_revision = _latest_event_id_for_tasks(conn, task_ids)
         comment_counts: dict[str, int] = {}
         if task_ids:
             comment_counts = {
@@ -749,6 +835,7 @@ def get_session_source(
             ]
             item["comment_count"] = comment_counts.get(task.id, 0)
             item["latest_run"] = latest_runs.get(task.id)
+            item["worker_activity"] = worker_activity.get(task.id)
             if task.id in diagnostics:
                 item["diagnostics"] = diagnostics[task.id]
                 item["warnings"] = _warnings_summary_from_diagnostics(diagnostics[task.id])
@@ -764,7 +851,13 @@ def get_session_source(
             "tasks": payload_tasks,
             "links": included_links,
             "external_links": [link for link in all_links if link not in included_links],
-            "latest_event_id": int(conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM task_events").fetchone()["m"]),
+            "latest_event_id": source_revision,
+            "source_revision": source_revision,
+            "changed_since": int(since_event_id) if since_event_id is not None else None,
+            "has_changes_since": (
+                source_revision > int(since_event_id)
+                if since_event_id is not None else None
+            ),
             "now": int(time.time()),
         }
     finally:
@@ -947,6 +1040,11 @@ def get_task(
         # a second round-trip. Cards on /board carry a 200-char preview.
         full_summary = kanban_db.latest_summary(conn, task_id)
         task_d = _task_dict(task, latest_summary=full_summary)
+        latest_runs = _latest_runs_for_tasks(conn, [task_id])
+        worker_activity = _worker_activity_for_tasks(conn, [task_id], latest_runs).get(task_id)
+        if worker_activity:
+            task_d["worker_activity"] = worker_activity
+        latest_event_id = _latest_event_id_for_tasks(conn, [task_id])
         # Attach diagnostics so the drawer's Diagnostics section can
         # render recovery actions without a second round-trip.
         diags = _compute_task_diagnostics(conn, task_ids=[task_id])
@@ -969,6 +1067,8 @@ def get_task(
                     state_name=run_state_name,
                 )
             ],
+            "latest_event_id": latest_event_id,
+            "source_revision": latest_event_id,
         }
     finally:
         conn.close()
@@ -1087,6 +1187,36 @@ def patch_loop_graph(
         raise HTTPException(status_code=400, detail=graph.error_response(e, conn, root_task_id))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+
+
+@router.get("/loop-handoffs")
+def list_loop_handoffs(
+    root_task_id: Optional[str] = Query(None),
+    tenant: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    task_id: Optional[str] = Query(None),
+    status_only: bool = Query(False),
+    board: Optional[str] = Query(None),
+):
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        if status_only:
+            if not tenant or not root_task_id:
+                raise HTTPException(status_code=400, detail="status_only requires tenant and root_task_id")
+            return kanban_db.loop_handoff_status(conn, tenant=tenant, root_task_id=root_task_id)
+        return {
+            "ok": True,
+            "handoffs": kanban_db.list_loop_handoffs(
+                conn,
+                root_task_id=root_task_id,
+                tenant=tenant,
+                state=state,
+                task_id=task_id,
+            ),
+        }
     finally:
         conn.close()
 
