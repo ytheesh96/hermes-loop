@@ -294,10 +294,89 @@ def _compact_handoff(task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     }
     if "run_id" in payload:
         handoff["run_id"] = payload.get("run_id")
-    for key in ("summary", "reason", "worker_session_id", "artifacts", "created_cards", "resolution_summary"):
+    for key in (
+        "handoff_id",
+        "state",
+        "source_event_id",
+        "worker_profile",
+        "originating_session_id",
+        "summary",
+        "reason",
+        "worker_session_id",
+        "artifacts",
+        "changed_files",
+        "created_cards",
+        "review_task_id",
+        "review_run_id",
+        "reviewer_session_id",
+        "review_batch_id",
+        "decision_actor",
+        "decision_reason",
+        "resolution_summary",
+        "created_at",
+        "updated_at",
+        "resolved_at",
+    ):
         if key in payload:
             handoff[key] = payload[key]
     return handoff
+
+
+def _durable_handoff_payloads_for_tasks(
+    conn: sqlite3.Connection,
+    task_ids: set[str],
+    root_task_id: str,
+) -> dict[str, dict[str, Any]]:
+    if not task_ids:
+        return {}
+    placeholders = ",".join("?" for _ in task_ids)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT *
+              FROM loop_handoffs
+             WHERE root_task_id = ?
+               AND task_id IN ({placeholders})
+             ORDER BY updated_at ASC, id ASC
+            """,
+            (root_task_id, *task_ids),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    payloads: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        handoff = kb._loop_handoff_row_to_dict(row)
+        task_id = handoff["task_id"]
+        payloads[task_id] = {
+            "handoff_id": handoff["id"],
+            "root_task_id": handoff["root_task_id"],
+            "task_id": task_id,
+            "run_id": handoff.get("run_id"),
+            "source_event_id": handoff.get("source_event_id"),
+            "handoff_kind": handoff.get("handoff_kind"),
+            "state": handoff.get("state"),
+            "attention": handoff.get("attention"),
+            "verification_state": handoff.get("verification_state"),
+            "worker_profile": handoff.get("worker_profile"),
+            "worker_session_id": handoff.get("worker_session_id"),
+            "originating_session_id": handoff.get("originating_session_id"),
+            "summary": handoff.get("summary"),
+            "reason": handoff.get("reason"),
+            "artifacts": handoff.get("artifacts", []),
+            "changed_files": handoff.get("changed_files", []),
+            "created_cards": handoff.get("created_cards", []),
+            "review_task_id": handoff.get("review_task_id"),
+            "review_run_id": handoff.get("review_run_id"),
+            "reviewer_session_id": handoff.get("reviewer_session_id"),
+            "review_batch_id": handoff.get("review_batch_id"),
+            "decision_actor": handoff.get("decision_actor"),
+            "decision_reason": handoff.get("decision_reason"),
+            "resolution_summary": handoff.get("resolution_summary"),
+            "created_at": handoff.get("created_at"),
+            "updated_at": handoff.get("updated_at"),
+            "resolved_at": handoff.get("resolved_at"),
+        }
+    return payloads
 
 
 def _latest_handoffs_for_tasks(
@@ -318,14 +397,15 @@ def _latest_handoffs_for_tasks(
         """,
         (*task_ids, LOOP_HANDOFF_EVENT_KIND, LOOP_HANDOFF_RESOLUTION_EVENT_KIND),
     ).fetchall()
-    handoffs: dict[str, dict[str, Any]] = {}
+    handoffs: dict[str, dict[str, Any]] = _durable_handoff_payloads_for_tasks(conn, task_ids, root_task_id)
     for row in rows:
         payload = _event_payload(row)
         if payload.get("root_task_id") != root_task_id:
             continue
         task_id = row["task_id"]
         if row["kind"] == LOOP_HANDOFF_EVENT_KIND:
-            handoffs[task_id] = dict(payload)
+            if task_id not in handoffs:
+                handoffs[task_id] = dict(payload)
         elif row["kind"] == LOOP_HANDOFF_RESOLUTION_EVENT_KIND:
             current = dict(handoffs.get(task_id, {}))
             current.update(payload)
@@ -475,7 +555,7 @@ def read_graph(
                     "handoff_kind": handoff.get("handoff_kind"),
                     "verification_state": handoff.get("verification_state"),
                 }
-                for key in ("summary", "reason"):
+                for key in ("handoff_id", "state", "review_task_id", "reviewer_session_id", "summary", "reason"):
                     if handoff.get(key) is not None:
                         pending[key] = handoff[key]
                 pending_handoffs.append(pending)
@@ -531,6 +611,47 @@ def _resolve_handoff_in_txn(
     if op.get("resolution_summary") is not None:
         payload["resolution_summary"] = op.get("resolution_summary")
     kb._append_event(conn, task_id, LOOP_HANDOFF_RESOLUTION_EVENT_KIND, payload, run_id=payload.get("run_id"))
+    durable_state = str(verification_state).replace("-", "_")
+    if verification_state == "done":
+        durable_state = "closed"
+    now = int(time.time())
+    conn.execute(
+        """
+        UPDATE loop_handoffs
+           SET state = ?,
+               attention = ?,
+               verification_state = ?,
+               decision_reason = ?,
+               resolution_summary = ?,
+               updated_at = ?,
+               resolved_at = COALESCE(resolved_at, ?),
+               completed_at = COALESCE(completed_at, ?)
+         WHERE id = (
+             SELECT id FROM loop_handoffs
+              WHERE root_task_id = ?
+                AND task_id = ?
+                AND handoff_kind = ?
+                AND (run_id IS ? OR run_id = ?)
+              ORDER BY updated_at DESC, id DESC
+              LIMIT 1
+         )
+        """,
+        (
+            durable_state,
+            attention,
+            verification_state,
+            op.get("reason"),
+            op.get("resolution_summary"),
+            now,
+            now,
+            now,
+            root_task_id,
+            task_id,
+            latest_payload.get("handoff_kind"),
+            latest_payload.get("run_id"),
+            latest_payload.get("run_id"),
+        ),
+    )
     return task_id
 
 

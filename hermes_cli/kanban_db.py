@@ -1125,6 +1125,51 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
+CREATE TABLE IF NOT EXISTS loop_handoffs (
+    id                             INTEGER PRIMARY KEY AUTOINCREMENT,
+    idempotency_key                TEXT NOT NULL UNIQUE,
+    root_task_id                   TEXT NOT NULL,
+    tenant                         TEXT,
+    task_id                        TEXT NOT NULL,
+    run_id                         INTEGER,
+    source_event_id                INTEGER,
+    handoff_kind                   TEXT NOT NULL,
+    state                          TEXT NOT NULL,
+    attention                      TEXT,
+    verification_state             TEXT NOT NULL,
+    verification_status            TEXT NOT NULL DEFAULT 'unknown',
+    worker_profile                 TEXT,
+    worker_session_id              TEXT,
+    originating_session_id         TEXT,
+    task_title                     TEXT,
+    task_body                      TEXT,
+    summary                        TEXT,
+    reason                         TEXT,
+    worker_metadata_json           TEXT,
+    artifacts_json                 TEXT,
+    changed_files_json             TEXT,
+    created_cards_json             TEXT,
+    parent_state_snapshot_json     TEXT,
+    child_state_snapshot_json      TEXT,
+    review_task_id                 TEXT,
+    review_run_id                  INTEGER,
+    reviewer_session_id            TEXT,
+    review_batch_id                TEXT,
+    decision_actor                 TEXT,
+    decision_reason                TEXT,
+    resolution_summary             TEXT,
+    auto_actions_log_json          TEXT,
+    escalation_reason              TEXT,
+    escalation_options_json        TEXT,
+    final_summary_sent_at          INTEGER,
+    escalation_notified_at         INTEGER,
+    created_at                     INTEGER NOT NULL,
+    updated_at                     INTEGER NOT NULL,
+    started_at                     INTEGER,
+    completed_at                   INTEGER,
+    resolved_at                    INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
@@ -1135,6 +1180,10 @@ CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, start
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
+CREATE INDEX IF NOT EXISTS idx_loop_handoffs_root_state ON loop_handoffs(root_task_id, state, updated_at);
+CREATE INDEX IF NOT EXISTS idx_loop_handoffs_tenant_state ON loop_handoffs(tenant, state, updated_at);
+CREATE INDEX IF NOT EXISTS idx_loop_handoffs_task ON loop_handoffs(task_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_loop_handoffs_review_task ON loop_handoffs(review_task_id);
 """
 
 
@@ -2704,7 +2753,7 @@ def _append_event(
     payload: Optional[dict] = None,
     *,
     run_id: Optional[int] = None,
-) -> None:
+) -> int:
     """Record an event row.  Called from within an already-open txn.
 
     ``run_id`` is optional: pass the current run id so UIs can group
@@ -2719,6 +2768,7 @@ def _append_event(
         "VALUES (?, ?, ?, ?, ?)",
         (task_id, run_id, kind, pl, now),
     )
+    return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
 
 def _loop_root_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
@@ -2734,6 +2784,316 @@ def _loop_root_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     return root_task_id or None
 
 
+_LOOP_HANDOFF_ACTIVE_STATES = {"assigned", "reviewing"}
+_LOOP_HANDOFF_TERMINAL_STATES = {
+    "approved",
+    "released",
+    "blocked_waiting",
+    "escalated",
+    "rejected",
+    "closed",
+    "ignored_duplicate",
+    "cancelled_superseded",
+}
+
+
+def _json_list(value: Any) -> list[Any]:
+    if isinstance(value, (list, tuple)):
+        return [item for item in value]
+    return []
+
+
+def _decode_json_list(raw: Optional[str]) -> list[Any]:
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except Exception:
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _decode_json_dict(raw: Optional[str]) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _loop_handoff_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    out = dict(row)
+    out["artifacts"] = _decode_json_list(out.pop("artifacts_json", None))
+    out["changed_files"] = _decode_json_list(out.pop("changed_files_json", None))
+    out["created_cards"] = _decode_json_list(out.pop("created_cards_json", None))
+    out["parent_state_snapshot"] = _decode_json_list(out.pop("parent_state_snapshot_json", None))
+    out["child_state_snapshot"] = _decode_json_list(out.pop("child_state_snapshot_json", None))
+    out["worker_metadata"] = _decode_json_dict(out.pop("worker_metadata_json", None))
+    out["auto_actions_log"] = _decode_json_list(out.pop("auto_actions_log_json", None))
+    out["escalation_options"] = _decode_json_list(out.pop("escalation_options_json", None))
+    return out
+
+
+def _task_state_snapshot(conn: sqlite3.Connection, task_ids: Iterable[str]) -> list[dict[str, Any]]:
+    ids = [str(task_id) for task_id in task_ids if str(task_id).strip()]
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"SELECT id, title, status, assignee, current_run_id FROM tasks WHERE id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    by_id = {row["id"]: row for row in rows}
+    out: list[dict[str, Any]] = []
+    for task_id in ids:
+        row = by_id.get(task_id)
+        if row:
+            out.append(
+                {
+                    "task_id": row["id"],
+                    "title": row["title"],
+                    "status": row["status"],
+                    "assignee": row["assignee"],
+                    "current_run_id": row["current_run_id"],
+                }
+            )
+    return out
+
+
+def _loop_handoff_idempotency_key(
+    *,
+    root_task_id: str,
+    task_id: str,
+    run_id: Optional[int],
+    source_event_id: Optional[int],
+    handoff_kind: str,
+) -> str:
+    if source_event_id is not None:
+        return f"loop-handoff:event:{int(source_event_id)}"
+    run_part = "none" if run_id is None else str(int(run_id))
+    return f"loop-handoff:{root_task_id}:{task_id}:{run_part}:{handoff_kind}"
+
+
+def _record_loop_handoff(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    root_task_id: str,
+    handoff_kind: str,
+    run_id: Optional[int],
+    source_event_id: Optional[int] = None,
+    summary: Optional[str] = None,
+    reason: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    created_cards: Optional[Iterable[str]] = None,
+) -> dict[str, Any]:
+    """Create the durable Loop handoff row for a worker completion/block.
+
+    The row is idempotent by source event when available and by the stable
+    ``root/task/run/kind`` tuple otherwise. Existing rows are returned without
+    overwriting reviewer or proof-packet state, so duplicate watcher triggers do
+    not duplicate reviews or erase the original evidence.
+    """
+    task_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if task_row is None:
+        raise ValueError(f"task {task_id} not found")
+    now = int(time.time())
+    tenant = task_row["tenant"] or root_task_id
+    md = metadata if isinstance(metadata, dict) else {}
+    artifacts = [str(p).strip() for p in _json_list(md.get("artifacts")) if str(p).strip()]
+    changed_files = [str(p).strip() for p in _json_list(md.get("changed_files")) if str(p).strip()]
+    cards = [str(card).strip() for card in (created_cards or []) if str(card).strip()]
+    worker_session_id = md.get("worker_session_id")
+    if not isinstance(worker_session_id, str) or not worker_session_id.strip():
+        worker_session_id = None
+    else:
+        worker_session_id = worker_session_id.strip()
+    parent_ids_snapshot = parent_ids(conn, task_id)
+    child_ids_snapshot = child_ids(conn, task_id)
+    key = _loop_handoff_idempotency_key(
+        root_task_id=root_task_id,
+        task_id=task_id,
+        run_id=run_id,
+        source_event_id=source_event_id,
+        handoff_kind=handoff_kind,
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO loop_handoffs (
+            idempotency_key, root_task_id, tenant, task_id, run_id, source_event_id,
+            handoff_kind, state, attention, verification_state, verification_status,
+            worker_profile, worker_session_id, originating_session_id, task_title,
+            task_body, summary, reason, worker_metadata_json, artifacts_json,
+            changed_files_json, created_cards_json, parent_state_snapshot_json,
+            child_state_snapshot_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'needs-orchestrator',
+                  'needs-orchestrator', 'unknown', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            key,
+            root_task_id,
+            tenant,
+            task_id,
+            run_id,
+            source_event_id,
+            handoff_kind,
+            task_row["assignee"],
+            worker_session_id,
+            task_row["session_id"] if "session_id" in task_row.keys() else None,
+            task_row["title"],
+            task_row["body"],
+            summary,
+            reason,
+            json.dumps(md, ensure_ascii=False) if md else None,
+            json.dumps(artifacts, ensure_ascii=False),
+            json.dumps(changed_files, ensure_ascii=False),
+            json.dumps(cards, ensure_ascii=False),
+            json.dumps(_task_state_snapshot(conn, parent_ids_snapshot), ensure_ascii=False),
+            json.dumps(_task_state_snapshot(conn, child_ids_snapshot), ensure_ascii=False),
+            now,
+            now,
+        ),
+    )
+    row = conn.execute(
+        "SELECT * FROM loop_handoffs WHERE idempotency_key = ?",
+        (key,),
+    ).fetchone()
+    return _loop_handoff_row_to_dict(row)
+
+
+def list_loop_handoffs(
+    conn: sqlite3.Connection,
+    *,
+    root_task_id: Optional[str] = None,
+    tenant: Optional[str] = None,
+    state: Optional[str] = None,
+    task_id: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Return durable Loop handoffs filtered by root/tenant/state/task."""
+    clauses: list[str] = []
+    args: list[Any] = []
+    if root_task_id is not None:
+        clauses.append("root_task_id = ?")
+        args.append(root_task_id)
+    if tenant is not None:
+        clauses.append("tenant = ?")
+        args.append(tenant)
+    if state is not None:
+        clauses.append("state = ?")
+        args.append(state)
+    if task_id is not None:
+        clauses.append("task_id = ?")
+        args.append(task_id)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    rows = conn.execute(
+        "SELECT * FROM loop_handoffs" + where + " ORDER BY created_at ASC, id ASC",
+        args,
+    ).fetchall()
+    return [_loop_handoff_row_to_dict(row) for row in rows]
+
+
+def loop_handoff_status(
+    conn: sqlite3.Connection,
+    *,
+    tenant: str,
+    root_task_id: str,
+) -> dict[str, Any]:
+    rows = list_loop_handoffs(conn, tenant=tenant, root_task_id=root_task_id)
+    pending = sum(1 for row in rows if row["state"] in {"recorded", "queued", "batched"})
+    active = sum(1 for row in rows if row["state"] in _LOOP_HANDOFF_ACTIVE_STATES)
+    terminal = sum(1 for row in rows if row["state"] in _LOOP_HANDOFF_TERMINAL_STATES)
+    return {
+        "tenant": tenant,
+        "root_task_id": root_task_id,
+        "pending_count": pending,
+        "active_count": active,
+        "terminal_count": terminal,
+        "total_count": len(rows),
+    }
+
+
+def _loop_handoff_dependency_depths(
+    conn: sqlite3.Connection, task_ids: set[str]) -> dict[str, int]:
+    if not task_ids:
+        return {}
+    rows = conn.execute("SELECT parent_id, child_id FROM task_links").fetchall()
+    parents: dict[str, list[str]] = {task_id: [] for task_id in task_ids}
+    for row in rows:
+        if row["child_id"] in task_ids and row["parent_id"] in task_ids:
+            parents.setdefault(row["child_id"], []).append(row["parent_id"])
+    cache: dict[str, int] = {}
+
+    def depth(task_id: str, visiting: Optional[set[str]] = None) -> int:
+        if task_id in cache:
+            return cache[task_id]
+        visiting = visiting or set()
+        if task_id in visiting:
+            return 0
+        visiting.add(task_id)
+        pids = parents.get(task_id, [])
+        value = 0 if not pids else 1 + max(depth(pid, visiting) for pid in pids)
+        cache[task_id] = value
+        return value
+
+    return {task_id: depth(task_id) for task_id in task_ids}
+
+
+def claim_loop_handoff_batch(
+    conn: sqlite3.Connection,
+    *,
+    tenant: str,
+    root_task_id: str,
+    reviewer_session_id: str,
+    limit: int = 10,
+    batch_id: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Assign a dependency-ordered handoff batch for one tenant/root.
+
+    This is the scheduler's serialization primitive: if any handoff for the
+    tenant/root is already assigned/reviewing, no new foreground reviewer is
+    activated. Different roots may claim independently.
+    """
+    limit = max(1, int(limit or 1))
+    reviewer_session_id = str(reviewer_session_id or "").strip()
+    if not reviewer_session_id:
+        raise ValueError("reviewer_session_id is required")
+    batch_id = batch_id or f"loop-review:{tenant}:{root_task_id}:{int(time.time())}"
+    with write_txn(conn):
+        active = conn.execute(
+            "SELECT 1 FROM loop_handoffs WHERE tenant = ? AND root_task_id = ? "
+            "AND state IN ('assigned', 'reviewing') LIMIT 1",
+            (tenant, root_task_id),
+        ).fetchone()
+        if active:
+            return []
+        rows = conn.execute(
+            "SELECT * FROM loop_handoffs WHERE tenant = ? AND root_task_id = ? "
+            "AND state IN ('recorded', 'queued', 'batched') ORDER BY created_at ASC, id ASC",
+            (tenant, root_task_id),
+        ).fetchall()
+        if not rows:
+            return []
+        depths = _loop_handoff_dependency_depths(conn, {row["task_id"] for row in rows})
+        ordered = sorted(rows, key=lambda row: (depths.get(row["task_id"], 0), row["created_at"], row["id"]))[:limit]
+        ids = [int(row["id"]) for row in ordered]
+        placeholders = ",".join("?" for _ in ids)
+        now = int(time.time())
+        conn.execute(
+            f"UPDATE loop_handoffs SET state = 'assigned', reviewer_session_id = ?, "
+            f"review_batch_id = ?, started_at = COALESCE(started_at, ?), updated_at = ? "
+            f"WHERE id IN ({placeholders}) AND state IN ('recorded', 'queued', 'batched')",
+            (reviewer_session_id, batch_id, now, now, *ids),
+        )
+        claimed = conn.execute(
+            f"SELECT * FROM loop_handoffs WHERE id IN ({placeholders}) ORDER BY id ASC",
+            ids,
+        ).fetchall()
+    claimed_by_id = {int(row["id"]): _loop_handoff_row_to_dict(row) for row in claimed}
+    return [claimed_by_id[i] for i in ids if i in claimed_by_id]
+
+
 def _append_loop_foreground_handoff_event(
     conn: sqlite3.Connection,
     task_id: str,
@@ -2741,6 +3101,7 @@ def _append_loop_foreground_handoff_event(
     root_task_id: str,
     handoff_kind: str,
     run_id: Optional[int],
+    source_event_id: Optional[int] = None,
     summary: Optional[str] = None,
     reason: Optional[str] = None,
     metadata: Optional[dict] = None,
@@ -2778,6 +3139,18 @@ def _append_loop_foreground_handoff_event(
         cards = [str(card).strip() for card in created_cards if str(card).strip()]
         if cards:
             payload["created_cards"] = cards
+    _record_loop_handoff(
+        conn,
+        task_id,
+        root_task_id=root_task_id,
+        handoff_kind=handoff_kind,
+        run_id=run_id,
+        source_event_id=source_event_id,
+        summary=summary,
+        reason=reason,
+        metadata=metadata,
+        created_cards=created_cards,
+    )
     _append_event(conn, task_id, "loop_foreground_handoff", payload, run_id=run_id)
 
 
@@ -3764,7 +4137,7 @@ def complete_task(
                 ]
                 if cleaned_artifacts:
                     completed_payload["artifacts"] = cleaned_artifacts
-        _append_event(
+        completed_event_id = _append_event(
             conn, task_id, "completed",
             completed_payload,
             run_id=run_id,
@@ -3776,6 +4149,7 @@ def complete_task(
                 root_task_id=loop_root_task_id,
                 handoff_kind="worker_completed",
                 run_id=run_id,
+                source_event_id=completed_event_id,
                 summary=summary if summary is not None else result,
                 metadata=metadata,
                 created_cards=verified_cards,
@@ -4236,7 +4610,7 @@ def block_task(
                 outcome="blocked",
                 summary=reason,
             )
-        _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
+        blocked_event_id = _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
         if loop_root_task_id:
             _append_loop_foreground_handoff_event(
                 conn,
@@ -4244,6 +4618,7 @@ def block_task(
                 root_task_id=loop_root_task_id,
                 handoff_kind="worker_blocked",
                 run_id=run_id,
+                source_event_id=blocked_event_id,
                 reason=reason,
             )
         return True

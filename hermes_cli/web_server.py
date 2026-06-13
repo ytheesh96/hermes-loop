@@ -6910,6 +6910,37 @@ async def get_session_loop_tasks(session_id: str, board: Optional[str] = None, p
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/loop-handoffs")
+async def list_loop_handoffs_endpoint(
+    root_task_id: Optional[str] = None,
+    tenant: Optional[str] = None,
+    state: Optional[str] = None,
+    task_id: Optional[str] = None,
+    status_only: bool = False,
+    board: Optional[str] = None,
+):
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect(board=board)
+    try:
+        if status_only:
+            if not tenant or not root_task_id:
+                raise HTTPException(status_code=400, detail="status_only requires tenant and root_task_id")
+            return kb.loop_handoff_status(conn, tenant=tenant, root_task_id=root_task_id)
+        return {
+            "ok": True,
+            "handoffs": kb.list_loop_handoffs(
+                conn,
+                root_task_id=root_task_id,
+                tenant=tenant,
+                state=state,
+                task_id=task_id,
+            ),
+        }
+    finally:
+        conn.close()
+
+
 @app.delete("/api/sessions/{session_id}")
 async def delete_session_endpoint(session_id: str, profile: Optional[str] = None):
     # ``profile`` deletes a session belonging to another (local) profile by

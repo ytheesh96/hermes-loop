@@ -496,12 +496,16 @@ def test_read_folds_pending_foreground_handoff_into_node_and_index(loop_env):
     assert node["verification_state"] == "needs-orchestrator"
     assert node["handoff"]["handoff_kind"] == "worker_completed"
     assert node["handoff"]["summary"] == "tests define handoff contract"
+    assert node["handoff"]["handoff_id"] is not None
+    assert node["handoff"]["state"] == "queued"
     assert read["pending_handoffs"] == [
         {
             "task_id": worker,
             "node_id": "contract-tests",
             "handoff_kind": "worker_completed",
             "verification_state": "needs-orchestrator",
+            "handoff_id": node["handoff"]["handoff_id"],
+            "state": "queued",
             "summary": "tests define handoff contract",
         }
     ]
@@ -561,6 +565,7 @@ def test_resolve_handoff_clears_attention_without_releasing_downstream(loop_env)
     try:
         parent_task = kb.get_task(conn, parent)
         child_task = kb.get_task(conn, child)
+        durable_handoff = kb.list_loop_handoffs(conn, task_id=parent)[0]
     finally:
         conn.close()
 
@@ -569,7 +574,10 @@ def test_resolve_handoff_clears_attention_without_releasing_downstream(loop_env)
     node = _node_by_task(after, parent)
     assert node.get("attention") is None
     assert node["verification_state"] == "approved"
+    assert node["handoff"]["state"] == "approved"
     assert node["handoff"]["resolution_summary"] == "foreground accepted evidence"
+    assert durable_handoff["state"] == "approved"
+    assert durable_handoff["resolved_at"] is not None
     assert after["pending_handoffs"] == []
     assert parent_task is not None and parent_task.status == "done"
     assert child_task is not None and child_task.status == "todo"
