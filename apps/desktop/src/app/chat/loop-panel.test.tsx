@@ -57,6 +57,7 @@ function LoopHarness({ state }: { state: LoopPanelState }) {
 
 function DetailFetchHarness({ state }: { state: LoopPanelState }) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>('t_child')
+
   const selectedTaskDetail =
     selectedTaskId === 't_external'
       ? {
@@ -139,6 +140,68 @@ function actionState() {
         id: 't_archived',
         title: 'Archived task',
         status: 'archived',
+        tenant: 'tenant-a',
+        included_child_ids: [],
+        included_parent_ids: []
+      }
+    ]
+  })!
+}
+
+function collapsedAttentionState() {
+  return deriveLoopPanelStateFromTenantSource({
+    session_id: 'sess-attention',
+    tenant: 'tenant-a',
+    latest_event_id: 120,
+    tasks: [
+      {
+        id: 't_running',
+        title: 'Ordinary running task stays out of collapsed attention',
+        status: 'running',
+        tenant: 'tenant-a',
+        included_child_ids: [],
+        included_parent_ids: []
+      },
+      {
+        id: 't_blocked',
+        title: 'Blocked release gate',
+        status: 'blocked',
+        tenant: 'tenant-a',
+        child_count: 4,
+        latest_summary: 'Waiting on foreground owner',
+        included_child_ids: ['t_child_a', 't_child_b', 't_child_c', 't_child_d'],
+        included_parent_ids: []
+      },
+      {
+        id: 't_failed',
+        title: 'Worker crashed while packaging',
+        status: 'ready',
+        tenant: 'tenant-a',
+        latest_run: { id: 5, profile: 'peacock', status: 'failed', outcome: 'failed', summary: 'worker failed' },
+        included_child_ids: [],
+        included_parent_ids: []
+      },
+      {
+        id: 't_review',
+        title: 'Review handoff needs approval',
+        status: 'ready',
+        tenant: 'tenant-a',
+        latest_summary: 'review-required: needs user acceptance',
+        included_child_ids: [],
+        included_parent_ids: []
+      },
+      {
+        id: 't_handoff',
+        title: 'Foreground handoff overflow row',
+        status: 'foreground-handoff',
+        tenant: 'tenant-a',
+        included_child_ids: [],
+        included_parent_ids: []
+      },
+      {
+        id: 't_done',
+        title: 'Completed task stays out of collapsed attention',
+        status: 'done',
         tenant: 'tenant-a',
         included_child_ids: [],
         included_parent_ids: []
@@ -324,6 +387,169 @@ describe('LoopPanel', () => {
     expect(screen.queryByText(/"nodes"/)).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: /show debug json/i }))
     expect(screen.getByText(/"nodes"/)).toBeTruthy()
+  })
+
+  it('lets Loop composer row titles claim available width and only expands priority rows to two lines', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-layout',
+      tenant: 'tenant-a',
+      latest_event_id: 100,
+      tasks: [
+        {
+          id: 't_long',
+          title: 'Fix session-source env fallback and add regression coverage without premature title truncation',
+          status: 'ready',
+          tenant: 'tenant-a',
+          included_child_ids: [],
+          included_parent_ids: []
+        },
+        {
+          id: 't_blocked',
+          title: 'Blocked foreground handoff title should reveal enough context before opening details',
+          status: 'blocked',
+          tenant: 'tenant-a',
+          included_child_ids: [],
+          included_parent_ids: []
+        }
+      ]
+    })
+
+    render(<LoopTaskStack onSelectTaskId={() => undefined} selectedTaskId="t_long" state={state} />)
+
+    const selectedTitle = screen.getByTestId('loop-card-title-t_long')
+    expect(selectedTitle.className).toContain('flex-1')
+    expect(selectedTitle.className).toContain('min-w-0')
+    expect(selectedTitle.className).not.toContain('max-w-')
+    expect(selectedTitle.className).not.toContain('truncate')
+    expect(selectedTitle.className).toContain('line-clamp-2')
+    expect(selectedTitle.getAttribute('title')).toContain('Fix session-source env fallback')
+
+    const blockedTitle = screen.getByTestId('loop-card-title-t_blocked')
+    expect(blockedTitle.className).toContain('line-clamp-2')
+    expect(blockedTitle.className).not.toContain('max-w-')
+    expect(blockedTitle.getAttribute('title')).toContain('Blocked foreground handoff title')
+  })
+
+  it('keeps ordinary Loop composer rows compact and one-line until true row overflow', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-compact-layout',
+      tenant: 'tenant-a',
+      latest_event_id: 101,
+      tasks: [
+        {
+          id: 't_selected',
+          title: 'Currently selected row may use two lines',
+          status: 'ready',
+          tenant: 'tenant-a',
+          included_child_ids: [],
+          included_parent_ids: []
+        },
+        {
+          id: 't_ready',
+          title: 'Ordinary ready row title stays compact but uses the whole row before ellipsis',
+          status: 'ready',
+          tenant: 'tenant-a',
+          included_child_ids: [],
+          included_parent_ids: []
+        }
+      ]
+    })
+
+    render(<LoopTaskStack onSelectTaskId={() => undefined} selectedTaskId="t_selected" state={state} />)
+
+    const title = screen.getByTestId('loop-card-title-t_ready')
+    expect(title.className).toContain('flex-1')
+    expect(title.className).toContain('truncate')
+    expect(title.className).not.toContain('max-w-')
+    expect(title.className).not.toContain('line-clamp-2')
+    expect(title.getAttribute('title')).toContain('Ordinary ready row title')
+  })
+
+  it('keeps the collapsed Loop handle compact when there are no actionable handoffs', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-no-attention',
+      tenant: 'tenant-a',
+      latest_event_id: 110,
+      tasks: [
+        {
+          id: 't_ready',
+          title: 'Ready implementation task',
+          status: 'ready',
+          tenant: 'tenant-a',
+          included_child_ids: [],
+          included_parent_ids: []
+        },
+        {
+          id: 't_running',
+          title: 'Running implementation task',
+          status: 'running',
+          tenant: 'tenant-a',
+          included_child_ids: [],
+          included_parent_ids: []
+        },
+        {
+          id: 't_done',
+          title: 'Completed implementation task',
+          status: 'done',
+          tenant: 'tenant-a',
+          included_child_ids: [],
+          included_parent_ids: []
+        }
+      ]
+    })
+
+    render(<LoopTaskStack onSelectTaskId={() => undefined} state={state} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Loop 1\/3/i }))
+
+    expect(screen.getByText('Loop 1/3')).toBeTruthy()
+    expect(screen.queryByText(/need attention/i)).toBeNull()
+    expect(screen.queryByTestId('loop-attention-queue')).toBeNull()
+    expect(screen.queryByText('Ready implementation task')).toBeNull()
+  })
+
+  it('shows top collapsed handoffs by severity and opens the side panel without dispatching actions', () => {
+    const state = collapsedAttentionState()
+    const onTaskAction = vi.fn()
+
+    function AttentionHarness() {
+      const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
+      const [panelOpen, setPanelOpen] = useState(false)
+
+      function selectTask(taskId: string) {
+        setSelectedTaskId(taskId)
+        setPanelOpen(true)
+      }
+
+      return (
+        <>
+          <LoopTaskStack onSelectTaskId={selectTask} selectedTaskId={selectedTaskId} state={state} />
+          {panelOpen && (
+            <LoopPanel onSelectTaskId={selectTask} onTaskAction={onTaskAction} open={panelOpen} selectedTaskId={selectedTaskId} state={state} />
+          )}
+        </>
+      )
+    }
+
+    render(<AttentionHarness />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Loop 1\/6/i }))
+
+    expect(screen.getByText('4 need attention')).toBeTruthy()
+    expect(screen.getByTestId('loop-attention-queue')).toBeTruthy()
+    expect(screen.getByText('Blocked release gate')).toBeTruthy()
+    expect(screen.getByText('Worker crashed while packaging')).toBeTruthy()
+    expect(screen.getByText('Review handoff needs approval')).toBeTruthy()
+    expect(screen.queryByText('Foreground handoff overflow row')).toBeNull()
+    expect(screen.queryByText('Ordinary running task stays out of collapsed attention')).toBeNull()
+    expect(screen.queryByText('Completed task stays out of collapsed attention')).toBeNull()
+    expect(screen.queryByText(/"tasks"/)).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /Status: blocked Blocked release gate/i }))
+
+    expect(screen.getByTestId('loop-panel').getAttribute('data-state')).toBe('open')
+    expect(screen.getByRole('heading', { name: /Blocked release gate/i })).toBeTruthy()
+    expect(onTaskAction).not.toHaveBeenCalled()
   })
 
   it('renders rich task detail sections from tenant metadata and navigates dependency links', () => {

@@ -7,6 +7,8 @@ interface StatusSectionProps {
    *  `Button` with `size="micro"` + `variant="text"` or `"link"`. */
   accessory?: ReactNode
   children: ReactNode
+  /** Optional compact body shown only while the section is collapsed. */
+  collapsedContent?: ReactNode
   defaultCollapsed?: boolean
   /** Optional glyph between the caret and the label (e.g. a `Codicon`). */
   icon?: ReactNode
@@ -19,7 +21,7 @@ interface StatusSectionProps {
  * (queue, subagents, background) reads as one piece. The stack supplies the
  * outer card and the dividers between groups; this owns only its own collapse.
  */
-export function StatusSection({ accessory, children, defaultCollapsed = true, icon, label }: StatusSectionProps) {
+export function StatusSection({ accessory, children, collapsedContent, defaultCollapsed = true, icon, label }: StatusSectionProps) {
   const [collapsed, setCollapsed] = useState(defaultCollapsed)
 
   return (
@@ -36,7 +38,7 @@ export function StatusSection({ accessory, children, defaultCollapsed = true, ic
         </button>
         {accessory && <div className="flex shrink-0 items-center gap-1">{accessory}</div>}
       </div>
-      {!collapsed && <div className="px-1 pb-0.5">{children}</div>}
+      {collapsed ? collapsedContent && <div className="px-1 pb-0.5">{collapsedContent}</div> : <div className="px-1 pb-0.5">{children}</div>}
     </div>
   )
 }

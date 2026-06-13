@@ -153,6 +153,142 @@ def test_tenant_filter(client):
     assert total == 1
 
 
+def test_session_source_returns_non_archived_tenant_tasks_across_compression_lineage(client, kanban_home):
+    """Loop composer source should be real Kanban rows from the session lineage.
+
+    The current session may be a compressed continuation; tasks created before
+    compression are attached to ancestor session ids but the current Loop view
+    still needs them. Archived rows and unrelated tenants/sessions must stay out.
+    """
+    from hermes_state import SessionDB
+
+    session_db = SessionDB()
+    try:
+        session_db.create_session("root-session", "cli")
+        session_db.end_session("root-session", "compression")
+        session_db.create_session("tip-session", "cli", parent_session_id="root-session")
+    finally:
+        session_db.close()
+
+    conn = kb.connect()
+    try:
+        root = kb.create_task(
+            conn,
+            title="root closure reviewer",
+            assignee="reviewer-qa",
+            tenant="20260612_145622_dc77fb",
+            session_id="root-session",
+        )
+        child = kb.create_task(
+            conn,
+            title="tip implementation",
+            assignee="peacock",
+            tenant="20260612_145622_dc77fb",
+            session_id="tip-session",
+            parents=[root],
+        )
+        other_tenant = kb.create_task(
+            conn,
+            title="wrong tenant",
+            tenant="other",
+            session_id="root-session",
+        )
+        archived = kb.create_task(
+            conn,
+            title="archived in lineage",
+            tenant="20260612_145622_dc77fb",
+            session_id="tip-session",
+        )
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'archived' WHERE id = ?", (archived,))
+    finally:
+        conn.close()
+
+    r = client.get(
+        "/api/plugins/kanban/session-source",
+        params={"session_id": "tip-session", "tenant": "20260612_145622_dc77fb"},
+    )
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["lineage_session_ids"] == ["root-session", "tip-session"]
+    assert [task["id"] for task in data["tasks"]] == [root, child]
+    assert {task["id"] for task in data["tasks"]}.isdisjoint({archived, other_tenant})
+    assert all(task["is_container"] is False for task in data["tasks"])
+    assert data["links"] == [{"parent_id": root, "child_id": child}]
+    child_payload = next(task for task in data["tasks"] if task["id"] == child)
+    assert child_payload["links"]["parents"] == [root]
+    assert child_payload["assignee"] == "peacock"
+    assert child_payload["tenant"] == "20260612_145622_dc77fb"
+    assert child_payload["session_id"] == "tip-session"
+
+
+def test_session_source_defaults_to_hermes_session_id_when_query_omits_session_id(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setenv("HERMES_SESSION_ID", "env-session")
+
+    conn = kb.connect()
+    try:
+        keep = kb.create_task(
+            conn,
+            title="env session task",
+            tenant="20260612_145622_dc77fb",
+            session_id="env-session",
+        )
+        drop = kb.create_task(
+            conn,
+            title="other session task",
+            tenant="20260612_145622_dc77fb",
+            session_id="other-session",
+        )
+    finally:
+        conn.close()
+
+    r = client.get(
+        "/api/plugins/kanban/session-source",
+        params={"tenant": "20260612_145622_dc77fb"},
+    )
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["session_id"] == "env-session"
+    assert data["lineage_session_ids"] == ["env-session"]
+    assert [task["id"] for task in data["tasks"]] == [keep]
+    assert drop not in {task["id"] for task in data["tasks"]}
+
+
+def test_session_source_can_infer_tenant_from_lineage_tasks(client):
+    conn = kb.connect()
+    try:
+        keep = kb.create_task(
+            conn,
+            title="tenant-scoped row",
+            tenant="20260612_145622_dc77fb",
+            session_id="solo-session",
+        )
+        drop = kb.create_task(
+            conn,
+            title="tenantless scratch row",
+            tenant=None,
+            session_id="solo-session",
+        )
+    finally:
+        conn.close()
+
+    r = client.get(
+        "/api/plugins/kanban/session-source",
+        params={"session_id": "solo-session"},
+    )
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["tenant"] == "20260612_145622_dc77fb"
+    assert [task["id"] for task in data["tasks"]] == [keep]
+    assert drop not in {task["id"] for task in data["tasks"]}
+
+
 def test_board_query_param_default_overrides_current_board_pointer(client):
     """Dashboard ``?board=default`` must win even if the CLI's current-board
     pointer targets a non-default board.

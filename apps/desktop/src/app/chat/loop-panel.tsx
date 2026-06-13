@@ -64,6 +64,94 @@ function completedLoopRows(rows: LoopRow[]): number {
   }).length
 }
 
+const TERMINAL_LOOP_STATUSES = new Set(['archived', 'cancelled', 'complete', 'completed', 'done'])
+const FAILED_LOOP_STATUSES = new Set(['crashed', 'error', 'failed', 'failure', 'stale', 'timed_out', 'timeout'])
+
+function normalizedLoopValue(value?: null | string): string {
+  return (value || '').trim().toLowerCase().replaceAll('-', '_')
+}
+
+function attentionText(row: LoopRow): string {
+  return [
+    row.status,
+    row.title,
+    row.body,
+    row.result,
+    row.latestSummary,
+    row.latestRun?.error,
+    row.latestRun?.outcome,
+    row.latestRun?.status,
+    row.latestRun?.summary
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(' ')
+    .toLowerCase()
+}
+
+function attentionReason(row: LoopRow): string {
+  const status = normalizedLoopValue(row.status)
+  const runStatus = normalizedLoopValue(row.latestRun?.status)
+  const runOutcome = normalizedLoopValue(row.latestRun?.outcome)
+  const text = attentionText(row)
+
+  if (status === 'blocked') {
+    return row.childCount > 0 ? `Blocked · ${row.childCount} downstream` : 'Blocked'
+  }
+
+  if (FAILED_LOOP_STATUSES.has(status) || FAILED_LOOP_STATUSES.has(runStatus) || FAILED_LOOP_STATUSES.has(runOutcome)) {
+    return 'Worker handoff failed'
+  }
+
+  if (text.includes('review-required') || text.includes('review required')) {
+    return 'Review required'
+  }
+
+  if (text.includes('human approval') || text.includes('needs approval') || text.includes('user acceptance')) {
+    return 'Approval needed'
+  }
+
+  if (status === 'foreground_handoff') {
+    return 'Foreground handoff'
+  }
+
+  return 'Needs attention'
+}
+
+function attentionScore(row: LoopRow): number {
+  const status = normalizedLoopValue(row.status)
+  const runStatus = normalizedLoopValue(row.latestRun?.status)
+  const runOutcome = normalizedLoopValue(row.latestRun?.outcome)
+  const text = attentionText(row)
+
+  if (TERMINAL_LOOP_STATUSES.has(status) || status === 'running' || status === 'claimed' || status === 'in_progress') {
+    return 0
+  }
+
+  let score = 0
+
+  if (status === 'blocked') {
+    score = 90
+  } else if (FAILED_LOOP_STATUSES.has(status) || FAILED_LOOP_STATUSES.has(runStatus) || FAILED_LOOP_STATUSES.has(runOutcome)) {
+    score = 88
+  } else if (text.includes('review-required') || text.includes('review required')) {
+    score = 82
+  } else if (text.includes('human approval') || text.includes('needs approval') || text.includes('user acceptance')) {
+    score = 78
+  } else if (status === 'foreground_handoff') {
+    score = 70
+  }
+
+  return score ? score + Math.min(row.childCount, 8) : 0
+}
+
+function attentionRows(rows: LoopRow[]): LoopRow[] {
+  return rows
+    .map((row, index) => ({ index, row, score: attentionScore(row) }))
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score || b.row.childCount - a.row.childCount || a.index - b.index)
+    .map(item => item.row)
+}
+
 function idsFromTask(task: TenantLoopTask, key: 'children' | 'parents'): string[] {
   const includedKey = key === 'parents' ? 'included_parent_ids' : 'included_child_ids'
   const explicit = task[includedKey] || task.links?.[key] || []
@@ -141,7 +229,15 @@ interface LoopStackRowProps {
   selected: boolean
 }
 
+function isExpandedLoopTitleRow(row: LoopRow, selected: boolean): boolean {
+  const status = row.status.toLowerCase()
+
+  return selected || status === 'blocked' || status === 'foreground-handoff' || status === 'foreground_handoff'
+}
+
 function LoopStackRow({ onSelect, row, selected }: LoopStackRowProps) {
+  const expandedTitle = isExpandedLoopTitleRow(row, selected)
+
   return (
     <div data-testid={`loop-card-${row.taskId}`}>
       <StatusRow
@@ -151,13 +247,46 @@ function LoopStackRow({ onSelect, row, selected }: LoopStackRowProps) {
       >
         <span
           className={cn(
-            'min-w-0 max-w-[18rem] truncate text-[0.73rem] leading-4',
+            'min-w-0 flex-1 text-[0.73rem] leading-4',
+            expandedTitle ? 'line-clamp-2 whitespace-normal break-words' : 'truncate',
             selected ? 'text-foreground/92' : 'text-muted-foreground/75'
           )}
+          data-testid={`loop-card-title-${row.taskId}`}
+          title={row.title}
         >
           {row.title}
         </span>
       </StatusRow>
+    </div>
+  )
+}
+
+function LoopAttentionRow({ onSelect, row }: { onSelect: (taskId: string) => void; row: LoopRow }) {
+  return (
+    <StatusRow leading={<LoopStatusIndicator row={row} />} onActivate={() => onSelect(row.taskId)}>
+      <span className="min-w-0 flex-1 text-[0.72rem] leading-4 text-foreground/85" title={row.title}>
+        <span className="block truncate">{row.title}</span>
+        <span className="block truncate text-[0.65rem] text-muted-foreground/70">{attentionReason(row)}</span>
+      </span>
+    </StatusRow>
+  )
+}
+
+function LoopCollapsedAttentionQueue({ onSelectTaskId, rows }: { onSelectTaskId: (taskId: string) => void; rows: LoopRow[] }) {
+  if (rows.length === 0) {
+    return null
+  }
+
+  const visibleRows = rows.slice(0, 3)
+
+  return (
+    <div className="grid gap-0.5 rounded-lg border border-amber-500/25 bg-amber-500/8 px-1 py-1" data-testid="loop-attention-queue">
+      <div className="px-1.5 pb-0.5 text-[0.67rem] font-medium uppercase tracking-wide text-amber-700 dark:text-amber-300">
+        {rows.length} need attention
+      </div>
+      {visibleRows.map(row => (
+        <LoopAttentionRow key={row.taskId} onSelect={onSelectTaskId} row={row} />
+      ))}
     </div>
   )
 }
@@ -170,6 +299,7 @@ interface LoopTaskStackProps {
 
 export function LoopTaskStack({ onSelectTaskId, selectedTaskId, state }: LoopTaskStackProps) {
   const selected = useMemo(() => selectedRowFrom(state, selectedTaskId), [selectedTaskId, state])
+  const collapsedAttentionRows = useMemo(() => attentionRows(state?.rows || []), [state])
 
   if (!state || state.rows.length === 0) {
     return null
@@ -177,6 +307,7 @@ export function LoopTaskStack({ onSelectTaskId, selectedTaskId, state }: LoopTas
 
   return (
     <StatusSection
+      collapsedContent={<LoopCollapsedAttentionQueue onSelectTaskId={onSelectTaskId} rows={collapsedAttentionRows} />}
       defaultCollapsed={false}
       icon={<Codicon className="text-muted-foreground/70" name="checklist" size="0.8rem" />}
       label={`Loop ${completedLoopRows(state.rows)}/${state.rows.length}`}
@@ -462,6 +593,7 @@ export function LoopPanel({
     () => selectedRowFrom(state, selectedTaskId, selectedTaskDetail),
     [selectedTaskDetail, selectedTaskId, state]
   )
+
   const rowById = useMemo(() => {
     const rows = state?.rows || []
     const map = new Map(rows.map(row => [row.taskId, row]))

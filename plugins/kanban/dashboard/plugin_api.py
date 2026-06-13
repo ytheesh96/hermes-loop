@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import time
 from dataclasses import asdict
@@ -369,6 +370,312 @@ def _links_for(conn: sqlite3.Connection, task_id: str) -> dict[str, list[str]]:
         )
     ]
     return {"parents": parents, "children": children}
+
+
+def _session_compression_lineage(session_id: Optional[str]) -> list[str]:
+    """Return compression-root → current/tip lineage ids for a session.
+
+    If the session store is unavailable (common in isolated tests or fresh
+    installs), degrade to the provided session id. The endpoint remains useful
+    for tasks whose ``session_id`` was already stored on Kanban rows.
+    """
+    sid = (session_id or os.environ.get("HERMES_SESSION_ID") or "").strip()
+    if not sid:
+        return []
+
+    try:
+        from hermes_state import DEFAULT_DB_PATH, SessionDB
+    except Exception:
+        return [sid]
+
+    try:
+        if not DEFAULT_DB_PATH.exists():
+            return [sid]
+        session_db = SessionDB(read_only=True)
+    except Exception:
+        return [sid]
+
+    try:
+        root = sid
+        seen = {sid}
+        # Walk backward only across compression-continuation edges. Branch and
+        # delegate children also have parent_session_id, but their parent was not
+        # ended for compression before the child began.
+        for _ in range(100):
+            row = session_db._conn.execute(  # read-only, no public ancestor helper
+                """
+                SELECT parent.id AS parent_id
+                FROM sessions child
+                JOIN sessions parent ON parent.id = child.parent_session_id
+                WHERE child.id = ?
+                  AND parent.end_reason = 'compression'
+                  AND child.started_at >= parent.ended_at
+                """,
+                (root,),
+            ).fetchone()
+            if not row or row["parent_id"] in seen:
+                break
+            root = row["parent_id"]
+            seen.add(root)
+        lineage = session_db.get_compression_lineage(root)
+        if sid not in lineage:
+            lineage.append(sid)
+        return lineage
+    except Exception:
+        return [sid]
+    finally:
+        try:
+            session_db.close()
+        except Exception:
+            pass
+
+
+def _infer_session_source_tenants(
+    conn: sqlite3.Connection,
+    lineage_session_ids: list[str],
+) -> list[str]:
+    if not lineage_session_ids:
+        return []
+    placeholders = ",".join("?" for _ in lineage_session_ids)
+    return [
+        r["tenant"]
+        for r in conn.execute(
+            f"""
+            SELECT DISTINCT tenant
+            FROM tasks
+            WHERE session_id IN ({placeholders})
+              AND tenant IS NOT NULL
+              AND status != 'archived'
+            ORDER BY tenant
+            """,
+            tuple(lineage_session_ids),
+        )
+    ]
+
+
+def _compact_task_context(task: kanban_db.Task) -> dict[str, Any]:
+    return {
+        "id": task.id,
+        "title": task.title,
+        "status": task.status,
+        "assignee": task.assignee,
+        "tenant": task.tenant,
+        "session_id": task.session_id,
+        "created_at": task.created_at,
+        "completed_at": task.completed_at,
+    }
+
+
+def _topologically_order_tasks(
+    tasks: list[kanban_db.Task],
+    links: list[dict[str, str]],
+) -> list[kanban_db.Task]:
+    """Stable Kahn ordering over returned tasks; ties keep creation order."""
+    task_by_id = {t.id: t for t in tasks}
+    original = {t.id: idx for idx, t in enumerate(tasks)}
+    indegree = {t.id: 0 for t in tasks}
+    children: dict[str, list[str]] = {t.id: [] for t in tasks}
+    for link in links:
+        parent_id = link["parent_id"]
+        child_id = link["child_id"]
+        if parent_id in task_by_id and child_id in task_by_id:
+            children[parent_id].append(child_id)
+            indegree[child_id] += 1
+    ready = sorted(
+        [task_id for task_id, degree in indegree.items() if degree == 0],
+        key=lambda task_id: original[task_id],
+    )
+    ordered: list[kanban_db.Task] = []
+    while ready:
+        task_id = ready.pop(0)
+        ordered.append(task_by_id[task_id])
+        for child_id in sorted(children[task_id], key=lambda cid: original[cid]):
+            indegree[child_id] -= 1
+            if indegree[child_id] == 0:
+                ready.append(child_id)
+                ready.sort(key=lambda cid: original[cid])
+    if len(ordered) != len(tasks):
+        # Cycles should be prevented at write time, but preserve all real rows if
+        # a legacy DB contains one.
+        ordered_ids = {t.id for t in ordered}
+        ordered.extend(t for t in tasks if t.id not in ordered_ids)
+    return ordered
+
+
+def _latest_runs_for_tasks(
+    conn: sqlite3.Connection,
+    task_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    if not task_ids:
+        return {}
+    placeholders = ",".join("?" for _ in task_ids)
+    rows = conn.execute(
+        f"""
+        SELECT * FROM (
+            SELECT r.*, ROW_NUMBER() OVER (
+                PARTITION BY r.task_id ORDER BY r.started_at DESC, r.id DESC
+            ) AS rn
+            FROM task_runs r
+            WHERE r.task_id IN ({placeholders})
+        ) ranked
+        WHERE rn = 1
+        """,
+        tuple(task_ids),
+    ).fetchall()
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        run = kanban_db.Run.from_row(row)
+        out[run.task_id] = _run_dict(run)
+    return out
+
+
+@router.get("/session-source")
+def get_session_source(
+    session_id: Optional[str] = Query(
+        None,
+        description="Current Loop session id; defaults to HERMES_SESSION_ID when omitted",
+    ),
+    tenant: Optional[str] = Query(
+        None,
+        description="Optional tenant override. When omitted, non-null tenants are inferred from lineage tasks.",
+    ),
+    include_archived: bool = Query(False),
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Return real Kanban tasks for the current Loop compression lineage.
+
+    The response is intentionally flat: every row is a real ``tasks`` row. The
+    ``links`` array contains only formal ``task_links`` prerequisite edges; no
+    synthetic root/container node is added.
+    """
+    board = _resolve_board(board)
+    lineage_session_ids = _session_compression_lineage(session_id)
+    if not lineage_session_ids:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    conn = _conn(board=board)
+    try:
+        explicit_tenant = (tenant or "").strip() or None
+        inferred_tenants = [] if explicit_tenant else _infer_session_source_tenants(conn, lineage_session_ids)
+        tenant_filters = [explicit_tenant] if explicit_tenant else inferred_tenants
+
+        params: list[Any] = list(lineage_session_ids)
+        where = [
+            f"session_id IN ({','.join('?' for _ in lineage_session_ids)})",
+        ]
+        if not include_archived:
+            where.append("status != 'archived'")
+        if tenant_filters:
+            where.append(f"tenant IN ({','.join('?' for _ in tenant_filters)})")
+            params.extend(tenant_filters)
+
+        rows = conn.execute(
+            f"""
+            SELECT * FROM tasks
+            WHERE {' AND '.join(where)}
+            ORDER BY created_at ASC, priority DESC, id ASC
+            """,
+            tuple(params),
+        ).fetchall()
+        tasks = [kanban_db.Task.from_row(row) for row in rows]
+        task_ids = [task.id for task in tasks]
+        task_id_set = set(task_ids)
+
+        if task_ids:
+            link_rows = conn.execute(
+                f"""
+                SELECT parent_id, child_id
+                FROM task_links
+                WHERE parent_id IN ({','.join('?' for _ in task_ids)})
+                   OR child_id IN ({','.join('?' for _ in task_ids)})
+                ORDER BY parent_id, child_id
+                """,
+                tuple(task_ids + task_ids),
+            ).fetchall()
+        else:
+            link_rows = []
+        all_links = [
+            {"parent_id": row["parent_id"], "child_id": row["child_id"]}
+            for row in link_rows
+        ]
+        included_links = [
+            link for link in all_links
+            if link["parent_id"] in task_id_set and link["child_id"] in task_id_set
+        ]
+
+        context_ids = sorted(
+            {
+                endpoint
+                for link in all_links
+                for endpoint in (link["parent_id"], link["child_id"])
+                if endpoint not in task_id_set
+            }
+        )
+        context: dict[str, dict[str, Any]] = {}
+        if context_ids:
+            context_rows = conn.execute(
+                f"SELECT * FROM tasks WHERE id IN ({','.join('?' for _ in context_ids)})",
+                tuple(context_ids),
+            ).fetchall()
+            context = {
+                row["id"]: _compact_task_context(kanban_db.Task.from_row(row))
+                for row in context_rows
+            }
+
+        summary_map = kanban_db.latest_summaries(conn, task_ids)
+        latest_runs = _latest_runs_for_tasks(conn, task_ids)
+        comment_counts: dict[str, int] = {}
+        if task_ids:
+            comment_counts = {
+                r["task_id"]: r["n"]
+                for r in conn.execute(
+                    f"""
+                    SELECT task_id, COUNT(*) AS n
+                    FROM task_comments
+                    WHERE task_id IN ({','.join('?' for _ in task_ids)})
+                    GROUP BY task_id
+                    """,
+                    tuple(task_ids),
+                )
+            }
+        diagnostics = _compute_task_diagnostics(conn, task_ids=task_ids) if task_ids else {}
+
+        ordered_tasks = _topologically_order_tasks(tasks, included_links)
+        payload_tasks: list[dict[str, Any]] = []
+        for task in ordered_tasks:
+            task_links = _links_for(conn, task.id)
+            item = _task_dict(task, latest_summary=summary_map.get(task.id))
+            item["is_container"] = False
+            item["links"] = task_links
+            item["included_parent_ids"] = [pid for pid in task_links["parents"] if pid in task_id_set]
+            item["included_child_ids"] = [cid for cid in task_links["children"] if cid in task_id_set]
+            item["external_parent_tasks"] = [
+                context[pid] for pid in task_links["parents"] if pid in context
+            ]
+            item["external_child_tasks"] = [
+                context[cid] for cid in task_links["children"] if cid in context
+            ]
+            item["comment_count"] = comment_counts.get(task.id, 0)
+            item["latest_run"] = latest_runs.get(task.id)
+            if task.id in diagnostics:
+                item["diagnostics"] = diagnostics[task.id]
+                item["warnings"] = _warnings_summary_from_diagnostics(diagnostics[task.id])
+            payload_tasks.append(item)
+
+        return {
+            "session_id": (session_id or os.environ.get("HERMES_SESSION_ID") or "").strip(),
+            "lineage_session_ids": lineage_session_ids,
+            "tenant": explicit_tenant or (inferred_tenants[0] if len(inferred_tenants) == 1 else None),
+            "tenants": tenant_filters,
+            "include_archived": include_archived,
+            "tasks": payload_tasks,
+            "links": included_links,
+            "external_links": [link for link in all_links if link not in included_links],
+            "latest_event_id": int(conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM task_events").fetchone()["m"]),
+            "now": int(time.time()),
+        }
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
