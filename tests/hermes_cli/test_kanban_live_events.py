@@ -1,0 +1,132 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+
+
+@pytest.fixture
+def kanban_home(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    return home
+
+
+def _capture_publishes(monkeypatch):
+    from hermes_cli import kanban_live_events as live
+
+    frames: list[dict] = []
+    monkeypatch.setattr(live, "_publish_frame", lambda frame: frames.append(frame) or True)
+    monkeypatch.setenv("HERMES_KANBAN_EVENT_PUBLISHER_URL", "ws://events.example/pub")
+    return frames
+
+
+def _event_payload(frame: dict) -> dict:
+    assert frame["jsonrpc"] == "2.0"
+    assert frame["method"] == "event"
+    return frame["params"]["payload"]
+
+
+def test_task_event_append_emits_loop_source_changed_with_identity(kanban_home, monkeypatch):
+    frames = _capture_publishes(monkeypatch)
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="Loop row",
+            assignee="worker",
+            tenant="tenant-a",
+            session_id="source-session-1",
+        )
+    finally:
+        conn.close()
+
+    source_frames = [f for f in frames if f["params"]["type"] == "loop.source_changed"]
+    assert source_frames, "task creation should invalidate open Loop source caches"
+    payload = _event_payload(source_frames[-1])
+    assert payload["schema_version"] == 1
+    assert payload["event"] == "loop.source_changed"
+    assert payload["tenant"] == "tenant-a"
+    assert payload["affected_task_ids"] == [tid]
+    assert "task_created" in payload["changed_kinds"]
+    assert payload["source_session_id"] == "source-session-1"
+    assert isinstance(payload["latest_task_event_id"], int)
+    assert "body" not in payload
+
+
+def test_worker_terminal_event_emits_namespaced_completion(kanban_home, monkeypatch, all_assignees_spawnable):
+    frames = _capture_publishes(monkeypatch)
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="Ship thing", assignee="peacock", tenant="tenant-a")
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: 4242)
+        assert [item[0] for item in res.spawned] == [tid]
+        run_id = kb.get_task(conn, tid).current_run_id
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="implemented backend events",
+            metadata={"worker_session_id": "worker-sess-1", "tests_run": 3, "tests_passed": 3},
+            expected_run_id=run_id,
+        )
+    finally:
+        conn.close()
+
+    worker_frames = [f for f in frames if f["params"]["type"] == "kanban.worker.complete"]
+    assert worker_frames, "completion should produce a live worker terminal event"
+    payload = _event_payload(worker_frames[-1])
+    assert payload["event"] == "kanban.worker.complete"
+    assert payload["task_id"] == tid
+    assert payload["run_id"] == run_id
+    assert payload["profile"] == "peacock"
+    assert payload["worker_session_id"] == "worker-sess-1"
+    assert payload["task_title"] == "Ship thing"
+    assert payload["task_status"] == "done"
+    assert payload["run_status"] == "completed"
+    assert payload["outcome"] == "completed"
+    assert payload["safe_summary"] == "implemented backend events"
+    assert payload["tests_run"] == 3
+    assert payload["tests_passed"] == 3
+    assert "metadata" not in payload
+
+
+def test_worker_callback_bridge_emits_structured_tool_events(kanban_home, monkeypatch, all_assignees_spawnable):
+    frames = _capture_publishes(monkeypatch)
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="Use tools", assignee="peacock", tenant="tenant-a")
+        kb.dispatch_once(conn, spawn_fn=lambda task, workspace: 4242)
+        task = kb.get_task(conn, tid)
+        run_id = task.current_run_id
+    finally:
+        conn.close()
+
+    from hermes_cli.kanban_live_events import KanbanWorkerEventBridge
+
+    bridge = KanbanWorkerEventBridge.from_env(
+        task_id=tid,
+        run_id=run_id,
+        board="default",
+        profile="peacock",
+        worker_session_id="worker-sess-1",
+    )
+    bridge.tool_start("call-1", "read_file", {"path": "/tmp/example.txt"})
+    bridge.tool_progress("tool.output", "read_file", "read 12 lines", None)
+    bridge.tool_complete("call-1", "terminal", {}, json.dumps({"exit_code": 0, "output": "secret raw output must not appear"}))
+
+    types = [f["params"]["type"] for f in frames]
+    assert "kanban.worker.tool_start" in types
+    assert "kanban.worker.tool_progress" in types
+    assert "kanban.worker.tool_complete" in types
+    complete_payload = _event_payload([f for f in frames if f["params"]["type"] == "kanban.worker.tool_complete"][-1])
+    assert complete_payload["tool_call_id"] == "call-1"
+    assert complete_payload["tool_name"] == "terminal"
+    assert complete_payload["exit_code"] == 0
+    assert complete_payload["success"] is True
+    assert "secret raw output" not in json.dumps(complete_payload)

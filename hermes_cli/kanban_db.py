@@ -2714,11 +2714,27 @@ def _append_event(
     """
     now = int(time.time())
     pl = json.dumps(payload, ensure_ascii=False) if payload else None
-    conn.execute(
+    cur = conn.execute(
         "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
         "VALUES (?, ?, ?, ?, ?)",
         (task_id, run_id, kind, pl, now),
     )
+    try:
+        from hermes_cli.kanban_live_events import emit_for_task_event
+
+        emit_for_task_event(
+            conn,
+            task_id=task_id,
+            kind=kind,
+            payload=payload,
+            run_id=run_id,
+            event_row_id=cur.lastrowid,
+            created_at=now,
+            board=os.environ.get("HERMES_KANBAN_BOARD"),
+        )
+    except Exception:
+        # Live events are best-effort; durable task_events remain authoritative.
+        pass
 
 
 def _loop_root_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
@@ -6810,6 +6826,7 @@ def _default_spawn(
     if task.tenant:
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
+    env["HERMES_KANBAN_TASK_TITLE"] = task.title
     env["HERMES_KANBAN_WORKSPACE"] = workspace
     if task.branch_name:
         env["HERMES_KANBAN_BRANCH"] = task.branch_name
@@ -6849,6 +6866,8 @@ def _default_spawn(
     # board slug still forces it to the right directory.
     resolved_board = _normalize_board_slug(board) or get_current_board()
     env["HERMES_KANBAN_BOARD"] = resolved_board
+    if env.get("HERMES_TUI_SIDECAR_URL") and not env.get("HERMES_KANBAN_EVENT_PUBLISHER_URL"):
+        env["HERMES_KANBAN_EVENT_PUBLISHER_URL"] = env["HERMES_TUI_SIDECAR_URL"]
     # HERMES_PROFILE is the author the kanban_comment tool defaults to.
     # `hermes -p <assignee>` activates the profile, but the env var is
     # what the tool reads — set it explicitly here so comments are

@@ -340,6 +340,69 @@ class CLIAgentSetupMixin:
                 "credential_pool": getattr(self, "_credential_pool", None),
             }
             effective_model = model_override or self.model
+            kanban_live_bridge = None
+            if os.environ.get("HERMES_KANBAN_TASK"):
+                try:
+                    from hermes_cli.kanban_live_events import KanbanWorkerEventBridge
+
+                    kanban_live_bridge = KanbanWorkerEventBridge.from_env(
+                        worker_session_id=self.session_id,
+                    )
+                    if kanban_live_bridge is not None:
+                        kanban_live_bridge.task_title = os.environ.get("HERMES_KANBAN_TASK_TITLE", "")
+                except Exception:
+                    kanban_live_bridge = None
+
+            base_reasoning_cb = self._current_reasoning_callback()
+            if kanban_live_bridge is not None:
+                base_tool_progress_cb = self._on_tool_progress
+                base_tool_start_cb = self._on_tool_start if self._inline_diffs_enabled else None
+                base_tool_complete_cb = self._on_tool_complete if self._inline_diffs_enabled else None
+                base_thinking_cb = self._on_thinking
+
+                def _kanban_tool_progress(event_type, name=None, preview=None, args=None, **kwargs):
+                    try:
+                        base_tool_progress_cb(event_type, name, preview, args, **kwargs)
+                    finally:
+                        kanban_live_bridge.tool_progress(event_type, name, preview, args, **kwargs)
+
+                def _kanban_tool_start(tc_id, name, args):
+                    if base_tool_start_cb is not None:
+                        base_tool_start_cb(tc_id, name, args)
+                    kanban_live_bridge.tool_start(tc_id, name, args)
+
+                def _kanban_tool_complete(tc_id, name, args, result):
+                    if base_tool_complete_cb is not None:
+                        base_tool_complete_cb(tc_id, name, args, result)
+                    kanban_live_bridge.tool_complete(tc_id, name, args, result)
+
+                def _kanban_thinking(text):
+                    base_thinking_cb(text)
+                    kanban_live_bridge.thinking(text)
+
+                def _kanban_reasoning(text):
+                    if base_reasoning_cb is not None:
+                        base_reasoning_cb(text)
+                    kanban_live_bridge.thinking(text)
+
+                def _kanban_status(kind, text=None):
+                    body = text if text is not None else kind
+                    kanban_live_bridge.progress(str(body), phase="other")
+
+                tool_progress_cb = _kanban_tool_progress
+                tool_start_cb = _kanban_tool_start
+                tool_complete_cb = _kanban_tool_complete
+                thinking_cb = _kanban_thinking
+                reasoning_cb = _kanban_reasoning
+                status_cb = _kanban_status
+            else:
+                tool_progress_cb = self._on_tool_progress
+                tool_start_cb = self._on_tool_start if self._inline_diffs_enabled else None
+                tool_complete_cb = self._on_tool_complete if self._inline_diffs_enabled else None
+                thinking_cb = self._on_thinking
+                reasoning_cb = base_reasoning_cb
+                status_cb = None
+
             self.agent = AIAgent(
                 model=effective_model,
                 api_key=runtime.get("api_key"),
@@ -372,10 +435,10 @@ class CLIAgentSetupMixin:
                 platform="cli",
                 session_db=self._session_db,
                 clarify_callback=self._clarify_callback,
-                reasoning_callback=self._current_reasoning_callback(),
+                reasoning_callback=reasoning_cb,
 
                 fallback_model=self._fallback_model,
-                thinking_callback=self._on_thinking,
+                thinking_callback=thinking_cb,
                 checkpoints_enabled=self.checkpoints_enabled,
                 checkpoint_max_snapshots=self.checkpoint_max_snapshots,
                 checkpoint_max_total_size_mb=self.checkpoint_max_total_size_mb,
@@ -383,11 +446,12 @@ class CLIAgentSetupMixin:
                 pass_session_id=self.pass_session_id,
                 skip_context_files=self.ignore_rules,
                 skip_memory=self.ignore_rules,
-                tool_progress_callback=self._on_tool_progress,
-                tool_start_callback=self._on_tool_start if self._inline_diffs_enabled else None,
-                tool_complete_callback=self._on_tool_complete if self._inline_diffs_enabled else None,
+                tool_progress_callback=tool_progress_cb,
+                tool_start_callback=tool_start_cb,
+                tool_complete_callback=tool_complete_cb,
                 stream_delta_callback=self._stream_delta if self.streaming_enabled else None,
                 tool_gen_callback=self._on_tool_gen_start if self.streaming_enabled else None,
+                status_callback=status_cb,
                 notice_callback=self._on_notice,
                 notice_clear_callback=self._on_notice_clear,
             )
