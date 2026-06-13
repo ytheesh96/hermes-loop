@@ -4,6 +4,7 @@ import json
 import pytest
 
 from tools.cronjob_tools import (
+    _normalize_deliver_param,
     _scan_cron_prompt,
     check_cronjob_requirements,
     cronjob,
@@ -527,6 +528,18 @@ class TestUnifiedCronjobTool:
         assert updated["success"] is True
         stored = get_job(created["job_id"])
         assert stored["deliver"] == "telegram"
+
+    def test_notify_session_wildcard_expands_to_current_session_key(self, monkeypatch):
+        from gateway.session_context import set_session_vars, clear_session_vars
+
+        tokens = set_session_vars(session_key="agent:main:cli:local:abc123")
+        try:
+            assert (
+                _normalize_deliver_param("origin,notify-session:*")
+                == "origin,notify-session:agent:main:cli:local:abc123"
+            )
+        finally:
+            clear_session_vars(tokens)
 
 
 # =========================================================================

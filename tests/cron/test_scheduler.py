@@ -530,6 +530,16 @@ class TestResolveDeliveryTarget:
 
         assert _resolve_delivery_targets({"deliver": []}) == []
 
+    def test_explicit_notify_session_target_is_supported(self):
+        """deliver: 'notify-session:<session_key>' resolves as an internal session-local target."""
+        job = {"deliver": "notify-session:agent:main:cli:local:abc123"}
+
+        assert _resolve_delivery_target(job) == {
+            "platform": "notify-session",
+            "chat_id": "agent:main:cli:local:abc123",
+            "thread_id": None,
+        }
+
 
 class TestRoutingIntents:
     """``all`` routing intent expands at fire time."""
@@ -992,6 +1002,47 @@ class TestDeliverResultWrapping:
 
         send_mock.assert_called_once()
         assert send_mock.call_args.kwargs["thread_id"] == "17585"
+
+    def test_notify_session_delivery_enqueues_local_notification(self, monkeypatch):
+        """notify-session targets use the local notification queue, not gateway platforms."""
+        from tools.process_registry import process_registry
+
+        while not process_registry.completion_queue.empty():
+            process_registry.completion_queue.get_nowait()
+
+        target = "agent:main:cli:local:abc123"
+        monkeypatch.setattr("cron.scheduler._notify_session_target_exists", lambda value: value == target)
+
+        with patch("gateway.config.load_gateway_config") as load_gateway_config, \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock()) as send_mock:
+            result = _deliver_result(
+                {"id": "cron-local", "name": "local smoke", "deliver": f"notify-session:{target}"},
+                "session-local output",
+            )
+
+        assert result is None
+        load_gateway_config.assert_not_called()
+        send_mock.assert_not_called()
+        evt = process_registry.completion_queue.get_nowait()
+        assert evt["type"] == "cron_delivery"
+        assert evt["session_key"] == target
+        assert evt["job_id"] == "cron-local"
+        assert "session-local output" in evt["output"]
+
+    def test_notify_session_delivery_reports_absent_target(self, monkeypatch):
+        """Absent session targets fail explicitly instead of falling back to Discord/home channels."""
+        monkeypatch.setattr("cron.scheduler._notify_session_target_exists", lambda _value: False)
+
+        with patch("gateway.config.load_gateway_config") as load_gateway_config, \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock()) as send_mock:
+            result = _deliver_result(
+                {"id": "cron-local", "deliver": "notify-session:missing-session"},
+                "output",
+            )
+
+        assert result == "notify-session target 'missing-session' is not active"
+        load_gateway_config.assert_not_called()
+        send_mock.assert_not_called()
 
 
 class TestDeliverResultErrorReturns:

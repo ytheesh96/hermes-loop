@@ -245,8 +245,10 @@ _KNOWN_DELIVERY_PLATFORMS = frozenset({
     "telegram", "discord", "slack", "whatsapp", "signal",
     "matrix", "mattermost", "homeassistant", "dingtalk", "feishu",
     "wecom", "wecom_callback", "weixin", "sms", "email", "webhook", "bluebubbles",
-    "qqbot", "yuanbao",
+    "qqbot", "yuanbao", "notify-session",
 })
+
+_NOTIFY_SESSION_PLATFORM = "notify-session"
 
 # Platforms that support a configured cron/notification home target, mapped to
 # the environment variable used by gateway setup/runtime config.
@@ -1320,6 +1322,78 @@ def _resolve_delivery_target(job: dict) -> Optional[dict]:
     return targets[0] if targets else None
 
 
+def _notify_session_target_exists(target_session: str) -> bool:
+    """Return True when ``target_session`` names a live local Hermes session.
+
+    ``notify-session`` is an internal cron delivery platform for desktop/TUI/CLI
+    local notification routing.  Accept either a TUI ``session_key`` or an agent
+    ``session_id`` so callers can use whichever identifier the creating surface
+    exposes.
+    """
+    target = str(target_session or "").strip()
+    if not target:
+        return False
+
+    try:
+        from tui_gateway import server as tui_server
+
+        sessions_lock = getattr(tui_server, "_sessions_lock", None)
+        sessions = getattr(tui_server, "_sessions", {})
+        if sessions_lock is not None:
+            with sessions_lock:
+                snapshot = list(sessions.items())
+        else:
+            snapshot = list(sessions.items())
+        for sid, session in snapshot:
+            if not isinstance(session, dict):
+                continue
+            if target == str(sid) or target == str(session.get("session_key") or ""):
+                if not session.get("_finalized"):
+                    return True
+    except Exception:
+        pass
+
+    try:
+        from hermes_cli.active_sessions import active_session_registry_snapshot
+
+        for entry in active_session_registry_snapshot():
+            if target == str(entry.get("session_id") or ""):
+                return True
+            metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+            if target == str(metadata.get("session_key") or ""):
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _deliver_notify_session(job: dict, target_session: str, content: str) -> Optional[str]:
+    """Queue a cron delivery for a local session notification poller."""
+    target = str(target_session or "").strip()
+    if not _notify_session_target_exists(target):
+        return f"notify-session target '{target}' is not active"
+
+    try:
+        from tools.process_registry import process_registry
+
+        job_id = str(job.get("id", "cron") or "cron")
+        process_registry.completion_queue.put({
+            "type": "cron_delivery",
+            "session_id": f"cron:{job_id}:{_hermes_now().timestamp()}",
+            "session_key": target,
+            "command": f"cron job {job.get('name') or job_id}",
+            "exit_code": 0,
+            "output": content,
+            "job_id": job_id,
+            "job_name": str(job.get("name") or job_id),
+        })
+        logger.info("Job '%s': queued notify-session delivery for %s", job_id, target)
+        return None
+    except Exception as exc:
+        return f"notify-session delivery to '{target}' failed: {exc}"
+
+
 # Media extension sets — audio routing is centralized in gateway.platforms.base
 # via should_send_media_as_audio() so Telegram-specific rules stay in one place.
 _VIDEO_EXTS = frozenset({'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'})
@@ -1524,6 +1598,24 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
 
+    # Internal local-session targets do not use gateway platform config or
+    # standalone send_message delivery; queue them directly for the owning
+    # session's notification poller.
+    delivery_errors = []
+    remaining_targets = []
+    for target in targets:
+        platform_name = target["platform"]
+        if str(platform_name).lower() == _NOTIFY_SESSION_PLATFORM:
+            error = _deliver_notify_session(job, str(target["chat_id"]), cleaned_delivery_content.strip())
+            if error:
+                logger.warning("Job '%s': %s", job["id"], error)
+                delivery_errors.append(error)
+        else:
+            remaining_targets.append(target)
+
+    if not remaining_targets:
+        return "; ".join(delivery_errors) if delivery_errors else None
+
     # Resolve the delivery-mirror gate ONCE (default off). When on, each
     # successful delivery is also appended to the target chat's gateway session
     # transcript so a user reply in that chat sees the cron output in context.
@@ -1537,6 +1629,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         _, mirror_text = BasePlatformAdapter.extract_media(content)
         mirror_text = (mirror_text or "").strip()
 
+
     try:
         config = load_gateway_config()
     except Exception as e:
@@ -1544,9 +1637,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         logger.error("Job '%s': %s", job["id"], msg)
         return msg
 
-    delivery_errors = []
-
-    for target in targets:
+    for target in remaining_targets:
         platform_name = target["platform"]
         chat_id = target["chat_id"]
         thread_id = target.get("thread_id")

@@ -2183,6 +2183,9 @@ def format_process_notification(evt: dict) -> "str | None":
     if evt_type == "watch_disabled":
         return f"[IMPORTANT: {evt.get('message', '')}]"
 
+    if evt_type == "cron_delivery":
+        return str(evt.get("output") or "") or None
+
     if evt_type == "watch_match":
         _pat = evt.get("pattern", "?")
         _out = evt.get("output", "")

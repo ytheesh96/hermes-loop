@@ -7,6 +7,7 @@ Compatibility wrappers remain for direct Python callers and legacy tests.
 
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -424,6 +425,24 @@ def _normalize_optional_job_value(value: Optional[Any], *, strip_trailing_slash:
     return text or None
 
 
+def _current_notify_session_target() -> Optional[str]:
+    """Best-effort identifier for ``deliver='notify-session:*'`` at create time."""
+    try:
+        from gateway.session_context import get_session_env
+
+        for key in ("HERMES_SESSION_KEY", "HERMES_SESSION_ID"):
+            value = str(get_session_env(key) or "").strip()
+            if value:
+                return value
+    except Exception:
+        pass
+    for key in ("HERMES_SESSION_KEY", "HERMES_SESSION_ID"):
+        value = str(os.getenv(key, "") or "").strip()
+        if value:
+            return value
+    return None
+
+
 def _normalize_deliver_param(value: Any) -> Optional[str]:
     """Normalize a user-supplied ``deliver`` value to the canonical string form.
 
@@ -442,6 +461,10 @@ def _normalize_deliver_param(value: Any) -> Optional[str]:
         parts = [str(p).strip() for p in value if str(p).strip()]
         return ",".join(parts) if parts else None
     text = str(value).strip()
+    if "notify-session:*" in text:
+        target = _current_notify_session_target()
+        if target:
+            text = text.replace("notify-session:*", f"notify-session:{target}")
     return text or None
 
 
