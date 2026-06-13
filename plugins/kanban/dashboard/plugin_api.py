@@ -433,11 +433,27 @@ def _session_compression_lineage(session_id: Optional[str]) -> list[str]:
 def _infer_session_source_tenants(
     conn: sqlite3.Connection,
     lineage_session_ids: list[str],
-) -> list[str]:
+) -> tuple[list[str], bool]:
     if not lineage_session_ids:
-        return []
+        return [], False
     placeholders = ",".join("?" for _ in lineage_session_ids)
-    return [
+    lineage_tenants = [
+        r["tenant"]
+        for r in conn.execute(
+            f"""
+            SELECT DISTINCT tenant
+            FROM tasks
+            WHERE tenant IN ({placeholders})
+              AND status != 'archived'
+            ORDER BY tenant
+            """,
+            tuple(lineage_session_ids),
+        )
+    ]
+    if lineage_tenants:
+        return lineage_tenants, True
+
+    session_tenants = [
         r["tenant"]
         for r in conn.execute(
             f"""
@@ -451,6 +467,7 @@ def _infer_session_source_tenants(
             tuple(lineage_session_ids),
         )
     ]
+    return session_tenants, False
 
 
 def _compact_task_context(task: kanban_db.Task) -> dict[str, Any]:
@@ -556,18 +573,26 @@ def get_session_source(
     conn = _conn(board=board)
     try:
         explicit_tenant = (tenant or "").strip() or None
-        inferred_tenants = [] if explicit_tenant else _infer_session_source_tenants(conn, lineage_session_ids)
-        tenant_filters = [explicit_tenant] if explicit_tenant else inferred_tenants
+        inferred_tenants: list[str] = []
+        tenant_scope_only = False
+        if explicit_tenant:
+            tenant_filters = [explicit_tenant]
+        else:
+            inferred_tenants, tenant_scope_only = _infer_session_source_tenants(conn, lineage_session_ids)
+            tenant_filters = inferred_tenants
 
-        params: list[Any] = list(lineage_session_ids)
-        where = [
-            f"session_id IN ({','.join('?' for _ in lineage_session_ids)})",
-        ]
+        params: list[Any] = []
+        if tenant_filters and tenant_scope_only:
+            where = [f"tenant IN ({','.join('?' for _ in tenant_filters)})"]
+            params.extend(tenant_filters)
+        else:
+            where = [f"session_id IN ({','.join('?' for _ in lineage_session_ids)})"]
+            params.extend(lineage_session_ids)
+            if tenant_filters:
+                where.append(f"tenant IN ({','.join('?' for _ in tenant_filters)})")
+                params.extend(tenant_filters)
         if not include_archived:
             where.append("status != 'archived'")
-        if tenant_filters:
-            where.append(f"tenant IN ({','.join('?' for _ in tenant_filters)})")
-            params.extend(tenant_filters)
 
         rows = conn.execute(
             f"""

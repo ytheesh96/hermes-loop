@@ -223,6 +223,75 @@ def test_session_source_returns_non_archived_tenant_tasks_across_compression_lin
     assert child_payload["session_id"] == "tip-session"
 
 
+def test_session_source_recovers_tasks_when_lineage_id_is_tenant_key(client, kanban_home):
+    """Compressed Loop continuations can point at tenant-keyed Kanban work."""
+    from hermes_state import SessionDB
+
+    tenant_root = "tenant-root-session-key"
+    tip_session = "tenant-tip-session"
+    session_db = SessionDB()
+    try:
+        session_db.create_session(tenant_root, "cli")
+        session_db.end_session(tenant_root, "compression")
+        session_db.create_session(tip_session, "cli", parent_session_id=tenant_root)
+    finally:
+        session_db.close()
+
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(
+            conn,
+            title="tenant-owned parent",
+            tenant=tenant_root,
+            session_id=None,
+        )
+        child = kb.create_task(
+            conn,
+            title="tenant-owned child",
+            tenant=tenant_root,
+            session_id="worker-session",
+            parents=[parent],
+        )
+        scratch = kb.create_task(
+            conn,
+            title="tenantless scratch row",
+            tenant=None,
+            session_id=tip_session,
+        )
+        wrong_tenant = kb.create_task(
+            conn,
+            title="wrong tenant in lineage session",
+            tenant="other-tenant",
+            session_id=tip_session,
+        )
+        archived = kb.create_task(
+            conn,
+            title="archived tenant row",
+            tenant=tenant_root,
+            session_id=None,
+        )
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'archived' WHERE id = ?", (archived,))
+    finally:
+        conn.close()
+
+    r = client.get(
+        "/api/plugins/kanban/session-source",
+        params={"session_id": tip_session},
+    )
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["lineage_session_ids"] == [tenant_root, tip_session]
+    assert data["tenant"] == tenant_root
+    assert data["tenants"] == [tenant_root]
+    assert [task["id"] for task in data["tasks"]] == [parent, child]
+    assert {task["id"] for task in data["tasks"]}.isdisjoint(
+        {scratch, wrong_tenant, archived},
+    )
+    assert data["links"] == [{"parent_id": parent, "child_id": child}]
+
+
 def test_session_source_defaults_to_hermes_session_id_when_query_omits_session_id(
     client,
     monkeypatch,
