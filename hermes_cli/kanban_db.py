@@ -8920,6 +8920,221 @@ def decompose_triage_task(
     return child_ids
 
 
+# ---------------------------------------------------------------------------
+# Review Gates maintenance
+# ---------------------------------------------------------------------------
+
+_REVIEW_GATE_ARTIFACT_MARKERS = (
+    "smoke",
+    "demo artifact",
+    "fixture",
+    "synthetic",
+    "scratchpad",
+    "test-artifact",
+    "test_artifact",
+    "test artifact",
+)
+
+_REVIEW_GATE_PROVENANCE_MARKERS = _REVIEW_GATE_ARTIFACT_MARKERS + (
+    "demo",
+    "test",
+    "pytest",
+    "vitest",
+)
+
+
+def _contains_marker(text: str, markers: Iterable[str]) -> list[str]:
+    lowered = (text or "").casefold()
+    return [m for m in markers if m in lowered]
+
+
+def _json_payload_dict(raw: Optional[str]) -> dict:
+    if not raw:
+        return {}
+    try:
+        val = json.loads(raw)
+    except Exception:
+        return {}
+    return val if isinstance(val, dict) else {}
+
+
+def _main_db_path(conn: sqlite3.Connection) -> Path:
+    row = conn.execute("PRAGMA database_list").fetchone()
+    if not row:
+        raise RuntimeError("could not resolve SQLite database path")
+    # sqlite3.Row supports both index and key lookup, but tests sometimes use
+    # plain tuples depending on connection setup.
+    path = row[2] if not isinstance(row, sqlite3.Row) else row["file"]
+    if not path:
+        raise RuntimeError("kanban DB is in-memory; no checkpoint path available")
+    return Path(path)
+
+
+def _integrity_check(conn: sqlite3.Connection) -> str:
+    rows = conn.execute("PRAGMA integrity_check").fetchall()
+    values = [r[0] for r in rows]
+    return "ok" if values == ["ok"] else "\n".join(str(v) for v in values)
+
+
+def checkpoint_database(conn: sqlite3.Connection, *, label: str) -> Path:
+    """Create a consistent SQLite backup next to the active kanban DB."""
+    db_path = _main_db_path(conn)
+    ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    backup = db_path.with_name(f"{db_path.name}.{label}.{ts}.bak")
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    dest = sqlite3.connect(str(backup))
+    try:
+        conn.backup(dest)
+    finally:
+        dest.close()
+    return backup
+
+
+def list_stale_review_gate_artifact_candidates(
+    conn: sqlite3.Connection,
+    *,
+    older_than_seconds: int = 0,
+) -> list[dict]:
+    """Return blocked review-required gates that are safe maintenance candidates.
+
+    This intentionally targets only active Review Gates inbox entries: tasks
+    whose latest block/unblock event is a ``blocked`` event and whose reason is
+    the worker review handoff convention (``review-required: ...``). Resolved
+    history (``done``/``archived`` tasks and old runs) is left untouched.
+
+    Provenance is conservative: candidates need an explicit smoke/demo/fixture
+    style marker in task metadata or text. Plain real tasks that merely mention
+    "tests" in their title/body are not enough unless the provenance fields
+    (created_by, tenant, idempotency_key, session_id) carry a test marker.
+    """
+    cutoff = int(time.time()) - max(0, int(older_than_seconds or 0))
+    rows = conn.execute(
+        """
+        SELECT t.*,
+               e.created_at AS blocked_at,
+               e.payload AS block_payload,
+               (
+                 SELECT COUNT(*)
+                   FROM task_links l
+                   JOIN tasks c ON c.id = l.child_id
+                  WHERE l.parent_id = t.id
+                    AND c.status NOT IN ('done', 'archived')
+               ) AS active_child_count
+          FROM tasks t
+          JOIN task_events e
+            ON e.id = (
+                 SELECT id FROM task_events
+                  WHERE task_id = t.id
+                    AND kind IN ('blocked', 'unblocked')
+                  ORDER BY id DESC
+                  LIMIT 1
+               )
+         WHERE t.status = 'blocked'
+           AND e.kind = 'blocked'
+           AND e.created_at <= ?
+           AND COALESCE(t.current_run_id, 0) = 0
+         ORDER BY e.created_at ASC, t.created_at ASC, t.id ASC
+        """,
+        (cutoff,),
+    ).fetchall()
+
+    out: list[dict] = []
+    for r in rows:
+        payload = _json_payload_dict(r["block_payload"])
+        reason = str(payload.get("reason") or "")
+        reason_norm = reason.casefold().strip()
+        if not (
+            reason_norm.startswith("review-required:")
+            or reason_norm.startswith("review required:")
+        ):
+            continue
+        if int(r["active_child_count"] or 0) > 0:
+            continue
+
+        provenance_text = "\n".join(
+            str(r[k] or "") for k in ("created_by", "tenant", "idempotency_key", "session_id")
+        )
+        text = "\n".join(str(v or "") for v in (r["title"], r["body"], reason))
+        provenance_hits = _contains_marker(provenance_text, _REVIEW_GATE_PROVENANCE_MARKERS)
+        artifact_hits = _contains_marker(text, _REVIEW_GATE_ARTIFACT_MARKERS)
+        if not provenance_hits and not artifact_hits:
+            continue
+
+        out.append(
+            {
+                "task_id": r["id"],
+                "title": r["title"],
+                "assignee": r["assignee"],
+                "created_by": r["created_by"],
+                "created_at": int(r["created_at"]),
+                "blocked_at": int(r["blocked_at"]),
+                "reason": reason,
+                "provenance_signals": sorted(set(provenance_hits + artifact_hits)),
+                "action": "archive",
+            }
+        )
+    return out
+
+
+def cleanup_stale_review_gate_artifacts(
+    conn: sqlite3.Connection,
+    *,
+    older_than_seconds: int = 0,
+    apply: bool = False,
+    author: str = "kanban-maintenance",
+) -> dict:
+    """Dry-run or archive stale smoke/demo/fixture Review Gate artifacts.
+
+    Applying never hard-deletes task history. It archives only the current
+    blocked artifact tasks after creating a DB checkpoint and checking SQLite
+    integrity before and after the update.
+    """
+    candidates = list_stale_review_gate_artifact_candidates(
+        conn, older_than_seconds=older_than_seconds,
+    )
+    result = {
+        "dry_run": not apply,
+        "candidates": candidates,
+        "applied_task_ids": [],
+        "checkpoint_path": None,
+        "integrity_before": None,
+        "integrity_after": None,
+        "rollback": None,
+    }
+    if not apply:
+        return result
+
+    before = _integrity_check(conn)
+    result["integrity_before"] = before
+    if before != "ok":
+        raise RuntimeError(f"integrity_check before cleanup failed: {before}")
+    checkpoint = checkpoint_database(conn, label="review-gates-cleanup")
+    result["checkpoint_path"] = str(checkpoint)
+    result["rollback"] = (
+        "Stop Hermes gateway/dispatchers, copy the checkpoint over the DB, "
+        "then rerun `PRAGMA integrity_check`: "
+        f"cp {checkpoint} {_main_db_path(conn)}"
+    )
+
+    for candidate in candidates:
+        task_id = candidate["task_id"]
+        add_comment(
+            conn,
+            task_id,
+            author,
+            "Archived by `hermes kanban cleanup-review-gates --apply` "
+            f"after checkpoint {checkpoint}. Candidate reason: {candidate['reason']}",
+        )
+        if archive_task(conn, task_id):
+            result["applied_task_ids"].append(task_id)
+
+    after = _integrity_check(conn)
+    result["integrity_after"] = after
+    if after != "ok":
+        raise RuntimeError(f"integrity_check after cleanup failed: {after}")
+    return result
+
+
 def archive_task(
     conn: sqlite3.Connection,
     task_id: str,

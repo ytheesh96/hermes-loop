@@ -949,6 +949,29 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_repair.add_argument("--json", action="store_true",
                           help="Emit the repair report as JSON")
 
+    p_cleanup_rg = sub.add_parser(
+        "cleanup-review-gates",
+        help="Dry-run/apply stale smoke/demo Review Gates cleanup",
+        description=(
+            "List blocked review-required gates that have explicit smoke/demo/fixture "
+            "provenance. Default is dry-run. --apply archives only those active "
+            "artifact tasks after a SQLite checkpoint and integrity checks; it "
+            "does not delete real historical resolved gates."
+        ),
+    )
+    p_cleanup_rg.add_argument(
+        "--older-than-days",
+        type=float,
+        default=7.0,
+        help="Only consider gates blocked at least N days ago (default: 7; use 0 for fixtures)",
+    )
+    p_cleanup_rg.add_argument(
+        "--apply",
+        action="store_true",
+        help="Archive the listed candidates after checkpoint + integrity checks (default: dry-run)",
+    )
+    p_cleanup_rg.add_argument("--json", action="store_true", help="Emit JSON")
+
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser
 
@@ -1083,6 +1106,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "specify":  _cmd_specify,
             "decompose":  _cmd_decompose,
             "gc":       _cmd_gc,
+            "cleanup-review-gates": _cmd_cleanup_review_gates,
         }
         handler = handlers.get(action)
         if not handler:
@@ -3188,6 +3212,53 @@ def _cmd_repair(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     return 1
+def _cmd_cleanup_review_gates(args: argparse.Namespace) -> int:
+    older_days = max(0.0, float(getattr(args, "older_than_days", 7.0) or 0.0))
+    older_seconds = int(older_days * 24 * 3600)
+    apply = bool(getattr(args, "apply", False))
+    want_json = bool(getattr(args, "json", False))
+    with kb.connect_closing() as conn:
+        result = kb.cleanup_stale_review_gate_artifacts(
+            conn,
+            older_than_seconds=older_seconds,
+            apply=apply,
+            author=_profile_author(),
+        )
+
+    if want_json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+
+    candidates = result["candidates"]
+    mode = "APPLY" if apply else "DRY-RUN"
+    print(f"Review Gates stale artifact cleanup ({mode})")
+    print(f"Candidates: {len(candidates)}")
+    if not candidates:
+        print("No blocked review-required smoke/demo/fixture artifacts matched.")
+        return 0
+    for c in candidates:
+        when = _fmt_ts(c.get("blocked_at"))
+        signals = ", ".join(c.get("provenance_signals") or [])
+        print(f"- {c['task_id']}  blocked={when}  action={c['action']}")
+        print(f"  title: {c['title']}")
+        print(f"  reason: {c['reason']}")
+        print(f"  provenance: {signals}")
+    if not apply:
+        print()
+        print("Dry-run only; no DB rows were changed.")
+        print("To archive exactly these active artifact gates after a checkpoint:")
+        print(f"  hermes kanban cleanup-review-gates --older-than-days {older_days:g} --apply")
+        return 0
+
+    print()
+    print(f"Archived: {len(result['applied_task_ids'])} task(s)")
+    print(f"Checkpoint: {result['checkpoint_path']}")
+    print(f"Integrity before: {result['integrity_before']}")
+    print(f"Integrity after:  {result['integrity_after']}")
+    print("Rollback:")
+    print(f"  {result['rollback']}")
+    return 0
+
 
 
 # ---------------------------------------------------------------------------
