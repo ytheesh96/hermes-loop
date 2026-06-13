@@ -130,13 +130,17 @@ export interface LoopRow {
   children: string[]
   commentCount: number
   depth: number
+  externalChildTasks?: CompactLoopTask[]
+  externalParentTasks?: CompactLoopTask[]
   frontier: boolean
   latestRun?: null | LoopLatestRun
   latestSummary?: null | string
   parentCount: number
   parents: string[]
+  priority?: number
   rawTask?: TenantLoopTask
   result?: null | string
+  sourceSessionId?: null | string
   status: string
   taskId: string
   tenant?: null | string
@@ -216,16 +220,18 @@ function normalizedStatus(status: unknown): string {
   return typeof status === 'string' && status.trim() ? status.trim().toLowerCase() : 'todo'
 }
 
-function taskParents(task: TenantLoopTask, includedTaskIds?: Set<string>): string[] {
+function taskParents(task: TenantLoopTask): string[] {
   const explicit = task.included_parent_ids || task.links?.parents || []
+  const external = task.external_parent_tasks?.map(parent => parent.id).filter(Boolean) || []
 
-  return includedTaskIds ? explicit.filter(id => includedTaskIds.has(id)) : explicit
+  return Array.from(new Set([...explicit, ...external]))
 }
 
-function taskChildren(task: TenantLoopTask, includedTaskIds?: Set<string>): string[] {
+function taskChildren(task: TenantLoopTask): string[] {
   const explicit = task.included_child_ids || task.links?.children || []
+  const external = task.external_child_tasks?.map(child => child.id).filter(Boolean) || []
 
-  return includedTaskIds ? explicit.filter(id => includedTaskIds.has(id)) : explicit
+  return Array.from(new Set([...explicit, ...external]))
 }
 
 function depthByTaskId(tasks: readonly TenantLoopTask[]): Map<string, number> {
@@ -241,7 +247,7 @@ function depthByTaskId(tasks: readonly TenantLoopTask[]): Map<string, number> {
     changed = false
 
     for (const task of tasks) {
-      const parentDepth = taskParents(task, taskIds).reduce(
+      const parentDepth = taskParents(task).reduce(
         (maxDepth, parentId) => Math.max(maxDepth, depths.get(parentId) ?? 0),
         -1
       )
@@ -258,9 +264,9 @@ function depthByTaskId(tasks: readonly TenantLoopTask[]): Map<string, number> {
   return depths
 }
 
-function tenantRowFromTask(task: TenantLoopTask, depths: Map<string, number>, taskIds: Set<string>): LoopRow {
-  const parents = taskParents(task, taskIds)
-  const children = taskChildren(task, taskIds)
+function tenantRowFromTask(task: TenantLoopTask, depths: Map<string, number>): LoopRow {
+  const parents = taskParents(task)
+  const children = taskChildren(task)
   const status = normalizedStatus(task.status)
   const latestRun = task.latest_run || null
   const latestRunActive = ACTIVE_STATUSES.has(normalizedStatus(latestRun?.status))
@@ -274,13 +280,17 @@ function tenantRowFromTask(task: TenantLoopTask, depths: Map<string, number>, ta
     children,
     commentCount: task.comment_count || 0,
     depth: depths.get(task.id) || 0,
+    externalChildTasks: task.external_child_tasks,
+    externalParentTasks: task.external_parent_tasks,
     frontier: unfinishedRunnable,
     latestRun,
     latestSummary: task.latest_summary || latestRun?.summary || null,
     parentCount: parents.length || task.parent_count || task.parents_count || 0,
     parents,
+    priority: task.priority,
     rawTask: task,
     result: task.result,
+    sourceSessionId: task.session_id,
     status,
     taskId: task.id,
     tenant: task.tenant,
@@ -298,9 +308,9 @@ export function deriveLoopPanelStateFromTenantSource(source: TenantLoopSource | 
   const tasks = (source.tasks || []).filter(
     task => task.id && (source.include_archived || !ARCHIVED_STATUSES.has(normalizedStatus(task.status)))
   )
+
   const depths = depthByTaskId(tasks)
-  const taskIds = new Set(tasks.map(task => task.id))
-  const rows = tasks.map(task => tenantRowFromTask(task, depths, taskIds))
+  const rows = tasks.map(task => tenantRowFromTask(task, depths))
   const rootTaskId = source.tenant || source.session_id || source.lineage_session_ids?.[0] || ''
 
   return {
@@ -342,6 +352,7 @@ function rowFromNode(value: unknown): LoopRow | null {
     frontier: booleanField(node, 'frontier'),
     parentCount: parents.length || numberField(node, 'parent_count'),
     parents,
+    priority: numberField(node, 'priority') || undefined,
     status: stringField(node, 'status') || 'triage',
     taskId,
     title: title || taskId

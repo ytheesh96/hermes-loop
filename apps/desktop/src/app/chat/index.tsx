@@ -55,7 +55,8 @@ import type { ChatBarState } from './composer/types'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { useFileDropZone } from './hooks/use-file-drop-zone'
 import { LoopPanel, type LoopTaskAction, LoopTaskStack } from './loop-panel'
-import { deriveLoopPanelState, deriveLoopPanelStateFromTenantSource, type LoopRow } from './loop-state'
+import { loopSessionSourceRefetchInterval } from './loop-refresh'
+import { deriveLoopPanelState, deriveLoopPanelStateFromTenantSource, type LoopRow, type TenantLoopSource } from './loop-state'
 import { SessionActionsMenu } from './sidebar/session-actions-menu'
 import { lastVisibleMessageIsUser, threadLoadingState } from './thread-loading'
 
@@ -261,10 +262,12 @@ export function ChatView({
 
   const loopSourceSessionId = selectedSessionId || activeSessionId || routedSessionId || ''
 
-  const loopSourceQuery = useQuery({
+  const loopSourceQuery = useQuery<TenantLoopSource>({
     queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId],
     queryFn: () => getLoopSessionSource(loopSourceSessionId, activeGatewayProfile),
     enabled: gatewayOpen && Boolean(loopSourceSessionId),
+    refetchInterval: query => loopSessionSourceRefetchInterval(query.state.data),
+    refetchOnWindowFocus: true,
     staleTime: 2_000
   })
 
@@ -321,6 +324,7 @@ export function ChatView({
     (action: LoopTaskAction, row: LoopRow) => {
       if (action === 'details' || action === 'kanban' || action === 'logs') {
         handleSelectLoopTaskId(row.taskId)
+
         return
       }
 
@@ -331,6 +335,7 @@ export function ChatView({
         start: 'ready',
         unblock: 'ready'
       }
+
       const nextStatus = nextStatusByAction[action]
 
       if (!nextStatus) {
@@ -423,92 +428,97 @@ export function ChatView({
   return (
     <div
       className={cn(
-        'relative isolate flex h-full min-w-0 flex-col overflow-hidden bg-(--ui-chat-surface-background)',
+        'relative isolate grid h-full min-w-0 grid-cols-[minmax(0,1fr)_auto] overflow-hidden bg-(--ui-chat-surface-background)',
         className
       )}
     >
       <Backdrop />
-      <ChatHeader
-        activeSessionId={activeSessionId}
-        isRoutedSessionView={isRoutedSessionView}
-        onDeleteSelectedSession={onDeleteSelectedSession}
-        onToggleSelectedPin={onToggleSelectedPin}
-        routedSessionId={routedSessionId}
-        selectedSessionId={selectedSessionId}
-      />
-
-      <PromptOverlays />
-
-      <div className="relative flex min-h-0 max-w-full flex-1 overflow-hidden bg-(--ui-chat-surface-background) contain-[layout_paint]">
-        <div
-          className="relative min-w-0 flex-1 overflow-hidden"
-          {...dropHandlers}
-        >
-          <AssistantRuntimeProvider runtime={runtime}>
-            <Thread
-              clampToComposer={showChatBar}
-              cwd={currentCwd}
-              gateway={gateway}
-              intro={showIntro ? { personality: introPersonality, seed: introSeed } : undefined}
-              loading={threadLoading}
-              onBranchInNewChat={onBranchInNewChat}
-              onCancel={onCancel}
-              onRestoreToMessage={onRestoreToMessage}
-              sessionId={activeSessionId}
-              sessionKey={threadKey}
-            />
-            {showChatBar && (
-              <Suspense fallback={<ChatBarFallback />}>
-                <ChatBar
-                  busy={busy}
-                  cwd={currentCwd}
-                  disabled={!gatewayOpen}
-                  focusKey={activeSessionId}
-                  gateway={gateway}
-                  maxRecordingSeconds={maxVoiceRecordingSeconds}
-                  onAddContextRef={onAddContextRef}
-                  onAddUrl={onAddUrl}
-                  onAttachDroppedItems={onAttachDroppedItems}
-                  onAttachImageBlob={onAttachImageBlob}
-                  onCancel={onCancel}
-                  onPasteClipboardImage={onPasteClipboardImage}
-                  onPickFiles={onPickFiles}
-                  onPickFolders={onPickFolders}
-                  onPickImages={onPickImages}
-                  onRemoveAttachment={onRemoveAttachment}
-                  onSteer={onSteer}
-                  onSubmit={onSubmit}
-                  onTranscribeAudio={onTranscribeAudio}
-                  queueSessionKey={selectedSessionId || activeSessionId}
-                  sessionId={activeSessionId}
-                  state={chatBarState}
-                  statusStackLead={
-                    loopPanelState?.rows.length ? (
-                      <LoopTaskStack
-                        onSelectTaskId={handleSelectLoopTaskId}
-                        selectedTaskId={selectedLoopTaskId}
-                        state={loopPanelState}
-                      />
-                    ) : null
-                  }
-                />
-              </Suspense>
-            )}
-          </AssistantRuntimeProvider>
-          <ChatDropOverlay kind={dragKind} />
-          <ChatSwapOverlay profile={gatewaySwapTarget} />
-        </div>
-        <LoopPanel
-          hidden={loopPanelHidden}
-          onHide={handleHideLoopPanel}
-          onSelectTaskId={handleSelectLoopTaskId}
-          onTaskAction={handleLoopTaskAction}
-          open={loopPanelOpen}
-          selectedTaskDetail={selectedLoopTaskDetailQuery.data}
-          selectedTaskId={selectedLoopTaskId}
-          state={loopPanelState}
+      <div className="row-start-1 flex min-h-0 min-w-0 flex-col overflow-hidden" style={{ gridColumn: '1 / 2' }}>
+        <ChatHeader
+          activeSessionId={activeSessionId}
+          isRoutedSessionView={isRoutedSessionView}
+          onDeleteSelectedSession={onDeleteSelectedSession}
+          onToggleSelectedPin={onToggleSelectedPin}
+          routedSessionId={routedSessionId}
+          selectedSessionId={selectedSessionId}
         />
+
+        <PromptOverlays />
+
+        <div className="relative flex min-h-0 max-w-full flex-1 overflow-hidden bg-(--ui-chat-surface-background) contain-[layout_paint]">
+          <div
+            className="relative min-w-0 flex-1 overflow-hidden"
+            {...dropHandlers}
+          >
+            <AssistantRuntimeProvider runtime={runtime}>
+              <Thread
+                clampToComposer={showChatBar}
+                cwd={currentCwd}
+                gateway={gateway}
+                intro={showIntro ? { personality: introPersonality, seed: introSeed } : undefined}
+                loading={threadLoading}
+                onBranchInNewChat={onBranchInNewChat}
+                onCancel={onCancel}
+                onRestoreToMessage={onRestoreToMessage}
+                sessionId={activeSessionId}
+                sessionKey={threadKey}
+              />
+              {showChatBar && (
+                <Suspense fallback={<ChatBarFallback />}>
+                  <ChatBar
+                    busy={busy}
+                    cwd={currentCwd}
+                    disabled={!gatewayOpen}
+                    focusKey={activeSessionId}
+                    gateway={gateway}
+                    maxRecordingSeconds={maxVoiceRecordingSeconds}
+                    onAddContextRef={onAddContextRef}
+                    onAddUrl={onAddUrl}
+                    onAttachDroppedItems={onAttachDroppedItems}
+                    onAttachImageBlob={onAttachImageBlob}
+                    onCancel={onCancel}
+                    onPasteClipboardImage={onPasteClipboardImage}
+                    onPickFiles={onPickFiles}
+                    onPickFolders={onPickFolders}
+                    onPickImages={onPickImages}
+                    onRemoveAttachment={onRemoveAttachment}
+                    onSteer={onSteer}
+                    onSubmit={onSubmit}
+                    onTranscribeAudio={onTranscribeAudio}
+                    queueSessionKey={selectedSessionId || activeSessionId}
+                    sessionId={activeSessionId}
+                    state={chatBarState}
+                    statusStackLead={
+                      loopPanelState?.rows.length ? (
+                        <LoopTaskStack
+                          onRefresh={() => void loopSourceQuery.refetch()}
+                          onSelectTaskId={handleSelectLoopTaskId}
+                          refreshing={loopSourceQuery.isFetching}
+                          selectedTaskId={selectedLoopTaskId}
+                          state={loopPanelState}
+                        />
+                      ) : null
+                    }
+                  />
+                </Suspense>
+              )}
+            </AssistantRuntimeProvider>
+            <ChatDropOverlay kind={dragKind} />
+            <ChatSwapOverlay profile={gatewaySwapTarget} />
+          </div>
+        </div>
       </div>
+      <LoopPanel
+        hidden={loopPanelHidden}
+        onHide={handleHideLoopPanel}
+        onRefresh={() => void loopSourceQuery.refetch()}
+        onSelectTaskId={handleSelectLoopTaskId}
+        onTaskAction={handleLoopTaskAction}
+        open={loopPanelOpen}
+        selectedTaskDetail={selectedLoopTaskDetailQuery.data}
+        selectedTaskId={selectedLoopTaskId}
+        state={loopPanelState}
+      />
     </div>
   )
 }
