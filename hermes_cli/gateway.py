@@ -1385,7 +1385,83 @@ def _format_gateway_pids(
     return ", ".join(rendered)
 
 
+def _preferred_gateway_pid(
+    gateway_pids: list[int] | tuple[int, ...],
+    *,
+    preferred_pid: int | None = None,
+) -> int | None:
+    """Choose the one gateway PID to keep when more than one is visible."""
+    normalized = [pid for pid in gateway_pids if pid > 0]
+    if not normalized:
+        return None
+    if preferred_pid in normalized:
+        return preferred_pid
+
+    service_pids = _get_service_pids()
+    for pid in normalized:
+        if pid in service_pids:
+            return pid
+    return normalized[0]
+
+
+def probe_gateway_single_process_state(
+    *, preferred_pid: int | None = None
+) -> dict[str, object]:
+    """Return a dry-run/smoke-testable view of current gateway multiplicity."""
+    gateway_pids = [pid for pid in find_gateway_pids() if pid > 0]
+    managed_pids = sorted(pid for pid in _get_service_pids() if pid in gateway_pids)
+    keep_pid = _preferred_gateway_pid(gateway_pids, preferred_pid=preferred_pid)
+    duplicate_pids = [pid for pid in gateway_pids if keep_pid is not None and pid != keep_pid]
+    return {
+        "ok": len(gateway_pids) <= 1,
+        "gateway_pids": gateway_pids,
+        "managed_pids": managed_pids,
+        "duplicate_pids": duplicate_pids,
+        "preferred_pid": keep_pid,
+    }
+
+
+def stop_duplicate_gateway_processes(*, preferred_pid: int | None = None) -> list[int]:
+    """Gracefully stop extra gateway processes, preserving one preferred PID.
+
+    This is intentionally profile-scoped and non-forcing: it uses the same
+    current-profile process discovery as status/restart, preserves the PID that
+    the service manager reports when available, and sends only the normal
+    terminate signal to extras. Broader cross-profile sweeps remain behind the
+    explicit ``--all`` command path.
+    """
+    probe = probe_gateway_single_process_state(preferred_pid=preferred_pid)
+    stopped: list[int] = []
+    for pid in probe["duplicate_pids"]:
+        try:
+            terminate_pid(int(pid), force=False)
+            stopped.append(int(pid))
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            print(f"⚠ Permission denied to stop duplicate gateway PID {pid}")
+        except OSError as exc:
+            print(f"⚠ Failed to stop duplicate gateway PID {pid}: {exc}")
+    return stopped
+
+
+def _print_gateway_duplicate_warning(snapshot: GatewayRuntimeSnapshot) -> None:
+    if len(snapshot.gateway_pids) <= 1:
+        return
+    probe = probe_gateway_single_process_state()
+    print()
+    print("⚠ Multiple gateway processes are running for this profile")
+    print(f"  PID(s): {_format_gateway_pids(snapshot.gateway_pids, limit=None)}")
+    if probe["preferred_pid"]:
+        print(f"  Preferred PID: {probe['preferred_pid']}")
+    if probe["duplicate_pids"]:
+        rendered = ", ".join(str(pid) for pid in probe["duplicate_pids"])
+        print(f"  Duplicate PID(s): {rendered}")
+    print("  Run: hermes gateway restart  # preserves one process and stops duplicates")
+
+
 def _print_gateway_process_mismatch(snapshot: GatewayRuntimeSnapshot) -> None:
+    _print_gateway_duplicate_warning(snapshot)
     if not snapshot.has_process_service_mismatch:
         return
     print()
@@ -4432,6 +4508,12 @@ def launchd_restart():
                         f"⚠ Gateway drain timed out after {drain_timeout:.0f}s — forcing launchd restart"
                     )
         subprocess.run(["launchctl", "kickstart", "-k", target], check=True, timeout=90)
+        duplicates = stop_duplicate_gateway_processes(preferred_pid=pid)
+        if duplicates:
+            print(
+                "✓ Stopped duplicate gateway process(es): "
+                + ", ".join(str(pid) for pid in duplicates)
+            )
         print("✓ Service restarted")
         _clear_launchd_unsupported_marker()
     except subprocess.CalledProcessError as e:
@@ -4463,6 +4545,12 @@ def launchd_restart():
                 timeout=30,
             )
             subprocess.run(["launchctl", "kickstart", target], check=True, timeout=30)
+            duplicates = stop_duplicate_gateway_processes()
+            if duplicates:
+                print(
+                    "✓ Stopped duplicate gateway process(es): "
+                    + ", ".join(str(pid) for pid in duplicates)
+                )
         except subprocess.CalledProcessError as e2:
             if not _launchctl_domain_unsupported(e2.returncode):
                 raise
@@ -7231,6 +7319,7 @@ def _gateway_command_inner(args):
             if pids:
                 print(f"✓ Gateway is running (PID: {', '.join(map(str, pids))})")
                 print("  (Running manually, not as a system service)")
+                _print_gateway_duplicate_warning(snapshot)
                 runtime_lines = _runtime_health_lines()
                 if runtime_lines:
                     print()

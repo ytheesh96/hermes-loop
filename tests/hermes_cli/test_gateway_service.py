@@ -860,6 +860,11 @@ class TestLaunchdServiceRecovery:
             "gateway.status.get_running_pid",
             lambda: 321,
         )
+        monkeypatch.setattr(
+            gateway_cli,
+            "stop_duplicate_gateway_processes",
+            lambda preferred_pid=None: calls.append(("dedupe", preferred_pid)) or [],
+        )
 
         def fake_run(cmd, check=False, **kwargs):
             calls.append(cmd)
@@ -872,6 +877,7 @@ class TestLaunchdServiceRecovery:
         assert calls == [
             ("term", 321, False),
             ["launchctl", "kickstart", "-k", target],
+            ("dedupe", 321),
         ]
         # The drain can silently hold for the full budget (180s default); the
         # desktop updater streams this output as its only progress feedback,
@@ -902,6 +908,83 @@ class TestLaunchdServiceRecovery:
 
         assert calls == [("self", 321)]
         assert "restart requested" in capsys.readouterr().out.lower()
+
+    def test_gateway_duplicate_probe_reports_single_process_state(self, monkeypatch):
+        monkeypatch.setattr(gateway_cli, "find_gateway_pids", lambda: [101, 202])
+        monkeypatch.setattr(gateway_cli, "_get_service_pids", lambda: {101})
+
+        probe = gateway_cli.probe_gateway_single_process_state()
+
+        assert probe == {
+            "ok": False,
+            "gateway_pids": [101, 202],
+            "managed_pids": [101],
+            "duplicate_pids": [202],
+            "preferred_pid": 101,
+        }
+
+    def test_gateway_duplicate_warning_makes_status_unambiguous(self, monkeypatch, capsys):
+        snapshot = gateway_cli.GatewayRuntimeSnapshot(
+            manager="manual process",
+            gateway_pids=(101, 202),
+        )
+        monkeypatch.setattr(gateway_cli, "find_gateway_pids", lambda: [101, 202])
+        monkeypatch.setattr(gateway_cli, "_get_service_pids", lambda: {101})
+
+        gateway_cli._print_gateway_duplicate_warning(snapshot)
+
+        output = capsys.readouterr().out
+        assert "Multiple gateway processes" in output
+        assert "Preferred PID: 101" in output
+        assert "Duplicate PID(s): 202" in output
+        assert "hermes gateway restart" in output
+
+    def test_stop_duplicate_gateways_preserves_preferred_pid(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(gateway_cli, "find_gateway_pids", lambda: [101, 202, 303])
+        monkeypatch.setattr(gateway_cli, "_get_service_pids", lambda: {101})
+        monkeypatch.setattr(
+            gateway_cli,
+            "terminate_pid",
+            lambda pid, force=False: calls.append((pid, force)),
+        )
+
+        stopped = gateway_cli.stop_duplicate_gateway_processes()
+
+        assert stopped == [202, 303]
+        assert calls == [(202, False), (303, False)]
+
+    def test_launchd_restart_stops_duplicates_after_successful_kickstart(self, monkeypatch):
+        calls = []
+        target = f"{gateway_cli._launchd_domain()}/{gateway_cli.get_launchd_label()}"
+
+        monkeypatch.setattr(gateway_cli, "_get_restart_drain_timeout", lambda: 12.0)
+        monkeypatch.setattr(gateway_cli, "_request_gateway_self_restart", lambda pid: False)
+        monkeypatch.setattr(gateway_cli, "_wait_for_gateway_exit", lambda timeout, force_after=None: True)
+        monkeypatch.setattr(gateway_cli, "terminate_pid", lambda pid, force=False: calls.append(("term", pid, force)))
+        monkeypatch.setattr(
+            "gateway.status.get_running_pid",
+            lambda: 321,
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "stop_duplicate_gateway_processes",
+            lambda preferred_pid=None: calls.append(("dedupe", preferred_pid)) or [],
+        )
+
+        def fake_run(cmd, check=False, **kwargs):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        gateway_cli.launchd_restart()
+
+        assert calls == [
+            ("term", 321, False),
+            ["launchctl", "kickstart", "-k", target],
+            ("dedupe", 321),
+        ]
 
     def test_launchd_stop_uses_bootout_not_kill(self, monkeypatch):
         """launchd_stop must bootout the service so KeepAlive doesn't respawn it."""
