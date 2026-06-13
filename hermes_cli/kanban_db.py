@@ -2802,6 +2802,16 @@ def _loop_root_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[str]
 
 
 _LOOP_HANDOFF_ACTIVE_STATES = {"assigned", "reviewing"}
+# Autonomous reviewer actions may only act on pending/active handoffs that are
+# still waiting for review. Escalated and terminal rows require human/user
+# resolution and must never be auto-approved or auto-released by a later retry.
+_LOOP_HANDOFF_AUTONOMOUS_ACTION_STATES = {
+    "recorded",
+    "queued",
+    "batched",
+    "assigned",
+    "reviewing",
+}
 _LOOP_HANDOFF_TERMINAL_STATES = {
     "approved",
     "released",
@@ -2811,6 +2821,23 @@ _LOOP_HANDOFF_TERMINAL_STATES = {
     "closed",
     "ignored_duplicate",
     "cancelled_superseded",
+}
+_LOOP_HANDOFF_REPAIR_LIMIT = 2
+LOOP_HANDOFF_ARTIFACT_DETAIL_POLICY = "metadata_only_untrusted_path"
+_LOOP_HANDOFF_SAFE_FOLLOWUP_KINDS = {"code", "test", "tests", "docs", "doc"}
+_LOOP_HANDOFF_ESCALATION_FLAGS = {
+    "live_mutation",
+    "push",
+    "restart",
+    "secrets",
+    "product_decision",
+    "unclear_acceptance_criteria",
+    "failed_evidence_tradeoff",
+    "repeated_failed_auto_repair",
+    "external_side_effect",
+    "destructive_side_effect",
+    "privacy_sensitive",
+    "ambiguous",
 }
 
 
@@ -3021,6 +3048,14 @@ def loop_handoff_status(
     pending = sum(1 for row in rows if row["state"] in {"recorded", "queued", "batched"})
     active = sum(1 for row in rows if row["state"] in _LOOP_HANDOFF_ACTIVE_STATES)
     terminal = sum(1 for row in rows if row["state"] in _LOOP_HANDOFF_TERMINAL_STATES)
+    escalated = sum(1 for row in rows if row["state"] == "escalated" or row.get("attention") == "needs-user")
+    approved = sum(
+        1
+        for row in rows
+        if row["state"] in {"closed", "approved", "released"}
+        and row.get("verification_state") == "approved"
+    )
+    needs_attention = pending + active + escalated
     return {
         "tenant": tenant,
         "root_task_id": root_task_id,
@@ -3028,6 +3063,10 @@ def loop_handoff_status(
         "active_count": active,
         "terminal_count": terminal,
         "total_count": len(rows),
+        "approved_count": approved,
+        "escalated_count": escalated,
+        "needs_attention_count": needs_attention,
+        "quiet_green": bool(rows) and needs_attention == 0 and approved == len(rows),
     }
 
 
@@ -3108,8 +3147,300 @@ def claim_loop_handoff_batch(
             ids,
         ).fetchall()
     claimed_by_id = {int(row["id"]): _loop_handoff_row_to_dict(row) for row in claimed}
-    return [claimed_by_id[i] for i in ids if i in claimed_by_id]
+    out = [claimed_by_id[i] for i in ids if i in claimed_by_id]
+    for handoff in out:
+        handoff["proof_packet"] = build_loop_handoff_proof_packet(conn, handoff["id"])
+    return out
 
+
+def _extract_acceptance_criteria(body: Optional[str]) -> Optional[str]:
+    if not body:
+        return None
+    text = str(body).strip()
+    marker = "acceptance criteria:"
+    idx = text.lower().find(marker)
+    if idx < 0:
+        return None
+    return text[idx + len(marker):].strip() or None
+
+
+def _handoff_row_by_id(conn: sqlite3.Connection, handoff_id: int) -> Optional[dict[str, Any]]:
+    row = conn.execute("SELECT * FROM loop_handoffs WHERE id = ?", (int(handoff_id),)).fetchone()
+    return _loop_handoff_row_to_dict(row) if row else None
+
+
+def build_loop_handoff_proof_packet(conn: sqlite3.Connection, handoff_id: int | dict[str, Any]) -> dict[str, Any]:
+    """Return the compact evidence packet injected into foreground reviews."""
+    handoff = handoff_id if isinstance(handoff_id, dict) else _handoff_row_by_id(conn, int(handoff_id))
+    if not handoff:
+        raise ValueError(f"loop handoff {handoff_id!r} not found")
+    task = get_task(conn, handoff["task_id"])
+    run = None
+    if handoff.get("run_id") is not None:
+        run = conn.execute("SELECT * FROM task_runs WHERE id = ?", (handoff["run_id"],)).fetchone()
+    event = None
+    if handoff.get("source_event_id") is not None:
+        event = conn.execute("SELECT id, kind, created_at FROM task_events WHERE id = ?", (handoff["source_event_id"],)).fetchone()
+    worker_metadata = handoff.get("worker_metadata") or {}
+    packet = {
+        "packet_kind": "loop_handoff_proof_packet",
+        "handoff_id": handoff["id"],
+        "root_task_id": handoff["root_task_id"],
+        "tenant": handoff.get("tenant"),
+        "task": {
+            "id": handoff["task_id"],
+            "title": handoff.get("task_title") or (task.title if task else None),
+            "body": handoff.get("task_body") or (task.body if task else None),
+            "acceptance_criteria": _extract_acceptance_criteria(handoff.get("task_body") or (task.body if task else None)),
+            "status": task.status if task else None,
+            "assignee": task.assignee if task else handoff.get("worker_profile"),
+        },
+        "worker": {
+            "profile": handoff.get("worker_profile"),
+            "summary": handoff.get("summary"),
+            "reason": handoff.get("reason"),
+            "metadata": worker_metadata,
+            "transcript_session_id": handoff.get("worker_session_id"),
+            "originating_session_id": handoff.get("originating_session_id"),
+        },
+        "evidence": {
+            "artifacts": handoff.get("artifacts", []),
+            "changed_files": handoff.get("changed_files", []),
+            "tests": worker_metadata.get("tests_run"),
+            "build": worker_metadata.get("build"),
+            "verification_status": handoff.get("verification_status"),
+            "verification_state": handoff.get("verification_state"),
+        },
+        "graph_state": {
+            "parents": handoff.get("parent_state_snapshot", []),
+            "children": handoff.get("child_state_snapshot", []),
+            "handoff_kind": handoff.get("handoff_kind"),
+            "state": handoff.get("state"),
+            "attention": handoff.get("attention"),
+        },
+        "audit_ids": {
+            "handoff_id": handoff["id"],
+            "task_id": handoff["task_id"],
+            "run_id": handoff.get("run_id"),
+            "source_event_id": handoff.get("source_event_id"),
+            "source_event_kind": event["kind"] if event else None,
+            "review_task_id": handoff.get("review_task_id"),
+            "review_run_id": handoff.get("review_run_id"),
+            "reviewer_session_id": handoff.get("reviewer_session_id"),
+            "detail_ref": f"loop_handoff:{handoff['id']}",
+            "transcript_ref": handoff.get("worker_session_id"),
+        },
+    }
+    if run is not None:
+        packet["worker"]["run"] = {
+            "id": run["id"],
+            "status": run["status"],
+            "outcome": run["outcome"],
+            "started_at": run["started_at"],
+            "ended_at": run["ended_at"],
+        }
+    return packet
+
+
+def _artifact_detail(path_value: str) -> dict[str, Any]:
+    """Return metadata-only artifact detail for an untrusted worker path.
+
+    Worker handoff metadata can contain arbitrary absolute paths. The dashboard
+    may display the reference, but must not read or stat it through this API:
+    even a bounded preview would become a local-file disclosure primitive if a
+    worker or DB row pointed at secrets outside the task workspace.
+    """
+    return {
+        "path": str(path_value or "").strip(),
+        "content_preview": None,
+        "content_policy": LOOP_HANDOFF_ARTIFACT_DETAIL_POLICY,
+    }
+
+
+def get_loop_handoff_details(conn: sqlite3.Connection, handoff_id: int) -> dict[str, Any]:
+    """Fetch safe on-demand handoff details referenced by a proof packet."""
+    handoff = _handoff_row_by_id(conn, int(handoff_id))
+    if not handoff:
+        raise ValueError(f"loop handoff {handoff_id!r} not found")
+    return {
+        "ok": True,
+        "handoff": handoff,
+        "proof_packet": build_loop_handoff_proof_packet(conn, handoff),
+        "task": get_task(conn, handoff["task_id"]),
+        "events": list_events(conn, handoff["task_id"]),
+        "runs": list_runs(conn, handoff["task_id"]),
+        "attachments": list_attachments(conn, handoff["task_id"]),
+        "detail_semantics": {
+            "artifact_content": LOOP_HANDOFF_ARTIFACT_DETAIL_POLICY,
+            "transcript_content": "metadata_only",
+        },
+        "transcript": {
+            "worker_session_id": handoff.get("worker_session_id"),
+            "originating_session_id": handoff.get("originating_session_id"),
+            "content_preview": None,
+            "content_policy": "metadata_only",
+        },
+        "artifact_details": [
+            _artifact_detail(path)
+            for path in handoff.get("artifacts", [])
+            if isinstance(path, str) and path.strip()
+        ],
+    }
+
+
+def _append_handoff_auto_action(conn: sqlite3.Connection, handoff: dict[str, Any], action: dict[str, Any]) -> list[dict[str, Any]]:
+    log = handoff.get("auto_actions_log", [])
+    if not isinstance(log, list):
+        log = []
+    entry = {"at": int(time.time()), **action}
+    log.append(entry)
+    conn.execute(
+        "UPDATE loop_handoffs SET auto_actions_log_json = ?, updated_at = ? WHERE id = ?",
+        (json.dumps(log, ensure_ascii=False), entry["at"], handoff["id"]),
+    )
+    _append_event(conn, handoff["task_id"], "loop_handoff_auto_action", entry, run_id=handoff.get("run_id"))
+    return log
+
+
+def _escalate_loop_handoff(
+    conn: sqlite3.Connection,
+    handoff: dict[str, Any],
+    *,
+    actor: str,
+    action: str,
+    reason: Optional[str],
+    flags: Iterable[str],
+    escalation_reason: str,
+) -> dict[str, Any]:
+    now = int(time.time())
+    conn.execute(
+        """
+        UPDATE loop_handoffs
+           SET state = 'escalated', attention = 'needs-user',
+               verification_state = 'needs-user', decision_actor = ?,
+               decision_reason = ?, escalation_reason = ?, updated_at = ?
+         WHERE id = ?
+        """,
+        (actor, reason, escalation_reason, now, handoff["id"]),
+    )
+    _append_handoff_auto_action(
+        conn,
+        handoff,
+        {
+            "actor": actor,
+            "action": action,
+            "outcome": "escalated",
+            "reason": reason,
+            "flags": sorted(flags),
+            "escalation_reason": escalation_reason,
+        },
+    )
+    return {
+        "ok": False,
+        "outcome": "escalated",
+        "escalation_reason": escalation_reason,
+        "notification": {"level": "escalation", "state": "needs-user"},
+    }
+
+
+def review_loop_handoff_autonomous_action(
+    conn: sqlite3.Connection,
+    handoff_id: int,
+    *,
+    action: str,
+    actor: str,
+    reason: Optional[str] = None,
+    evidence_passed: bool = False,
+    prohibited_flags: Optional[Iterable[str]] = None,
+    followups: Optional[Iterable[dict[str, Any]]] = None,
+    repair_attempts: int = 0,
+    max_repair_attempts: int = _LOOP_HANDOFF_REPAIR_LIMIT,
+) -> dict[str, Any]:
+    """Enforce safe autonomous reviewer actions and audit every decision."""
+    actor = str(actor or "").strip() or "reviewer"
+    action = str(action or "").strip()
+    flags = {str(flag).strip() for flag in (prohibited_flags or []) if str(flag).strip()}
+    now = int(time.time())
+    handoff = _handoff_row_by_id(conn, int(handoff_id))
+    if not handoff:
+        raise ValueError(f"loop handoff {handoff_id!r} not found")
+    current_state = str(handoff.get("state") or "").strip()
+    if current_state not in _LOOP_HANDOFF_AUTONOMOUS_ACTION_STATES:
+        _append_handoff_auto_action(
+            conn,
+            handoff,
+            {
+                "actor": actor,
+                "action": action,
+                "outcome": "rejected_state",
+                "reason": reason,
+                "current_state": current_state,
+            },
+        )
+        return {"ok": False, "outcome": "rejected_state", "current_state": current_state}
+    escalation_reason = None
+    if flags:
+        unknown = flags - _LOOP_HANDOFF_ESCALATION_FLAGS
+        safe_flags = flags - unknown
+        escalation_reason = "prohibited reviewer action(s): " + ", ".join(sorted(safe_flags or flags))
+    elif repair_attempts >= max_repair_attempts and action in {"auto_repair", "create_followups"}:
+        escalation_reason = "repeated_failed_auto_repair"
+    elif action in {"approve_release", "create_followups"} and not evidence_passed:
+        escalation_reason = "evidence did not pass"
+    elif action not in {"approve_release", "create_followups"}:
+        escalation_reason = f"unsupported autonomous action: {action}"
+    if escalation_reason:
+        return _escalate_loop_handoff(conn, handoff, actor=actor, action=action, reason=reason, flags=flags, escalation_reason=escalation_reason)
+
+    created_cards: list[str] = []
+    if action == "create_followups":
+        for item in followups or []:
+            kind = str(item.get("kind") or "").strip().lower()
+            title = str(item.get("title") or "").strip()
+            assignee = str(item.get("assignee") or "").strip()
+            if kind not in _LOOP_HANDOFF_SAFE_FOLLOWUP_KINDS or not title or not assignee:
+                return _escalate_loop_handoff(
+                    conn,
+                    handoff,
+                    actor=actor,
+                    action=action,
+                    reason=reason or "unsafe or incomplete follow-up request",
+                    flags={"ambiguous"},
+                    escalation_reason="unsafe follow-up request",
+                )
+            card_id = create_task(
+                conn,
+                title=title,
+                body=str(item.get("body") or ""),
+                assignee=assignee,
+                created_by=f"loop-review:{handoff['id']}",
+                tenant=handoff.get("tenant"),
+                parents=[handoff["task_id"]],
+                workspace_kind="worktree",
+                branch_name=f"loop-review/{handoff['id']}/{len(created_cards) + 1}",
+                idempotency_key=f"loop-review:{handoff['id']}:{kind}:{title}",
+            )
+            created_cards.append(card_id)
+
+    conn.execute(
+        """
+        UPDATE loop_handoffs
+           SET state = 'closed', attention = NULL, verification_state = 'approved',
+               verification_status = 'passed', decision_actor = ?, decision_reason = ?,
+               resolution_summary = ?, resolved_at = COALESCE(resolved_at, ?),
+               completed_at = COALESCE(completed_at, ?), updated_at = ?
+         WHERE id = ?
+        """,
+        (actor, reason, reason, now, now, now, handoff["id"]),
+    )
+    _append_handoff_auto_action(conn, handoff, {"actor": actor, "action": action, "outcome": "approved", "reason": reason, "created_cards": created_cards})
+    recompute_ready(conn)
+    return {
+        "ok": True,
+        "outcome": "approved",
+        "created_cards": created_cards,
+        "notification": {"level": "quiet", "state": "approved"},
+    }
 
 def _append_loop_foreground_handoff_event(
     conn: sqlite3.Connection,
@@ -7202,7 +7533,6 @@ def _default_spawn(
     if task.tenant:
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
-    env["HERMES_KANBAN_TASK_TITLE"] = task.title
     env["HERMES_KANBAN_WORKSPACE"] = workspace
     if task.branch_name:
         env["HERMES_KANBAN_BRANCH"] = task.branch_name
@@ -7242,8 +7572,6 @@ def _default_spawn(
     # board slug still forces it to the right directory.
     resolved_board = _normalize_board_slug(board) or get_current_board()
     env["HERMES_KANBAN_BOARD"] = resolved_board
-    if env.get("HERMES_TUI_SIDECAR_URL") and not env.get("HERMES_KANBAN_EVENT_PUBLISHER_URL"):
-        env["HERMES_KANBAN_EVENT_PUBLISHER_URL"] = env["HERMES_TUI_SIDECAR_URL"]
     # HERMES_PROFILE is the author the kanban_comment tool defaults to.
     # `hermes -p <assignee>` activates the profile, but the env var is
     # what the tool reads — set it explicitly here so comments are

@@ -1221,6 +1221,57 @@ def list_loop_handoffs(
         conn.close()
 
 
+class LoopHandoffAutoActionBody(BaseModel):
+    action: str
+    actor: Optional[str] = None
+    reason: Optional[str] = None
+    evidence_passed: bool = False
+    prohibited_flags: list[str] = Field(default_factory=list)
+    followups: list[dict[str, Any]] = Field(default_factory=list)
+    repair_attempts: int = 0
+
+
+@router.get("/loop-handoffs/{handoff_id}")
+def get_loop_handoff_details(handoff_id: int, board: Optional[str] = Query(None)):
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        try:
+            return kanban_db.get_loop_handoff_details(conn, handoff_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@router.post("/loop-handoffs/{handoff_id}/auto-action")
+def review_loop_handoff_auto_action(
+    handoff_id: int,
+    payload: LoopHandoffAutoActionBody,
+    board: Optional[str] = Query(None),
+):
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        try:
+            return kanban_db.review_loop_handoff_autonomous_action(
+                conn,
+                handoff_id,
+                action=payload.action,
+                actor=payload.actor or "dashboard-reviewer",
+                reason=payload.reason,
+                evidence_passed=payload.evidence_passed,
+                prohibited_flags=payload.prohibited_flags,
+                followups=payload.followups,
+                repair_attempts=payload.repair_attempts,
+                max_repair_attempts=kanban_db._LOOP_HANDOFF_REPAIR_LIMIT,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Attachments — upload / list / download / delete (#35338)
 # ---------------------------------------------------------------------------

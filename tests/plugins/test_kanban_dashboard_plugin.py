@@ -59,6 +59,36 @@ def client(kanban_home):
     return TestClient(app)
 
 
+def _loop_node(
+    conn,
+    *,
+    root_task_id: str = "t_looproot",
+    tenant: str = "tenant-a",
+    session_id: str = "origin-session",
+) -> str:
+    task_id = kb.create_task(
+        conn,
+        title="loop worker node",
+        assignee="implementation-worker",
+        created_by=f"loop:{root_task_id}",
+        tenant=tenant,
+        session_id=session_id,
+    )
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            task_id,
+            "loop_node_state",
+            {
+                "root_task_id": root_task_id,
+                "client_id": "loop-worker-node",
+                "active": True,
+                "frontier": True,
+            },
+        )
+    return task_id
+
+
 # ---------------------------------------------------------------------------
 # GET /board on an empty DB
 # ---------------------------------------------------------------------------
@@ -151,6 +181,137 @@ def test_tenant_filter(client):
     r = client.get("/api/plugins/kanban/board?tenant=t2")
     total = sum(len(c["tasks"]) for c in r.json()["columns"])
     assert total == 1
+
+
+def test_loop_handoff_plugin_routes_expose_detail_and_action():
+    routes = {
+        (route.path, tuple(sorted(method for method in route.methods if method not in {"HEAD", "OPTIONS"})))
+        for route in _load_plugin_router().routes
+        if "loop-handoffs" in route.path
+    }
+
+    assert ("/loop-handoffs", ("GET",)) in routes
+    assert ("/loop-handoffs/{handoff_id}", ("GET",)) in routes
+    assert ("/loop-handoffs/{handoff_id}/auto-action", ("POST",)) in routes
+
+
+def test_loop_handoff_plugin_detail_and_safe_auto_action(client, tmp_path):
+    proof = tmp_path / "proof.log"
+    proof.write_text("review evidence", encoding="utf-8")
+
+    conn = kb.connect()
+    try:
+        task_id = _loop_node(conn)
+        assert kb.claim_task(conn, task_id, claimer="worker-host:123") is not None
+        assert kb.complete_task(
+            conn,
+            task_id,
+            summary="implementation complete",
+            metadata={
+                "worker_session_id": "worker-session-1",
+                "artifacts": [str(proof)],
+                "changed_files": ["src/app.py"],
+                "tests_run": ["pytest -q"],
+            },
+        )
+        handoff = kb.list_loop_handoffs(conn)[0]
+    finally:
+        conn.close()
+
+    detail = client.get(f"/api/plugins/kanban/loop-handoffs/{handoff['id']}?board=default")
+    assert detail.status_code == 200, detail.text
+    payload = detail.json()
+    assert payload["proof_packet"]["handoff_id"] == handoff["id"]
+    assert payload["transcript"] == {
+        "worker_session_id": "worker-session-1",
+        "originating_session_id": "origin-session",
+        "content_preview": None,
+        "content_policy": "metadata_only",
+    }
+    assert payload["artifact_details"][0]["path"] == str(proof)
+    assert payload["artifact_details"][0]["content_preview"] is None
+    assert payload["artifact_details"][0]["content_policy"] == kb.LOOP_HANDOFF_ARTIFACT_DETAIL_POLICY
+    assert "review evidence" not in str(payload)
+
+    action = client.post(
+        f"/api/plugins/kanban/loop-handoffs/{handoff['id']}/auto-action?board=default",
+        json={
+            "action": "approve_release",
+            "actor": "dashboard-reviewer",
+            "reason": "proof packet evidence passed",
+            "evidence_passed": True,
+        },
+    )
+    assert action.status_code == 200, action.text
+    assert action.json() == {
+        "ok": True,
+        "outcome": "approved",
+        "created_cards": [],
+        "notification": {"level": "quiet", "state": "approved"},
+    }
+
+    status = client.get(
+        "/api/plugins/kanban/loop-handoffs",
+        params={"tenant": "tenant-a", "root_task_id": "t_looproot", "status_only": True, "board": "default"},
+    )
+    assert status.status_code == 200, status.text
+    assert status.json()["quiet_green"] is True
+    assert status.json()["escalated_count"] == 0
+
+
+def test_loop_handoff_plugin_auto_action_escalation_is_explicit(client):
+    conn = kb.connect()
+    try:
+        task_id = _loop_node(conn)
+        assert kb.claim_task(conn, task_id, claimer="worker-host:123") is not None
+        assert kb.complete_task(conn, task_id, summary="needs review")
+        handoff = kb.list_loop_handoffs(conn)[0]
+    finally:
+        conn.close()
+
+    r = client.post(
+        f"/api/plugins/kanban/loop-handoffs/{handoff['id']}/auto-action",
+        json={
+            "action": "approve_release",
+            "actor": "dashboard-reviewer",
+            "evidence_passed": True,
+            "prohibited_flags": ["push"],
+            "reason": "would push to remote",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["outcome"] == "escalated"
+    assert body["notification"] == {"level": "escalation", "state": "needs-user"}
+    assert "push" in body["escalation_reason"]
+
+
+def test_loop_handoff_plugin_ignores_client_repair_limit_override(client):
+    conn = kb.connect()
+    try:
+        task_id = _loop_node(conn)
+        assert kb.claim_task(conn, task_id, claimer="worker-host:123") is not None
+        assert kb.complete_task(conn, task_id, summary="needs bounded repair")
+        handoff = kb.list_loop_handoffs(conn)[0]
+    finally:
+        conn.close()
+
+    r = client.post(
+        f"/api/plugins/kanban/loop-handoffs/{handoff['id']}/auto-action",
+        json={
+            "action": "create_followups",
+            "actor": "dashboard-reviewer",
+            "evidence_passed": True,
+            "repair_attempts": kb._LOOP_HANDOFF_REPAIR_LIMIT,
+            "max_repair_attempts": 999,
+            "followups": [
+                {"kind": "test", "title": "would bypass bounded repair", "assignee": "peacock"},
+            ],
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["outcome"] == "escalated"
+    assert r.json()["escalation_reason"] == "repeated_failed_auto_repair"
 
 
 def test_session_source_returns_non_archived_tenant_tasks_across_compression_lineage(client, kanban_home):
