@@ -1,5 +1,6 @@
-import { type ReactNode, useMemo, useState } from 'react'
+import { type ReactNode, useEffect, useMemo, useState } from 'react'
 
+import { CompactMarkdown } from '@/components/chat/compact-markdown'
 import { StatusRow } from '@/components/chat/status-row'
 import { StatusSection } from '@/components/chat/status-section'
 import { Button } from '@/components/ui/button'
@@ -185,11 +186,14 @@ function detailRowFromTaskDetail(detail?: LoopTaskDetail | null, selectedTaskId?
     children,
     commentCount: detail?.comments?.length ?? task.comment_count ?? 0,
     depth: 0,
+    externalChildTasks: task.external_child_tasks || [],
+    externalParentTasks: task.external_parent_tasks || [],
     frontier: false,
     latestRun,
     latestSummary: task.latest_summary || latestRun?.summary || null,
     parentCount: parents.length || task.parent_count || task.parents_count || 0,
     parents,
+    priority: task.priority,
     rawTask: task,
     result: task.result,
     status,
@@ -327,6 +331,7 @@ export function LoopTaskStack({ onSelectTaskId, selectedTaskId, state }: LoopTas
 interface LoopPanelProps {
   enableDebugJson?: boolean
   hidden?: boolean
+  onFocusTaskId?: (taskId: string) => void
   onHide?: () => void
   onSelectTaskId?: (taskId: string) => void
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
@@ -349,8 +354,60 @@ function EmptyDetail({ children }: { children: ReactNode }) {
   return <p className="m-0 text-xs text-(--ui-text-tertiary)">{children}</p>
 }
 
-function relationTitle(taskId: string, rowById: Map<string, LoopRow>): string {
-  return rowById.get(taskId)?.title || taskId
+function cleanTaskBodyMarkdown(body?: null | string): string {
+  if (!body?.trim()) {
+    return ''
+  }
+
+  const lines = body.replace(/\r\n?/g, '\n').split('\n')
+  let start = 0
+
+  if (lines[0]?.trim() === '---') {
+    const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---')
+
+    if (end > 0) {
+      start = end + 1
+    }
+  }
+
+  const hiddenField = /^(?:_?metadata|internal|diagnostics|warnings|current_run_id|current_step_key|workspace_(?:kind|path)|created_by|created_at|started_at|completed_at|tenant|session_id|links|runs|attachments)\s*:/i
+  const cleaned: string[] = []
+  let inFence = false
+
+  for (const line of lines.slice(start)) {
+    if (line.trim().startsWith('```')) {
+      inFence = !inFence
+      cleaned.push(line)
+
+      continue
+    }
+
+    if (!inFence && hiddenField.test(line.trim())) {
+      continue
+    }
+
+    cleaned.push(line)
+  }
+
+  return cleaned.join('\n').trim()
+}
+
+function relationTitle(taskId: string, rowById: Map<string, LoopRow>, row: LoopRow): string {
+  return (
+    rowById.get(taskId)?.title ||
+    row.externalParentTasks?.find(task => task.id === taskId)?.title ||
+    row.externalChildTasks?.find(task => task.id === taskId)?.title ||
+    taskId
+  )
+}
+
+function relationStatus(taskId: string, rowById: Map<string, LoopRow>, row: LoopRow): string | null {
+  return (
+    rowById.get(taskId)?.status ||
+    row.externalParentTasks?.find(task => task.id === taskId)?.status ||
+    row.externalChildTasks?.find(task => task.id === taskId)?.status ||
+    null
+  )
 }
 
 interface DependencyLinksProps {
@@ -358,29 +415,47 @@ interface DependencyLinksProps {
   ids: string[]
   label: string
   onSelectTaskId?: (taskId: string) => void
+  row: LoopRow
   rowById: Map<string, LoopRow>
 }
 
-function DependencyLinks({ emptyCopy, ids, label, onSelectTaskId, rowById }: DependencyLinksProps) {
+function DependencyLinks({ emptyCopy, ids, label, onSelectTaskId, row, rowById }: DependencyLinksProps) {
   if (ids.length === 0) {
     return <EmptyDetail>{emptyCopy}</EmptyDetail>
   }
 
   return (
-    <div className="flex flex-wrap gap-1.5">
-      {ids.map(taskId => (
-        <Button
-          aria-label={`Select ${label} task ${taskId}`}
-          className="h-auto max-w-full px-2 py-1 font-mono text-[0.68rem]"
-          disabled={!onSelectTaskId}
-          key={taskId}
-          onClick={() => onSelectTaskId?.(taskId)}
-          type="button"
-          variant="secondary"
-        >
-          <span className="truncate">{relationTitle(taskId, rowById)}</span>
-        </Button>
-      ))}
+    <div className="grid gap-1.5">
+      {ids.map(taskId => {
+        const relatedRow = rowById.get(taskId)
+        const title = relationTitle(taskId, rowById, row)
+        const status = relationStatus(taskId, rowById, row)
+        const unavailable = !relatedRow && !status
+        const archived = status?.toLowerCase() === 'archived'
+
+        return (
+          <Button
+            aria-label={`Select ${label} task ${taskId}`}
+            className="h-auto w-full justify-start px-2 py-1.5 text-left text-[0.68rem]"
+            disabled={!onSelectTaskId}
+            key={taskId}
+            onClick={() => onSelectTaskId?.(taskId)}
+            type="button"
+            variant="secondary"
+          >
+            <span className="grid min-w-0 flex-1 gap-0.5">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span aria-hidden="true" className={cn('shrink-0 rounded-full', statusIndicatorClass(status || 'stale'))} />
+                <span className="truncate font-medium text-(--ui-text-secondary)">{title}</span>
+              </span>
+              <span className="truncate font-mono text-[0.63rem] text-(--ui-text-tertiary)">
+                {taskId}
+                {archived ? ' · Archived task details unavailable' : unavailable ? ' · Task details unavailable' : ''}
+              </span>
+            </span>
+          </Button>
+        )
+      })}
     </div>
   )
 }
@@ -407,35 +482,8 @@ function latestRunCopy(row: LoopRow): string {
   return `Run ${id} · ${status}${profile}`
 }
 
-function normalizedRowStatus(row: LoopRow): string {
-  return row.status.toLowerCase()
-}
-
 function actionsForRow(row: LoopRow): { action: LoopTaskAction; label: string; tone?: 'primary' }[] {
-  const status = normalizedRowStatus(row)
-  const terminal = status === 'done' || status === 'complete' || status === 'completed' || status === 'cancelled'
-  const archived = status === 'archived'
-  const actions: { action: LoopTaskAction; label: string; tone?: 'primary' }[] = []
-
-  if (status === 'triage') {
-    actions.push({ action: 'decompose', label: '⚗ Decompose', tone: 'primary' })
-  } else if (status === 'blocked') {
-    actions.push({ action: 'unblock', label: 'Unblock', tone: 'primary' })
-  } else if (status === 'scheduled') {
-    actions.push({ action: 'start', label: 'Start', tone: 'primary' })
-  } else if (status === 'todo') {
-    actions.push({ action: 'start', label: 'Start', tone: 'primary' })
-  }
-
-  if (!terminal && !archived && status !== 'blocked') {
-    actions.push({ action: 'block', label: 'Block' })
-  }
-
-  if (!terminal && !archived && status !== 'scheduled') {
-    actions.push({ action: 'park', label: 'Park' })
-  }
-
-  actions.push({ action: 'details', label: 'Details' })
+  const actions: { action: LoopTaskAction; label: string; tone?: 'primary' }[] = [{ action: 'details', label: 'Details' }]
 
   if (row.tenant || row.workspacePath || row.rawTask?.session_id) {
     actions.push({ action: 'kanban', label: 'Kanban' })
@@ -491,24 +539,47 @@ function LoopTaskActions({ onTaskAction, row }: { onTaskAction?: (action: LoopTa
 
 function LoopTaskDetails({
   detail,
+  history,
+  onBack,
   onSelectTaskId,
   onTaskAction,
   row,
-  rowById
+  rowById,
+  sourceTaskId
 }: {
   detail?: LoopTaskDetail | null
+  history: { taskId: string; title: string }[]
+  onBack: () => void
   onSelectTaskId?: (taskId: string) => void
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
   row: LoopRow
   rowById: Map<string, LoopRow>
+  sourceTaskId?: string
 }) {
   const detailForRow = detail?.task?.id === row.taskId ? detail : null
   const comments = detailForRow?.comments || []
+  const cleanedBody = cleanTaskBodyMarkdown(row.body)
+
+  const lineageItems = [row.rawTask?.session_id && `Session: ${row.rawTask.session_id}`, row.tenant && `Tenant: ${row.tenant}`].filter(
+    (item): item is string => Boolean(item)
+  )
 
   return (
     <div className="grid gap-3">
       <DetailSection title="Task">
         <div className="grid gap-2">
+          {history.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 text-[0.68rem] text-(--ui-text-tertiary)">
+              <Button aria-label={`Back to ${history[history.length - 1]?.title || history[history.length - 1]?.taskId}`} className="h-6 px-2 text-[0.68rem]" onClick={onBack} type="button" variant="ghost">
+                Back
+              </Button>
+              {history.map(item => (
+                <span className="max-w-28 truncate" key={`${item.taskId}-${item.title}`} title={item.title}>
+                  {item.title || item.taskId}
+                </span>
+              ))}
+            </div>
+          )}
           <div className="flex items-center gap-2 font-medium text-(--ui-text-primary)">
             <LoopStatusIndicator row={row} />
             <h3 className="m-0 min-w-0 truncate text-sm font-semibold text-(--ui-text-primary)">{row.title}</h3>
@@ -518,16 +589,32 @@ function LoopTaskDetails({
       </DetailSection>
 
       <DetailSection title="Description">
-        {row.body?.trim() ? <p className="m-0 whitespace-pre-wrap text-(--ui-text-secondary)">{row.body}</p> : <EmptyDetail>No description provided.</EmptyDetail>}
+        {cleanedBody ? <CompactMarkdown text={cleanedBody} /> : <EmptyDetail>No description provided.</EmptyDetail>}
       </DetailSection>
 
-      <DetailSection title="Parents">
-        <DependencyLinks emptyCopy="No parent tasks." ids={row.parents} label="parent" onSelectTaskId={onSelectTaskId} rowById={rowById} />
-        <div className="mt-2 text-(--ui-text-tertiary)">Parents: {row.parents.length ? row.parents.join(', ') : 'none'}</div>
+      <DetailSection title="Lineage/source">
+        {lineageItems.length || sourceTaskId ? (
+          <div className="grid gap-2 text-(--ui-text-secondary)">
+            {lineageItems.map(item => <div key={item}>{item}</div>)}
+            {sourceTaskId && sourceTaskId !== row.taskId && (
+              <DependencyLinks emptyCopy="" ids={[sourceTaskId]} label="lineage/source" onSelectTaskId={onSelectTaskId} row={row} rowById={rowById} />
+            )}
+          </div>
+        ) : (
+          <EmptyDetail>No lineage or source details available.</EmptyDetail>
+        )}
       </DetailSection>
 
-      <DetailSection title="Children">
-        <DependencyLinks emptyCopy="No child tasks." ids={row.children} label="child" onSelectTaskId={onSelectTaskId} rowById={rowById} />
+      <DetailSection title="Blocked by">
+        <DependencyLinks emptyCopy="Not blocked by any tasks." ids={row.parents} label="blocked by" onSelectTaskId={onSelectTaskId} row={row} rowById={rowById} />
+      </DetailSection>
+
+      <DetailSection title="Blocking">
+        <DependencyLinks emptyCopy="Not blocking other tasks." ids={row.children} label="blocking" onSelectTaskId={onSelectTaskId} row={row} rowById={rowById} />
+      </DetailSection>
+
+      <DetailSection title="Decomposed children/follow-ups">
+        <DependencyLinks emptyCopy="No decomposed children or follow-ups." ids={row.children} label="child/follow-up" onSelectTaskId={onSelectTaskId} row={row} rowById={rowById} />
       </DetailSection>
 
       <DetailSection title="Comments">
@@ -579,6 +666,7 @@ function LoopTaskDetails({
 export function LoopPanel({
   enableDebugJson = false,
   hidden = false,
+  onFocusTaskId,
   onHide,
   onSelectTaskId,
   onTaskAction,
@@ -588,23 +676,54 @@ export function LoopPanel({
   state
 }: LoopPanelProps) {
   const [debugOpen, setDebugOpen] = useState(false)
+  const [history, setHistory] = useState<{ taskId: string; title: string }[]>([])
+  const [focusedTaskId, setFocusedTaskId] = useState<null | string>(selectedTaskId || null)
+
+  useEffect(() => {
+    setFocusedTaskId(selectedTaskId || null)
+    setHistory([])
+  }, [selectedTaskId])
 
   const selected = useMemo(
-    () => selectedRowFrom(state, selectedTaskId, selectedTaskDetail),
-    [selectedTaskDetail, selectedTaskId, state]
+    () => selectedRowFrom(state, focusedTaskId, selectedTaskDetail),
+    [focusedTaskId, selectedTaskDetail, state]
   )
 
   const rowById = useMemo(() => {
     const rows = state?.rows || []
     const map = new Map(rows.map(row => [row.taskId, row]))
-    const detailRow = detailRowFromTaskDetail(selectedTaskDetail, selectedTaskId)
+    const detailRow = detailRowFromTaskDetail(selectedTaskDetail, focusedTaskId)
 
     if (detailRow) {
       map.set(detailRow.taskId, detailRow)
     }
 
     return map
-  }, [selectedTaskDetail, selectedTaskId, state])
+  }, [focusedTaskId, selectedTaskDetail, state])
+
+  function focusDrawerTask(taskId: string) {
+    setFocusedTaskId(taskId)
+    onFocusTaskId?.(taskId)
+  }
+
+  function handleSelectRelatedTask(taskId: string) {
+    if (selected && selected.taskId !== taskId) {
+      setHistory(items => [...items, { taskId: selected.taskId, title: selected.title }].slice(-8))
+    }
+
+    focusDrawerTask(taskId)
+  }
+
+  function handleBack() {
+    const previous = history[history.length - 1]
+
+    if (!previous) {
+      return
+    }
+
+    setHistory(items => items.slice(0, -1))
+    focusDrawerTask(previous.taskId)
+  }
 
   if (!state || hidden) {
     return null
@@ -661,17 +780,20 @@ export function LoopPanel({
             <h3 className="m-0 text-xs font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">Loop details</h3>
             <LoopTaskDetails
               detail={selectedTaskDetail}
-              onSelectTaskId={onSelectTaskId}
+              history={history}
+              onBack={handleBack}
+              onSelectTaskId={onSelectTaskId || onFocusTaskId ? handleSelectRelatedTask : undefined}
               onTaskAction={onTaskAction}
               row={selected}
               rowById={rowById}
+              sourceTaskId={state.rootTaskId?.startsWith('t_') ? state.rootTaskId : undefined}
             />
           </div>
-        ) : selectedTaskId ? (
+        ) : focusedTaskId ? (
           <section className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
             <h3 className="m-0 mb-2 text-xs font-semibold uppercase tracking-wide">Selected task unavailable</h3>
             <p className="m-0">
-              Task <span className="font-mono">{selectedTaskId}</span> is missing from the latest Loop source. It may have been archived,
+              Task <span className="font-mono">{focusedTaskId}</span> is missing from the latest Loop source. It may have been archived,
               deleted, or refreshed out of this session lineage. Select another row or close the panel.
             </p>
           </section>

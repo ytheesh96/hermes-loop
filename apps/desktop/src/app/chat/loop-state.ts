@@ -130,11 +130,14 @@ export interface LoopRow {
   children: string[]
   commentCount: number
   depth: number
+  externalChildTasks?: CompactLoopTask[]
+  externalParentTasks?: CompactLoopTask[]
   frontier: boolean
   latestRun?: null | LoopLatestRun
   latestSummary?: null | string
   parentCount: number
   parents: string[]
+  priority?: number
   rawTask?: TenantLoopTask
   result?: null | string
   status: string
@@ -274,11 +277,14 @@ function tenantRowFromTask(task: TenantLoopTask, depths: Map<string, number>, ta
     children,
     commentCount: task.comment_count || 0,
     depth: depths.get(task.id) || 0,
+    externalChildTasks: task.external_child_tasks || [],
+    externalParentTasks: task.external_parent_tasks || [],
     frontier: unfinishedRunnable,
     latestRun,
     latestSummary: task.latest_summary || latestRun?.summary || null,
     parentCount: parents.length || task.parent_count || task.parents_count || 0,
     parents,
+    priority: task.priority,
     rawTask: task,
     result: task.result,
     status,
@@ -298,6 +304,7 @@ export function deriveLoopPanelStateFromTenantSource(source: TenantLoopSource | 
   const tasks = (source.tasks || []).filter(
     task => task.id && (source.include_archived || !ARCHIVED_STATUSES.has(normalizedStatus(task.status)))
   )
+
   const depths = depthByTaskId(tasks)
   const taskIds = new Set(tasks.map(task => task.id))
   const rows = tasks.map(task => tenantRowFromTask(task, depths, taskIds))
