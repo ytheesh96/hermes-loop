@@ -96,6 +96,67 @@ def test_worker_terminal_event_emits_namespaced_completion(kanban_home, monkeypa
     assert "metadata" not in payload
 
 
+def test_auto_give_up_emits_source_invalidation_and_safe_worker_terminal_event(
+    kanban_home,
+    monkeypatch,
+    all_assignees_spawnable,
+):
+    frames = _capture_publishes(monkeypatch)
+    conn = kb.connect()
+    raw_sensitive = "token=sk-live-very-secret-value"
+    try:
+        tid = kb.create_task(
+            conn,
+            title="Breaker task",
+            assignee="peacock",
+            tenant="tenant-a",
+            session_id="source-session-1",
+        )
+        res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: 4242)
+        assert [item[0] for item in res.spawned] == [tid]
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        run_id = task.current_run_id
+
+        frames.clear()
+        blocked = kb._record_task_failure(
+            conn,
+            tid,
+            error=f"spawn exploded with {raw_sensitive}",
+            outcome="spawn_failed",
+            release_claim=True,
+            end_run=True,
+            failure_limit=1,
+        )
+        assert blocked is True
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "blocked"
+    finally:
+        conn.close()
+
+    frame_types = [f["params"]["type"] for f in frames]
+    assert "loop.source_changed" in frame_types
+    assert "kanban.worker.gave_up" in frame_types
+
+    source_payload = _event_payload([f for f in frames if f["params"]["type"] == "loop.source_changed"][-1])
+    assert source_payload["affected_task_ids"] == [tid]
+    assert source_payload["affected_run_ids"] == [run_id]
+    assert source_payload["source_session_id"] == "source-session-1"
+    assert "run_failed" in source_payload["changed_kinds"]
+
+    worker_payload = _event_payload([f for f in frames if f["params"]["type"] == "kanban.worker.gave_up"][-1])
+    assert worker_payload["event"] == "kanban.worker.gave_up"
+    assert worker_payload["task_id"] == tid
+    assert worker_payload["run_id"] == run_id
+    assert worker_payload["task_status"] == "blocked"
+    assert worker_payload["run_status"] == "failed"
+    assert worker_payload["outcome"] == "gave_up"
+    assert worker_payload["error_preview"]
+    assert raw_sensitive not in worker_payload["error_preview"]
+    assert raw_sensitive not in json.dumps(frames)
+
+
 def test_worker_callback_bridge_emits_structured_tool_events(kanban_home, monkeypatch, all_assignees_spawnable):
     frames = _capture_publishes(monkeypatch)
     conn = kb.connect()

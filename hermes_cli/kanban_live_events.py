@@ -54,6 +54,7 @@ _TASK_EVENT_TO_SOURCE_KIND = {
     "timed_out": "run_failed",
     "manual_terminated": "run_failed",
     "failed": "run_failed",
+    "gave_up": "run_failed",
     "loop_foreground_handoff": "task_edited",
     "scheduled": "task_edited",
 }
@@ -70,6 +71,7 @@ _WORKER_EVENT_BY_TASK_EVENT = {
     "timed_out": "kanban.worker.timed_out",
     "manual_terminated": "kanban.worker.manual_terminated",
     "failed": "kanban.worker.failed",
+    "gave_up": "kanban.worker.gave_up",
 }
 
 
