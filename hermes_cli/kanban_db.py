@@ -3338,6 +3338,176 @@ def claim_next_loop_handoff_review_batch(
     return None
 
 
+def _loop_handoff_review_runner_prompt(batch: dict[str, Any]) -> str:
+    """Return the explicit turn prompt used to resume a foreground reviewer.
+
+    The durable proof-packet batch is already in the resumed session history as
+    an observed user message. This prompt starts a real turn in that same
+    session without duplicating the proof packet into argv/process listings.
+    """
+    return (
+        "Process the queued kanban_loop_handoff_review_batch already present "
+        "in this resumed foreground review session. Review the proof packets "
+        "against the source task acceptance criteria, then take only safe "
+        "Loop handoff reviewer actions. Escalate instead of acting on any "
+        "destructive, external, secret, privacy-sensitive, or ambiguous step.\n\n"
+        f"Review batch id: {batch.get('review_batch_id')}\n"
+        f"Tenant: {batch.get('tenant') or 'default'}\n"
+        f"Root task: {batch.get('root_task_id')}\n"
+        f"Handoffs: {len(batch.get('handoffs') or [])}"
+    )
+
+
+def _append_loop_handoff_review_run_events(
+    conn: sqlite3.Connection,
+    batch: dict[str, Any],
+    *,
+    runner_result: Optional[dict[str, Any]] = None,
+    error: Optional[str] = None,
+) -> None:
+    """Audit that a claimed batch was handed to an execution/resume path."""
+    payload: dict[str, Any] = {
+        "tenant": batch.get("tenant"),
+        "root_task_id": batch.get("root_task_id"),
+        "reviewer_session_id": batch.get("reviewer_session_id"),
+        "review_batch_id": batch.get("review_batch_id"),
+        "review_message_id": batch.get("review_message_id"),
+    }
+    if runner_result is not None:
+        payload["runner_ok"] = bool(runner_result.get("ok", True))
+        if runner_result.get("outcome") is not None:
+            payload["runner_outcome"] = runner_result.get("outcome")
+        if runner_result.get("pid") is not None:
+            payload["runner_pid"] = runner_result.get("pid")
+        if runner_result.get("mode") is not None:
+            payload["runner_mode"] = runner_result.get("mode")
+    if error:
+        payload["runner_ok"] = False
+        payload["runner_error"] = str(error)
+    with write_txn(conn):
+        for handoff in batch.get("handoffs") or []:
+            _append_event(
+                conn,
+                handoff["task_id"],
+                "loop_handoff_review_run",
+                payload,
+                run_id=handoff.get("run_id"),
+            )
+
+
+def run_next_loop_handoff_review_batch(
+    conn: sqlite3.Connection,
+    *,
+    session_db: Any = None,
+    limit: int = 10,
+    review_runner: Any,
+) -> Optional[dict[str, Any]]:
+    """Claim one queued Loop handoff batch and execute its reviewer runner.
+
+    ``claim_next_loop_handoff_review_batch`` only persists/resumes the stable
+    review session and injects the proof-packet message. This helper is the
+    production bridge that proves the selected runner path was actually invoked
+    for that claimed batch.
+    """
+    if review_runner is None:
+        raise ValueError("review_runner is required")
+    batch = claim_next_loop_handoff_review_batch(conn, session_db=session_db, limit=limit)
+    if not batch:
+        return None
+    try:
+        runner_result = review_runner(batch)
+    except Exception as exc:
+        _append_loop_handoff_review_run_events(conn, batch, error=str(exc))
+        raise
+    if not isinstance(runner_result, dict):
+        runner_result = {"ok": True, "result": runner_result}
+    _append_loop_handoff_review_run_events(conn, batch, runner_result=runner_result)
+    out = dict(batch)
+    out["runner_result"] = runner_result
+    return out
+
+
+def _loop_handoff_reviewer_profile() -> str:
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        profile = ((cfg.get("kanban") or {}).get("loop_handoff_review_profile") or "").strip()
+        if profile:
+            return profile
+    except Exception:
+        pass
+    return "reviewer-qa"
+
+
+def start_loop_handoff_review_process(
+    batch: dict[str, Any],
+    *,
+    board: Optional[str] = None,
+    profile: Optional[str] = None,
+) -> dict[str, Any]:
+    """Start/resume the foreground reviewer session for a claimed batch.
+
+    The gateway dispatcher calls this after claiming a batch. It launches a
+    normal Hermes foreground-reviewer turn against the stable reviewer session
+    id, with kanban board paths pinned in the child environment. The proof
+    packet itself remains in the session DB; argv carries only a compact resume
+    instruction so process listings do not expose artifact/transcript details.
+    """
+    reviewer_session_id = str(batch.get("reviewer_session_id") or "").strip()
+    if not reviewer_session_id:
+        raise ValueError("reviewer_session_id is required")
+    profile_arg = (profile or _loop_handoff_reviewer_profile()).strip() or "reviewer-qa"
+    resolve_profile_env = None
+    try:
+        from hermes_cli.profiles import normalize_profile_name, resolve_profile_env as _resolve_profile_env
+        profile_arg = normalize_profile_name(profile_arg)
+        resolve_profile_env = _resolve_profile_env
+    except Exception:
+        pass
+
+    env = dict(os.environ)
+    if resolve_profile_env is not None:
+        try:
+            env["HERMES_HOME"] = resolve_profile_env(profile_arg)
+        except FileNotFoundError:
+            pass
+    env["HERMES_PROFILE"] = profile_arg
+    if batch.get("tenant"):
+        env["HERMES_TENANT"] = str(batch.get("tenant"))
+    env["HERMES_KANBAN_DB"] = str(kanban_db_path(board=board))
+    env["HERMES_KANBAN_WORKSPACES_ROOT"] = str(workspaces_root(board=board))
+    env["HERMES_KANBAN_BOARD"] = _normalize_board_slug(board) or get_current_board()
+
+    cmd = [
+        *_resolve_hermes_argv(),
+        "-p", profile_arg,
+        "--resume", reviewer_session_id,
+        "chat",
+        "-q", _loop_handoff_review_runner_prompt(batch),
+    ]
+    log_dir = worker_logs_dir(board=board)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    safe_session = re.sub(r"[^A-Za-z0-9_.-]+", "-", reviewer_session_id)[:120]
+    log_path = log_dir / f"loop-review-{safe_session}.log"
+    rotate_bytes, backup_count = worker_log_rotation_config()
+    _rotate_worker_log(log_path, rotate_bytes, backup_count)
+    log_f = open(log_path, "ab")
+    try:
+        proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list; no shell=True
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+            env=env,
+            start_new_session=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
+        )
+    except Exception:
+        log_f.close()
+        raise
+    return {"ok": True, "pid": proc.pid, "mode": "subprocess", "profile": profile_arg, "log_path": str(log_path)}
+
+
 def _extract_acceptance_criteria(body: Optional[str]) -> Optional[str]:
     if not body:
         return None

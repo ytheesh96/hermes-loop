@@ -409,6 +409,46 @@ def test_scheduler_claims_next_handoff_into_stable_review_session(kanban_home):
     assert events[-1].payload["review_run_id"] == first["review_message_id"]
 
 
+def test_review_batch_runner_executes_after_claim_and_closes_handoff(kanban_home):
+    from hermes_state import SessionDB
+
+    session_db = SessionDB()
+    with kb.connect() as conn:
+        task_id = _loop_node(conn, title="reviewable loop node", tenant="tenant-a")
+        assert kb.claim_task(conn, task_id, claimer="worker-host:123") is not None
+        assert kb.complete_task(conn, task_id, summary="done with passing evidence", metadata={"tests_run": ["pytest -q"]})
+
+        calls = []
+
+        def review_runner(batch):
+            calls.append(batch)
+            messages = session_db.get_messages(batch["reviewer_session_id"])
+            assert messages and "kanban_loop_handoff_review_batch" in messages[0]["content"]
+            return kb.review_loop_handoff_autonomous_action(
+                conn,
+                batch["handoffs"][0]["id"],
+                action="approve_release",
+                actor="reviewer-qa",
+                evidence_passed=True,
+                reason="runner processed proof packet",
+            )
+
+        result = kb.run_next_loop_handoff_review_batch(
+            conn,
+            session_db=session_db,
+            review_runner=review_runner,
+        )
+        reviewed = kb.list_loop_handoffs(conn, task_id=task_id)[0]
+        run_events = [event for event in kb.list_events(conn, task_id) if event.kind == "loop_handoff_review_run"]
+
+    assert calls and calls[0]["reviewer_session_id"] == kb.loop_handoff_reviewer_session_id("tenant-a", "t_looproot")
+    assert result["ok"] is True
+    assert result["runner_result"]["outcome"] == "approved"
+    assert reviewed["state"] == "closed"
+    assert reviewed["verification_state"] == "approved"
+    assert run_events and run_events[-1].payload["runner_outcome"] == "approved"
+
+
 def test_autonomous_approve_release_is_audited_and_promotes_downstream(kanban_home):
     with kb.connect() as conn:
         parent_id = _loop_node(conn, title="loop parent", tenant="tenant-a")

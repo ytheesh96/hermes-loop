@@ -2120,6 +2120,11 @@ DEFAULT_CONFIG = {
         # raise these to keep more early failure evidence.
         "worker_log_rotate_bytes": 2 * 1024 * 1024,
         "worker_log_backup_count": 1,
+        # Profile used for autonomous Loop foreground handoff review sessions.
+        # The dispatcher resumes the stable tenant/root review session under
+        # this profile after claiming a proof-packet batch. Override only if
+        # your installation names the reviewer lane differently.
+        "loop_handoff_review_profile": "reviewer-qa",
         # Profile assigned to the root/orchestration task after Triage
         # decomposition. When unset, falls back to the default profile (the
         # one `hermes` launches with no -p flag). This does not control the
