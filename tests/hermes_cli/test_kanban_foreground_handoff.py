@@ -86,6 +86,33 @@ def test_completing_loop_node_emits_compact_foreground_handoff_event(kanban_home
     }
 
 
+
+def test_routine_child_completion_records_run_but_no_foreground_handoff(kanban_home):
+    with kb.connect() as conn:
+        root_id = _loop_node(conn, root_task_id="t_looproot", title="loop root")
+        child_id = _loop_node(conn, root_task_id="t_looproot", title="routine child", parents=(root_id,))
+        assert kb.claim_task(conn, root_id, claimer="worker-host:root") is not None
+        assert kb.complete_task(conn, root_id, summary="root released child work")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child_id,))
+        assert kb.claim_task(conn, child_id, claimer="worker-host:child") is not None
+
+        assert kb.complete_task(
+            conn,
+            child_id,
+            summary="routine child evidence is stored on the run",
+            metadata={"changed_files": ["worker.py"], "tests_run": ["pytest child"]},
+        )
+
+        child_events = _handoff_events(conn, child_id)
+        child_handoffs = kb.list_loop_handoffs(conn, task_id=child_id)
+        runs = kb.list_runs(conn, child_id)
+
+    assert child_events == []
+    assert child_handoffs == []
+    assert runs[-1].summary == "routine child evidence is stored on the run"
+    assert runs[-1].metadata["changed_files"] == ["worker.py"]
+
 def test_blocking_loop_node_emits_pending_foreground_handoff_reason(kanban_home):
     with kb.connect() as conn:
         task_id = _loop_node(conn, title="loop blocker")
@@ -256,7 +283,7 @@ def test_claim_loop_handoff_batch_serializes_per_tenant_root_and_orders_dependen
             limit=10,
         )
 
-    assert [handoff["task_id"] for handoff in batch] == [parent_id, child_id]
+    assert [handoff["task_id"] for handoff in batch] == [parent_id]
     assert {handoff["state"] for handoff in batch} == {"assigned"}
     assert {handoff["reviewer_session_id"] for handoff in batch} == {"review-session-1"}
     assert blocked_by_active == []
@@ -375,6 +402,43 @@ def test_handoff_details_expose_safe_transcript_and_artifact_metadata(kanban_hom
 
 
 
+
+def test_review_message_transcript_card_is_minimal_with_payload_reference(kanban_home):
+    with kb.connect() as conn:
+        task_id = _loop_node(conn, title="Reviewable worker", tenant="tenant-a")
+        assert kb.claim_task(conn, task_id, claimer="worker-host:root") is not None
+        assert kb.complete_task(
+            conn,
+            task_id,
+            summary="Line one is visible.\nLine two stays out of the transcript card.",
+            metadata={"changed_files": ["secretly-large-diff.py"], "tests_run": ["pytest -q"]},
+        )
+        handoff = kb.claim_loop_handoff_batch(
+            conn,
+            tenant="tenant-a",
+            root_task_id="t_looproot",
+            reviewer_session_id="review-session",
+            limit=10,
+        )[0]
+
+    message = kb._render_loop_handoff_review_message(
+        tenant="tenant-a",
+        root_task_id="t_looproot",
+        batch_id="batch-1",
+        handoffs=[handoff],
+    )
+
+    assert "Reviewable worker" in message
+    assert "Line one is visible." in message
+    assert "Open drawer" in message
+    assert "Line two stays out" not in message
+    assert "secretly-large-diff.py" not in message
+    assert "proof_packets" not in message
+    assert f"loop_handoff:{handoff['id']}" in message
+    assert "Accept" not in message
+    assert "Reject" not in message
+    assert "Escalate" not in message
+
 def test_scheduler_claims_next_handoff_into_stable_review_session(kanban_home):
     from hermes_state import SessionDB
 
@@ -394,19 +458,26 @@ def test_scheduler_claims_next_handoff_into_stable_review_session(kanban_home):
         handoffs = kb.list_loop_handoffs(conn, tenant="tenant-a", root_task_id="t_looproot")
         events = [event for event in kb.list_events(conn, parent_id) if event.kind == "loop_handoff_review_session"]
 
+    assert first is not None
     assert first["tenant"] == "tenant-a"
     assert first["root_task_id"] == "t_looproot"
     assert first["reviewer_session_id"] == kb.loop_handoff_reviewer_session_id("tenant-a", "t_looproot")
-    assert [handoff["task_id"] for handoff in first["handoffs"]] == [parent_id, child_id]
+    assert [handoff["task_id"] for handoff in first["handoffs"]] == [parent_id]
     assert first["review_message_id"] is not None
     assert {handoff["reviewer_session_id"] for handoff in handoffs} == {first["reviewer_session_id"]}
     assert {handoff["review_run_id"] for handoff in handoffs} == {first["review_message_id"]}
     assert messages and messages[0]["role"] == "user"
-    assert "loop_handoff_proof_packet" in messages[0]["content"]
+    assert "Open drawer" in messages[0]["content"]
+    assert "loop_handoff_proof_packet" not in messages[0]["content"]
     assert str(first["handoffs"][0]["id"]) in messages[0]["content"]
+    assert blocked_same_root is not None
     assert blocked_same_root["root_task_id"] == "t_otherroot"
     assert events and events[-1].payload["reviewer_session_id"] == first["reviewer_session_id"]
     assert events[-1].payload["review_run_id"] == first["review_message_id"]
+    prompt = kb._loop_handoff_review_runner_prompt(first)
+    assert "payload_ref" in prompt
+    assert "drawer/API" in prompt
+    assert "proof packets" not in prompt
 
 
 def test_review_batch_runner_executes_after_claim_and_closes_handoff(kanban_home):
@@ -636,6 +707,80 @@ def test_autonomous_action_loses_stale_state_race_without_promoting_or_creating_
     assert reviewed["state"] == "closed"
     assert reviewed["verification_state"] != "approved"
     assert child is not None and child.status == "todo"
+    assert followups == []
+
+
+
+def test_failed_final_evidence_creates_followups_without_blocking_root(kanban_home):
+    with kb.connect() as conn:
+        root_id = _loop_node(conn, title="loop root", tenant="tenant-a")
+        assert kb.claim_task(conn, root_id, claimer="worker-host:root") is not None
+        assert kb.complete_task(conn, root_id, summary="final evidence has a gap")
+        handoff = kb.list_loop_handoffs(conn, task_id=root_id)[0]
+
+        result = kb.review_loop_handoff_autonomous_action(
+            conn,
+            handoff["id"],
+            action="create_followups",
+            actor="reviewer-qa",
+            evidence_passed=False,
+            reason="missing regression evidence for final acceptance",
+            followups=[{
+                "kind": "test",
+                "title": "Add missing final evidence regression",
+                "assignee": "implementation-worker",
+                "body": "Cover the final acceptance evidence gap before releasing the root.",
+            }],
+        )
+        reviewed = kb.list_loop_handoffs(conn, task_id=root_id)[0]
+        root = kb.get_task(conn, root_id)
+        followup = kb.get_task(conn, result["created_cards"][0])
+        followup_parents = kb.parent_ids(conn, result["created_cards"][0])
+        followup_claim = kb.claim_task(conn, result["created_cards"][0], claimer="worker-host:followup")
+        launched_followup = kb.get_task(conn, result["created_cards"][0])
+        events = [event for event in kb.list_events(conn, root_id) if event.kind == "loop_final_evidence_followups"]
+        event_payload = events[-1].payload if events else {}
+
+    assert result["ok"] is True
+    assert result["outcome"] == "followups_created"
+    assert reviewed["verification_state"] == "followups-created"
+    assert reviewed["verification_status"] == "failed"
+    assert reviewed["decision_reason"] == "missing regression evidence for final acceptance"
+    assert root is not None and root.status == "running"
+    assert root.completed_at is None
+    assert root.current_run_id is not None
+    assert followup is not None
+    assert followup.status == "ready"
+    assert followup.tenant == "tenant-a"
+    assert followup.created_by == f"loop-review:{handoff['id']}"
+    assert followup_parents == [root_id]
+    assert followup_claim is not None
+    assert launched_followup is not None and launched_followup.status == "running"
+    assert event_payload and event_payload["created_cards"] == result["created_cards"]
+
+def test_failed_final_evidence_requires_concrete_followup_tasks(kanban_home):
+    with kb.connect() as conn:
+        task_id = _loop_node(conn, title="loop root", tenant="tenant-a")
+        assert kb.claim_task(conn, task_id, claimer="worker-host:root") is not None
+        assert kb.complete_task(conn, task_id, summary="final evidence has a gap")
+        handoff = kb.list_loop_handoffs(conn, task_id=task_id)[0]
+
+        result = kb.review_loop_handoff_autonomous_action(
+            conn,
+            handoff["id"],
+            action="create_followups",
+            actor="reviewer-qa",
+            evidence_passed=False,
+            reason="gap named but no work item supplied",
+            followups=[],
+        )
+        reviewed = kb.list_loop_handoffs(conn, task_id=task_id)[0]
+        followups = [task for task in kb.list_tasks(conn) if task.created_by == f"loop-review:{handoff['id']}"]
+
+    assert result["ok"] is False
+    assert result["outcome"] == "escalated"
+    assert result["escalation_reason"] == "missing follow-up task request"
+    assert reviewed["state"] == "escalated"
     assert followups == []
 
 

@@ -3203,6 +3203,13 @@ def _ensure_loop_handoff_review_session(session_db: Any, *, tenant: Optional[str
     return session_id
 
 
+def _handoff_visible_summary(handoff: dict[str, Any]) -> Optional[str]:
+    summary = str(handoff.get("summary") or handoff.get("reason") or "").strip()
+    if not summary:
+        return None
+    return summary.splitlines()[0][:240]
+
+
 def _render_loop_handoff_review_message(
     *,
     tenant: Optional[str],
@@ -3210,19 +3217,30 @@ def _render_loop_handoff_review_message(
     batch_id: str,
     handoffs: list[dict[str, Any]],
 ) -> str:
-    packets = [handoff.get("proof_packet") or {} for handoff in handoffs]
+    cards = []
+    for handoff in handoffs:
+        handoff_id = handoff.get("id") if handoff.get("id") is not None else handoff.get("handoff_id")
+        cards.append(
+            {
+                "task_title": handoff.get("task_title") or handoff.get("task_id"),
+                "summary": _handoff_visible_summary(handoff),
+                "action": "Open drawer",
+                "payload_ref": f"loop_handoff:{handoff_id}" if handoff_id is not None else None,
+            }
+        )
     payload = {
         "kind": "kanban_loop_handoff_review_batch",
         "tenant": tenant,
         "root_task_id": root_task_id,
         "review_batch_id": batch_id,
         "handoff_count": len(handoffs),
+        "transcript_card_contract": "handoff-a-minimal",
+        "visible_cards": cards,
         "instructions": [
-            "Review the compact proof packets in topological order.",
-            "Approve/release only when the provided evidence satisfies the task acceptance criteria.",
-            "Escalate instead of acting on prohibited, destructive, external, secret, or ambiguous changes.",
+            "Treat visible_cards as transcript artifacts only: title, one-line summary, and Open drawer.",
+            "Do not render or offer mutating decision controls from this transcript message.",
+            "Use each payload_ref to fetch full handoff details from the Loop/Kanban drawer/API before deciding.",
         ],
-        "proof_packets": packets,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
 
@@ -3341,16 +3359,19 @@ def claim_next_loop_handoff_review_batch(
 def _loop_handoff_review_runner_prompt(batch: dict[str, Any]) -> str:
     """Return the explicit turn prompt used to resume a foreground reviewer.
 
-    The durable proof-packet batch is already in the resumed session history as
-    an observed user message. This prompt starts a real turn in that same
-    session without duplicating the proof packet into argv/process listings.
+    The minimal Handoff-A transcript card is already in the resumed session
+    history as an observed user message. This prompt starts a real turn in
+    that same session without duplicating hidden handoff payloads into
+    argv/process listings.
     """
     return (
         "Process the queued kanban_loop_handoff_review_batch already present "
-        "in this resumed foreground review session. Review the proof packets "
-        "against the source task acceptance criteria, then take only safe "
-        "Loop handoff reviewer actions. Escalate instead of acting on any "
-        "destructive, external, secret, privacy-sensitive, or ambiguous step.\n\n"
+        "in this resumed foreground review session. Treat the transcript "
+        "cards as minimal visible artifacts only; use their payload_ref values "
+        "or the Loop/Kanban drawer/API to fetch full handoff details before "
+        "deciding. Take only safe Loop handoff reviewer actions. Escalate "
+        "instead of acting on any destructive, external, secret, "
+        "privacy-sensitive, or ambiguous step.\n\n"
         f"Review batch id: {batch.get('review_batch_id')}\n"
         f"Tenant: {batch.get('tenant') or 'default'}\n"
         f"Root task: {batch.get('root_task_id')}\n"
@@ -3716,6 +3737,117 @@ def _escalate_loop_handoff(
     }
 
 
+def _keep_loop_root_running_for_followups(
+    conn: sqlite3.Connection,
+    handoff: dict[str, Any],
+    *,
+    actor: str,
+    reason: Optional[str],
+    created_cards: list[str],
+    now: int,
+) -> Optional[int]:
+    """Re-open a final/root handoff source row while repair children run."""
+    task_id = str(handoff.get("task_id") or "").strip()
+    if not task_id or parent_ids(conn, task_id):
+        return None
+    task = conn.execute(
+        "SELECT assignee, current_run_id FROM tasks WHERE id = ? AND status = 'done'",
+        (task_id,),
+    ).fetchone()
+    if task is None:
+        return None
+    metadata = {
+        "loop_handoff_id": handoff.get("id"),
+        "evidence_gap": reason,
+        "created_cards": created_cards,
+    }
+    current_run_id = task["current_run_id"]
+    if current_run_id is None:
+        cur = conn.execute(
+            """
+            INSERT INTO task_runs (
+                task_id, profile, status, claim_lock, claim_expires,
+                worker_pid, started_at, summary, metadata
+            ) VALUES (?, ?, 'running', NULL, NULL, NULL, ?, ?, ?)
+            """,
+            (
+                task_id,
+                actor or task["assignee"],
+                now,
+                reason,
+                json.dumps(metadata, ensure_ascii=False),
+            ),
+        )
+        current_run_id = int(cur.lastrowid)
+    conn.execute(
+        """
+        UPDATE tasks
+           SET status = 'running', completed_at = NULL,
+               claim_lock = NULL, claim_expires = NULL, worker_pid = NULL,
+               current_run_id = ?
+         WHERE id = ? AND status = 'done'
+        """,
+        (current_run_id, task_id),
+    )
+    _append_event(
+        conn,
+        task_id,
+        "loop_final_evidence_followups",
+        {
+            "handoff_id": handoff.get("id"),
+            "reason": reason,
+            "created_cards": created_cards,
+            "root_status": "running",
+        },
+        run_id=current_run_id,
+    )
+    return int(current_run_id)
+
+
+def _release_loop_root_after_approved_handoff(
+    conn: sqlite3.Connection,
+    handoff: dict[str, Any],
+    *,
+    reason: Optional[str],
+    now: int,
+) -> Optional[int]:
+    """Close a root row held running for foreground final acceptance."""
+    task_id = str(handoff.get("task_id") or "").strip()
+    if not task_id or parent_ids(conn, task_id):
+        return None
+    task = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if task is None or task["status"] != "running":
+        return None
+    run_id = _end_run(
+        conn,
+        task_id,
+        outcome="completed",
+        status="done",
+        summary=reason or handoff.get("summary") or handoff.get("reason"),
+        metadata={"loop_handoff_id": handoff.get("id"), "final_evidence": "approved"},
+    )
+    conn.execute(
+        """
+        UPDATE tasks
+           SET status = 'done', completed_at = COALESCE(completed_at, ?),
+               claim_lock = NULL, claim_expires = NULL, worker_pid = NULL
+         WHERE id = ? AND status = 'running'
+        """,
+        (now, task_id),
+    )
+    _append_event(
+        conn,
+        task_id,
+        "loop_final_evidence_accepted",
+        {"handoff_id": handoff.get("id"), "reason": reason, "root_status": "done"},
+        run_id=run_id,
+    )
+    return run_id
+
+
 def review_loop_handoff_autonomous_action(
     conn: sqlite3.Connection,
     handoff_id: int,
@@ -3758,7 +3890,7 @@ def review_loop_handoff_autonomous_action(
         escalation_reason = "prohibited reviewer action(s): " + ", ".join(sorted(safe_flags or flags))
     elif repair_attempts >= max_repair_attempts and action in {"auto_repair", "create_followups"}:
         escalation_reason = "repeated_failed_auto_repair"
-    elif action in {"approve_release", "create_followups"} and not evidence_passed:
+    elif action == "approve_release" and not evidence_passed:
         escalation_reason = "evidence did not pass"
     elif action not in {"approve_release", "create_followups"}:
         escalation_reason = f"unsupported autonomous action: {action}"
@@ -3782,19 +3914,41 @@ def review_loop_handoff_autonomous_action(
                     escalation_reason="unsafe follow-up request",
                 )
             followup_items.append((kind, item))
+        if not followup_items:
+            return _escalate_loop_handoff(
+                conn,
+                handoff,
+                actor=actor,
+                action=action,
+                reason=reason or "missing follow-up task request",
+                flags={"ambiguous"},
+                escalation_reason="missing follow-up task request",
+            )
 
     allowed_states = tuple(sorted(_LOOP_HANDOFF_AUTONOMOUS_ACTION_STATES))
     placeholders = ",".join("?" for _ in allowed_states)
     cur = conn.execute(
         f"""
         UPDATE loop_handoffs
-           SET state = 'closed', attention = NULL, verification_state = 'approved',
-               verification_status = 'passed', decision_actor = ?, decision_reason = ?,
+           SET state = 'closed', attention = NULL,
+               verification_state = ?, verification_status = ?,
+               decision_actor = ?, decision_reason = ?,
                resolution_summary = ?, resolved_at = COALESCE(resolved_at, ?),
                completed_at = COALESCE(completed_at, ?), updated_at = ?
          WHERE id = ? AND state IN ({placeholders})
         """,
-        (actor, reason, reason, now, now, now, handoff["id"], *allowed_states),
+        (
+            "followups-created" if action == "create_followups" and not evidence_passed else "approved",
+            "failed" if action == "create_followups" and not evidence_passed else "passed",
+            actor,
+            reason,
+            reason,
+            now,
+            now,
+            now,
+            handoff["id"],
+            *allowed_states,
+        ),
     )
     if cur.rowcount != 1:
         refreshed = _handoff_row_by_id(conn, int(handoff["id"])) or handoff
@@ -3828,14 +3982,28 @@ def review_loop_handoff_autonomous_action(
         )
         created_cards.append(card_id)
 
+    outcome = "followups_created" if action == "create_followups" and not evidence_passed else "approved"
+    if outcome == "followups_created":
+        _keep_loop_root_running_for_followups(
+            conn,
+            handoff,
+            actor=actor,
+            reason=reason,
+            created_cards=created_cards,
+            now=now,
+        )
+    elif action == "approve_release" and evidence_passed:
+        _release_loop_root_after_approved_handoff(conn, handoff, reason=reason, now=now)
+
     refreshed = _handoff_row_by_id(conn, int(handoff["id"])) or handoff
-    _append_handoff_auto_action(conn, refreshed, {"actor": actor, "action": action, "outcome": "approved", "reason": reason, "created_cards": created_cards})
+    notification_state = "followups-created" if outcome == "followups_created" else "approved"
+    _append_handoff_auto_action(conn, refreshed, {"actor": actor, "action": action, "outcome": outcome, "reason": reason, "created_cards": created_cards})
     recompute_ready(conn)
     return {
         "ok": True,
-        "outcome": "approved",
+        "outcome": outcome,
         "created_cards": created_cards,
-        "notification": {"level": "quiet", "state": "approved"},
+        "notification": {"level": "quiet", "state": notification_state},
     }
 
 def _append_loop_foreground_handoff_event(
@@ -4173,7 +4341,12 @@ def claim_task(
         undone = conn.execute(
             "SELECT 1 FROM task_links l "
             "JOIN tasks p ON p.id = l.parent_id "
-            "WHERE l.child_id = ? AND p.status NOT IN ('done', 'archived') LIMIT 1",
+            "JOIN tasks c ON c.id = l.child_id "
+            "WHERE l.child_id = ? AND p.status NOT IN ('done', 'archived') "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM loop_handoffs h "
+            "  WHERE c.created_by = ('loop-review:' || h.id) AND h.task_id = p.id"
+            ") LIMIT 1",
             (task_id,),
         ).fetchone()
         if undone:
@@ -4867,6 +5040,7 @@ def complete_task(
         }
         if verified_cards:
             completed_payload["verified_cards"] = verified_cards
+        should_emit_loop_handoff = bool(loop_root_task_id) and not parent_ids(conn, task_id)
         # Carry artifact paths in the event payload so the gateway
         # notifier can upload them as native attachments alongside the
         # completion message. Workers pass these via
@@ -4886,7 +5060,7 @@ def complete_task(
             completed_payload,
             run_id=run_id,
         )
-        if loop_root_task_id:
+        if should_emit_loop_handoff:
             _append_loop_foreground_handoff_event(
                 conn,
                 task_id,
@@ -4925,9 +5099,10 @@ def complete_task(
     # care about", and a success resets that question.
     _clear_failure_counter(conn, task_id)
     # Recompute ready status for dependents (separate txn so children see done).
-    # Loop-backed rows hand control back to foreground first; downstream rows
-    # remain gated until a separate foreground release/dispatch action.
-    if not loop_root_task_id:
+    # Loop root/final completions hand control back to foreground first; routine
+    # child completions may release their own dependents without injecting a
+    # foreground transcript handoff.
+    if not should_emit_loop_handoff:
         recompute_ready(conn)
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
