@@ -444,6 +444,11 @@ def run_conversation(
     compression_attempts = 0
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
 
+    def _record_visible_failure(content: str) -> str:
+        messages.append({"role": "assistant", "content": content})
+        agent._checkpoint_session_transcript(messages, conversation_history)
+        return content
+
     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
     # turn to the codex app-server subprocess (terminal/file ops/patching
     # all run inside Codex). Default Hermes path is bypassed entirely.
@@ -766,6 +771,7 @@ def run_conversation(
             failed = True
             _turn_exit_reason = "ollama_runtime_context_too_small"
             messages.append({"role": "assistant", "content": final_response})
+            agent._checkpoint_session_transcript(messages, conversation_history)
             agent._emit_status("❌ Ollama runtime context is too small for Hermes tool use")
             api_call_count -= 1
             agent._api_call_count = api_call_count
@@ -2540,6 +2546,7 @@ def run_conversation(
                         # so _flush_messages_to_session_db writes compressed
                         # messages to the new session, not skipping them.
                         conversation_history = None
+                        agent._set_active_turn_persistence_history(conversation_history)
                         if len(messages) < original_len or old_ctx > _reduced_ctx:
                             agent._buffer_status(
                                 f"🗜️ Context reduced to {_reduced_ctx:,} tokens "
@@ -2695,12 +2702,16 @@ def run_conversation(
                         agent._vprint(f"{agent.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached for payload-too-large error.", force=True)
                         agent._vprint(f"{agent.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                         logger.error(f"{agent.log_prefix}413 compression failed after {max_compression_attempts} attempts.")
+                        visible_error = _record_visible_failure(
+                            f"Request payload too large: max compression attempts ({max_compression_attempts}) reached."
+                        )
                         agent._persist_session(messages, conversation_history)
                         return {
                             "messages": messages,
                             "completed": False,
                             "api_calls": api_call_count,
-                            "error": f"Request payload too large: max compression attempts ({max_compression_attempts}) reached.",
+                            "final_response": visible_error,
+                            "error": visible_error,
                             "partial": True,
                             "failed": True,
                             "compression_exhausted": True,
@@ -2716,6 +2727,7 @@ def run_conversation(
                     # so _flush_messages_to_session_db writes compressed
                     # messages to the new session, not skipping them.
                     conversation_history = None
+                    agent._set_active_turn_persistence_history(conversation_history)
 
                     if len(messages) < original_len:
                         agent._buffer_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
@@ -2729,12 +2741,16 @@ def run_conversation(
                         agent._vprint(f"{agent.log_prefix}❌ Payload too large and cannot compress further.", force=True)
                         agent._vprint(f"{agent.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                         logger.error(f"{agent.log_prefix}413 payload too large. Cannot compress further.")
+                        visible_error = _record_visible_failure(
+                            "Request payload too large (413). Cannot compress further."
+                        )
                         agent._persist_session(messages, conversation_history)
                         return {
                             "messages": messages,
                             "completed": False,
                             "api_calls": api_call_count,
-                            "error": "Request payload too large (413). Cannot compress further.",
+                            "final_response": visible_error,
+                            "error": visible_error,
                             "partial": True,
                             "failed": True,
                             "compression_exhausted": True,
@@ -2782,12 +2798,16 @@ def run_conversation(
                             agent._vprint(f"{agent.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached.", force=True)
                             agent._vprint(f"{agent.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                             logger.error(f"{agent.log_prefix}Context compression failed after {max_compression_attempts} attempts.")
+                            visible_error = _record_visible_failure(
+                                f"Context length exceeded: max compression attempts ({max_compression_attempts}) reached."
+                            )
                             agent._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
-                                "error": f"Context length exceeded: max compression attempts ({max_compression_attempts}) reached.",
+                                "final_response": visible_error,
+                                "error": visible_error,
                                 "partial": True,
                                 "failed": True,
                                 "compression_exhausted": True,
@@ -2851,12 +2871,16 @@ def run_conversation(
                         agent._vprint(f"{agent.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached.", force=True)
                         agent._vprint(f"{agent.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                         logger.error(f"{agent.log_prefix}Context compression failed after {max_compression_attempts} attempts.")
+                        visible_error = _record_visible_failure(
+                            f"Context length exceeded: max compression attempts ({max_compression_attempts}) reached."
+                        )
                         agent._persist_session(messages, conversation_history)
                         return {
                             "messages": messages,
                             "completed": False,
                             "api_calls": api_call_count,
-                            "error": f"Context length exceeded: max compression attempts ({max_compression_attempts}) reached.",
+                            "final_response": visible_error,
+                            "error": visible_error,
                             "partial": True,
                             "failed": True,
                             "compression_exhausted": True,
@@ -2872,6 +2896,7 @@ def run_conversation(
                     # so _flush_messages_to_session_db writes compressed
                     # messages to the new session, not skipping them.
                     conversation_history = None
+                    agent._set_active_turn_persistence_history(conversation_history)
 
                     if len(messages) < original_len or new_ctx and new_ctx < old_ctx:
                         if len(messages) < original_len:
@@ -2885,12 +2910,16 @@ def run_conversation(
                         agent._vprint(f"{agent.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)
                         agent._vprint(f"{agent.log_prefix}   💡 The conversation has accumulated too much content. Try /new to start fresh, or /compress to manually trigger compression.", force=True)
                         logger.error(f"{agent.log_prefix}Context length exceeded: {approx_tokens:,} tokens. Cannot compress further.")
+                        visible_error = _record_visible_failure(
+                            f"Context length exceeded ({approx_tokens:,} tokens). Cannot compress further."
+                        )
                         agent._persist_session(messages, conversation_history)
                         return {
                             "messages": messages,
                             "completed": False,
                             "api_calls": api_call_count,
-                            "error": f"Context length exceeded ({approx_tokens:,} tokens). Cannot compress further.",
+                            "final_response": visible_error,
+                            "error": visible_error,
                             "partial": True,
                             "failed": True,
                             "compression_exhausted": True,
@@ -3563,6 +3592,7 @@ def run_conversation(
                             "tool_call_id": tc.id,
                             "content": content,
                         })
+                    agent._checkpoint_session_transcript(messages, conversation_history)
                     continue
                 # Reset retry counter on successful tool call validation
                 agent._invalid_tool_retries = 0
@@ -3655,6 +3685,7 @@ def run_conversation(
                                 "tool_call_id": tc.id,
                                 "content": tool_result,
                             })
+                        agent._checkpoint_session_transcript(messages, conversation_history)
                         continue
                 
                 # Reset retry counter on successful JSON validation
@@ -3725,6 +3756,7 @@ def run_conversation(
 
                 messages.append(assistant_msg)
                 agent._emit_interim_assistant_message(assistant_msg)
+                agent._checkpoint_session_transcript(messages, conversation_history)
 
                 # Close any open streaming display (response box, reasoning
                 # box) before tool execution begins.  Intermediate turns may
@@ -3739,6 +3771,7 @@ def run_conversation(
                         pass
 
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+                agent._checkpoint_session_transcript(messages, conversation_history)
 
                 if agent._tool_guardrail_halt_decision is not None:
                     decision = agent._tool_guardrail_halt_decision
@@ -3748,6 +3781,7 @@ def run_conversation(
                         f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}"
                     )
                     messages.append({"role": "assistant", "content": final_response})
+                    agent._checkpoint_session_transcript(messages, conversation_history)
                     # Emit the halt message to the client so it's not
                     # indistinguishable from a crash.  The stream display
                     # was flushed (callback(None)) before tool execution,
@@ -3830,6 +3864,7 @@ def run_conversation(
                     # _flush_messages_to_session_db writes compressed messages
                     # to the new session (see preflight compression comment).
                     conversation_history = None
+                    agent._set_active_turn_persistence_history(conversation_history)
                 
                 # Save session log incrementally (so progress is visible even if interrupted)
                 agent._session_messages = messages
@@ -4167,6 +4202,7 @@ def run_conversation(
                     messages.pop()
 
                 messages.append(final_msg)
+                agent._checkpoint_session_transcript(messages, conversation_history)
                 
                 _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
                 if not agent.quiet_mode:
@@ -4213,6 +4249,7 @@ def run_conversation(
                                 "content": f"Error executing tool: {error_msg}",
                             }
                             messages.append(err_msg)
+                    agent._checkpoint_session_transcript(messages, conversation_history)
                 break
             
             # Non-tool errors don't need a synthetic message injected.
@@ -4228,6 +4265,7 @@ def run_conversation(
                 # Append as assistant so the history stays valid for
                 # session resume (avoids consecutive user messages).
                 messages.append({"role": "assistant", "content": final_response})
+                agent._checkpoint_session_transcript(messages, conversation_history)
                 break
     
     # Post-loop turn finalization extracted to agent/turn_finalizer.finalize_turn

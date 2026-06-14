@@ -61,6 +61,29 @@ def _compression_lock_holder(agent: Any) -> str:
     )
 
 
+def _compression_lock_holder_pid_is_dead(holder: Any) -> bool:
+    """Return True only when a Hermes compression holder has a definitely dead PID."""
+    if not isinstance(holder, str):
+        return False
+    pid = None
+    for part in holder.split(":"):
+        if part.startswith("pid="):
+            try:
+                pid = int(part[4:])
+            except (TypeError, ValueError):
+                return False
+            break
+    if not pid or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError):
+        return False
+    return False
+
+
 def check_compression_model_feasibility(agent: Any) -> None:
     """Warn at session start if the auxiliary compression model's context
     window is smaller than the main model's compression threshold.
@@ -395,27 +418,46 @@ def compress_context(
                 existing = _lock_db.get_compression_lock_holder(_lock_sid)
             except Exception:
                 existing = None
-            logger.warning(
-                "compression skipped: another path is compressing session=%s "
-                "(holder=%s) — returning messages unchanged to avoid session fork",
-                _lock_sid, existing,
-            )
-            _lock_holder = None  # don't release a lock we don't own
-            # Surface to the user once — quiet for downstream auto-compress loops
-            if getattr(agent, "_last_compression_lock_warning_sid", None) != _lock_sid:
-                agent._last_compression_lock_warning_sid = _lock_sid
+            if existing and _compression_lock_holder_pid_is_dead(existing):
+                logger.warning(
+                    "compression lock holder for session=%s is stale "
+                    "(holder=%s) — reclaiming after process restart",
+                    _lock_sid, existing,
+                )
                 try:
-                    agent._emit_warning(
-                        "⚠ Skipping concurrent compression — another path "
-                        "is already compressing this session. Will retry "
-                        "after it finishes."
+                    _lock_db.release_compression_lock(_lock_sid, existing)
+                    _lock_acquired = _lock_db.try_acquire_compression_lock(
+                        _lock_sid, _lock_holder
                     )
-                except Exception:
-                    pass
-            _existing_sp = getattr(agent, "_cached_system_prompt", None)
-            if not _existing_sp:
-                _existing_sp = agent._build_system_prompt(system_message)
-            return messages, _existing_sp
+                except Exception as _reclaim_err:
+                    logger.warning(
+                        "compression lock reclaim failed for session=%s "
+                        "(holder=%s): %s",
+                        _lock_sid, existing, _reclaim_err,
+                    )
+                    _lock_acquired = False
+            if not _lock_acquired:
+                logger.warning(
+                    "compression skipped: another path is compressing session=%s "
+                    "(holder=%s) — returning messages unchanged to avoid session fork",
+                    _lock_sid, existing,
+                )
+                _lock_holder = None  # don't release a lock we don't own
+                # Surface to the user once — quiet for downstream auto-compress loops
+                if getattr(agent, "_last_compression_lock_warning_sid", None) != _lock_sid:
+                    agent._last_compression_lock_warning_sid = _lock_sid
+                    try:
+                        agent._emit_warning(
+                            "⚠ Skipping concurrent compression — another path "
+                            "is already compressing this session. Will retry "
+                            "after it finishes."
+                        )
+                    except Exception:
+                        pass
+                _existing_sp = getattr(agent, "_cached_system_prompt", None)
+                if not _existing_sp:
+                    _existing_sp = agent._build_system_prompt(system_message)
+                return messages, _existing_sp
 
     def _release_lock() -> None:
         """Release the lock keyed on the OLD session_id (before rotation)."""

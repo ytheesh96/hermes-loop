@@ -169,6 +169,88 @@ class TestFlushDeduplication:
             finally:
                 db.close()
 
+    def test_checkpoint_uses_active_turn_history_boundary(self):
+        """In-flight checkpoints append only current-turn rows."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = SessionDB(db_path=db_path)
+            try:
+                agent = self._make_agent(db)
+
+                conversation_history = [
+                    {"role": "user", "content": "old question"},
+                    {"role": "assistant", "content": "old answer"},
+                ]
+                messages = list(conversation_history) + [
+                    {"role": "user", "content": "new question"},
+                ]
+                agent._set_active_turn_persistence_history(conversation_history)
+
+                agent._checkpoint_session_transcript(messages)
+                agent._checkpoint_session_transcript(messages)
+
+                rows = db.get_messages(agent.session_id)
+                assert [row["content"] for row in rows] == ["new question"]
+
+                messages.append({"role": "assistant", "content": "new answer"})
+                agent._checkpoint_session_transcript(messages)
+                agent._checkpoint_session_transcript(messages)
+
+                rows = db.get_messages(agent.session_id)
+                assert [row["content"] for row in rows] == [
+                    "new question",
+                    "new answer",
+                ]
+            finally:
+                db.close()
+
+    def test_checkpoint_boundary_resets_after_compression_session_fork(self):
+        """Compressed child sessions checkpoint from the beginning."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = SessionDB(db_path=db_path)
+            try:
+                agent = self._make_agent(db)
+                old_session = agent.session_id
+                agent._set_active_turn_persistence_history([
+                    {"role": "user", "content": "old question"},
+                    {"role": "assistant", "content": "old answer"},
+                ])
+
+                old_messages = [
+                    {"role": "user", "content": "old question"},
+                    {"role": "assistant", "content": "old answer"},
+                    {"role": "user", "content": "new question"},
+                ]
+                agent._checkpoint_session_transcript(old_messages)
+                assert [row["content"] for row in db.get_messages(old_session)] == [
+                    "new question",
+                ]
+
+                agent.session_id = "compressed-checkpoint-session"
+                db.create_session(session_id=agent.session_id, source="test")
+                agent._last_flushed_db_idx = 0
+                agent._set_active_turn_persistence_history(None)
+
+                compressed_messages = [
+                    {"role": "user", "content": "summary after compression"},
+                    {"role": "assistant", "content": "answer after compression"},
+                ]
+                agent._checkpoint_session_transcript(compressed_messages)
+                agent._checkpoint_session_transcript(compressed_messages)
+
+                rows = db.get_messages(agent.session_id)
+                assert [row["content"] for row in rows] == [
+                    "summary after compression",
+                    "answer after compression",
+                ]
+            finally:
+                db.close()
+
 
 # ---------------------------------------------------------------------------
 # Test: append_to_transcript skip_db parameter

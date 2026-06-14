@@ -173,6 +173,38 @@ def test_skipped_compression_returns_messages_unchanged(tmp_path: Path) -> None:
     agent.context_compressor.compress.assert_not_called()
 
 
+def test_dead_process_compression_lock_is_reclaimed(tmp_path: Path, monkeypatch) -> None:
+    """After a restart, a dead holder PID must not block compression for the full TTL."""
+    import agent.conversation_compression as compression_mod
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    parent_sid = "DEAD_HOLDER_TEST"
+    db.create_session(parent_sid, source="discord")
+
+    stale_holder = "pid=42424242:tid=1:agent=stale:nonce=deadbeef"
+    held = db.try_acquire_compression_lock(parent_sid, stale_holder, ttl_seconds=300)
+    assert held is True
+
+    def fake_kill(pid: int, sig: int) -> None:
+        assert sig == 0
+        if pid == 42424242:
+            raise ProcessLookupError
+        return None
+
+    monkeypatch.setattr(compression_mod.os, "kill", fake_kill)
+
+    agent = _build_agent_with_db(db, parent_sid)
+    messages = [{"role": "user", "content": "m1"}, {"role": "assistant", "content": "m2"}]
+
+    compressed, _sp = agent._compress_context(messages, "sys", approx_tokens=120_000)
+
+    assert compressed != messages
+    assert agent.session_id != parent_sid
+    agent.context_compressor.compress.assert_called_once()
+    assert _count_children(db, parent_sid) == 1
+    assert db.get_compression_lock_holder(parent_sid) is None
+
+
 class _NoLockSubsystemDB:
     """Wraps a real SessionDB but simulates a pre-#34351 version skew.
 

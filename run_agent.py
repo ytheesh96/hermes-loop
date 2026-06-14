@@ -1487,6 +1487,25 @@ class AIAgent:
         self._save_session_log(messages)
         self._flush_messages_to_session_db(messages, conversation_history)
 
+    def _set_active_turn_persistence_history(self, conversation_history: List[Dict] = None) -> None:
+        """Record the already-loaded history boundary for in-flight checkpoints."""
+        self._active_turn_persistence_history_len = len(conversation_history) if conversation_history else 0
+
+    def _checkpoint_session_transcript(self, messages: List[Dict], conversation_history: List[Dict] = None):
+        """Durably append stable in-flight transcript rows without rewriting the JSON log."""
+        if messages is None:
+            return
+        self._apply_persist_user_message_override(messages)
+        self._session_messages = messages
+        history = conversation_history
+        if history is None:
+            start_len = getattr(self, "_active_turn_persistence_history_len", 0) or 0
+            if start_len:
+                # _flush_messages_to_session_db only needs the length. A dummy
+                # list avoids retaining another full copy of large histories.
+                history = [None] * start_len
+        self._flush_messages_to_session_db(messages, history)
+
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
         """Remove private empty-response retry/failure scaffolding from transcript tails.
 

@@ -221,6 +221,7 @@ def build_turn_context(
     messages.append(user_msg)
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
+    agent._set_active_turn_persistence_history(conversation_history)
 
     if not agent.quiet_mode:
         _print_preview = summarize_user_message_for_log(user_message)
@@ -300,6 +301,7 @@ def build_turn_context(
                 if len(messages) >= _orig_len:
                     break  # Cannot compress further
                 conversation_history = None
+                agent._set_active_turn_persistence_history(conversation_history)
                 agent._empty_content_retries = 0
                 agent._thinking_prefill_retries = 0
                 agent._last_content_with_tools = None
