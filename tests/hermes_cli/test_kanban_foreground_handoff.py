@@ -559,6 +559,46 @@ def test_autonomous_action_after_closed_handoff_is_rejected(kanban_home):
     assert reviewed["decision_reason"] == "first approval"
 
 
+def test_autonomous_action_loses_stale_state_race_without_promoting_or_creating_followups(kanban_home, monkeypatch):
+    original_handoff_row_by_id = kb._handoff_row_by_id
+
+    with kb.connect() as conn:
+        parent_id = _loop_node(conn, title="loop parent", tenant="tenant-a")
+        child_id = _loop_node(conn, title="loop child", parents=(parent_id,), tenant="tenant-a")
+        assert kb.claim_task(conn, parent_id, claimer="worker-host:123") is not None
+        assert kb.complete_task(conn, parent_id, summary="done with stale reviewer")
+        stale_handoff = kb.list_loop_handoffs(conn)[0]
+        conn.execute("UPDATE loop_handoffs SET state = 'closed' WHERE id = ?", (stale_handoff["id"],))
+
+        calls = {"count": 0}
+
+        def stale_once(inner_conn, handoff_id):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return dict(stale_handoff)
+            return original_handoff_row_by_id(inner_conn, handoff_id)
+
+        monkeypatch.setattr(kb, "_handoff_row_by_id", stale_once)
+        rejected = kb.review_loop_handoff_autonomous_action(
+            conn,
+            stale_handoff["id"],
+            action="create_followups",
+            actor="reviewer-qa",
+            evidence_passed=True,
+            reason="stale reviewer must lose",
+            followups=[{"kind": "test", "title": "Should not be created", "assignee": "implementation-worker"}],
+        )
+        reviewed = kb.list_loop_handoffs(conn)[0]
+        child = kb.get_task(conn, child_id)
+        followups = [task for task in kb.list_tasks(conn) if task.created_by == f"loop-review:{stale_handoff['id']}"]
+
+    assert rejected == {"ok": False, "outcome": "rejected_state", "current_state": "closed"}
+    assert reviewed["state"] == "closed"
+    assert reviewed["verification_state"] != "approved"
+    assert child is not None and child.status == "todo"
+    assert followups == []
+
+
 def test_autonomous_safe_followups_are_same_tenant_clean_worktrees(kanban_home):
     with kb.connect() as conn:
         task_id = _loop_node(conn, tenant="tenant-a")

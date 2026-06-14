@@ -56,7 +56,7 @@ import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-ac
 import { useFileDropZone } from './hooks/use-file-drop-zone'
 import { LoopPanel, type LoopTaskAction, LoopTaskStack } from './loop-panel'
 import { loopSessionSourceRefetchInterval } from './loop-refresh'
-import { deriveLoopPanelState, deriveLoopPanelStateFromTenantSource, type LoopRow, type TenantLoopSource } from './loop-state'
+import { deriveLoopPanelStateFromTenantSource, type LoopRow, type TenantLoopSource } from './loop-state'
 import { SessionActionsMenu } from './sidebar/session-actions-menu'
 import { lastVisibleMessageIsUser, threadLoadingState } from './thread-loading'
 
@@ -271,14 +271,12 @@ export function ChatView({
     staleTime: 2_000
   })
 
-  const transcriptLoopPanelState = useMemo(() => deriveLoopPanelState(messages), [messages])
-
   const tenantLoopPanelState = useMemo(
     () => deriveLoopPanelStateFromTenantSource(loopSourceQuery.data),
     [loopSourceQuery.data]
   )
 
-  const loopPanelState = tenantLoopPanelState?.rows.length ? tenantLoopPanelState : transcriptLoopPanelState
+  const loopPanelState = tenantLoopPanelState
   const [selectedLoopTaskId, setSelectedLoopTaskId] = useState<string | null>(null)
   const [focusedLoopTaskId, setFocusedLoopTaskId] = useState<string | null>(null)
   const [loopPanelOpen, setLoopPanelOpen] = useState(false)

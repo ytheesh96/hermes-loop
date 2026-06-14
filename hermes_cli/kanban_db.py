@@ -3498,19 +3498,37 @@ def _escalate_loop_handoff(
     escalation_reason: str,
 ) -> dict[str, Any]:
     now = int(time.time())
-    conn.execute(
-        """
+    allowed_states = tuple(sorted(_LOOP_HANDOFF_AUTONOMOUS_ACTION_STATES))
+    placeholders = ",".join("?" for _ in allowed_states)
+    cur = conn.execute(
+        f"""
         UPDATE loop_handoffs
            SET state = 'escalated', attention = 'needs-user',
                verification_state = 'needs-user', decision_actor = ?,
                decision_reason = ?, escalation_reason = ?, updated_at = ?
-         WHERE id = ?
+         WHERE id = ? AND state IN ({placeholders})
         """,
-        (actor, reason, escalation_reason, now, handoff["id"]),
+        (actor, reason, escalation_reason, now, handoff["id"], *allowed_states),
     )
+    if cur.rowcount != 1:
+        refreshed = _handoff_row_by_id(conn, int(handoff["id"])) or handoff
+        current_state = str(refreshed.get("state") or "").strip()
+        _append_handoff_auto_action(
+            conn,
+            refreshed,
+            {
+                "actor": actor,
+                "action": action,
+                "outcome": "rejected_state",
+                "reason": reason,
+                "current_state": current_state,
+            },
+        )
+        return {"ok": False, "outcome": "rejected_state", "current_state": current_state}
+    refreshed = _handoff_row_by_id(conn, int(handoff["id"])) or handoff
     _append_handoff_auto_action(
         conn,
-        handoff,
+        refreshed,
         {
             "actor": actor,
             "action": action,
@@ -3577,7 +3595,7 @@ def review_loop_handoff_autonomous_action(
     if escalation_reason:
         return _escalate_loop_handoff(conn, handoff, actor=actor, action=action, reason=reason, flags=flags, escalation_reason=escalation_reason)
 
-    created_cards: list[str] = []
+    followup_items: list[tuple[str, dict[str, Any]]] = []
     if action == "create_followups":
         for item in followups or []:
             kind = str(item.get("kind") or "").strip().lower()
@@ -3593,32 +3611,55 @@ def review_loop_handoff_autonomous_action(
                     flags={"ambiguous"},
                     escalation_reason="unsafe follow-up request",
                 )
-            card_id = create_task(
-                conn,
-                title=title,
-                body=str(item.get("body") or ""),
-                assignee=assignee,
-                created_by=f"loop-review:{handoff['id']}",
-                tenant=handoff.get("tenant"),
-                parents=[handoff["task_id"]],
-                workspace_kind="worktree",
-                branch_name=f"loop-review/{handoff['id']}/{len(created_cards) + 1}",
-                idempotency_key=f"loop-review:{handoff['id']}:{kind}:{title}",
-            )
-            created_cards.append(card_id)
+            followup_items.append((kind, item))
 
-    conn.execute(
-        """
+    allowed_states = tuple(sorted(_LOOP_HANDOFF_AUTONOMOUS_ACTION_STATES))
+    placeholders = ",".join("?" for _ in allowed_states)
+    cur = conn.execute(
+        f"""
         UPDATE loop_handoffs
            SET state = 'closed', attention = NULL, verification_state = 'approved',
                verification_status = 'passed', decision_actor = ?, decision_reason = ?,
                resolution_summary = ?, resolved_at = COALESCE(resolved_at, ?),
                completed_at = COALESCE(completed_at, ?), updated_at = ?
-         WHERE id = ?
+         WHERE id = ? AND state IN ({placeholders})
         """,
-        (actor, reason, reason, now, now, now, handoff["id"]),
+        (actor, reason, reason, now, now, now, handoff["id"], *allowed_states),
     )
-    _append_handoff_auto_action(conn, handoff, {"actor": actor, "action": action, "outcome": "approved", "reason": reason, "created_cards": created_cards})
+    if cur.rowcount != 1:
+        refreshed = _handoff_row_by_id(conn, int(handoff["id"])) or handoff
+        current_state = str(refreshed.get("state") or "").strip()
+        _append_handoff_auto_action(
+            conn,
+            refreshed,
+            {
+                "actor": actor,
+                "action": action,
+                "outcome": "rejected_state",
+                "reason": reason,
+                "current_state": current_state,
+            },
+        )
+        return {"ok": False, "outcome": "rejected_state", "current_state": current_state}
+
+    created_cards: list[str] = []
+    for kind, item in followup_items:
+        card_id = create_task(
+            conn,
+            title=str(item.get("title") or ""),
+            body=str(item.get("body") or ""),
+            assignee=str(item.get("assignee") or ""),
+            created_by=f"loop-review:{handoff['id']}",
+            tenant=handoff.get("tenant"),
+            parents=[handoff["task_id"]],
+            workspace_kind="worktree",
+            branch_name=f"loop-review/{handoff['id']}/{len(created_cards) + 1}",
+            idempotency_key=f"loop-review:{handoff['id']}:{kind}:{item.get('title')}",
+        )
+        created_cards.append(card_id)
+
+    refreshed = _handoff_row_by_id(conn, int(handoff["id"])) or handoff
+    _append_handoff_auto_action(conn, refreshed, {"actor": actor, "action": action, "outcome": "approved", "reason": reason, "created_cards": created_cards})
     recompute_ready(conn)
     return {
         "ok": True,
