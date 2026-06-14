@@ -2801,6 +2801,28 @@ def _loop_root_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     return root_task_id or None
 
 
+def _is_loop_root_handoff_source(
+    conn: sqlite3.Connection,
+    task_id: str,
+    root_task_id: Optional[str] = None,
+) -> bool:
+    """Whether ``task_id`` is a Loop root/final-closeout handoff source.
+
+    Routine Loop children have dependency parents and hand off only through
+    their run rows/drawer. Root closeout rows, however, can also be modeled as
+    the Loop identity itself (``created_by='loop:<task_id>'``) while depending
+    on implementation/QA/adoption parents. Treat that self-root identity as a
+    final/root handoff source instead of using parent absence alone.
+    """
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return False
+    root_task_id = str(root_task_id or _loop_root_for_task(conn, task_id) or "").strip()
+    if not root_task_id:
+        return False
+    return root_task_id == task_id or not parent_ids(conn, task_id)
+
+
 _LOOP_HANDOFF_ACTIVE_STATES = {"assigned", "reviewing"}
 # Autonomous reviewer actions may only act on pending/active handoffs that are
 # still waiting for review. Escalated and terminal rows require human/user
@@ -3748,7 +3770,7 @@ def _keep_loop_root_running_for_followups(
 ) -> Optional[int]:
     """Re-open a final/root handoff source row while repair children run."""
     task_id = str(handoff.get("task_id") or "").strip()
-    if not task_id or parent_ids(conn, task_id):
+    if not _is_loop_root_handoff_source(conn, task_id, handoff.get("root_task_id")):
         return None
     task = conn.execute(
         "SELECT assignee, current_run_id FROM tasks WHERE id = ? AND status = 'done'",
@@ -3813,7 +3835,7 @@ def _release_loop_root_after_approved_handoff(
 ) -> Optional[int]:
     """Close a root row held running for foreground final acceptance."""
     task_id = str(handoff.get("task_id") or "").strip()
-    if not task_id or parent_ids(conn, task_id):
+    if not _is_loop_root_handoff_source(conn, task_id, handoff.get("root_task_id")):
         return None
     task = conn.execute(
         "SELECT status FROM tasks WHERE id = ?",
@@ -3991,6 +4013,15 @@ def review_loop_handoff_autonomous_action(
             reason=reason,
             created_cards=created_cards,
             now=now,
+        )
+        conn.execute(
+            """
+            UPDATE loop_handoffs
+               SET state = 'assigned', attention = 'needs-orchestrator',
+                   resolved_at = NULL, completed_at = NULL, updated_at = ?
+             WHERE id = ?
+            """,
+            (now, handoff["id"]),
         )
     elif action == "approve_release" and evidence_passed:
         _release_loop_root_after_approved_handoff(conn, handoff, reason=reason, now=now)
@@ -5040,7 +5071,7 @@ def complete_task(
         }
         if verified_cards:
             completed_payload["verified_cards"] = verified_cards
-        should_emit_loop_handoff = bool(loop_root_task_id) and not parent_ids(conn, task_id)
+        should_emit_loop_handoff = _is_loop_root_handoff_source(conn, task_id, loop_root_task_id)
         # Carry artifact paths in the event payload so the gateway
         # notifier can upload them as native attachments alongside the
         # completion message. Workers pass these via

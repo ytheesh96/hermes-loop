@@ -58,6 +58,44 @@ def _handoff_events(conn, task_id: str):
     return [event for event in kb.list_events(conn, task_id) if event.kind == "loop_foreground_handoff"]
 
 
+def _parented_loop_closeout(
+    conn,
+    *,
+    title: str = "loop root closeout",
+    tenant: str | None = None,
+) -> tuple[str, tuple[str, str]]:
+    parent_a = kb.create_task(conn, title="implementation gate", assignee="implementation-worker", tenant=tenant)
+    parent_b = kb.create_task(conn, title="qa gate", assignee="implementation-worker", tenant=tenant)
+    assert kb.claim_task(conn, parent_a, claimer="worker-host:parent-a") is not None
+    assert kb.complete_task(conn, parent_a, summary="implementation gate done")
+    assert kb.claim_task(conn, parent_b, claimer="worker-host:parent-b") is not None
+    assert kb.complete_task(conn, parent_b, summary="qa gate done")
+    closeout_id = kb.create_task(
+        conn,
+        title=title,
+        assignee="implementation-worker",
+        created_by="loop:pending-root",
+        parents=(parent_a, parent_b),
+        tenant=tenant,
+    )
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET created_by = ? WHERE id = ?", (f"loop:{closeout_id}", closeout_id))
+        for task_id in (parent_a, parent_b):
+            conn.execute("UPDATE tasks SET created_by = ? WHERE id = ?", (f"loop:{closeout_id}", task_id))
+        kb._append_event(
+            conn,
+            closeout_id,
+            "loop_node_state",
+            {
+                "root_task_id": closeout_id,
+                "client_id": "root-closeout",
+                "active": True,
+                "frontier": True,
+            },
+        )
+    return closeout_id, (parent_a, parent_b)
+
+
 def test_completing_loop_node_emits_compact_foreground_handoff_event(kanban_home):
     with kb.connect() as conn:
         task_id = _loop_node(conn)
@@ -757,6 +795,63 @@ def test_failed_final_evidence_creates_followups_without_blocking_root(kanban_ho
     assert followup_claim is not None
     assert launched_followup is not None and launched_followup.status == "running"
     assert event_payload and event_payload["created_cards"] == result["created_cards"]
+
+
+def test_dependency_parented_loop_closeout_uses_root_identity_for_handoff_lifecycle(kanban_home):
+    with kb.connect() as conn:
+        closeout_id, parent_ids = _parented_loop_closeout(conn, tenant="tenant-a")
+        assert kb.parent_ids(conn, closeout_id) == sorted(parent_ids)
+        assert kb.claim_task(conn, closeout_id, claimer="worker-host:root-closeout") is not None
+
+        assert kb.complete_task(conn, closeout_id, summary="final closeout evidence ready")
+        handoffs = kb.list_loop_handoffs(conn, task_id=closeout_id)
+        events = _handoff_events(conn, closeout_id)
+        closeout_after_completion = kb.get_task(conn, closeout_id)
+
+        assert len(handoffs) == 1
+        assert len(events) == 1
+        assert handoffs[0]["root_task_id"] == closeout_id
+        assert closeout_after_completion is not None and closeout_after_completion.status == "done"
+
+        failed = kb.review_loop_handoff_autonomous_action(
+            conn,
+            handoffs[0]["id"],
+            action="create_followups",
+            actor="reviewer-qa",
+            evidence_passed=False,
+            reason="missing final closeout evidence",
+            followups=[{
+                "kind": "test",
+                "title": "Add closeout evidence regression",
+                "assignee": "implementation-worker",
+                "body": "Cover dependency-parented closeout final evidence.",
+            }],
+        )
+        closeout_after_failure = kb.get_task(conn, closeout_id)
+        followup = kb.get_task(conn, failed["created_cards"][0])
+        followup_claim = kb.claim_task(conn, failed["created_cards"][0], claimer="worker-host:followup")
+
+        assert failed["ok"] is True
+        assert closeout_after_failure is not None and closeout_after_failure.status == "running"
+        assert closeout_after_failure.completed_at is None
+        assert followup is not None and followup.status == "ready"
+        assert kb.parent_ids(conn, followup.id) == [closeout_id]
+        assert followup_claim is not None
+
+        assert kb.complete_task(conn, failed["created_cards"][0], summary="followup evidence complete")
+        approved = kb.review_loop_handoff_autonomous_action(
+            conn,
+            handoffs[0]["id"],
+            action="approve_release",
+            actor="reviewer-qa",
+            evidence_passed=True,
+            reason="final closeout evidence accepted",
+        )
+        closeout_after_approval = kb.get_task(conn, closeout_id)
+
+    assert approved["ok"] is True
+    assert approved["outcome"] == "approved"
+    assert closeout_after_approval is not None and closeout_after_approval.status == "done"
 
 def test_failed_final_evidence_requires_concrete_followup_tasks(kanban_home):
     with kb.connect() as conn:
