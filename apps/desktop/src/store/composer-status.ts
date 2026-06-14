@@ -197,6 +197,28 @@ export function reconcileKanbanSessionSource(sid: string, source: TenantLoopSour
   writeKanbanStatus(sid, [...tasks, ...agents])
 }
 
+export function reconcileKanbanSessionSourceForComposer({
+  activeSessionId,
+  source,
+  sourceSessionId
+}: {
+  activeSessionId?: null | string
+  source: TenantLoopSource | null | undefined
+  sourceSessionId?: null | string
+}) {
+  const displaySessionId = activeSessionId || sourceSessionId || ''
+
+  if (!displaySessionId) {
+    return
+  }
+
+  if (sourceSessionId && sourceSessionId !== displaySessionId) {
+    writeKanbanStatus(sourceSessionId, [])
+  }
+
+  reconcileKanbanSessionSource(displaySessionId, source)
+}
+
 // The single thing the stack reads: a typed, merged item list per session.
 export const $statusItemsBySession = computed(
   [$subagentsBySession, $backgroundStatusBySession, $todosBySession, $kanbanStatusBySession],

@@ -21,7 +21,7 @@ import { quickModelOptions, sessionTitle, toRuntimeMessage } from '@/lib/chat-ru
 import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import { cn } from '@/lib/utils'
 import type { ComposerAttachment } from '@/store/composer'
-import { reconcileKanbanSessionSource } from '@/store/composer-status'
+import { reconcileKanbanSessionSourceForComposer } from '@/store/composer-status'
 import { $pinnedSessionIds } from '@/store/layout'
 import { $activeGatewayProfile, $gatewaySwapTarget } from '@/store/profile'
 import {
@@ -390,8 +390,12 @@ export function ChatView({
       return
     }
 
-    reconcileKanbanSessionSource(loopSourceSessionId, loopSourceQuery.data)
-  }, [loopSourceQuery.data, loopSourceSessionId])
+    reconcileKanbanSessionSourceForComposer({
+      activeSessionId,
+      source: loopSourceQuery.data,
+      sourceSessionId: loopSourceSessionId
+    })
+  }, [activeSessionId, loopSourceQuery.data, loopSourceSessionId])
 
   const loopPanelState = tenantLoopPanelState
   const [selectedLoopTaskId, setSelectedLoopTaskId] = useState<string | null>(null)

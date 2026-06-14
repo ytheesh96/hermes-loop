@@ -6,6 +6,7 @@ import {
   dismissBackgroundProcess,
   groupStatusItems,
   reconcileBackgroundProcesses,
+  reconcileKanbanSessionSourceForComposer,
   reconcileKanbanSessionSource
 } from './composer-status'
 
@@ -171,5 +172,21 @@ describe('reconcileKanbanSessionSource', () => {
     reconcileKanbanSessionSource(SID, null)
 
     expect($kanbanStatusBySession.get()).toEqual({})
+  })
+
+  it('writes compressed lineage source under the active composer session key', () => {
+    reconcileKanbanSessionSourceForComposer({
+      activeSessionId: 'runtime-tip',
+      source: {
+        tasks: [{ id: 't_root', status: 'done', title: 'Root task', included_parent_ids: [], included_child_ids: [] }]
+      },
+      sourceSessionId: 'compression-root'
+    })
+
+    const bySession = $kanbanStatusBySession.get()
+    expect(bySession['compression-root']).toBeUndefined()
+    expect(bySession['runtime-tip']?.map(item => [item.id, item.kanbanTaskId, item.todoStatus])).toEqual([
+      ['kanban-task:t_root', 't_root', 'completed']
+    ])
   })
 })

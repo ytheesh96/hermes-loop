@@ -3295,9 +3295,7 @@ def claim_next_loop_handoff_review_batch(
     ``review_run_id`` for this foreground-review run).
     """
     if session_db is None:
-        from hermes_state import SessionDB
-
-        session_db = SessionDB()
+        session_db = _loop_handoff_reviewer_session_db()
 
     for scope in _pending_loop_handoff_review_scopes(conn):
         tenant = str(scope.get("tenant") or scope["root_task_id"])
@@ -3480,6 +3478,29 @@ def _loop_handoff_reviewer_profile() -> str:
     except Exception:
         pass
     return "reviewer-qa"
+
+
+def _loop_handoff_reviewer_session_db(profile: Optional[str] = None) -> Any:
+    """Return the SessionDB that the foreground reviewer subprocess will read.
+
+    ``start_loop_handoff_review_process`` launches ``hermes -p <profile>`` and
+    sets that child's ``HERMES_HOME`` to the profile home. The injected review
+    session must therefore be written to the same profile's state.db, otherwise
+    the child exits with ``Session not found`` even though the handoff row was
+    queued correctly.
+    """
+    from hermes_state import SessionDB
+
+    profile_arg = (profile or _loop_handoff_reviewer_profile()).strip() or "reviewer-qa"
+    try:
+        from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+        profile_arg = normalize_profile_name(profile_arg)
+        profile_home = Path(resolve_profile_env(profile_arg))
+    except FileNotFoundError:
+        return SessionDB()
+    except Exception:
+        return SessionDB()
+    return SessionDB(db_path=profile_home / "state.db")
 
 
 def start_loop_handoff_review_process(

@@ -518,6 +518,33 @@ def test_scheduler_claims_next_handoff_into_stable_review_session(kanban_home):
     assert "proof packets" not in prompt
 
 
+def test_scheduler_default_review_session_db_matches_reviewer_profile(kanban_home, monkeypatch):
+    import hermes_state
+    from hermes_state import SessionDB
+
+    reviewer_home = kanban_home / "profiles" / "reviewer-qa"
+    reviewer_home.mkdir(parents=True)
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", kanban_home / "state.db")
+    monkeypatch.setattr(kb, "_loop_handoff_reviewer_profile", lambda: "reviewer-qa")
+
+    with kb.connect() as conn:
+        task_id = _loop_node(conn, title="profile-routed reviewable node", tenant="tenant-a")
+        assert kb.claim_task(conn, task_id, claimer="worker-host:123") is not None
+        assert kb.complete_task(conn, task_id, summary="ready for reviewer profile", metadata={"tests_run": ["pytest -q"]})
+
+        batch = kb.claim_next_loop_handoff_review_batch(conn, limit=10)
+
+    assert batch is not None
+    reviewer_db = SessionDB(db_path=reviewer_home / "state.db")
+    default_db = SessionDB(db_path=kanban_home / "state.db")
+
+    reviewer_messages = reviewer_db.get_messages(batch["reviewer_session_id"])
+    default_messages = default_db.get_messages(batch["reviewer_session_id"])
+
+    assert reviewer_messages and "kanban_loop_handoff_review_batch" in reviewer_messages[0]["content"]
+    assert default_messages == []
+
+
 def test_review_batch_runner_executes_after_claim_and_closes_handoff(kanban_home):
     from hermes_state import SessionDB
 
