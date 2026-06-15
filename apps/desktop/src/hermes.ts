@@ -1,5 +1,6 @@
 import { JsonRpcGatewayClient } from '@hermes/shared'
 
+import type { LoopTaskAction } from '@/app/chat/loop-panel'
 import type { LoopTaskDetail, TenantLoopSource } from '@/app/chat/loop-state'
 import type {
   ActionResponse,
@@ -275,6 +276,103 @@ export function updateLoopTaskStatus(
       status,
       ...(options?.blockReason ? { block_reason: options.blockReason } : {})
     }
+  })
+}
+
+interface LoopHandoffSummary {
+  attention?: null | string
+  id?: number
+  state?: null | string
+  task_id?: string
+  updated_at?: number
+  verification_state?: null | string
+}
+
+interface LoopHandoffListResponse {
+  handoffs?: LoopHandoffSummary[]
+  ok?: boolean
+}
+
+export interface LoopHandoffReviewResult {
+  created_cards?: unknown[]
+  escalation_reason?: string
+  notification?: { level?: string; state?: string }
+  ok: boolean
+  outcome?: string
+}
+
+function latestActionableHandoff(handoffs: readonly LoopHandoffSummary[]): LoopHandoffSummary | null {
+  const byFreshness = [...handoffs].sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0) || (b.id || 0) - (a.id || 0))
+
+  return byFreshness.find(handoff => {
+    const state = (handoff.state || '').toLowerCase()
+    const verification = (handoff.verification_state || '').toLowerCase()
+
+    return state === 'assigned' || state === 'reviewing' || verification === 'needs-orchestrator' || Boolean(handoff.attention)
+  }) || byFreshness[0] || null
+}
+
+function reviewActionBody(action: Extract<LoopTaskAction, 'accept-review' | 'escalate-review' | 'reject-review'>) {
+  if (action === 'accept-review') {
+    return {
+      action: 'approve_release',
+      actor: 'desktop-loop-panel',
+      evidence_passed: true,
+      reason: 'Accepted from the Loop side panel after reviewing the foreground handoff.'
+    }
+  }
+
+  if (action === 'escalate-review') {
+    return {
+      action: 'approve_release',
+      actor: 'desktop-loop-panel',
+      evidence_passed: true,
+      prohibited_flags: ['product_decision'],
+      reason: 'Escalated from the Loop side panel because this needs a user decision.'
+    }
+  }
+
+  return {
+    action: 'approve_release',
+    actor: 'desktop-loop-panel',
+    evidence_passed: false,
+    reason: 'Rejected from the Loop side panel; the foreground handoff evidence did not pass.'
+  }
+}
+
+export async function reviewLoopHandoffForTask(
+  taskId: string,
+  action: Extract<LoopTaskAction, 'accept-review' | 'escalate-review' | 'reject-review'>,
+  profile?: string | null,
+  options: { board?: null | string } = {}
+): Promise<LoopHandoffReviewResult> {
+  const query = new URLSearchParams({ task_id: taskId })
+
+  if (options.board) {
+    query.set('board', options.board)
+  }
+
+  const list = await window.hermesDesktop.api<LoopHandoffListResponse>({
+    ...(profile ? { profile } : profileScoped()),
+    path: `/api/plugins/kanban/loop-handoffs?${query.toString()}`
+  })
+  const handoff = latestActionableHandoff(list.handoffs || [])
+
+  if (!handoff?.id) {
+    throw new Error(`No Loop handoff is available for ${taskId}`)
+  }
+
+  const actionQuery = new URLSearchParams()
+
+  if (options.board) {
+    actionQuery.set('board', options.board)
+  }
+
+  return window.hermesDesktop.api<LoopHandoffReviewResult>({
+    ...(profile ? { profile } : profileScoped()),
+    body: reviewActionBody(action),
+    method: 'POST',
+    path: `/api/plugins/kanban/loop-handoffs/${encodeURIComponent(String(handoff.id))}/auto-action${actionQuery.size ? `?${actionQuery.toString()}` : ''}`
   })
 }
 

@@ -289,9 +289,10 @@ async function fetchProviderDefaultModel(
   }
 }
 
-// After OAuth/API-key success: reload the backend env, verify runtime,
-// then either show the model-confirm step or fall straight through to
-// completion if we can't determine a default.
+// After OAuth/API-key success: reload the backend env, persist a sensible
+// provider default when one is discoverable, verify runtime, then either show
+// the model-confirm step or fall straight through to completion if we can't
+// determine a default.
 //
 // onFail receives the runtime-readiness `reason` from checkRuntime so
 // the caller can fold it into a user-facing error — same contract as
@@ -307,17 +308,17 @@ async function completeWithModelConfirm(
   ignoreRuntimeGate = false
 ) {
   await ctx.requestGateway('reload.env').catch(() => undefined)
-  const runtime = await checkRuntime(ctx)
-
-  if (!runtime.ready && !ignoreRuntimeGate) {
-    onFail(runtime.reason)
-
-    return
-  }
-
   const defaults = await fetchProviderDefaultModel(preferredSlugs)
 
   if (!defaults) {
+    const runtime = await checkRuntime(ctx)
+
+    if (!runtime.ready && !ignoreRuntimeGate) {
+      onFail(runtime.reason)
+
+      return
+    }
+
     // Couldn't get a sensible default — proceed without confirm step.
     notifyReady(providerLabel)
     completeDesktopOnboarding()
@@ -342,9 +343,16 @@ async function completeWithModelConfirm(
 
     notifyGatewayTools(res.gateway_tools)
   } catch {
-    // Persistence failed — still show the confirm card so the user can
-    // pick something explicitly. The backend will pick its own default
-    // at chat time if we end up never persisting.
+    // Persistence failed — continue to the runtime check. If the runtime is
+    // already usable, the confirm card can still let the user pick explicitly.
+  }
+
+  const runtime = await checkRuntime(ctx)
+
+  if (!runtime.ready && !ignoreRuntimeGate) {
+    onFail(runtime.reason)
+
+    return
   }
 
   setFlow({
@@ -450,6 +458,37 @@ export function clearPendingProviderOAuth() {
   pendingProviderOAuthId = null
 }
 
+function getLoggedInProvider(providers: null | OAuthProvider[]): null | OAuthProvider {
+  if (!providers) {
+    return null
+  }
+
+  return providers.find(p => p.id === 'nous' && p.status?.logged_in) ?? providers.find(p => p.status?.logged_in) ?? null
+}
+
+export async function completeExistingProviderOnboarding(provider: OAuthProvider, ctx: OnboardingContext) {
+  setFlow({ status: 'success', provider })
+  await completeWithModelConfirm(ctx, provider.name, [provider.id], reason =>
+    setFlow({
+      status: 'error',
+      provider,
+      message: providerResolutionFailure(reason)
+    })
+  )
+}
+
+async function resumeLoggedInProviderOnboarding(ctx: OnboardingContext): Promise<boolean> {
+  const provider = getLoggedInProvider($desktopOnboarding.get().providers)
+
+  if (!provider) {
+    return false
+  }
+
+  await completeExistingProviderOnboarding(provider, ctx)
+
+  return true
+}
+
 // Dismiss a manually-opened provider selector without touching the existing
 // (working) configuration. Only valid in the manual path — the unconfigured
 // first-run flow has no close affordance because the app can't run yet.
@@ -521,10 +560,13 @@ export async function refreshOnboarding(ctx: OnboardingContext) {
   patch({ configured: false, reason })
 
   if (state.providers !== null && !state.requested) {
+    await resumeLoggedInProviderOnboarding(ctx)
+
     return false
   }
 
   await refreshProviders()
+  await resumeLoggedInProviderOnboarding(ctx)
 
   return false
 }

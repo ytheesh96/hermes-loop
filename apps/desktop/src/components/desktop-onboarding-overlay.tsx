@@ -28,6 +28,7 @@ import {
   cancelOnboardingFlow,
   clearPendingProviderOAuth,
   closeManualOnboarding,
+  completeExistingProviderOnboarding,
   confirmOnboardingModel,
   copyDeviceCode,
   copyExternalCommand,
@@ -463,7 +464,9 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
     return <Status>{t.onboarding.lookingUpProviders}</Status>
   }
 
-  const select = (p: OAuthProvider) => void startProviderOAuth(p, ctx)
+  const select = (p: OAuthProvider) =>
+    void (p.status?.logged_in ? completeExistingProviderOnboarding(p, ctx) : startProviderOAuth(p, ctx))
+
   const featured = ordered.find(p => p.id === FEATURED_ID) ?? null
   const rest = featured ? ordered.filter(p => p.id !== FEATURED_ID) : ordered
   // Collapse the secondary providers behind a disclosure only when Nous

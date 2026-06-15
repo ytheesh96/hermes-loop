@@ -28,7 +28,10 @@ const toolMessage = (result: unknown, args: Record<string, unknown> = { action: 
   ]
 })
 
-afterEach(() => cleanup())
+afterEach(() => {
+  cleanup()
+  delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+})
 
 function LoopHarness({ state }: { state: LoopPanelState }) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
@@ -609,6 +612,44 @@ describe('LoopPanel', () => {
     expect(screen.getByRole('heading', { name: /Root Task/i })).toBeTruthy()
   })
 
+  it('enables review decision controls when a Loop action handler is connected', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-review-actions',
+      tenant: 'tenant-a',
+      latest_event_id: 405,
+      tasks: [
+        {
+          id: 't_review',
+          title: 'Review handoff child',
+          status: 'ready',
+          tenant: 'tenant-a',
+          latest_summary: 'review-required: inspect proof packet',
+          included_child_ids: [],
+          included_parent_ids: []
+        }
+      ]
+    })!
+    const onTaskAction = vi.fn()
+
+    render(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_review" state={state} />)
+
+    const accept = screen.getByRole('button', { name: /accept review/i }) as HTMLButtonElement
+    const reject = screen.getByRole('button', { name: /reject review/i }) as HTMLButtonElement
+    const escalate = screen.getByRole('button', { name: /escalate review/i }) as HTMLButtonElement
+
+    expect(accept.disabled).toBe(false)
+    expect(reject.disabled).toBe(false)
+    expect(escalate.disabled).toBe(false)
+
+    fireEvent.click(accept)
+    fireEvent.click(reject)
+    fireEvent.click(escalate)
+
+    expect(onTaskAction).toHaveBeenNthCalledWith(1, 'accept-review', expect.objectContaining({ taskId: 't_review' }))
+    expect(onTaskAction).toHaveBeenNthCalledWith(2, 'reject-review', expect.objectContaining({ taskId: 't_review' }))
+    expect(onTaskAction).toHaveBeenNthCalledWith(3, 'escalate-review', expect.objectContaining({ taskId: 't_review' }))
+  })
+
   it('keeps completed roots in overview mode and does not show review controls for non-review blockers', () => {
     const state = deriveLoopPanelStateFromTenantSource({
       session_id: 'sess-option-a-done-root',
@@ -714,6 +755,17 @@ describe('LoopPanel', () => {
   })
 
   it('renders clickable artifact and source outputs from task metadata', async () => {
+    const gitDiff = vi.fn(async (path: string) => ({
+      diff: ['--- a/src/app/chat/fallback.ts', '+++ b/src/app/chat/fallback.ts', '@@', '-before', '+fallback'].join('\n'),
+      path,
+      root: '/worktrees/t_artifacts'
+    }))
+
+    Object.defineProperty(window, 'hermesDesktop', {
+      configurable: true,
+      value: { gitDiff }
+    })
+
     const state = deriveLoopPanelStateFromTenantSource({
       session_id: 'sess-artifacts',
       tenant: 'tenant-a',
@@ -743,7 +795,13 @@ describe('LoopPanel', () => {
             summary: 'outputs ready',
             metadata: {
               artifacts: ['/tmp/loop-report.pdf', { label: 'Preview page', path: 'dist/preview.html' }],
-              changed_files: ['src/app/chat/loop-panel.tsx']
+              changed_files: [
+                {
+                  inline_diff: ['--- a/src/app/chat/loop-panel.tsx', '+++ b/src/app/chat/loop-panel.tsx', '@@', '-old', '+new'].join('\n'),
+                  path: 'src/app/chat/loop-panel.tsx'
+                },
+                { label: 'Fallback diff', path: 'src/app/chat/fallback.ts' }
+              ]
             }
           }
         }
@@ -761,6 +819,7 @@ describe('LoopPanel', () => {
     expect(within(card).getByText('loop-report.pdf')).toBeTruthy()
     expect(within(card).getByText('Preview page')).toBeTruthy()
     expect(within(card).getByText('loop-panel.tsx')).toBeTruthy()
+    expect(within(card).getByText('Fallback diff')).toBeTruthy()
 
     fireEvent.click(within(card).getByRole('button', { name: /open artifact \/tmp\/loop-report\.pdf/i }))
     expect((await screen.findByRole('tab', { name: /loop-report\.pdf/i })).getAttribute('aria-selected')).toBe('true')
@@ -776,7 +835,18 @@ describe('LoopPanel', () => {
     artifactTab = screen.getByTestId('loop-artifact-source-tab')
     expect(within(artifactTab).getByText('loop-panel.tsx')).toBeTruthy()
     expect(within(artifactTab).getByText('src/app/chat/loop-panel.tsx')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Diff/i }).getAttribute('aria-pressed')).toBe('true')
+    expect(await screen.findByText('+new')).toBeTruthy()
+    expect(gitDiff).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: /Preview/i }))
     expect(await screen.findByText('/worktrees/t_artifacts/src/app/chat/loop-panel.tsx')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('tab', { name: /Build artifact drawer/i }))
+    const fallbackCard = screen.getByTestId('loop-artifact-sources-card')
+    fireEvent.click(within(fallbackCard).getByRole('button', { name: /open changed file src\/app\/chat\/fallback\.ts/i }))
+    expect((await screen.findByRole('tab', { name: /Fallback diff/i })).getAttribute('aria-selected')).toBe('true')
+    expect(await screen.findByText('+fallback')).toBeTruthy()
+    expect(gitDiff).toHaveBeenCalledWith('/worktrees/t_artifacts/src/app/chat/fallback.ts')
 
     rerender(<LoopPanel artifactSourceBaseDir="/workspace/root" open selectedTaskId="t_root" state={state} />)
     const rootAgentsCard = screen.getByTestId('loop-root-agents-card')
@@ -791,7 +861,7 @@ describe('LoopPanel', () => {
     expect(within(artifactTab).getByText('Preview page')).toBeTruthy()
     expect(within(artifactTab).getByText('dist/preview.html')).toBeTruthy()
     expect(await screen.findByText('/worktrees/t_artifacts/dist/preview.html')).toBeTruthy()
-  })
+  }, 30_000)
 
   it('renders debug JSON only when explicitly enabled for development diagnostics', () => {
     const state = deriveLoopPanelState([

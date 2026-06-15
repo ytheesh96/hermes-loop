@@ -1,4 +1,6 @@
 import base64
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -148,6 +150,43 @@ def test_fs_git_root_returns_null_outside_repo(client, tmp_path):
     assert response.json() == {"root": None}
 
 
+def test_fs_git_diff_returns_head_diff(client, tmp_path):
+    if not shutil.which("git"):
+        pytest.skip("git unavailable")
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+    target = tmp_path / "demo.txt"
+    target.write_text("old\n")
+    subprocess.run(["git", "add", "demo.txt"], cwd=tmp_path, check=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+    subprocess.run(
+        ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "init"],
+        cwd=tmp_path,
+        check=True,
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    target.write_text("new\n")
+
+    response = client.get("/api/fs/git-diff", params={"path": str(target)})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["root"] == str(tmp_path)
+    assert body["path"] == str(target)
+    assert "-old" in body["diff"]
+    assert "+new" in body["diff"]
+
+
+def test_fs_git_diff_returns_structured_no_repo_error(client, tmp_path):
+    target = tmp_path / "demo.txt"
+    target.write_text("new\n")
+
+    response = client.get("/api/fs/git-diff", params={"path": str(target)})
+
+    assert response.status_code == 200
+    assert response.json() == {"diff": "", "error": "not-a-git-repo", "path": str(target), "root": None}
+
+
 def test_fs_default_cwd_prefers_existing_terminal_cwd(client, tmp_path, monkeypatch):
     monkeypatch.setattr(web_server, "load_config", lambda: {"terminal": {"cwd": str(tmp_path)}})
     monkeypatch.setenv("TERMINAL_CWD", str(tmp_path / "env"))
@@ -181,8 +220,10 @@ def test_fs_endpoints_require_auth(tmp_path):
 
     list_response = client.get("/api/fs/list", params={"path": str(tmp_path)})
     read_response = client.get("/api/fs/read-text", params={"path": str(target)})
+    diff_response = client.get("/api/fs/git-diff", params={"path": str(target)})
     default_response = client.get("/api/fs/default-cwd")
 
     assert list_response.status_code == 401
     assert read_response.status_code == 401
+    assert diff_response.status_code == 401
     assert default_response.status_code == 401

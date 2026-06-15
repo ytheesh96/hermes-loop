@@ -36,4 +36,13 @@ describe('hermesDirectiveFormatter.parse', () => {
       { kind: 'text', text: ' the entry point' }
     ])
   })
+
+  it('parses task refs as lightweight attachment chips', () => {
+    const segments = hermesDirectiveFormatter.parse('triage @task:t_7437c246')
+
+    expect(segments).toEqual([
+      { kind: 'text', text: 'triage ' },
+      { kind: 'mention', type: 'task', label: 't_7437c246', id: 't_7437c246' }
+    ])
+  })
 })

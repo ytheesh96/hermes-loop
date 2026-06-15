@@ -4,7 +4,7 @@ import { triggerHaptic } from '@/lib/haptics'
 
 export interface ComposerAttachment {
   id: string
-  kind: 'image' | 'file' | 'folder' | 'terminal' | 'url'
+  kind: 'image' | 'file' | 'folder' | 'task' | 'terminal' | 'url'
   label: string
   detail?: string
   refText?: string

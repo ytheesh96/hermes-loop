@@ -4,6 +4,7 @@ import { $connection } from '@/store/session'
 
 import {
   desktopDefaultCwd,
+  desktopGitDiff,
   desktopGitRoot,
   readDesktopDir,
   readDesktopFileDataUrl,
@@ -15,14 +16,34 @@ import {
 const readDir = vi.fn(async () => ({ entries: [{ name: 'local', path: '/local', isDirectory: true }] }))
 const readFileText = vi.fn(async () => ({ path: '/local/file.txt', text: 'local', byteSize: 5 }))
 const readFileDataUrl = vi.fn(async () => 'data:text/plain;base64,bG9jYWw=')
+const gitDiff = vi.fn(async () => ({ diff: 'local diff', path: '/work/file.txt', root: '/local' }))
 const gitRoot = vi.fn(async () => '/local')
 const selectPaths = vi.fn(async () => ['/local'])
 const api = vi.fn(async ({ path }: { path: string }) => {
-  if (path.startsWith('/api/fs/list?')) return { entries: [{ name: 'remote', path: '/remote', isDirectory: true }] }
-  if (path.startsWith('/api/fs/read-text?')) return { path: '/remote/file.txt', text: 'remote', byteSize: 6 }
-  if (path.startsWith('/api/fs/read-data-url?')) return { dataUrl: 'data:text/plain;base64,cmVtb3Rl' }
-  if (path.startsWith('/api/fs/git-root?')) return { root: '/remote' }
-  if (path === '/api/fs/default-cwd') return { cwd: '/backend/project', branch: 'main' }
+  if (path.startsWith('/api/fs/list?')) {
+    return { entries: [{ name: 'remote', path: '/remote', isDirectory: true }] }
+  }
+
+  if (path.startsWith('/api/fs/read-text?')) {
+    return { path: '/remote/file.txt', text: 'remote', byteSize: 6 }
+  }
+
+  if (path.startsWith('/api/fs/read-data-url?')) {
+    return { dataUrl: 'data:text/plain;base64,cmVtb3Rl' }
+  }
+
+  if (path.startsWith('/api/fs/git-diff?')) {
+    return { diff: 'remote diff', path: '/remote/file.txt', root: '/remote' }
+  }
+
+  if (path.startsWith('/api/fs/git-root?')) {
+    return { root: '/remote' }
+  }
+
+  if (path === '/api/fs/default-cwd') {
+    return { cwd: '/backend/project', branch: 'main' }
+  }
+
   throw new Error(`unexpected path ${path}`)
 })
 
@@ -30,6 +51,7 @@ function stubBridge() {
   vi.stubGlobal('window', {
     hermesDesktop: {
       api,
+      gitDiff,
       gitRoot,
       readDir,
       readFileDataUrl,
@@ -58,12 +80,14 @@ describe('desktop filesystem facade', () => {
     await expect(readDesktopDir('/work')).resolves.toEqual({ entries: [{ name: 'local', path: '/local', isDirectory: true }] })
     await expect(readDesktopFileText('/work/file.txt')).resolves.toMatchObject({ text: 'local' })
     await expect(readDesktopFileDataUrl('/work/file.txt')).resolves.toBe('data:text/plain;base64,bG9jYWw=')
+    await expect(desktopGitDiff('/work/file.txt')).resolves.toMatchObject({ diff: 'local diff' })
     await expect(desktopGitRoot('/work')).resolves.toBe('/local')
     await expect(selectDesktopPaths({ directories: true })).resolves.toEqual(['/local'])
 
     expect(readDir).toHaveBeenCalledWith('/work')
     expect(readFileText).toHaveBeenCalledWith('/work/file.txt')
     expect(readFileDataUrl).toHaveBeenCalledWith('/work/file.txt')
+    expect(gitDiff).toHaveBeenCalledWith('/work/file.txt')
     expect(gitRoot).toHaveBeenCalledWith('/work')
     expect(selectPaths).toHaveBeenCalledWith({ directories: true })
     expect(api).not.toHaveBeenCalled()
@@ -75,17 +99,20 @@ describe('desktop filesystem facade', () => {
     await expect(readDesktopDir('/home/user/project')).resolves.toMatchObject({ entries: [{ name: 'remote' }] })
     await expect(readDesktopFileText('/home/user/project/a b.txt')).resolves.toMatchObject({ text: 'remote' })
     await expect(readDesktopFileDataUrl('/home/user/project/a b.txt')).resolves.toBe('data:text/plain;base64,cmVtb3Rl')
+    await expect(desktopGitDiff('/home/user/project/a b.txt')).resolves.toMatchObject({ diff: 'remote diff' })
     await expect(desktopGitRoot('/home/user/project')).resolves.toBe('/remote')
     await expect(desktopDefaultCwd()).resolves.toEqual({ cwd: '/backend/project', branch: 'main' })
 
     expect(api).toHaveBeenCalledWith({ path: '/api/fs/list?path=%2Fhome%2Fuser%2Fproject' })
     expect(api).toHaveBeenCalledWith({ path: '/api/fs/read-text?path=%2Fhome%2Fuser%2Fproject%2Fa%20b.txt' })
     expect(api).toHaveBeenCalledWith({ path: '/api/fs/read-data-url?path=%2Fhome%2Fuser%2Fproject%2Fa%20b.txt' })
+    expect(api).toHaveBeenCalledWith({ path: '/api/fs/git-diff?path=%2Fhome%2Fuser%2Fproject%2Fa%20b.txt' })
     expect(api).toHaveBeenCalledWith({ path: '/api/fs/git-root?path=%2Fhome%2Fuser%2Fproject' })
     expect(api).toHaveBeenCalledWith({ path: '/api/fs/default-cwd' })
     expect(readDir).not.toHaveBeenCalled()
     expect(readFileText).not.toHaveBeenCalled()
     expect(readFileDataUrl).not.toHaveBeenCalled()
+    expect(gitDiff).not.toHaveBeenCalled()
     expect(gitRoot).not.toHaveBeenCalled()
   })
 

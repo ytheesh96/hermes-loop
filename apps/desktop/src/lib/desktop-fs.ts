@@ -1,5 +1,6 @@
 import type {
   HermesConnection,
+  HermesGitDiffResult,
   HermesReadDirResult,
   HermesReadFileTextResult,
   HermesSelectPathsOptions,
@@ -78,6 +79,19 @@ export async function desktopGitRoot(path: string): Promise<string | null> {
 
   const result = await desktop.api<{ root: string | null }>({ path: fsPath('git-root', path) })
   return result.root
+}
+
+export async function desktopGitDiff(path: string): Promise<HermesGitDiffResult> {
+  const desktop = bridge()
+  if (!isDesktopFsRemoteMode()) {
+    if (!desktop.gitDiff) {
+      return { diff: '', error: 'git-diff-unavailable', path, root: null }
+    }
+
+    return desktop.gitDiff(path)
+  }
+
+  return desktop.api<HermesGitDiffResult>({ path: fsPath('git-diff', path) })
 }
 
 // Worktree detection runs against the LOCAL filesystem (the electron main

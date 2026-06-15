@@ -959,6 +959,7 @@ _FS_READDIR_HIDDEN = {
     "venv",
 }
 _FS_DATA_URL_MAX_BYTES = 16 * 1024 * 1024
+_FS_GIT_DIFF_MAX_BYTES = 512 * 1024
 _FS_TEXT_SOURCE_MAX_BYTES = 64 * 1024 * 1024
 _FS_TEXT_PREVIEW_MAX_BYTES = 512 * 1024
 _FS_PREVIEW_LANGUAGE_BY_EXT = {
@@ -1537,6 +1538,50 @@ async def fs_git_root(path: str):
     except OSError:
         start = target
     return {"root": _fs_find_git_root(start)}
+
+
+@app.get("/api/fs/git-diff")
+async def fs_git_diff(path: str):
+    target = _fs_path(path)
+    try:
+        st = target.stat()
+        start = target if stat.S_ISDIR(st.st_mode) else target.parent
+    except OSError:
+        start = target.parent
+
+    root = _fs_find_git_root(start)
+    if not root:
+        return {"diff": "", "error": "not-a-git-repo", "path": str(target), "root": None}
+
+    relative = os.path.relpath(target, root)
+    if relative == os.curdir or relative.startswith(os.pardir + os.sep) or os.path.isabs(relative):
+        return {"diff": "", "error": "path-outside-git-root", "path": str(target), "root": root}
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", root, "diff", "--no-ext-diff", "--no-color", "HEAD", "--", relative],
+            capture_output=True,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return {"diff": "", "error": "git-unavailable", "path": str(target), "root": root}
+    except subprocess.TimeoutExpired:
+        return {"diff": "", "error": "git-diff-timeout", "path": str(target), "root": root}
+
+    if result.returncode not in (0, 1):
+        lines = (result.stderr or result.stdout or "").splitlines()
+        detail = lines[0] if lines else f"git diff exited {result.returncode}"
+        return {"diff": "", "error": detail, "path": str(target), "root": root}
+
+    diff = result.stdout or ""
+    encoded = diff.encode("utf-8", errors="replace")
+    truncated = len(encoded) > _FS_GIT_DIFF_MAX_BYTES
+    if truncated:
+        diff = encoded[:_FS_GIT_DIFF_MAX_BYTES].decode("utf-8", errors="replace")
+
+    return {"diff": diff, "path": str(target), "root": root, "truncated": truncated}
 
 
 @app.get("/api/fs/default-cwd")

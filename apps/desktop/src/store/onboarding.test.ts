@@ -146,6 +146,76 @@ describe('refreshOnboarding', () => {
 
     expect($desktopOnboarding.get().providers?.map(p => p.id)).toEqual(['shared'])
   })
+
+  it('resumes onboarding when the provider list already has a logged-in provider', async () => {
+    const model = 'anthropic/claude-opus-4.8'
+    let modelSet = false
+    const nous = provider('nous', 'Nous Portal')
+    nous.status = { logged_in: true }
+
+    installApiMock(async ({ path }: { body?: unknown; path: string }) => {
+      if (path === '/api/providers/oauth') {
+        return { providers: [nous] }
+      }
+
+      if (path === '/api/model/options') {
+        return {
+          providers: [
+            {
+              name: 'Nous Portal',
+              slug: 'nous',
+              models: [model]
+            }
+          ]
+        }
+      }
+
+      if (path.startsWith('/api/model/recommended-default?')) {
+        return { provider: 'nous', model, free_tier: false }
+      }
+
+      if (path === '/api/model/set') {
+        modelSet = true
+
+        return { ok: true, provider: 'nous', model, gateway_tools: [] }
+      }
+
+      throw new Error(`unexpected api path: ${path}`)
+    })
+
+    const requestGateway: OnboardingContext['requestGateway'] = async method => {
+      if (method === 'reload.env') {
+        return {} as never
+      }
+
+      if (method === 'setup.status') {
+        return { provider_configured: true } as never
+      }
+
+      if (method === 'setup.runtime_check') {
+        return modelSet
+          ? ({ ok: true } as never)
+          : ({
+              ok: false,
+              error: 'No provider can serve the selected model.'
+            } as never)
+      }
+
+      throw new Error(`unexpected gateway method: ${method}`)
+    }
+
+    const ready = await refreshOnboarding(onboardingContext(requestGateway))
+
+    const state = $desktopOnboarding.get()
+    expect(ready).toBe(false)
+    expect(modelSet).toBe(true)
+    expect(state.flow.status).toBe('confirming_model')
+
+    if (state.flow.status === 'confirming_model') {
+      expect(state.flow.label).toBe('Nous Portal')
+      expect(state.flow.currentModel).toBe(model)
+    }
+  })
 })
 
 describe('OAuth onboarding', () => {
@@ -163,6 +233,7 @@ describe('OAuth onboarding', () => {
   it('clears stale readiness errors after OAuth succeeds and model confirmation is shown', async () => {
     const model = 'anthropic/claude-opus-4.8'
     const calls: { body?: unknown; path: string }[] = []
+    let modelSet = false
 
     installApiMock(async ({ body, path }: { body?: unknown; path: string }) => {
       calls.push({ body, path })
@@ -188,6 +259,8 @@ describe('OAuth onboarding', () => {
       }
 
       if (path === '/api/model/set') {
+        modelSet = true
+
         return { ok: true, provider: 'nous', model, gateway_tools: [] }
       }
 
@@ -204,7 +277,12 @@ describe('OAuth onboarding', () => {
       }
 
       if (method === 'setup.runtime_check') {
-        return { ok: true } as never
+        return modelSet
+          ? ({ ok: true } as never)
+          : ({
+              ok: false,
+              error: 'No provider can serve the selected model.'
+            } as never)
       }
 
       throw new Error(`unexpected gateway method: ${method}`)

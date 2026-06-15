@@ -15,7 +15,15 @@ import { Backdrop } from '@/components/Backdrop'
 import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
-import { decomposeLoopTask, getGlobalModelOptions, getLoopSessionSource, getLoopTaskDetail, type HermesGateway, updateLoopTaskStatus } from '@/hermes'
+import {
+  decomposeLoopTask,
+  getGlobalModelOptions,
+  getLoopSessionSource,
+  getLoopTaskDetail,
+  type HermesGateway,
+  reviewLoopHandoffForTask,
+  updateLoopTaskStatus
+} from '@/hermes'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { quickModelOptions, sessionTitle, toRuntimeMessage } from '@/lib/chat-runtime'
 import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
@@ -121,22 +129,8 @@ function archiveableLoopRows(state: LoopPanelState | null, fallback: LoopRow): L
   })
 }
 
-function buildLoopTriageDraft(root: LoopRow, state: LoopPanelState | null): string {
-  const body = (root.body || '').trim()
-  const relatedRows = (state?.rows || [])
-    .filter(row => row.taskId !== root.taskId)
-    .slice(0, 20)
-    .map(row => `- ${row.taskId} [${row.status}] ${row.title}`)
-
-  return [
-    'Help me triage this Loop spec in Kanban.',
-    `Root task: ${root.taskId} - ${root.title}`,
-    `Status: ${root.status}`,
-    body ? `Spec:\n${body}` : null,
-    relatedRows.length ? `Current Loop tasks:\n${relatedRows.join('\n')}` : null
-  ]
-    .filter((part): part is string => Boolean(part))
-    .join('\n\n')
+function buildLoopTriageDraft(): string {
+  return 'Help me triage this Loop spec in Kanban.'
 }
 
 function ChatHeader({
@@ -478,6 +472,18 @@ export function ChatView({
     }
   })
 
+  const loopReviewDecisionMutation = useMutation({
+    mutationFn: ({ action, taskId }: { action: Extract<LoopTaskAction, 'accept-review' | 'escalate-review' | 'reject-review'>; taskId: string }) =>
+      reviewLoopHandoffForTask(taskId, action, activeGatewayProfile, { board: loopSourceQuery.data?.board }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId] })
+      await queryClient.invalidateQueries({ queryKey: ['loop-task-detail', activeGatewayProfile] })
+    },
+    onError: error => {
+      console.error('Loop review decision failed', error)
+    }
+  })
+
   useEffect(() => {
     setSelectedLoopTaskId(null)
     setFocusedLoopTaskId(null)
@@ -512,7 +518,8 @@ export function ChatView({
       }
 
       if (action === 'ask-hermes') {
-        requestComposerInsert(buildLoopTriageDraft(row, loopPanelState), { mode: 'block', target: 'main' })
+        onAddContextRef(`@task:${row.taskId}`, row.title || row.taskId, `Loop task ${row.taskId}`)
+        requestComposerInsert(buildLoopTriageDraft(), { mode: 'block', target: 'main' })
 
         return
       }
@@ -533,6 +540,12 @@ export function ChatView({
         return
       }
 
+      if (action === 'accept-review' || action === 'escalate-review' || action === 'reject-review') {
+        loopReviewDecisionMutation.mutate({ action, taskId: row.taskId })
+
+        return
+      }
+
       const nextStatusByAction: Partial<Record<LoopTaskAction, string>> = {
         archive: 'archived',
         block: 'blocked',
@@ -549,7 +562,7 @@ export function ChatView({
 
       loopTaskStatusMutation.mutate({ status: nextStatus, taskId: row.taskId })
     },
-    [handleSelectLoopTaskId, loopPanelState, loopTaskArchiveMutation, loopTaskDecomposeMutation, loopTaskStatusMutation]
+    [handleSelectLoopTaskId, loopPanelState, loopReviewDecisionMutation, loopTaskArchiveMutation, loopTaskDecomposeMutation, loopTaskStatusMutation, onAddContextRef]
   )
 
   // Drop files anywhere in the conversation area, not just on the composer
@@ -665,6 +678,7 @@ export function ChatView({
         </div>
       </div>
       <LoopPanel
+        artifactSourceBaseDir={currentCwd}
         hidden={loopPanelHidden}
         onFocusTaskId={setFocusedLoopTaskId}
         onHide={handleHideLoopPanel}

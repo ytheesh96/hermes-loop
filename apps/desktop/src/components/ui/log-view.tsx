@@ -8,7 +8,7 @@ export function LogView({ className, ...props }: ComponentProps<'div'>) {
   return (
     <div
       className={cn(
-        'overflow-auto rounded-lg border border-(--ui-stroke-tertiary) px-2.5 py-1.5 font-mono text-[0.6875rem] leading-[1.5] whitespace-pre-wrap break-words text-(--ui-text-tertiary) [scrollbar-width:thin]',
+        'min-w-0 max-w-full overflow-auto rounded-lg border border-(--ui-stroke-tertiary) px-2.5 py-1.5 font-mono text-[0.6875rem] leading-[1.5] whitespace-pre-wrap break-words text-(--ui-text-tertiary) [scrollbar-width:thin]',
         className
       )}
       {...props}

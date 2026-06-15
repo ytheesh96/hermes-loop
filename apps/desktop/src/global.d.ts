@@ -44,6 +44,7 @@ declare global {
       requestMicrophoneAccess: () => Promise<boolean>
       readFileDataUrl: (filePath: string) => Promise<string>
       readFileText: (filePath: string) => Promise<HermesReadFileTextResult>
+      gitDiff?: (filePath: string) => Promise<HermesGitDiffResult>
       selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>
       writeClipboard: (text: string) => Promise<boolean>
       saveImageFromUrl: (url: string) => Promise<boolean>
@@ -437,6 +438,14 @@ export interface HermesReadFileTextResult {
   mimeType?: string
   path: string
   text: string
+  truncated?: boolean
+}
+
+export interface HermesGitDiffResult {
+  diff: string
+  error?: string
+  path: string
+  root: null | string
   truncated?: boolean
 }
 

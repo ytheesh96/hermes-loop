@@ -20,7 +20,6 @@ const crypto = require('node:crypto')
 const fs = require('node:fs')
 const http = require('node:http')
 const https = require('node:https')
-const net = require('node:net')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { execFileSync, spawn } = require('node:child_process')
@@ -1428,6 +1427,47 @@ function runGit(args, options = {}) {
     child.once('error', reject)
     child.once('exit', code => resolve({ code, stdout, stderr }))
   })
+}
+
+async function gitDiffForIpc(filePath) {
+  const resolvedPath = resolveRequestedPathForIpc(filePath, { purpose: 'Git diff' })
+  let startPath = resolvedPath
+
+  try {
+    const stat = await fs.promises.stat(resolvedPath)
+    startPath = stat.isDirectory() ? resolvedPath : path.dirname(resolvedPath)
+  } catch {
+    startPath = path.dirname(resolvedPath)
+  }
+
+  const root = await gitRootForIpc(startPath)
+
+  if (!root) {
+    return { diff: '', error: 'not-a-git-repo', path: resolvedPath, root: null }
+  }
+
+  const relativePath = path.relative(root, resolvedPath)
+
+  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    return { diff: '', error: 'path-outside-git-root', path: resolvedPath, root }
+  }
+
+  const result = await runGit(['diff', '--no-ext-diff', '--no-color', 'HEAD', '--', relativePath], { cwd: root })
+
+  if (result.code !== 0 && result.code !== 1) {
+    return { diff: '', error: firstLine(result.stderr) || firstLine(result.stdout) || `git diff exited ${result.code}`, path: resolvedPath, root }
+  }
+
+  const diff = result.stdout || ''
+  const diffBuffer = Buffer.from(diff, 'utf8')
+  const truncated = diffBuffer.length > TEXT_PREVIEW_MAX_BYTES
+
+  return {
+    diff: truncated ? diffBuffer.subarray(0, TEXT_PREVIEW_MAX_BYTES).toString('utf8') : diff,
+    path: resolvedPath,
+    root,
+    truncated
+  }
 }
 
 const firstLine = text => (text || '').split('\n').find(Boolean) || ''
@@ -6023,6 +6063,8 @@ function disposeTerminalSession(id) {
 ipcMain.handle('hermes:fs:readDir', async (_event, dirPath) => readDirForIpc(dirPath))
 
 ipcMain.handle('hermes:fs:gitRoot', async (_event, startPath) => gitRootForIpc(startPath))
+
+ipcMain.handle('hermes:fs:gitDiff', async (_event, filePath) => gitDiffForIpc(filePath))
 
 ipcMain.handle('hermes:fs:worktrees', async (_event, cwds) => worktreesForIpc(cwds))
 

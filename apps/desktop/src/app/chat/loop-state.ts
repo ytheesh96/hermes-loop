@@ -141,6 +141,7 @@ export interface TenantLoopTask {
 }
 
 export interface TenantLoopSource {
+  board?: null | string
   external_links?: { child_id?: string; parent_id?: string }[]
   include_archived?: boolean
   latest_event_id?: number

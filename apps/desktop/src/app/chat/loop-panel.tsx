@@ -11,11 +11,13 @@ import {
 
 import { StatusItemRow } from '@/app/chat/composer/status-stack/status-row'
 import { CompactMarkdown } from '@/components/chat/compact-markdown'
+import { DiffLines } from '@/components/chat/diff-lines'
 import { StatusRow } from '@/components/chat/status-row'
 import { StatusSection } from '@/components/chat/status-section'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { LogView } from '@/components/ui/log-view'
+import { desktopGitDiff } from '@/lib/desktop-fs'
 import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
 import { cn } from '@/lib/utils'
 import type { ComposerStatusItem, StatusItemState } from '@/store/composer-status'
@@ -46,11 +48,16 @@ export type LoopArtifactSourceKind = 'artifact' | 'changed-file' | 'source'
 
 export interface LoopArtifactSourceEntry {
   id: string
+  inlineDiff?: string
   kind: LoopArtifactSourceKind
   label: string
   sourceLabel: string
   target: string
 }
+
+type LoopArtifactDiffSource = 'git' | 'inline'
+type LoopArtifactDiffStatus = 'empty' | 'error' | 'idle' | 'loading' | 'ready'
+type LoopArtifactTabView = 'details' | 'diff' | 'preview'
 
 const LOOP_PANEL_DEFAULT_WIDTH = 416
 const LOOP_PANEL_MIN_WIDTH = 384
@@ -827,6 +834,47 @@ function artifactSourceLabel(value: unknown, target: string): string {
   return artifactSourceBasename(target)
 }
 
+const ANSI_ESCAPE_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g')
+const INLINE_DIFF_LABEL_PATTERN = new RegExp(`^\\s*${String.fromCharCode(0x250a)}?\\s*review diff\\s*\\n`, 'i')
+
+function cleanArtifactSourceDiff(value: string): string {
+  return value.replace(ANSI_ESCAPE_PATTERN, '').replace(INLINE_DIFF_LABEL_PATTERN, '').trim()
+}
+
+function artifactSourceDiffFromRecord(record: Record<string, unknown> | null): string | undefined {
+  if (!record) {
+    return undefined
+  }
+
+  for (const key of ['inline_diff', 'inlineDiff', 'unified_diff', 'unifiedDiff', 'diff', 'patch']) {
+    const value = record[key]
+
+    if (typeof value === 'string' && value.trim()) {
+      const cleaned = cleanArtifactSourceDiff(value)
+
+      if (cleaned) {
+        return cleaned
+      }
+    }
+  }
+
+  return undefined
+}
+
+function artifactSourceInlineDiff(value: unknown, metadata: unknown, fieldValues: unknown[]): string | undefined {
+  const direct = artifactSourceDiffFromRecord(artifactSourceRecord(value))
+
+  if (direct) {
+    return direct
+  }
+
+  if (fieldValues.length === 1) {
+    return artifactSourceDiffFromRecord(artifactSourceRecord(metadata))
+  }
+
+  return undefined
+}
+
 function artifactSourceValues(metadata: unknown, key: string): unknown[] {
   const record = artifactSourceRecord(metadata)
 
@@ -845,6 +893,7 @@ function artifactSourceValues(metadata: unknown, key: string): unknown[] {
 
 function artifactSourceMetadataForRow(row: LoopRow, detail?: LoopTaskDetail | null): unknown[] {
   const latestRun = detail?.runs?.at(-1) || row.latestRun || null
+
   const sources = [
     latestRun?.metadata,
     latestRun !== row.latestRun ? row.latestRun?.metadata : null,
@@ -867,7 +916,9 @@ function artifactSourceEntriesForRow(row: LoopRow, detail?: LoopTaskDetail | nul
 
   for (const metadata of artifactSourceMetadataForRow(row, detail)) {
     for (const field of ARTIFACT_SOURCE_FIELDS) {
-      for (const value of artifactSourceValues(metadata, field.key)) {
+      const values = artifactSourceValues(metadata, field.key)
+
+      for (const value of values) {
         const target = artifactSourceTarget(value)
 
         if (!target) {
@@ -883,6 +934,7 @@ function artifactSourceEntriesForRow(row: LoopRow, detail?: LoopTaskDetail | nul
         seen.add(dedupeKey)
         entries.push({
           id: `${row.taskId}:${dedupeKey}`,
+          inlineDiff: field.kind === 'changed-file' ? artifactSourceInlineDiff(value, metadata, values) : undefined,
           kind: field.kind,
           label: artifactSourceLabel(value, target),
           sourceLabel: field.sourceLabel,
@@ -907,6 +959,46 @@ function artifactSourceIcon(kind: LoopArtifactSourceKind): string {
   return 'file'
 }
 
+const ARTIFACT_SOURCE_GROUPS: { kind: LoopArtifactSourceKind; label: string }[] = [
+  { kind: 'artifact', label: 'Artifacts' },
+  { kind: 'changed-file', label: 'Changed' },
+  { kind: 'source', label: 'Sources' }
+]
+
+function artifactSourceActionLabel(entry: LoopArtifactSourceEntry): string {
+  if (entry.kind === 'changed-file') {
+    return entry.inlineDiff ? 'Diff' : 'Changed'
+  }
+
+  return 'Open'
+}
+
+function artifactSourceSummary(items: { entry: LoopArtifactSourceEntry; row: LoopRow }[]): string {
+  const counts = new Map<LoopArtifactSourceKind, number>()
+
+  for (const { entry } of items) {
+    counts.set(entry.kind, (counts.get(entry.kind) || 0) + 1)
+  }
+
+  return ARTIFACT_SOURCE_GROUPS.map(group => {
+    const count = counts.get(group.kind) || 0
+
+    if (count === 0) {
+      return ''
+    }
+
+    if (group.kind === 'artifact') {
+      return `${count} artifact${count === 1 ? '' : 's'}`
+    }
+
+    if (group.kind === 'changed-file') {
+      return `${count} changed`
+    }
+
+    return `${count} source${count === 1 ? '' : 's'}`
+  }).filter(Boolean).join(' · ')
+}
+
 function LoopArtifactSourcesCard({
   detail,
   hideEmpty = false,
@@ -928,31 +1020,49 @@ function LoopArtifactSourcesCard({
     return null
   }
 
+  const groupedItems = ARTIFACT_SOURCE_GROUPS.map(group => ({
+    ...group,
+    items: items.filter(item => item.entry.kind === group.kind)
+  })).filter(group => group.items.length > 0)
+
   return (
     <DetailSection testId="loop-artifact-sources-card" title="Artifacts / sources">
       {items.length === 0 ? (
         <EmptyDetail>No artifact or source outputs recorded yet.</EmptyDetail>
       ) : (
-        <div className="grid gap-1.5" data-testid="loop-artifact-sources-list">
-          {items.map(({ entry, row }) => (
-            <Button
-              aria-label={`Open ${entry.sourceLabel.toLowerCase()} ${entry.target}`}
-              className="h-auto min-w-0 justify-start gap-2 px-2 py-1.5 text-left text-xs"
-              disabled={!onOpenArtifactSource}
-              key={`${row.taskId}:${entry.id}`}
-              onClick={() => onOpenArtifactSource?.(entry, row)}
-              title={entry.target}
-              type="button"
-              variant="secondary"
-            >
-              <Codicon className="shrink-0 text-(--ui-text-tertiary)" name={artifactSourceIcon(entry.kind)} size="0.82rem" />
-              <span className="grid min-w-0 flex-1 gap-0.5">
-                <span className="truncate text-(--ui-text-primary)">{entry.label}</span>
-                <span className="truncate text-[0.65rem] text-(--ui-text-tertiary)">
-                  {entry.sourceLabel}{rows.length > 1 ? ` · ${row.title || row.taskId}` : ''}
-                </span>
-              </span>
-            </Button>
+        <div className="grid gap-2" data-testid="loop-artifact-sources-list">
+          <p className="m-0 text-[0.66rem] text-(--ui-text-tertiary)">{artifactSourceSummary(items)}</p>
+          {groupedItems.map(group => (
+            <div className="grid gap-1" key={group.kind}>
+              <div className="flex items-center gap-1.5 px-0.5 text-[0.62rem] font-medium uppercase tracking-wide text-(--ui-text-quaternary)">
+                <Codicon name={artifactSourceIcon(group.kind)} size="0.72rem" />
+                <span>{group.label}</span>
+              </div>
+              {group.items.map(({ entry, row }) => (
+                <Button
+                  aria-label={`Open ${entry.sourceLabel.toLowerCase()} ${entry.target}`}
+                  className="h-auto min-w-0 items-center justify-start gap-2 px-2 py-1.5 text-left text-xs"
+                  disabled={!onOpenArtifactSource}
+                  key={`${row.taskId}:${entry.id}`}
+                  onClick={() => onOpenArtifactSource?.(entry, row)}
+                  title={entry.target}
+                  type="button"
+                  variant="secondary"
+                >
+                  <Codicon className="shrink-0 text-(--ui-text-tertiary)" name={artifactSourceIcon(entry.kind)} size="0.82rem" />
+                  <span className="grid min-w-0 flex-1 gap-0.5">
+                    <span className="truncate text-(--ui-text-primary)">{entry.label}</span>
+                    <span className="truncate font-mono text-[0.64rem] text-(--ui-text-tertiary)">{entry.target}</span>
+                    <span className="truncate text-[0.65rem] text-(--ui-text-tertiary)">
+                      {entry.sourceLabel}{rows.length > 1 ? ` · ${row.title || row.taskId}` : ''}
+                    </span>
+                  </span>
+                  <span className="shrink-0 rounded bg-(--ui-fill-quaternary) px-1.5 py-0.5 text-[0.62rem] font-medium text-(--ui-text-tertiary)">
+                    {artifactSourceActionLabel(entry)}
+                  </span>
+                </Button>
+              ))}
+            </div>
           ))}
         </div>
       )}
@@ -960,7 +1070,153 @@ function LoopArtifactSourcesCard({
   )
 }
 
-function LoopArtifactSourceTab({ tab }: { tab: LoopPanelArtifactTab }) {
+function artifactSourceKindLabel(kind: LoopArtifactSourceKind): string {
+  if (kind === 'artifact') {
+    return 'Artifact'
+  }
+
+  if (kind === 'changed-file') {
+    return 'Changed file'
+  }
+
+  return 'Source'
+}
+
+function LoopArtifactViewButton({
+  active,
+  disabled,
+  icon,
+  label,
+  onClick
+}: {
+  active: boolean
+  disabled?: boolean
+  icon: string
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <Button
+      aria-pressed={active}
+      className={cn('h-6 gap-1 px-2 text-[0.68rem]', active && 'bg-(--ui-bg-quaternary) text-(--ui-text-primary)')}
+      disabled={disabled}
+      onClick={onClick}
+      size="xs"
+      type="button"
+      variant={active ? 'secondary' : 'ghost'}
+    >
+      <Codicon name={icon} size="0.74rem" />
+      <span>{label}</span>
+    </Button>
+  )
+}
+
+function LoopArtifactPreviewView({ tab }: { tab: LoopPanelArtifactTab }) {
+  if (tab.status === 'loading') {
+    return <div className="grid h-full min-h-[24rem] place-items-center text-xs text-(--ui-text-tertiary)">Loading preview...</div>
+  }
+
+  if (tab.status === 'error') {
+    return (
+      <div className="grid h-full min-h-[24rem] place-items-center p-4 text-center text-xs text-(--ui-text-tertiary)">
+        {tab.error || 'Preview unavailable.'}
+      </div>
+    )
+  }
+
+  if (tab.target) {
+    return <LocalFilePreview reloadKey={0} target={tab.target} />
+  }
+
+  return <div className="grid h-full min-h-[24rem] place-items-center text-xs text-(--ui-text-tertiary)">Preview unavailable.</div>
+}
+
+function LoopArtifactDiffView({ tab }: { tab: LoopPanelArtifactTab }) {
+  if (tab.entry.kind !== 'changed-file') {
+    return (
+      <div className="grid h-full min-h-[24rem] place-items-center p-4 text-center text-xs text-(--ui-text-tertiary)">
+        Diff is only available for changed files.
+      </div>
+    )
+  }
+
+  if (tab.diffStatus === 'loading') {
+    return <div className="grid h-full min-h-[24rem] place-items-center text-xs text-(--ui-text-tertiary)">Loading diff...</div>
+  }
+
+  if (tab.diffStatus === 'error') {
+    return (
+      <div className="grid h-full min-h-[24rem] place-items-center p-4 text-center text-xs text-(--ui-text-tertiary)">
+        {tab.diffError || 'Diff unavailable.'}
+      </div>
+    )
+  }
+
+  if (tab.diffStatus === 'ready' && tab.diff) {
+    return (
+      <div className="flex h-full min-h-[24rem] min-w-0 flex-col">
+        {tab.diffTruncated && (
+          <div className="border-b border-(--ui-stroke-tertiary) px-3 py-1.5 text-[0.66rem] text-(--ui-text-tertiary)">
+            Diff truncated for preview.
+          </div>
+        )}
+        <DiffLines
+          className="m-0 h-full max-h-none min-h-0 flex-1 rounded-none border-0 bg-transparent p-3"
+          text={tab.diff}
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div className="grid h-full min-h-[24rem] place-items-center p-4 text-center text-xs text-(--ui-text-tertiary)">
+      No diff recorded for this file.
+    </div>
+  )
+}
+
+function LoopArtifactDetailRow({ label, value }: { label: string; value?: null | string }) {
+  if (!value) {
+    return null
+  }
+
+  return (
+    <div className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-2">
+      <dt className="text-(--ui-text-tertiary)">{label}</dt>
+      <dd className="m-0 min-w-0 break-all font-mono text-(--ui-text-secondary)">{value}</dd>
+    </div>
+  )
+}
+
+function LoopArtifactDetailsView({ tab }: { tab: LoopPanelArtifactTab }) {
+  const diffLine = tab.entry.kind === 'changed-file'
+    ? [tab.diffSource === 'inline' ? 'inline' : tab.diffSource === 'git' ? 'git' : '', tab.diffStatus]
+        .filter(Boolean)
+        .join(' · ')
+    : undefined
+
+  return (
+    <div className="h-full min-h-[24rem] overflow-auto p-3 text-xs">
+      <dl className="m-0 grid gap-2">
+        <LoopArtifactDetailRow label="Type" value={artifactSourceKindLabel(tab.entry.kind)} />
+        <LoopArtifactDetailRow label="Task" value={tab.rowTitle || tab.rowTaskId} />
+        <LoopArtifactDetailRow label="Target" value={tab.entry.target} />
+        <LoopArtifactDetailRow label="Preview" value={tab.target?.path || tab.target?.url || tab.error} />
+        <LoopArtifactDetailRow label="Diff" value={diffLine} />
+      </dl>
+    </div>
+  )
+}
+
+function LoopArtifactSourceTab({
+  onSelectView,
+  tab
+}: {
+  onSelectView: (tabId: string, view: LoopArtifactTabView) => void
+  tab: LoopPanelArtifactTab
+}) {
+  const canShowDiff = tab.entry.kind === 'changed-file'
+
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col gap-3">
       <section
@@ -973,23 +1229,43 @@ function LoopArtifactSourceTab({ tab }: { tab: LoopPanelArtifactTab }) {
             <h3 className="m-0 min-w-0 truncate text-sm font-semibold text-(--ui-text-primary)">{tab.entry.label}</h3>
           </div>
           <div className="grid gap-1 text-[0.68rem] text-(--ui-text-tertiary)">
-            <div className="truncate">{tab.entry.sourceLabel} · {tab.rowTitle || tab.rowTaskId}</div>
+            <div className="truncate">
+              {tab.entry.sourceLabel} · {tab.rowTitle || tab.rowTaskId}
+              {tab.diffSource ? ` · ${tab.diffSource === 'inline' ? 'inline diff' : 'git diff'}` : ''}
+            </div>
             <div className="break-all font-mono">{tab.entry.target}</div>
+          </div>
+          <div aria-label="Artifact view" className="flex w-fit max-w-full items-center gap-0.5 rounded border border-(--ui-stroke-tertiary) bg-(--ui-fill-quaternary) p-0.5">
+            <LoopArtifactViewButton
+              active={tab.view === 'preview'}
+              icon="open-preview"
+              label="Preview"
+              onClick={() => onSelectView(tab.id, 'preview')}
+            />
+            <LoopArtifactViewButton
+              active={tab.view === 'diff'}
+              disabled={!canShowDiff}
+              icon="diff"
+              label="Diff"
+              onClick={() => onSelectView(tab.id, 'diff')}
+            />
+            <LoopArtifactViewButton
+              active={tab.view === 'details'}
+              icon="list-unordered"
+              label="Details"
+              onClick={() => onSelectView(tab.id, 'details')}
+            />
           </div>
         </div>
       </section>
 
       <div className="relative min-h-[24rem] min-w-0 flex-1 overflow-hidden rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-surface-background)">
-        {tab.status === 'loading' ? (
-          <div className="grid h-full min-h-[24rem] place-items-center text-xs text-(--ui-text-tertiary)">Loading preview...</div>
-        ) : tab.status === 'error' ? (
-          <div className="grid h-full min-h-[24rem] place-items-center p-4 text-center text-xs text-(--ui-text-tertiary)">
-            {tab.error || 'Preview unavailable.'}
-          </div>
-        ) : tab.target ? (
-          <LocalFilePreview reloadKey={0} target={tab.target} />
+        {tab.view === 'diff' ? (
+          <LoopArtifactDiffView tab={tab} />
+        ) : tab.view === 'details' ? (
+          <LoopArtifactDetailsView tab={tab} />
         ) : (
-          <div className="grid h-full min-h-[24rem] place-items-center text-xs text-(--ui-text-tertiary)">Preview unavailable.</div>
+          <LoopArtifactPreviewView tab={tab} />
         )}
       </div>
     </div>
@@ -1044,7 +1320,7 @@ function EvidenceDetails({ detail, row }: { detail?: LoopTaskDetail | null; row:
 }
 
 function ReviewDecisionControls({ onTaskAction, row }: { onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void; row: LoopRow }) {
-  const unavailable = true
+  const unavailable = !onTaskAction
 
   return (
     <div className="grid gap-2">
@@ -1053,7 +1329,7 @@ function ReviewDecisionControls({ onTaskAction, row }: { onTaskAction?: (action:
         <Button aria-label="Reject review" className="h-7 px-2 text-xs" disabled={unavailable} onClick={() => onTaskAction?.('reject-review', row)} type="button" variant="outline">Reject</Button>
         <Button aria-label="Escalate review" className="h-7 px-2 text-xs" disabled={unavailable} onClick={() => onTaskAction?.('escalate-review', row)} type="button" variant="outline">Escalate</Button>
       </div>
-      {unavailable && <EmptyDetail>Review decisions are unavailable until the gateway exposes drawer decision actions.</EmptyDetail>}
+      {unavailable && <EmptyDetail>Review decisions are unavailable until this view is connected to the gateway action handler.</EmptyDetail>}
     </div>
   )
 }
@@ -1505,6 +1781,11 @@ interface LoopPanelTaskTab {
 }
 
 interface LoopPanelArtifactTab {
+  diff?: string
+  diffError?: string
+  diffSource?: LoopArtifactDiffSource
+  diffStatus: LoopArtifactDiffStatus
+  diffTruncated?: boolean
   entry: LoopArtifactSourceEntry
   error?: string
   id: string
@@ -1512,6 +1793,7 @@ interface LoopPanelArtifactTab {
   rowTitle: string
   status: 'error' | 'loading' | 'ready'
   target?: PreviewTarget
+  view: LoopArtifactTabView
 }
 
 interface LoopPanelTabBarProps {
@@ -1575,6 +1857,7 @@ function LoopPanelTabBar({
             : tab.taskId
               ? tab.taskId === activeTaskTabId && !activeArtifactTabId
               : !activeTaskTabId && !activeArtifactTabId
+
           const closeTab = tab.artifactTabId ? () => onCloseArtifactTab(tab.artifactTabId!) : tab.taskId ? () => onCloseTaskTab(tab.taskId!) : onClosePane
           const selectTab = tab.artifactTabId ? () => onSelectArtifactTab(tab.artifactTabId!) : tab.taskId ? () => onSelectTaskTab(tab.taskId!) : onSelectBaseTab
 
@@ -1659,6 +1942,30 @@ function LoopPanelTabBar({
   )
 }
 
+function defaultArtifactTabView(entry: LoopArtifactSourceEntry): LoopArtifactTabView {
+  return entry.kind === 'changed-file' ? 'diff' : 'preview'
+}
+
+function initialArtifactDiffStatus(entry: LoopArtifactSourceEntry): LoopArtifactDiffStatus {
+  if (entry.kind !== 'changed-file') {
+    return 'idle'
+  }
+
+  return entry.inlineDiff ? 'ready' : 'loading'
+}
+
+function artifactDiffPath(entry: LoopArtifactSourceEntry, target: PreviewTarget | null): string {
+  if (target?.kind === 'file' && target.path) {
+    return target.path
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:/i.test(entry.target)) {
+    return ''
+  }
+
+  return entry.target
+}
+
 export function LoopPanel({
   artifactSourceBaseDir,
   enableDebugJson = false,
@@ -1715,6 +2022,7 @@ export function LoopPanel({
     () => activeTaskTabId ? selectedRowFrom(state, activeTaskTabId, selectedTaskDetail) : null,
     [activeTaskTabId, selectedTaskDetail, state]
   )
+
   const activeArtifactTab = useMemo(
     () => artifactTabs.find(tab => tab.id === activeArtifactTabId) || null,
     [activeArtifactTabId, artifactTabs]
@@ -1795,20 +2103,35 @@ export function LoopPanel({
 
   const openArtifactTab = useCallback((entry: LoopArtifactSourceEntry, row: LoopRow) => {
     const tabId = entry.id
+
     const nextTab: LoopPanelArtifactTab = {
+      diff: entry.kind === 'changed-file' ? entry.inlineDiff : undefined,
+      diffSource: entry.kind === 'changed-file' && entry.inlineDiff ? 'inline' : undefined,
+      diffStatus: initialArtifactDiffStatus(entry),
       entry,
       id: tabId,
       rowTaskId: row.taskId,
       rowTitle: row.title || row.taskId,
-      status: 'loading'
+      status: 'loading',
+      view: defaultArtifactTabView(entry)
     }
+
     const baseDir = row.workspacePath || artifactSourceBaseDir || undefined
 
     setArtifactTabs(tabs => {
       const existingIndex = tabs.findIndex(tab => tab.id === tabId)
 
       if (existingIndex >= 0) {
-        return tabs.map(tab => tab.id === tabId ? { ...tab, entry, rowTaskId: row.taskId, rowTitle: row.title || row.taskId } : tab)
+        return tabs.map(tab => tab.id === tabId ? {
+          ...tab,
+          diff: entry.kind === 'changed-file' ? entry.inlineDiff || tab.diff : undefined,
+          diffSource: entry.kind === 'changed-file' && entry.inlineDiff ? 'inline' : tab.diffSource,
+          diffStatus: entry.kind === 'changed-file' && entry.inlineDiff ? 'ready' : tab.diffStatus,
+          entry,
+          rowTaskId: row.taskId,
+          rowTitle: row.title || row.taskId,
+          view: tab.view
+        } : tab)
       }
 
       return [...tabs, nextTab]
@@ -1825,6 +2148,44 @@ export function LoopPanel({
           status: target ? 'ready' : 'error',
           target: target || undefined
         } : tab))
+
+        if (entry.kind !== 'changed-file' || entry.inlineDiff) {
+          return
+        }
+
+        const diffPath = artifactDiffPath(entry, target)
+
+        if (!diffPath) {
+          setArtifactTabs(tabs => tabs.map(tab => tab.id === tabId ? {
+            ...tab,
+            diffError: 'Diff unavailable for this target.',
+            diffStatus: 'error'
+          } : tab))
+
+          return
+        }
+
+        void desktopGitDiff(diffPath).then(
+          result => {
+            const diff = (result.diff || '').trim()
+
+            setArtifactTabs(tabs => tabs.map(tab => tab.id === tabId ? {
+              ...tab,
+              diff: diff || undefined,
+              diffError: result.error,
+              diffSource: 'git',
+              diffStatus: result.error ? 'error' : diff ? 'ready' : 'empty',
+              diffTruncated: Boolean(result.truncated)
+            } : tab))
+          },
+          error => {
+            setArtifactTabs(tabs => tabs.map(tab => tab.id === tabId ? {
+              ...tab,
+              diffError: error instanceof Error ? error.message : String(error),
+              diffStatus: 'error'
+            } : tab))
+          }
+        )
       },
       error => {
         setArtifactTabs(tabs => tabs.map(tab => tab.id === tabId ? {
@@ -1832,9 +2193,21 @@ export function LoopPanel({
           error: error instanceof Error ? error.message : String(error),
           status: 'error'
         } : tab))
+
+        if (entry.kind === 'changed-file' && !entry.inlineDiff) {
+          setArtifactTabs(tabs => tabs.map(tab => tab.id === tabId ? {
+            ...tab,
+            diffError: 'Diff unavailable while resolving the file preview.',
+            diffStatus: 'error'
+          } : tab))
+        }
       }
     )
   }, [artifactSourceBaseDir])
+
+  const selectArtifactView = useCallback((tabId: string, view: LoopArtifactTabView) => {
+    setArtifactTabs(tabs => tabs.map(tab => tab.id === tabId ? { ...tab, view } : tab))
+  }, [])
 
   const closeTaskTab = useCallback((taskId: string) => {
     const index = taskTabs.findIndex(tab => tab.taskId === taskId)
@@ -2019,7 +2392,7 @@ export function LoopPanel({
 
           <div className="min-h-0 flex-1 overflow-auto">
             {activeArtifactTab ? (
-              <LoopArtifactSourceTab tab={activeArtifactTab} />
+              <LoopArtifactSourceTab onSelectView={selectArtifactView} tab={activeArtifactTab} />
             ) : activeTaskTabId ? (
               activeTaskTabRow ? (
                 <div className="grid min-w-0 max-w-full gap-3">

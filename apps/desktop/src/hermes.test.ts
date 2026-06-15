@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { decomposeLoopTask, getLoopSessionSource, getLoopTaskDetail, getSessionMessages, listAllProfileSessions, listSessions, updateLoopTaskStatus } from './hermes'
+import {
+  decomposeLoopTask,
+  getLoopSessionSource,
+  getLoopTaskDetail,
+  getSessionMessages,
+  listAllProfileSessions,
+  listSessions,
+  reviewLoopHandoffForTask,
+  updateLoopTaskStatus
+} from './hermes'
 
 const emptySessionsResponse = {
   limit: 0,
@@ -101,6 +110,57 @@ describe('Hermes REST session helpers', () => {
       path: '/api/plugins/kanban/tasks/t_root/decompose',
       profile: 'peacock',
       timeoutMs: 600_000
+    })
+  })
+
+  it('submits Loop handoff accept decisions through the profile-scoped kanban API', async () => {
+    api
+      .mockResolvedValueOnce({
+        handoffs: [
+          { id: 42, state: 'closed', task_id: 't_review', updated_at: 1 },
+          { id: 43, state: 'reviewing', task_id: 't_review', updated_at: 2 }
+        ],
+        ok: true
+      })
+      .mockResolvedValueOnce({ ok: true, outcome: 'approved' })
+
+    await reviewLoopHandoffForTask('t_review', 'accept-review', 'peacock', { board: 'developer' })
+
+    expect(api).toHaveBeenNthCalledWith(1, {
+      path: '/api/plugins/kanban/loop-handoffs?task_id=t_review&board=developer',
+      profile: 'peacock'
+    })
+    expect(api).toHaveBeenNthCalledWith(2, {
+      body: {
+        action: 'approve_release',
+        actor: 'desktop-loop-panel',
+        evidence_passed: true,
+        reason: 'Accepted from the Loop side panel after reviewing the foreground handoff.'
+      },
+      method: 'POST',
+      path: '/api/plugins/kanban/loop-handoffs/43/auto-action?board=developer',
+      profile: 'peacock'
+    })
+  })
+
+  it('submits Loop handoff escalation decisions with a safe escalation flag', async () => {
+    api
+      .mockResolvedValueOnce({ handoffs: [{ id: 44, state: 'assigned', task_id: 't_review', updated_at: 3 }], ok: true })
+      .mockResolvedValueOnce({ ok: true, outcome: 'escalated' })
+
+    await reviewLoopHandoffForTask('t_review', 'escalate-review', 'peacock')
+
+    expect(api).toHaveBeenNthCalledWith(2, {
+      body: {
+        action: 'approve_release',
+        actor: 'desktop-loop-panel',
+        evidence_passed: true,
+        prohibited_flags: ['product_decision'],
+        reason: 'Escalated from the Loop side panel because this needs a user decision.'
+      },
+      method: 'POST',
+      path: '/api/plugins/kanban/loop-handoffs/44/auto-action',
+      profile: 'peacock'
     })
   })
 })
