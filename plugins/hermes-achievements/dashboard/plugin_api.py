@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import threading
 import time
@@ -32,6 +33,7 @@ except Exception:  # Allows local unit tests without dashboard dependencies.
 router = APIRouter()
 
 SNAPSHOT_TTL_SECONDS = 120
+AUTO_SCAN_ENV = "HERMES_ACHIEVEMENTS_AUTO_SCAN"
 _SCAN_LOCK = threading.Lock()
 _SNAPSHOT_CACHE: Optional[Dict[str, Any]] = None
 _SNAPSHOT_CACHE_AT = 0
@@ -235,6 +237,27 @@ def _cache_is_fresh(now: int) -> bool:
     return _SNAPSHOT_CACHE is not None and (now - _SNAPSHOT_CACHE_AT) <= SNAPSHOT_TTL_SECONDS
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _auto_scan_enabled() -> bool:
+    """Return whether non-manual achievement scans may start automatically.
+
+    Desktop boots request achievements opportunistically. On large local
+    histories, the full lifetime scan can monopolize Python during startup and
+    make unrelated dashboard APIs look dead. Keep the scan automatic for the
+    standalone dashboard, but require an explicit opt-in for desktop boot.
+    Manual /rescan still runs regardless of this guard.
+    """
+    if AUTO_SCAN_ENV in os.environ:
+        return _env_flag(AUTO_SCAN_ENV, True)
+    return not _env_flag("HERMES_DESKTOP", False)
+
+
 def _is_snapshot_stale(snapshot: Optional[Dict[str, Any]], now: Optional[int] = None) -> bool:
     if not isinstance(snapshot, dict):
         return True
@@ -260,6 +283,7 @@ def _scan_status_payload(now: Optional[int] = None) -> Dict[str, Any]:
         "snapshot_generated_at": generated_at or None,
         "snapshot_age_seconds": (current - generated_at) if generated_at else None,
         "snapshot_stale": _is_snapshot_stale(snap, current),
+        "auto_scan_enabled": _auto_scan_enabled(),
     }
 
 
@@ -947,11 +971,12 @@ def evaluate_all(force: bool = False) -> Dict[str, Any]:
     Behavior matrix:
 
     * Fresh in-memory cache → return it instantly.
-    * Stale on-disk snapshot → load it, kick a background rescan, return
-      the stale data (UI decorates it with ``is_stale=True``).
-    * No snapshot yet (first-ever run) → kick a background scan, return
-      an empty-but-valid "pending" payload so the UI can render a spinner
-      without blocking.
+    * Stale on-disk snapshot → load it, kick a background rescan when automatic
+      scanning is enabled, return the stale data (UI decorates it with
+      ``is_stale=True``).
+    * No snapshot yet (first-ever run) → kick a background scan when automatic
+      scanning is enabled, otherwise return an empty-but-valid "deferred"
+      payload so the UI can render without blocking.
     * ``force=True`` (manual /rescan) → run synchronously, block the
       caller, replace the cache.
 
@@ -985,15 +1010,23 @@ def evaluate_all(force: bool = False) -> Dict[str, Any]:
 
     # Non-force path: serve whatever we have and refresh in background.
     if _SNAPSHOT_CACHE is not None:
-        if not _cache_is_fresh(now):
+        if not _cache_is_fresh(now) and _auto_scan_enabled():
             _start_background_scan()
         return _SNAPSHOT_CACHE
 
-    # First-ever run on this machine — no snapshot yet. Kick off a scan
-    # and return a pending placeholder. The UI polls /scan-status and
-    # re-fetches /achievements when the scan completes.
-    _start_background_scan()
-    return _build_pending_snapshot(now)
+    # First-ever run on this machine — no snapshot yet. Kick off a scan only
+    # when auto-scanning is allowed; desktop startup should stay responsive.
+    if _auto_scan_enabled():
+        _start_background_scan()
+        return _build_pending_snapshot(now)
+
+    pending = _build_pending_snapshot(now)
+    pending["scan_meta"] = {
+        **(pending.get("scan_meta") or {}),
+        "mode": "deferred",
+        "auto_scan_enabled": False,
+    }
+    return pending
 
 
 @router.get("/achievements")

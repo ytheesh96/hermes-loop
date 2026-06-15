@@ -54,7 +54,7 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
 
   const refresh = useCallback(async () => {
     try {
-      const { profiles: list } = await getProfiles()
+      const { profiles: list } = await getProfiles({ detail: 'full' })
       setProfiles(list)
       setSelectedName(current => {
         if (current && list.some(p => p.name === current)) {

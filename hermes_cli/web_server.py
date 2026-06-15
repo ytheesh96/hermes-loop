@@ -2587,54 +2587,58 @@ async def get_sessions(
     profile_name: Optional[str] = None
     if profile:
         profile_name, _ = _cron_profile_home(profile)
-    try:
-        db = _open_session_db_for_profile(profile)
+
+    def _list_sessions_payload() -> Dict[str, Any]:
         try:
-            min_message_count = max(0, min_messages)
-            archived_only = archived == "only"
-            include_archived = archived == "include"
-            # Optional source scoping: ``source`` includes a single class,
-            # ``exclude_sources`` (comma-separated) drops classes. The desktop
-            # uses these to split recents (exclude=cron) from the cron-jobs
-            # section (source=cron) into two independent lists.
-            exclude_list = [s for s in (exclude_sources or "").split(",") if s.strip()]
-            sessions = db.list_sessions_rich(
-                source=source or None,
-                exclude_sources=exclude_list or None,
-                limit=limit,
-                offset=offset,
-                min_message_count=min_message_count,
-                include_archived=include_archived,
-                archived_only=archived_only,
-                order_by_last_active=order == "recent",
-            )
-            total = db.session_count(
-                source=source or None,
-                exclude_sources=exclude_list or None,
-                min_message_count=min_message_count,
-                include_archived=include_archived,
-                archived_only=archived_only,
-                exclude_children=True,
-            )
-            now = time.time()
-            for s in sessions:
-                s["is_active"] = (
-                    s.get("ended_at") is None
-                    and (now - s.get("last_active", s.get("started_at", 0))) < 300
+            db = _open_session_db_for_profile(profile)
+            try:
+                min_message_count = max(0, min_messages)
+                archived_only = archived == "only"
+                include_archived = archived == "include"
+                # Optional source scoping: ``source`` includes a single class,
+                # ``exclude_sources`` (comma-separated) drops classes. The desktop
+                # uses these to split recents (exclude=cron) from the cron-jobs
+                # section (source=cron) into two independent lists.
+                exclude_list = [s for s in (exclude_sources or "").split(",") if s.strip()]
+                sessions = db.list_sessions_rich(
+                    source=source or None,
+                    exclude_sources=exclude_list or None,
+                    limit=limit,
+                    offset=offset,
+                    min_message_count=min_message_count,
+                    include_archived=include_archived,
+                    archived_only=archived_only,
+                    order_by_last_active=order == "recent",
                 )
-                if profile_name:
-                    s["profile"] = profile_name
-                    s["is_default_profile"] = profile_name == "default"
-                # SQLite stores the flag as 0/1; expose a real JSON boolean.
-                s["archived"] = bool(s.get("archived"))
-            return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
-        finally:
-            db.close()
-    except HTTPException:
-        raise
-    except Exception:
-        _log.exception("GET /api/sessions failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
+                total = db.session_count(
+                    source=source or None,
+                    exclude_sources=exclude_list or None,
+                    min_message_count=min_message_count,
+                    include_archived=include_archived,
+                    archived_only=archived_only,
+                    exclude_children=True,
+                )
+                now = time.time()
+                for s in sessions:
+                    s["is_active"] = (
+                        s.get("ended_at") is None
+                        and (now - s.get("last_active", s.get("started_at", 0))) < 300
+                    )
+                    if profile_name:
+                        s["profile"] = profile_name
+                        s["is_default_profile"] = profile_name == "default"
+                    # SQLite stores the flag as 0/1; expose a real JSON boolean.
+                    s["archived"] = bool(s.get("archived"))
+                return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
+            finally:
+                db.close()
+        except HTTPException:
+            raise
+        except Exception:
+            _log.exception("GET /api/sessions failed")
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    return await asyncio.to_thread(_list_sessions_payload)
 
 
 @app.get("/api/profiles/sessions")
@@ -2662,98 +2666,101 @@ async def get_profiles_sessions(
     if order not in ("created", "recent"):
         raise HTTPException(status_code=400, detail="order must be one of: created, recent")
 
-    from hermes_state import SessionDB
-    from hermes_cli import profiles as profiles_mod
+    def _list_profile_sessions_payload() -> Dict[str, Any]:
+        from hermes_state import SessionDB
+        from hermes_cli import profiles as profiles_mod
 
-    targets: List[Tuple[str, Path]] = []
-    if profile and profile != "all":
-        name, home = _cron_profile_home(profile)
-        targets.append((name, home))
-    else:
-        try:
-            infos = profiles_mod.list_profiles()
-            targets = [(info.name, info.path) for info in infos]
-        except Exception:
-            _log.exception("GET /api/profiles/sessions: list_profiles failed")
-            targets = []
-        if not targets:
-            targets.append(("default", profiles_mod.get_profile_dir("default")))
+        targets: List[Tuple[str, Path]] = []
+        if profile and profile != "all":
+            name, home = _cron_profile_home(profile)
+            targets.append((name, home))
+        else:
+            try:
+                infos = profiles_mod.list_profiles()
+                targets = [(info.name, info.path) for info in infos]
+            except Exception:
+                _log.exception("GET /api/profiles/sessions: list_profiles failed")
+                targets = []
+            if not targets:
+                targets.append(("default", profiles_mod.get_profile_dir("default")))
 
-    min_message_count = max(0, min_messages)
-    archived_only = archived == "only"
-    include_archived = archived == "include"
-    # Source scoping (see /api/sessions): recents pass exclude_sources=cron,
-    # the cron-jobs section passes source=cron — two independent lists so
-    # newest cron sessions can't starve the recents page.
-    source_filter = source or None
-    exclude_list = [s for s in (exclude_sources or "").split(",") if s.strip()]
-    # Over-fetch per profile so the merged+sorted window is correct for the
-    # requested page. Capped so a huge profile can't blow up the response.
-    per_profile = min(max(limit + offset, limit), 500)
+        min_message_count = max(0, min_messages)
+        archived_only = archived == "only"
+        include_archived = archived == "include"
+        # Source scoping (see /api/sessions): recents pass exclude_sources=cron,
+        # the cron-jobs section passes source=cron — two independent lists so
+        # newest cron sessions can't starve the recents page.
+        source_filter = source or None
+        exclude_list = [s for s in (exclude_sources or "").split(",") if s.strip()]
+        # Over-fetch per profile so the merged+sorted window is correct for the
+        # requested page. Capped so a huge profile can't blow up the response.
+        per_profile = min(max(limit + offset, limit), 500)
 
-    merged: List[Dict[str, Any]] = []
-    total = 0
-    profile_totals: Dict[str, int] = {}
-    errors: List[Dict[str, str]] = []
-    now = time.time()
-    for name, home in targets:
-        db_path = Path(home) / "state.db"
-        if not db_path.exists():
-            continue
-        try:
-            # Read-only: this loop runs on every sidebar refresh, so it must
-            # never DDL/write-lock another profile's live DB (see SessionDB
-            # read_only docstring).
-            db = SessionDB(db_path=db_path, read_only=True)
-        except Exception as exc:
-            errors.append({"profile": name, "error": str(exc)})
-            continue
-        try:
-            rows = db.list_sessions_rich(
-                source=source_filter,
-                exclude_sources=exclude_list or None,
-                limit=per_profile,
-                offset=0,
-                min_message_count=min_message_count,
-                include_archived=include_archived,
-                archived_only=archived_only,
-                order_by_last_active=order == "recent",
-            )
-            profile_total = db.session_count(
-                source=source_filter,
-                exclude_sources=exclude_list or None,
-                min_message_count=min_message_count,
-                include_archived=include_archived,
-                archived_only=archived_only,
-                exclude_children=True,
-            )
-            total += profile_total
-            profile_totals[name] = profile_total
-            for s in rows:
-                s["profile"] = name
-                s["is_default_profile"] = name == "default"
-                s["is_active"] = (
-                    s.get("ended_at") is None
-                    and (now - s.get("last_active", s.get("started_at", 0))) < 300
+        merged: List[Dict[str, Any]] = []
+        total = 0
+        profile_totals: Dict[str, int] = {}
+        errors: List[Dict[str, str]] = []
+        now = time.time()
+        for name, home in targets:
+            db_path = Path(home) / "state.db"
+            if not db_path.exists():
+                continue
+            try:
+                # Read-only: this loop runs on every sidebar refresh, so it must
+                # never DDL/write-lock another profile's live DB (see SessionDB
+                # read_only docstring).
+                db = SessionDB(db_path=db_path, read_only=True)
+            except Exception as exc:
+                errors.append({"profile": name, "error": str(exc)})
+                continue
+            try:
+                rows = db.list_sessions_rich(
+                    source=source_filter,
+                    exclude_sources=exclude_list or None,
+                    limit=per_profile,
+                    offset=0,
+                    min_message_count=min_message_count,
+                    include_archived=include_archived,
+                    archived_only=archived_only,
+                    order_by_last_active=order == "recent",
                 )
-                s["archived"] = bool(s.get("archived"))
-                merged.append(s)
-        except Exception as exc:
-            errors.append({"profile": name, "error": str(exc)})
-        finally:
-            db.close()
+                profile_total = db.session_count(
+                    source=source_filter,
+                    exclude_sources=exclude_list or None,
+                    min_message_count=min_message_count,
+                    include_archived=include_archived,
+                    archived_only=archived_only,
+                    exclude_children=True,
+                )
+                total += profile_total
+                profile_totals[name] = profile_total
+                for s in rows:
+                    s["profile"] = name
+                    s["is_default_profile"] = name == "default"
+                    s["is_active"] = (
+                        s.get("ended_at") is None
+                        and (now - s.get("last_active", s.get("started_at", 0))) < 300
+                    )
+                    s["archived"] = bool(s.get("archived"))
+                    merged.append(s)
+            except Exception as exc:
+                errors.append({"profile": name, "error": str(exc)})
+            finally:
+                db.close()
 
-    sort_key = "last_active" if order == "recent" else "started_at"
-    merged.sort(key=lambda s: s.get(sort_key) or s.get("started_at") or 0, reverse=True)
-    window = merged[offset:offset + limit]
-    return {
-        "sessions": window,
-        "total": total,
-        "profile_totals": profile_totals,
-        "limit": limit,
-        "offset": offset,
-        "errors": errors,
-    }
+        sort_key = "last_active" if order == "recent" else "started_at"
+        merged.sort(key=lambda s: s.get(sort_key) or s.get("started_at") or 0, reverse=True)
+        window = merged[offset:offset + limit]
+        return {
+            "sessions": window,
+            "total": total,
+            "profile_totals": profile_totals,
+            "limit": limit,
+            "offset": offset,
+            "errors": errors,
+        }
+
+    return await asyncio.to_thread(_list_profile_sessions_payload)
 
 
 @app.get("/api/sessions/search")
@@ -7309,20 +7316,23 @@ def _find_cron_job_profile(job_id: str) -> Optional[str]:
 
 @app.get("/api/cron/jobs")
 async def list_cron_jobs(profile: str = "all"):
-    requested = (profile or "all").strip()
-    if requested.lower() != "all":
-        return _call_cron_for_profile(requested, "list_jobs", True)
+    def _list_cron_jobs_payload() -> List[Dict[str, Any]]:
+        requested = (profile or "all").strip()
+        if requested.lower() != "all":
+            return _call_cron_for_profile(requested, "list_jobs", True)
 
-    jobs: List[Dict[str, Any]] = []
-    for item in _cron_profile_dicts():
-        name = str(item.get("name") or "")
-        if not name:
-            continue
-        try:
-            jobs.extend(_call_cron_for_profile(name, "list_jobs", True))
-        except Exception:
-            _log.exception("Failed to list cron jobs for profile %s", name)
-    return jobs
+        jobs: List[Dict[str, Any]] = []
+        for item in _cron_profile_dicts():
+            name = str(item.get("name") or "")
+            if not name:
+                continue
+            try:
+                jobs.extend(_call_cron_for_profile(name, "list_jobs", True))
+            except Exception:
+                _log.exception("Failed to list cron jobs for profile %s", name)
+        return jobs
+
+    return await asyncio.to_thread(_list_cron_jobs_payload)
 
 
 @app.get("/api/cron/jobs/{job_id}")
@@ -9142,7 +9152,7 @@ def _profile_to_dict(info) -> Dict[str, Any]:
     }
 
 
-def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
+def _fallback_profile_dicts(profiles_mod, *, include_details: bool = True) -> List[Dict[str, Any]]:
     def _safe(callable_, default):
         try:
             return callable_()
@@ -9160,8 +9170,8 @@ def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
             "model": model,
             "provider": provider,
             "has_env": (default_home / ".env").exists(),
-            "skill_count": _safe(lambda: profiles_mod._count_skills(default_home), 0),
-            "gateway_running": _safe(lambda: profiles_mod._check_gateway_running(default_home), False),
+            "skill_count": _safe(lambda: profiles_mod._count_skills(default_home), 0) if include_details else 0,
+            "gateway_running": _safe(lambda: profiles_mod._check_gateway_running(default_home), False) if include_details else False,
             "description": _safe(lambda: profiles_mod.read_profile_meta(default_home).get("description", ""), ""),
             "description_auto": _safe(lambda: profiles_mod.read_profile_meta(default_home).get("description_auto", False), False),
             "distribution_name": None,
@@ -9183,8 +9193,8 @@ def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
                 "model": model,
                 "provider": provider,
                 "has_env": (entry / ".env").exists(),
-                "skill_count": _safe(lambda entry=entry: profiles_mod._count_skills(entry), 0),
-                "gateway_running": _safe(lambda entry=entry: profiles_mod._check_gateway_running(entry), False),
+                "skill_count": _safe(lambda entry=entry: profiles_mod._count_skills(entry), 0) if include_details else 0,
+                "gateway_running": _safe(lambda entry=entry: profiles_mod._check_gateway_running(entry), False) if include_details else False,
                 "description": _safe(lambda entry=entry: profiles_mod.read_profile_meta(entry).get("description", ""), ""),
                 "description_auto": _safe(lambda entry=entry: profiles_mod.read_profile_meta(entry).get("description_auto", False), False),
                 "distribution_name": None,
@@ -9324,13 +9334,19 @@ def _disable_unselected_skills(profile_dir: Path, keep: List[str]) -> int:
 
 
 @app.get("/api/profiles")
-async def list_profiles_endpoint():
-    from hermes_cli import profiles as profiles_mod
-    try:
-        return {"profiles": [_profile_to_dict(p) for p in profiles_mod.list_profiles()]}
-    except Exception:
-        _log.exception("GET /api/profiles failed; falling back to profile directory scan")
-        return {"profiles": _fallback_profile_dicts(profiles_mod)}
+async def list_profiles_endpoint(detail: str = "full"):
+    def _list_profiles_payload() -> Dict[str, Any]:
+        from hermes_cli import profiles as profiles_mod
+        include_details = str(detail or "full").strip().lower() not in {"summary", "light", "fast"}
+        if not include_details:
+            return {"profiles": _fallback_profile_dicts(profiles_mod, include_details=False)}
+        try:
+            return {"profiles": [_profile_to_dict(p) for p in profiles_mod.list_profiles()]}
+        except Exception:
+            _log.exception("GET /api/profiles failed; falling back to profile directory scan")
+            return {"profiles": _fallback_profile_dicts(profiles_mod)}
+
+    return await asyncio.to_thread(_list_profiles_payload)
 
 
 @app.post("/api/profiles")

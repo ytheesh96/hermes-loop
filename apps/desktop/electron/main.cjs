@@ -2614,6 +2614,7 @@ function fetchJson(url, token, options = {}) {
     const parsed = new URL(url)
     const client = parsed.protocol === 'https:' ? https : http
     const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+    const requestLabel = `${options.method || 'GET'} ${parsed.pathname}${parsed.search}`
 
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
@@ -2670,7 +2671,7 @@ function fetchJson(url, token, options = {}) {
 
     req.on('error', reject)
     req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
+      req.destroy(new Error(`Timed out connecting to Hermes backend for ${requestLabel} after ${timeoutMs}ms`))
     })
     if (body) req.write(body)
     req.end()
@@ -2694,6 +2695,7 @@ function fetchPublicJson(url, options = {}) {
     }
     const client = parsed.protocol === 'https:' ? https : http
     const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+    const requestLabel = `${options.method || 'GET'} ${parsed.pathname}${parsed.search}`
 
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
@@ -2744,7 +2746,7 @@ function fetchPublicJson(url, options = {}) {
 
     req.on('error', reject)
     req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
+      req.destroy(new Error(`Timed out connecting to Hermes backend for ${requestLabel} after ${timeoutMs}ms`))
     })
     if (body) req.write(body)
     req.end()
@@ -3917,6 +3919,7 @@ function fetchJsonViaOauthSession(url, options = {}) {
     }
     const body = serializeJsonBody(options.body)
     const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+    const requestLabel = `${options.method || 'GET'} ${parsed.pathname}${parsed.search}`
 
     const request = electronNet.request({
       method: options.method || 'GET',
@@ -3935,7 +3938,7 @@ function fetchJsonViaOauthSession(url, options = {}) {
       } catch {
         // already finished
       }
-      reject(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
+      reject(new Error(`Timed out connecting to Hermes backend for ${requestLabel} after ${timeoutMs}ms`))
     }, timeoutMs)
 
     request.on('response', res => {
@@ -5575,36 +5578,56 @@ async function mergeRemoteProfileSessions(searchParams, remoteProfiles) {
 }
 
 ipcMain.handle('hermes:api', async (_event, request) => {
+  const requestStartedAt = Date.now()
+  const requestMethod = request?.method || 'GET'
+  const requestPath = request?.path || '<missing-path>'
+  const logSlowOrFailedRequest = (message, force = false) => {
+    const elapsedMs = Date.now() - requestStartedAt
+    if (force || elapsedMs >= 3_000) {
+      rememberLog(`[api] ${requestMethod} ${requestPath} ${message} (${elapsedMs}ms)`)
+    }
+  }
+
   // Remote-profile session requests would otherwise hit the local primary off
   // each profile's on-disk state.db — fine for local profiles, but a remote
   // profile's sessions live on its remote host, so the UI's IDs 404 (or mutations
   // no-op) the moment they run there. Route reads + mutations to the remote.
-  const rerouted = await interceptSessionRequestForRemote(request)
-  if (rerouted !== undefined) {
-    return rerouted
-  }
+  try {
+    const rerouted = await interceptSessionRequestForRemote(request)
+    if (rerouted !== undefined) {
+      logSlowOrFailedRequest('completed via remote profile route')
+      return rerouted
+    }
 
-  await prepareProfileDeleteRequest(request)
+    await prepareProfileDeleteRequest(request)
 
-  const connection = await ensureBackend(request?.profile)
-  const timeoutMs = resolveTimeoutMs(request?.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
-  const url = `${connection.baseUrl}${request.path}`
-  // OAuth gateways authenticate REST via the HttpOnly session cookie held in
-  // the OAuth partition — route through Electron's net stack bound to that
-  // session so the cookie attaches automatically. Token/local modes keep using
-  // the static session-token header.
-  if (connection.authMode === 'oauth') {
-    return fetchJsonViaOauthSession(url, {
+    const connection = await ensureBackend(request?.profile)
+    const timeoutMs = resolveTimeoutMs(request?.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+    const url = `${connection.baseUrl}${request.path}`
+    // OAuth gateways authenticate REST via the HttpOnly session cookie held in
+    // the OAuth partition — route through Electron's net stack bound to that
+    // session so the cookie attaches automatically. Token/local modes keep using
+    // the static session-token header.
+    if (connection.authMode === 'oauth') {
+      const result = await fetchJsonViaOauthSession(url, {
+        method: request?.method,
+        body: request?.body,
+        timeoutMs
+      })
+      logSlowOrFailedRequest('completed')
+      return result
+    }
+    const result = await fetchJson(url, connection.token, {
       method: request?.method,
       body: request?.body,
       timeoutMs
     })
+    logSlowOrFailedRequest('completed')
+    return result
+  } catch (error) {
+    logSlowOrFailedRequest(`failed: ${error instanceof Error ? error.message : String(error)}`, true)
+    throw error
   }
-  return fetchJson(url, connection.token, {
-    method: request?.method,
-    body: request?.body,
-    timeoutMs
-  })
 })
 
 ipcMain.handle('hermes:notify', (_event, payload) => {

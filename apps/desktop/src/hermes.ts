@@ -568,7 +568,8 @@ export function testMessagingPlatform(platformId: string): Promise<MessagingPlat
 
 export function getCronJobs(): Promise<CronJob[]> {
   return window.hermesDesktop.api<CronJob[]>({
-    path: '/api/cron/jobs'
+    path: '/api/cron/jobs',
+    timeoutMs: SESSION_LIST_REQUEST_TIMEOUT_MS
   })
 }
 
@@ -630,9 +631,11 @@ export function deleteCronJob(jobId: string): Promise<{ ok: boolean }> {
   })
 }
 
-export function getProfiles(): Promise<ProfilesResponse> {
+export function getProfiles(options: { detail?: 'full' | 'summary' } = {}): Promise<ProfilesResponse> {
+  const detail = options.detail ?? 'summary'
+
   return window.hermesDesktop.api<ProfilesResponse>({
-    path: '/api/profiles'
+    path: `/api/profiles?detail=${encodeURIComponent(detail)}`
   })
 }
 
