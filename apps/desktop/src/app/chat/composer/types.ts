@@ -24,6 +24,8 @@ export interface ChatBarState {
     canSwitch: boolean
     loading?: boolean
     quickModels?: QuickModelOption[]
+    /** Reused status-bar dropdown (built with gateway + selectModel upstream). */
+    modelMenuContent?: ReactNode
   }
   tools: { enabled: boolean; label: string; suggestions?: ContextSuggestion[] }
   voice: { enabled: boolean; active: boolean }

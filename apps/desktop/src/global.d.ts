@@ -24,6 +24,8 @@ declare global {
       // a spectator window (lazy resume — no agent build) for live-streaming
       // a running subagent's session.
       openSessionWindow: (sessionId: string, opts?: { watch?: boolean }) => Promise<{ ok: boolean; error?: string }>
+      // Open (or focus) a compact secondary window on the new-session draft.
+      openNewSessionWindow: () => Promise<{ ok: boolean; error?: string }>
       getBootProgress: () => Promise<DesktopBootProgress>
       getConnectionConfig: (profile?: null | string) => Promise<DesktopConnectionConfig>
       saveConnectionConfig: (payload: DesktopConnectionConfigInput) => Promise<DesktopConnectionConfig>
@@ -89,6 +91,8 @@ declare global {
       ) => () => void
       signalDeepLinkReady?: () => Promise<{ ok: boolean }>
       onWindowStateChanged?: (callback: (payload: HermesWindowState) => void) => () => void
+      onFocusSession?: (callback: (sessionId: string) => void) => () => void
+      onNotificationAction?: (callback: (payload: { actionId: string; sessionId?: string }) => void) => () => void
       onPreviewFileChanged: (callback: (payload: HermesPreviewFileChanged) => void) => () => void
       onBackendExit: (callback: (payload: BackendExit) => void) => () => void
       onPowerResume?: (callback: () => void) => () => void
@@ -414,6 +418,9 @@ export interface HermesNotification {
   title?: string
   body?: string
   silent?: boolean
+  kind?: string
+  sessionId?: string
+  actions?: { id: string; text: string }[]
 }
 
 export interface HermesPreviewTarget {
