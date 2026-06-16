@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -58,7 +58,6 @@ function LoopHarness({ state }: { state: LoopPanelState }) {
       <LoopPanel
         hidden={panelHidden}
         onHide={hidePanel}
-        onRefresh={() => undefined}
         onSelectTaskId={selectTask}
         open={panelOpen}
         selectedTaskId={selectedTaskId}
@@ -485,10 +484,9 @@ describe('LoopPanel', () => {
     expect(screen.queryByText('Parents: t_parent')).toBeNull()
     expect(screen.queryByText(/triage/i)).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: /hide loop panel/i }))
-    expect(screen.queryByTestId('loop-panel')).toBeNull()
+    expect(screen.queryByRole('button', { name: /hide loop panel/i })).toBeNull()
 
-    fireEvent.click(screen.getByText('Design parent'))
+    fireEvent.click(within(screen.getByTestId('loop-card-t_parent')).getByText('Design parent'))
     expect(screen.getByTestId('loop-panel')).toBeTruthy()
     expect(screen.getAllByText('t_parent').length).toBeGreaterThan(0)
     expect(screen.queryByRole('button', { name: /show debug json/i })).toBeNull()
@@ -534,12 +532,10 @@ describe('LoopPanel', () => {
     })
 
     const onTaskAction = vi.fn()
-    const onRefresh = vi.fn()
     render(
       <>
         <LoopTaskStack onSelectTaskId={() => undefined} selectedTaskId="t_child" state={state} />
         <LoopPanel
-          onRefresh={onRefresh}
           onSelectTaskId={() => undefined}
           onTaskAction={onTaskAction}
           open
@@ -565,7 +561,9 @@ describe('LoopPanel', () => {
     expect(screen.queryByRole('heading', { name: 'Blocking' })).toBeNull()
     const taskCard = screen.getByTestId('loop-task-card')
     expect(within(taskCard).getByRole('heading', { name: /Build child/i })).toBeTruthy()
-    expect(within(taskCard).getByRole('button', { name: /copy id for t_child/i })).toBeTruthy()
+    expect(within(taskCard).getByRole('button', { name: /unblock t_child/i })).toBeTruthy()
+    expect(within(taskCard).getByRole('button', { name: /ask to chat about t_child/i })).toBeTruthy()
+    expect(within(taskCard).getByRole('button', { name: /archive t_child/i })).toBeTruthy()
     expect(screen.queryByText('Header')).toBeNull()
     expect(screen.queryByText('Safe actions')).toBeNull()
     expect(screen.queryByText('Decomposed children/follow-ups')).toBeNull()
@@ -578,18 +576,137 @@ describe('LoopPanel', () => {
     expect(screen.queryByText('Assignee: peacock')).toBeNull()
     expect(screen.queryByText('Workspace: worktree')).toBeNull()
     expect(screen.queryByText('/worktrees/t_child')).toBeNull()
-    expect(screen.getAllByRole('button', { name: /copy id for t_child/i }).length).toBeGreaterThan(0)
-    expect(screen.getAllByRole('button', { name: /open source task\/details for t_child/i }).length).toBeGreaterThan(0)
-    expect(screen.getAllByRole('button', { name: /refresh details for t_child/i }).length).toBeGreaterThan(0)
-    expect(screen.queryByRole('button', { name: /unblock t_child/i })).toBeNull()
-    expect(screen.queryByRole('button', { name: /block t_child/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /copy id for t_child/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /open source task\/details for t_child/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /refresh details for t_child/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^block t_child$/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /decompose t_child/i })).toBeNull()
     expect(screen.queryByText(/"tasks"/)).toBeNull()
 
-    fireEvent.click(screen.getAllByRole('button', { name: /open source task\/details for t_child/i })[0]!)
-    expect(onTaskAction).toHaveBeenCalledWith('details', expect.objectContaining({ taskId: 't_child' }))
-    fireEvent.click(screen.getAllByRole('button', { name: /refresh details for t_child/i })[0]!)
-    expect(onRefresh).toHaveBeenCalledTimes(1)
+    fireEvent.click(within(taskCard).getByRole('button', { name: /unblock t_child/i }))
+    expect(onTaskAction).toHaveBeenCalledWith('unblock', expect.objectContaining({ taskId: 't_child' }))
+    fireEvent.click(within(taskCard).getByRole('button', { name: /ask to chat about t_child/i }))
+    expect(onTaskAction).toHaveBeenCalledWith('ask-hermes', expect.objectContaining({ taskId: 't_child' }))
+    fireEvent.click(within(taskCard).getByRole('button', { name: /archive t_child/i }))
+    expect(onTaskAction).toHaveBeenCalledWith('archive', expect.objectContaining({ taskId: 't_child' }))
+  })
+
+  it('renders focused task comments and submits new comments through the Loop comment handler', async () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-comments',
+      tenant: 'tenant-a',
+      latest_event_id: 208,
+      tasks: [
+        {
+          id: 't_child',
+          title: 'Build child',
+          status: 'running',
+          tenant: 'tenant-a',
+          body: 'Implement the detail panel',
+          comment_count: 2,
+          included_child_ids: [],
+          included_parent_ids: []
+        }
+      ]
+    })
+
+    const onAddTaskComment = vi.fn(async () => undefined)
+
+    render(
+      <LoopPanel
+        onAddTaskComment={onAddTaskComment}
+        open
+        selectedTaskDetail={{
+          comments: [
+            {
+              author: 'peacock',
+              body: 'Agent found the implementation seam.',
+              created_at: 1_700_000_000,
+              id: 1,
+              task_id: 't_child'
+            },
+            {
+              author: 'reviewer-qa',
+              body: 'Please add a regression test.',
+              created_at: 1_700_000_060,
+              id: 2,
+              task_id: 't_child'
+            }
+          ]
+        }}
+        selectedTaskId="t_child"
+        state={state}
+      />
+    )
+
+    const commentsCard = screen.getByTestId('loop-task-comments-card')
+    expect(within(commentsCard).getByRole('heading', { name: /Comments \(2\)/i })).toBeTruthy()
+    expect(within(commentsCard).queryByText('Task discussion and review breadcrumbs')).toBeNull()
+    expect(within(commentsCard).queryByText('2 comments')).toBeNull()
+    expect(within(commentsCard).getByText('peacock')).toBeTruthy()
+    expect(within(commentsCard).getByText('reviewer-qa')).toBeTruthy()
+    expect(within(commentsCard).getByText(/Agent found the implementation seam/i)).toBeTruthy()
+    expect(within(commentsCard).getByText(/Please add a regression test/i)).toBeTruthy()
+
+    for (const comment of within(commentsCard).getAllByTestId('loop-task-comment')) {
+      expect(comment.className).not.toContain('grid-cols-[1.35rem_minmax(0,1fr)]')
+    }
+
+    const composer = within(commentsCard).getByTestId('loop-task-comment-composer')
+    const input = within(composer).getByRole('textbox', { name: /comment on t_child/i }) as HTMLTextAreaElement
+    const submit = within(composer).getByRole('button', { name: /^comment$/i })
+
+    expect(composer.tagName).toBe('FORM')
+    expect(composer.className).toContain('rounded-md')
+    expect(composer.contains(input)).toBe(true)
+    expect(composer.contains(submit)).toBe(true)
+    expect(within(composer).queryByText(/Enter sends/i)).toBeNull()
+    expect(input.className).toContain('border-0')
+    expect(input.className).toContain('bg-transparent')
+
+    fireEvent.change(input, { target: { value: 'Looks good — please merge after tests.' } })
+    fireEvent.keyDown(input, { code: 'Enter', key: 'Enter' })
+
+    await waitFor(() =>
+      expect(onAddTaskComment).toHaveBeenCalledWith('t_child', 'Looks good — please merge after tests.')
+    )
+    await waitFor(() => expect(input.value).toBe(''))
+  })
+
+  it('shows task detail comment load errors instead of an endless loading fallback', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-comments-error',
+      tenant: 'tenant-a',
+      latest_event_id: 209,
+      tasks: [
+        {
+          id: 't_child',
+          title: 'Build child',
+          status: 'running',
+          tenant: 'tenant-a',
+          body: 'Implement the detail panel',
+          comment_count: 2,
+          included_child_ids: [],
+          included_parent_ids: []
+        }
+      ]
+    })
+
+    render(
+      <LoopPanel
+        open
+        selectedTaskDetailError="task t_child not found on board default"
+        selectedTaskId="t_child"
+        state={state}
+      />
+    )
+
+    const commentsCard = screen.getByTestId('loop-task-comments-card')
+
+    expect(
+      within(commentsCard).getByText(/Couldn't load comments: task t_child not found on board default/i)
+    ).toBeTruthy()
+    expect(within(commentsCard).queryByText(/Loading comments/i)).toBeNull()
   })
 
   it('renders root overview groups, opens focused child details, and returns back to the root overview', () => {
@@ -651,12 +768,15 @@ describe('LoopPanel', () => {
     const onHide = vi.fn()
     render(<LoopPanel onHide={onHide} open selectedTaskId="t_root" state={state} />)
 
+    expect(screen.queryByRole('button', { name: /Hide Loop panel/i })).toBeNull()
+
     const panel = screen.getByTestId('loop-panel')
     expect(panel.style.minWidth).toBe('384px')
     expect(screen.getByTestId('loop-panel-tabbar').style.paddingRight).toBe(
       'calc(var(--titlebar-tools-right) + var(--titlebar-tools-width) + 0.5rem)'
     )
     expect(screen.getByTestId('loop-overview-tab').className).toContain('min-w-36')
+    expect(screen.queryByTestId('loop-task-comments-card')).toBeNull()
     fireEvent.keyDown(screen.getByRole('separator', { name: /Resize loop-panel/i }), { key: 'Home' })
     expect(panel.style.width).toBe('384px')
 
@@ -669,22 +789,30 @@ describe('LoopPanel', () => {
     expect(screen.queryByText('1 needs attention')).toBeNull()
     expect(screen.queryByText('1 queued')).toBeNull()
     expect(screen.queryByText('1 completed')).toBeNull()
+
     const agentsCard = screen.getByTestId('loop-root-agents-card')
     const agentsList = within(agentsCard).getByTestId('loop-root-agents-list')
+
     expect(within(agentsCard).getByRole('heading', { name: /^Agents$/i })).toBeTruthy()
+
     const agentRows = within(agentsList).getAllByRole('button')
+
     expect(agentRows[0]?.textContent).toContain('Root Task')
     expect(agentRows[0]?.textContent).toContain('Foreground')
+
     const agentTitleSpans = Array.from(agentsList.querySelectorAll('span')).filter(element =>
       element.className.includes('text-[0.73rem]')
     )
+
     expect(agentTitleSpans.length).toBeGreaterThanOrEqual(agentRows.length)
+
     for (const titleSpan of agentTitleSpans) {
       expect(titleSpan.className).toContain('w-[18rem]')
       expect(titleSpan.className).toMatch(/(?:^|\s)shrink(?:\s|$)/)
       expect(titleSpan.className).not.toContain('shrink-0')
       expect(titleSpan.className).toContain('max-w-[18rem]')
     }
+
     expect(within(agentsList).getByRole('button', { name: /Active child/i })).toBeTruthy()
     expect(within(agentsList).getByRole('button', { name: /Review child/i })).toBeTruthy()
     expect(within(agentsList).getByRole('button', { name: /Queued child/i })).toBeTruthy()
@@ -700,6 +828,7 @@ describe('LoopPanel', () => {
     const reviewRow = screen
       .getAllByRole('button', { name: /Review child/i })
       .find(element => element.className.includes('group/status-row'))
+
     expect(reviewRow).toBeTruthy()
     expect(reviewRow!.className).toContain('group/status-row')
 
@@ -720,12 +849,19 @@ describe('LoopPanel', () => {
     expect(screen.getByText(/Review decisions are unavailable/i)).toBeTruthy()
     expect(screen.queryByRole('button', { name: /Back to root overview/i })).toBeNull()
 
+    const reviewAgentsCard = screen.getByTestId('loop-task-agents-card')
+    const rootRelationshipRow = within(reviewAgentsCard).getByRole('button', { name: /Root Task/i })
+    fireEvent.click(rootRelationshipRow)
+    expect(screen.getByRole('heading', { name: /Root Task/i })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: /Review decision/i })).toBeNull()
+
     fireEvent.click(screen.getByRole('tab', { name: /Root Task/i }))
     expect(screen.getByRole('heading', { name: /Root Task/i })).toBeTruthy()
 
     const reopenedReviewRow = screen
       .getAllByRole('button', { name: /Review child/i })
       .find(element => element.className.includes('group/status-row'))
+
     expect(reopenedReviewRow).toBeTruthy()
     fireEvent.click(reopenedReviewRow!)
     fireEvent.click(screen.getByRole('button', { name: /Close Review child/i }))
@@ -750,6 +886,7 @@ describe('LoopPanel', () => {
         }
       ]
     })!
+
     const onTaskAction = vi.fn()
 
     render(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_review" state={state} />)
@@ -806,7 +943,9 @@ describe('LoopPanel', () => {
 
     expect(screen.getByRole('heading', { name: /Original Loop root/i })).toBeTruthy()
     expect(screen.getByTestId('loop-root-agents-card')).toBeTruthy()
-    expect(within(screen.getByTestId('loop-root-agents-card')).getByRole('button', { name: /Implementation child/i })).toBeTruthy()
+    expect(
+      within(screen.getByTestId('loop-root-agents-card')).getByRole('button', { name: /Implementation child/i })
+    ).toBeTruthy()
     expect(screen.getByTestId('loop-root-spec')).toBeTruthy()
   })
 
@@ -869,6 +1008,7 @@ describe('LoopPanel', () => {
         }
       ]
     })
+
     const onTaskAction = vi.fn()
 
     render(<LoopPanel onTaskAction={onTaskAction} open state={state} />)
@@ -1029,7 +1169,9 @@ describe('LoopPanel', () => {
 
   it('renders clickable artifact and source outputs from task metadata', async () => {
     const gitDiff = vi.fn(async (path: string) => ({
-      diff: ['--- a/src/app/chat/fallback.ts', '+++ b/src/app/chat/fallback.ts', '@@', '-before', '+fallback'].join('\n'),
+      diff: ['--- a/src/app/chat/fallback.ts', '+++ b/src/app/chat/fallback.ts', '@@', '-before', '+fallback'].join(
+        '\n'
+      ),
       path,
       root: '/worktrees/t_artifacts'
     }))
@@ -1070,7 +1212,13 @@ describe('LoopPanel', () => {
               artifacts: ['/tmp/loop-report.pdf', { label: 'Preview page', path: 'dist/preview.html' }],
               changed_files: [
                 {
-                  inline_diff: ['--- a/src/app/chat/loop-panel.tsx', '+++ b/src/app/chat/loop-panel.tsx', '@@', '-old', '+new'].join('\n'),
+                  inline_diff: [
+                    '--- a/src/app/chat/loop-panel.tsx',
+                    '+++ b/src/app/chat/loop-panel.tsx',
+                    '@@',
+                    '-old',
+                    '+new'
+                  ].join('\n'),
                   path: 'src/app/chat/loop-panel.tsx'
                 },
                 { label: 'Fallback diff', path: 'src/app/chat/fallback.ts' }
@@ -1118,7 +1266,9 @@ describe('LoopPanel', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: /Build artifact drawer/i }))
     const fallbackCard = screen.getByTestId('loop-artifact-sources-card')
-    fireEvent.click(within(fallbackCard).getByRole('button', { name: /open changed file src\/app\/chat\/fallback\.ts/i }))
+    fireEvent.click(
+      within(fallbackCard).getByRole('button', { name: /open changed file src\/app\/chat\/fallback\.ts/i })
+    )
     expect((await screen.findByRole('tab', { name: /Fallback diff/i })).getAttribute('aria-selected')).toBe('true')
     expect(await screen.findByText('+fallback')).toBeTruthy()
     expect(gitDiff).toHaveBeenCalledWith('/worktrees/t_artifacts/src/app/chat/fallback.ts')
@@ -1446,7 +1596,9 @@ describe('LoopPanel', () => {
     expect(screen.queryByRole('heading', { name: 'Blocking' })).toBeNull()
     const taskCard = screen.getByTestId('loop-task-card')
     expect(within(taskCard).getByRole('heading', { name: /Build child/i })).toBeTruthy()
-    expect(within(taskCard).getByRole('button', { name: /copy id for t_child/i })).toBeTruthy()
+    expect(within(taskCard).getByRole('button', { name: /unblock t_child/i })).toBeTruthy()
+    expect(within(taskCard).getByRole('button', { name: /ask to chat about t_child/i })).toBeTruthy()
+    expect(within(taskCard).getByRole('button', { name: /archive t_child/i })).toBeTruthy()
     expect(screen.queryByText('Header')).toBeNull()
     expect(screen.queryByText('Safe actions')).toBeNull()
     expect(screen.queryByText('Decomposed children/follow-ups')).toBeNull()
@@ -1459,7 +1611,7 @@ describe('LoopPanel', () => {
     expect(screen.queryByText('Assignee: peacock')).toBeNull()
     expect(screen.queryByText('Workspace: worktree')).toBeNull()
     expect(screen.queryByText('/worktrees/t_child')).toBeNull()
-    expect(screen.getAllByRole('button', { name: /copy id for t_child/i }).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('button', { name: /copy id for t_child/i })).toBeNull()
     expect(screen.queryByText('Comments')).toBeNull()
     expect(screen.queryByText('Latest run')).toBeNull()
     expect(screen.queryByText('Result')).toBeNull()
@@ -1631,13 +1783,11 @@ describe('LoopPanel', () => {
     expect(onTaskAction).not.toHaveBeenCalled()
   })
 
-  it('exposes root draft quick actions and keeps child drawer utilities read-only', () => {
+  it('exposes root draft quick actions and focused task action utilities', () => {
     const state = actionState()
     const onTaskAction = vi.fn()
-    const onRefresh = vi.fn()
-    const { rerender } = render(
-      <LoopPanel onRefresh={onRefresh} onTaskAction={onTaskAction} open selectedTaskId="t_triage" state={state} />
-    )
+
+    const { rerender } = render(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_triage" state={state} />)
 
     expect(onTaskAction).not.toHaveBeenCalled()
     const rootCard = screen.getByTestId('loop-root-card')
@@ -1669,14 +1819,32 @@ describe('LoopPanel', () => {
     fireEvent.click(within(rootActions).getByRole('button', { name: /ask hermes about t_triage/i }))
     expect(onTaskAction).toHaveBeenCalledWith('ask-hermes', expect.objectContaining({ taskId: 't_triage' }))
 
-    rerender(
-      <LoopPanel onRefresh={onRefresh} onTaskAction={onTaskAction} open selectedTaskId="t_blocked" state={state} />
-    )
+    rerender(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_blocked" state={state} />)
     expect(screen.queryByTestId('loop-root-actions')).toBeNull()
-    expect(screen.queryByRole('button', { name: /unblock t_blocked/i })).toBeNull()
+    const taskActions = screen.getByTestId('loop-task-actions')
+    expect(within(taskActions).getByRole('button', { name: /unblock t_blocked/i })).toBeTruthy()
+    expect(within(taskActions).getByRole('button', { name: /ask to chat about t_blocked/i })).toBeTruthy()
+    expect(within(taskActions).getByRole('button', { name: /archive t_blocked/i })).toBeTruthy()
     expect(screen.queryByRole('button', { name: /park t_blocked/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /^Block t_blocked$/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /decompose t_blocked/i })).toBeNull()
+
+    fireEvent.click(within(taskActions).getByRole('button', { name: /unblock t_blocked/i }))
+    expect(onTaskAction).toHaveBeenCalledWith('unblock', expect.objectContaining({ taskId: 't_blocked' }))
+    fireEvent.click(within(taskActions).getByRole('button', { name: /ask to chat about t_blocked/i }))
+    expect(onTaskAction).toHaveBeenCalledWith('ask-hermes', expect.objectContaining({ taskId: 't_blocked' }))
+    fireEvent.click(within(taskActions).getByRole('button', { name: /archive t_blocked/i }))
+    expect(onTaskAction).toHaveBeenCalledWith('archive', expect.objectContaining({ taskId: 't_blocked' }))
+
+    rerender(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_todo" state={state} />)
+    const readyTaskActions = screen.getByTestId('loop-task-actions')
+    expect(within(readyTaskActions).getByRole('button', { name: /^block t_todo$/i })).toBeTruthy()
+    expect(within(readyTaskActions).getByRole('button', { name: /ask to chat about t_todo/i })).toBeTruthy()
+    expect(within(readyTaskActions).getByRole('button', { name: /archive t_todo/i })).toBeTruthy()
+    expect(within(readyTaskActions).queryByRole('button', { name: /unblock t_todo/i })).toBeNull()
+
+    fireEvent.click(within(readyTaskActions).getByRole('button', { name: /^block t_todo$/i }))
+    expect(onTaskAction).toHaveBeenCalledWith('block', expect.objectContaining({ taskId: 't_todo' }))
   })
 
   it('keeps missing or archived selections sticky instead of silently selecting another row', () => {

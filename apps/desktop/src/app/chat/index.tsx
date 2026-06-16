@@ -16,6 +16,7 @@ import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import {
+  addLoopTaskComment,
   decomposeLoopTask,
   getGlobalModelOptions,
   getLoopSessionSource,
@@ -68,7 +69,12 @@ import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-ac
 import { useFileDropZone } from './hooks/use-file-drop-zone'
 import { LoopPanel, type LoopTaskAction } from './loop-panel'
 import { loopSessionSourceRefetchInterval } from './loop-refresh'
-import { deriveLoopPanelStateFromTenantSource, type LoopPanelState, type LoopRow, type TenantLoopSource } from './loop-state'
+import {
+  deriveLoopPanelStateFromTenantSource,
+  type LoopPanelState,
+  type LoopRow,
+  type TenantLoopSource
+} from './loop-state'
 import { ScrollToBottomButton } from './scroll-to-bottom-button'
 import { SessionActionsMenu } from './sidebar/session-actions-menu'
 import { threadLoadingState } from './thread-loading'
@@ -129,8 +135,10 @@ function archiveableLoopRows(state: LoopPanelState | null, fallback: LoopRow): L
   })
 }
 
-function buildLoopTriageDraft(): string {
-  return 'Help me triage this Loop spec in Kanban.'
+function buildLoopChatDraft(row: LoopRow): string {
+  const title = row.title?.trim()
+
+  return title ? `Help me with Loop task ${row.taskId}: ${title}` : `Help me with Loop task ${row.taskId}.`
 }
 
 function ChatHeader({
@@ -145,7 +153,8 @@ function ChatHeader({
   const pinnedSessionIds = useStore($pinnedSessionIds)
 
   const activeStoredSession =
-    sessions.find(session => sessionMatchesAnyId(session, [selectedSessionId, routedSessionId, activeSessionId])) || null
+    sessions.find(session => sessionMatchesAnyId(session, [selectedSessionId, routedSessionId, activeSessionId])) ||
+    null
 
   const title = activeStoredSession ? sessionTitle(activeStoredSession) : 'New session'
 
@@ -435,12 +444,36 @@ export function ChatView({
   const [loopPanelHidden, setLoopPanelHidden] = useState(false)
 
   const loopPanelRootKey = loopPanelState?.rootTaskId || ''
+  const loopSourceBoard = loopSourceQuery.data?.board || undefined
 
   const selectedLoopTaskDetailQuery = useQuery({
-    queryKey: ['loop-task-detail', activeGatewayProfile, focusedLoopTaskId, loopPanelState?.revision || 0],
-    queryFn: () => getLoopTaskDetail(focusedLoopTaskId!, activeGatewayProfile),
+    queryKey: [
+      'loop-task-detail',
+      activeGatewayProfile,
+      loopSourceBoard,
+      focusedLoopTaskId,
+      loopPanelState?.revision || 0
+    ],
+    queryFn: () => getLoopTaskDetail(focusedLoopTaskId!, activeGatewayProfile, loopSourceBoard),
     enabled: gatewayOpen && loopPanelOpen && Boolean(focusedLoopTaskId) && Boolean(tenantLoopPanelState?.rows.length),
     staleTime: 2_000
+  })
+
+  const selectedLoopTaskDetailError = selectedLoopTaskDetailQuery.error
+    ? selectedLoopTaskDetailQuery.error instanceof Error
+      ? selectedLoopTaskDetailQuery.error.message
+      : String(selectedLoopTaskDetailQuery.error)
+    : null
+
+  const loopTaskCommentMutation = useMutation({
+    mutationFn: ({ body, taskId }: { body: string; taskId: string }) =>
+      addLoopTaskComment(taskId, body, activeGatewayProfile, 'desktop', loopSourceBoard),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId]
+      })
+      await queryClient.invalidateQueries({ queryKey: ['loop-task-detail', activeGatewayProfile] })
+    }
   })
 
   const loopTaskStatusMutation = useMutation({
@@ -449,7 +482,9 @@ export function ChatView({
         blockReason: status === 'blocked' ? 'Blocked from Loop side panel' : undefined
       }),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId] })
+      await queryClient.invalidateQueries({
+        queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId]
+      })
       await queryClient.invalidateQueries({ queryKey: ['loop-task-detail', activeGatewayProfile] })
     }
   })
@@ -457,7 +492,9 @@ export function ChatView({
   const loopTaskDecomposeMutation = useMutation({
     mutationFn: ({ taskId }: { taskId: string }) => decomposeLoopTask(taskId, activeGatewayProfile),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId] })
+      await queryClient.invalidateQueries({
+        queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId]
+      })
       await queryClient.invalidateQueries({ queryKey: ['loop-task-detail', activeGatewayProfile] })
     }
   })
@@ -467,16 +504,25 @@ export function ChatView({
       await Promise.all(taskIds.map(taskId => updateLoopTaskStatus(taskId, 'archived', activeGatewayProfile)))
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId] })
+      await queryClient.invalidateQueries({
+        queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId]
+      })
       await queryClient.invalidateQueries({ queryKey: ['loop-task-detail', activeGatewayProfile] })
     }
   })
 
   const loopReviewDecisionMutation = useMutation({
-    mutationFn: ({ action, taskId }: { action: Extract<LoopTaskAction, 'accept-review' | 'escalate-review' | 'reject-review'>; taskId: string }) =>
-      reviewLoopHandoffForTask(taskId, action, activeGatewayProfile, { board: loopSourceQuery.data?.board }),
+    mutationFn: ({
+      action,
+      taskId
+    }: {
+      action: Extract<LoopTaskAction, 'accept-review' | 'escalate-review' | 'reject-review'>
+      taskId: string
+    }) => reviewLoopHandoffForTask(taskId, action, activeGatewayProfile, { board: loopSourceQuery.data?.board }),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId] })
+      await queryClient.invalidateQueries({
+        queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId]
+      })
       await queryClient.invalidateQueries({ queryKey: ['loop-task-detail', activeGatewayProfile] })
     },
     onError: error => {
@@ -503,6 +549,13 @@ export function ChatView({
     setLoopPanelHidden(true)
   }, [])
 
+  const handleAddLoopTaskComment = useCallback(
+    async (taskId: string, body: string) => {
+      await loopTaskCommentMutation.mutateAsync({ body, taskId })
+    },
+    [loopTaskCommentMutation]
+  )
+
   const handleLoopTaskAction = useCallback(
     (action: LoopTaskAction, row: LoopRow) => {
       if (action === 'worker-session' && row.workerActivity?.worker_session_id) {
@@ -519,7 +572,7 @@ export function ChatView({
 
       if (action === 'ask-hermes') {
         onAddContextRef(`@task:${row.taskId}`, row.title || row.taskId, `Loop task ${row.taskId}`)
-        requestComposerInsert(buildLoopTriageDraft(), { mode: 'block', target: 'main' })
+        requestComposerInsert(buildLoopChatDraft(row), { mode: 'block', target: 'main' })
 
         return
       }
@@ -562,7 +615,15 @@ export function ChatView({
 
       loopTaskStatusMutation.mutate({ status: nextStatus, taskId: row.taskId })
     },
-    [handleSelectLoopTaskId, loopPanelState, loopReviewDecisionMutation, loopTaskArchiveMutation, loopTaskDecomposeMutation, loopTaskStatusMutation, onAddContextRef]
+    [
+      handleSelectLoopTaskId,
+      loopPanelState,
+      loopReviewDecisionMutation,
+      loopTaskArchiveMutation,
+      loopTaskDecomposeMutation,
+      loopTaskStatusMutation,
+      onAddContextRef
+    ]
   )
 
   // Drop files anywhere in the conversation area, not just on the composer
@@ -616,10 +677,7 @@ export function ChatView({
         <PromptOverlays />
 
         <div className="relative flex min-h-0 max-w-full flex-1 overflow-hidden bg-(--ui-chat-surface-background) contain-[layout_paint]">
-          <div
-            className="relative min-w-0 flex-1 overflow-hidden"
-            {...dropHandlers}
-          >
+          <div className="relative min-w-0 flex-1 overflow-hidden" {...dropHandlers}>
             <ChatRuntimeBoundary
               busy={busy}
               onCancel={onCancel}
@@ -636,6 +694,7 @@ export function ChatView({
                 loading={threadLoading}
                 onBranchInNewChat={onBranchInNewChat}
                 onCancel={onCancel}
+                onOpenKanbanTask={handleSelectLoopTaskId}
                 onRestoreToMessage={onRestoreToMessage}
                 sessionId={activeSessionId}
                 sessionKey={threadKey}
@@ -680,13 +739,14 @@ export function ChatView({
       <LoopPanel
         artifactSourceBaseDir={currentCwd}
         hidden={loopPanelHidden}
+        onAddTaskComment={handleAddLoopTaskComment}
         onFocusTaskId={setFocusedLoopTaskId}
         onHide={handleHideLoopPanel}
-        onRefresh={() => void loopSourceQuery.refetch()}
         onSelectTaskId={handleSelectLoopTaskId}
         onTaskAction={handleLoopTaskAction}
         open={loopPanelOpen}
         selectedTaskDetail={selectedLoopTaskDetailQuery.data}
+        selectedTaskDetailError={selectedLoopTaskDetailError}
         selectedTaskId={selectedLoopTaskId}
         state={loopPanelState}
       />

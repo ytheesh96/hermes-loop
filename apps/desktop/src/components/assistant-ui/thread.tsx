@@ -168,6 +168,7 @@ export const Thread: FC<{
   loading?: ThreadLoadingState
   onBranchInNewChat?: (messageId: string) => void
   onCancel?: () => Promise<void> | void
+  onOpenKanbanTask?: (taskId: string) => void
   onRestoreToMessage?: (messageId: string) => Promise<void> | void
   sessionId?: string | null
   sessionKey?: string | null
@@ -179,6 +180,7 @@ export const Thread: FC<{
   loading,
   onBranchInNewChat,
   onCancel,
+  onOpenKanbanTask,
   onRestoreToMessage,
   sessionId = null,
   sessionKey
@@ -188,9 +190,11 @@ export const Thread: FC<{
       AssistantMessage: () => <AssistantMessage onBranchInNewChat={onBranchInNewChat} />,
       SystemMessage,
       UserEditComposer: () => <UserEditComposer cwd={cwd} gateway={gateway} sessionId={sessionId} />,
-      UserMessage: () => <UserMessage onCancel={onCancel} onRestoreToMessage={onRestoreToMessage} />
+      UserMessage: () => (
+        <UserMessage onCancel={onCancel} onOpenKanbanTask={onOpenKanbanTask} onRestoreToMessage={onRestoreToMessage} />
+      )
     }),
-    [cwd, gateway, onBranchInNewChat, onCancel, onRestoreToMessage, sessionId]
+    [cwd, gateway, onBranchInNewChat, onCancel, onOpenKanbanTask, onRestoreToMessage, sessionId]
   )
 
   const emptyPlaceholder = intro ? (
@@ -838,10 +842,136 @@ const ProcessNotificationNote: FC<{ text: string }> = ({ text }) => {
   )
 }
 
+type LoopHandoffVisibleCard = {
+  action: string
+  payloadRef: string
+  summary: string
+  taskTitle: string
+}
+
+type LoopHandoffReviewBatch = {
+  handoffCount: number
+  reviewBatchId: string
+  rootTaskId: string
+  tenant: string
+  visibleCards: LoopHandoffVisibleCard[]
+}
+
+function stringField(record: Record<string, unknown>, key: string): string {
+  const value = record[key]
+
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function parseLoopHandoffReviewBatch(text: string): LoopHandoffReviewBatch | null {
+  let parsed: unknown
+
+  try {
+    parsed = JSON.parse(text.replace(/\u00a0/g, ' '))
+  } catch {
+    return null
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return null
+  }
+
+  const record = parsed as Record<string, unknown>
+
+  if (record.kind !== 'kanban_loop_handoff_review_batch') {
+    return null
+  }
+
+  const rootTaskId = stringField(record, 'root_task_id')
+  const visibleCardsRaw = Array.isArray(record.visible_cards) ? record.visible_cards : []
+
+  const visibleCards = visibleCardsRaw
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
+    .map(item => ({
+      action: stringField(item, 'action') || 'Open drawer',
+      payloadRef: stringField(item, 'payload_ref'),
+      summary: stringField(item, 'summary'),
+      taskTitle: stringField(item, 'task_title') || rootTaskId || 'Loop handoff'
+    }))
+    .filter(card => card.summary || card.taskTitle || card.payloadRef)
+
+  if (!rootTaskId || visibleCards.length === 0) {
+    return null
+  }
+
+  const handoffCount = typeof record.handoff_count === 'number' ? record.handoff_count : visibleCards.length
+
+  return {
+    handoffCount,
+    reviewBatchId: stringField(record, 'review_batch_id'),
+    rootTaskId,
+    tenant: stringField(record, 'tenant'),
+    visibleCards
+  }
+}
+
+const LoopHandoffReviewBatchCard: FC<{
+  batch: LoopHandoffReviewBatch
+  onOpenKanbanTask?: (taskId: string) => void
+}> = ({ batch, onOpenKanbanTask }) => (
+  <div className="flex w-full justify-center px-2 py-1">
+    <section
+      aria-label="Loop handoff review"
+      className="flex w-full max-w-[min(86%,44rem)] flex-col gap-2 rounded-xl border border-(--ui-stroke-tertiary) bg-(--ui-chat-surface-background) px-3 py-2 text-left shadow-xs"
+      data-testid="loop-handoff-review-batch"
+    >
+      <div className="flex items-center justify-between gap-3 text-[0.6875rem] font-medium uppercase tracking-[0.08em] text-(--ui-text-tertiary)">
+        <span className="flex items-center gap-1.5">
+          <Codicon className="text-(--ui-text-secondary)" name="git-pull-request" size="0.75rem" />
+          Loop handoff review
+        </span>
+        <span>{batch.handoffCount === 1 ? '1 handoff' : `${batch.handoffCount} handoffs`}</span>
+      </div>
+      <div className="flex flex-col gap-2">
+        {batch.visibleCards.map(card => (
+          <article
+            className="rounded-lg border border-(--ui-stroke-tertiary) bg-muted/20 px-3 py-2"
+            data-payload-ref={card.payloadRef || undefined}
+            key={card.payloadRef || `${batch.rootTaskId}:${card.taskTitle}`}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0 flex-1">
+                <h3 className="wrap-anywhere text-[0.8125rem] font-medium leading-5 text-foreground">{card.taskTitle}</h3>
+                {card.summary && (
+                  <p className="wrap-anywhere mt-0.5 text-[0.75rem] leading-5 text-(--ui-text-secondary)">{card.summary}</p>
+                )}
+                {card.payloadRef && (
+                  <p className="mt-1 font-mono text-[0.6875rem] leading-4 text-(--ui-text-quaternary)">{card.payloadRef}</p>
+                )}
+              </div>
+              <button
+                aria-label={`Open drawer for ${card.taskTitle}`}
+                className="shrink-0 rounded-md border border-(--ui-stroke-tertiary) px-2 py-1 text-[0.6875rem] font-medium text-(--ui-text-secondary) transition-colors hover:border-(--ui-stroke-secondary) hover:bg-(--ui-control-hover-background) hover:text-foreground disabled:cursor-default disabled:opacity-55"
+                disabled={!onOpenKanbanTask}
+                onClick={() => onOpenKanbanTask?.(batch.rootTaskId)}
+                type="button"
+              >
+                {card.action || 'Open drawer'}
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+      {(batch.reviewBatchId || batch.tenant) && (
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-[0.625rem] leading-4 text-(--ui-text-quaternary)">
+          {batch.reviewBatchId && <span className="font-mono">{batch.reviewBatchId}</span>}
+          {batch.tenant && <span className="font-mono">tenant:{batch.tenant}</span>}
+        </div>
+      )}
+    </section>
+  </div>
+)
+
 const UserMessage: FC<{
   onCancel?: () => Promise<void> | void
+  onOpenKanbanTask?: (taskId: string) => void
   onRestoreToMessage?: (messageId: string) => Promise<void> | void
-}> = ({ onCancel, onRestoreToMessage }) => {
+}> = ({ onCancel, onOpenKanbanTask, onRestoreToMessage }) => {
   const { t } = useI18n()
   const copy = t.assistant.thread
   const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false)
@@ -922,6 +1052,20 @@ const UserMessage: FC<{
         data-slot="aui_user-message-root"
       >
         <ProcessNotificationNote text={messageText.trim()} />
+      </MessagePrimitive.Root>
+    )
+  }
+
+  const handoffBatch = parseLoopHandoffReviewBatch(messageText.trim())
+
+  if (handoffBatch) {
+    return (
+      <MessagePrimitive.Root
+        className="flex w-full min-w-0 flex-col items-stretch"
+        data-role="user"
+        data-slot="aui_user-message-root"
+      >
+        <LoopHandoffReviewBatchCard batch={handoffBatch} onOpenKanbanTask={onOpenKanbanTask} />
       </MessagePrimitive.Root>
     )
   }

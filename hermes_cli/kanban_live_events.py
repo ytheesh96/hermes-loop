@@ -160,6 +160,51 @@ def publish_live_event(event: str, payload: dict, *, session_id: Optional[str] =
     return _publish_frame(frame)
 
 
+def emit_session_message_appended(
+    *,
+    session_id: str,
+    message_id: Optional[int] = None,
+    role: str = "user",
+    observed: bool = False,
+    reason: Optional[str] = None,
+    profile: Optional[str] = None,
+    metadata: Optional[dict[str, Any]] = None,
+) -> bool:
+    """Notify live clients that a durable SessionDB message was appended externally.
+
+    Some Loop foreground handoffs append an ``observed`` user message directly to
+    the target conversation's state.db instead of flowing through the active
+    gateway turn stream. The DB write is authoritative, but the Desktop runtime
+    only repaints when it sees gateway events. This small invalidation event
+    tells the renderer to refetch the transcript for the matching active stored
+    session.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    payload: dict[str, Any] = {
+        "schema_version": _SCHEMA_VERSION,
+        "event": "session.message.appended",
+        "stored_session_id": sid,
+        "session_id": sid,
+        "role": str(role or ""),
+        "observed": bool(observed),
+        "created_at": _iso(),
+    }
+    if message_id is not None:
+        try:
+            payload["message_id"] = int(message_id)
+        except Exception:
+            payload["message_id"] = message_id
+    if reason:
+        payload["reason"] = str(reason)
+    if profile:
+        payload["profile"] = str(profile)
+    if metadata:
+        payload.update(metadata)
+    return publish_live_event("session.message.appended", payload, session_id=sid)
+
+
 def _board_slug(explicit: Optional[str] = None) -> str:
     if explicit:
         return str(explicit)

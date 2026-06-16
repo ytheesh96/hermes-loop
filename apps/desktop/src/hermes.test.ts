@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  addLoopTaskComment,
   decomposeLoopTask,
   getLoopSessionSource,
   getLoopTaskDetail,
@@ -71,14 +72,30 @@ describe('Hermes REST session helpers', () => {
     api.mockResolvedValue({ tasks: [] })
 
     await getLoopSessionSource('session-1', 'peacock')
-    await getLoopTaskDetail('t_child', 'peacock')
+    await getLoopTaskDetail('t_child', 'peacock', 'developer')
 
     expect(api).toHaveBeenNthCalledWith(1, {
       path: '/api/plugins/kanban/session-source?session_id=session-1',
       profile: 'peacock'
     })
     expect(api).toHaveBeenNthCalledWith(2, {
-      path: '/api/plugins/kanban/tasks/t_child',
+      path: '/api/plugins/kanban/tasks/t_child?board=developer',
+      profile: 'peacock'
+    })
+  })
+
+  it('posts Loop task comments through the profile-scoped kanban API', async () => {
+    api.mockResolvedValue({ ok: true })
+
+    await addLoopTaskComment('t_child', 'Looks good — please merge after tests.', 'peacock', 'desktop', 'developer')
+
+    expect(api).toHaveBeenCalledWith({
+      body: {
+        author: 'desktop',
+        body: 'Looks good — please merge after tests.'
+      },
+      method: 'POST',
+      path: '/api/plugins/kanban/tasks/t_child/comments?board=developer',
       profile: 'peacock'
     })
   })
@@ -145,7 +162,10 @@ describe('Hermes REST session helpers', () => {
 
   it('submits Loop handoff escalation decisions with a safe escalation flag', async () => {
     api
-      .mockResolvedValueOnce({ handoffs: [{ id: 44, state: 'assigned', task_id: 't_review', updated_at: 3 }], ok: true })
+      .mockResolvedValueOnce({
+        handoffs: [{ id: 44, state: 'assigned', task_id: 't_review', updated_at: 3 }],
+        ok: true
+      })
       .mockResolvedValueOnce({ ok: true, outcome: 'escalated' })
 
     await reviewLoopHandoffForTask('t_review', 'escalate-review', 'peacock')

@@ -729,6 +729,30 @@ export function useMessageStream({
 
       if (event.type === 'gateway.ready') {
         return
+      } else if (event.type === 'session.message.appended' || event.type === 'session.history.updated') {
+        const storedSessionId = firstString(
+          payloadRecord.stored_session_id,
+          payloadRecord.session_key,
+          payloadRecord.session_id,
+          payloadSessionId,
+          explicitSid
+        )
+
+        const runtimeSessionId = activeSessionIdRef.current
+
+        const activeStoredSessionId = runtimeSessionId
+          ? sessionStateByRuntimeIdRef.current.get(runtimeSessionId)?.storedSessionId
+          : null
+
+        if (
+          storedSessionId &&
+          runtimeSessionId &&
+          (runtimeSessionId === storedSessionId || activeStoredSessionId === storedSessionId)
+        ) {
+          void hydrateFromStoredSession(3, storedSessionId, runtimeSessionId)
+        }
+
+        void refreshSessions().catch(() => undefined)
       } else if (event.type === 'session.info') {
         // Apply session-scoped fields when the event targets the active
         // session, OR when it's a global broadcast and we have no session.
@@ -1101,8 +1125,11 @@ export function useMessageStream({
       completeAssistantMessage,
       failAssistantMessage,
       flushQueuedDeltas,
+      hydrateFromStoredSession,
       queryClient,
       refreshHermesConfig,
+      refreshSessions,
+      sessionStateByRuntimeIdRef,
       sessionInterrupted,
       updateSessionState,
       upsertToolCall

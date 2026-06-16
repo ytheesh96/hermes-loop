@@ -1,7 +1,7 @@
 import { JsonRpcGatewayClient } from '@hermes/shared'
 
 import type { LoopTaskAction } from '@/app/chat/loop-panel'
-import type { LoopTaskDetail, TenantLoopSource } from '@/app/chat/loop-state'
+import type { LoopTaskComment, LoopTaskDetail, TenantLoopSource } from '@/app/chat/loop-state'
 import type {
   ActionResponse,
   ActionStatusResponse,
@@ -255,10 +255,46 @@ export function getLoopSessionSource(sessionId: string, profile?: string | null)
   })
 }
 
-export function getLoopTaskDetail(taskId: string, profile?: string | null): Promise<LoopTaskDetail> {
+function kanbanBoardQuery(board?: null | string): string {
+  const normalizedBoard = board?.trim()
+
+  if (!normalizedBoard) {
+    return ''
+  }
+
+  const query = new URLSearchParams({ board: normalizedBoard })
+
+  return `?${query.toString()}`
+}
+
+export function getLoopTaskDetail(
+  taskId: string,
+  profile?: string | null,
+  board?: null | string
+): Promise<LoopTaskDetail> {
   return window.hermesDesktop.api<LoopTaskDetail>({
     ...(profile ? { profile } : profileScoped()),
-    path: `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`
+    path: `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}${kanbanBoardQuery(board)}`
+  })
+}
+
+export interface LoopTaskCommentResult {
+  comment?: LoopTaskComment
+  ok: boolean
+}
+
+export function addLoopTaskComment(
+  taskId: string,
+  body: string,
+  profile?: string | null,
+  author = 'desktop',
+  board?: null | string
+): Promise<LoopTaskCommentResult> {
+  return window.hermesDesktop.api<LoopTaskCommentResult>({
+    ...(profile ? { profile } : profileScoped()),
+    body: { author, body },
+    method: 'POST',
+    path: `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/comments${kanbanBoardQuery(board)}`
   })
 }
 
@@ -302,14 +338,25 @@ export interface LoopHandoffReviewResult {
 }
 
 function latestActionableHandoff(handoffs: readonly LoopHandoffSummary[]): LoopHandoffSummary | null {
-  const byFreshness = [...handoffs].sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0) || (b.id || 0) - (a.id || 0))
+  const byFreshness = [...handoffs].sort(
+    (a, b) => (b.updated_at || 0) - (a.updated_at || 0) || (b.id || 0) - (a.id || 0)
+  )
 
-  return byFreshness.find(handoff => {
-    const state = (handoff.state || '').toLowerCase()
-    const verification = (handoff.verification_state || '').toLowerCase()
+  return (
+    byFreshness.find(handoff => {
+      const state = (handoff.state || '').toLowerCase()
+      const verification = (handoff.verification_state || '').toLowerCase()
 
-    return state === 'assigned' || state === 'reviewing' || verification === 'needs-orchestrator' || Boolean(handoff.attention)
-  }) || byFreshness[0] || null
+      return (
+        state === 'assigned' ||
+        state === 'reviewing' ||
+        verification === 'needs-orchestrator' ||
+        Boolean(handoff.attention)
+      )
+    }) ||
+    byFreshness[0] ||
+    null
+  )
 }
 
 function reviewActionBody(action: Extract<LoopTaskAction, 'accept-review' | 'escalate-review' | 'reject-review'>) {
@@ -356,6 +403,7 @@ export async function reviewLoopHandoffForTask(
     ...(profile ? { profile } : profileScoped()),
     path: `/api/plugins/kanban/loop-handoffs?${query.toString()}`
   })
+
   const handoff = latestActionableHandoff(list.handoffs || [])
 
   if (!handoff?.id) {

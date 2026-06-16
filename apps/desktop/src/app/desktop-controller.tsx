@@ -139,6 +139,12 @@ const SkillsView = lazy(async () => ({ default: (await import('./skills')).Skill
 // this cadence while the app is open + visible so new runs surface promptly
 // instead of waiting for the next user-triggered refreshSessions().
 const CRON_POLL_INTERVAL_MS = 30_000
+// External actors can append observed messages directly to the active
+// SessionDB row (Loop foreground handoff reviews are the motivating case)
+// without going through the currently attached gateway stream. Poll only the
+// visible active transcript, and only while no turn is streaming, so those DB
+// appends surface promptly even when no push event reaches /api/ws.
+const ACTIVE_SESSION_EXTERNAL_REFRESH_INTERVAL_MS = 3_000
 // The recents list is local-only: cron rows have their own section, and each
 // messaging platform (telegram, discord, …) is fetched separately into its own
 // self-managed sidebar section (refreshMessagingSessions). Excluding both here
@@ -794,6 +800,54 @@ export function DesktopController() {
       document.removeEventListener('visibilitychange', tick)
     }
   }, [gatewayState, refreshCronJobs])
+
+  useEffect(() => {
+    if (gatewayState !== 'open' || !activeSessionId || !selectedStoredSessionId) {
+      return
+    }
+
+    let inFlight = false
+
+    const tick = () => {
+      if (inFlight || document.visibilityState !== 'visible') {
+        return
+      }
+
+      const runtimeSessionId = activeSessionIdRef.current
+      const storedSessionId = selectedStoredSessionIdRef.current
+
+      if (!runtimeSessionId || !storedSessionId) {
+        return
+      }
+
+      const state = sessionStateByRuntimeIdRef.current.get(runtimeSessionId)
+
+      if (state?.busy) {
+        return
+      }
+
+      inFlight = true
+      void hydrateFromStoredSession(1, storedSessionId, runtimeSessionId).finally(() => {
+        inFlight = false
+      })
+    }
+
+    const intervalId = window.setInterval(tick, ACTIVE_SESSION_EXTERNAL_REFRESH_INTERVAL_MS)
+    document.addEventListener('visibilitychange', tick)
+
+    return () => {
+      window.clearInterval(intervalId)
+      document.removeEventListener('visibilitychange', tick)
+    }
+  }, [
+    activeSessionId,
+    activeSessionIdRef,
+    gatewayState,
+    hydrateFromStoredSession,
+    selectedStoredSessionId,
+    selectedStoredSessionIdRef,
+    sessionStateByRuntimeIdRef
+  ])
 
   useEffect(() => {
     if (gatewayState === 'open' && !activeSessionId && freshDraftReady) {

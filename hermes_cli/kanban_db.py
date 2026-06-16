@@ -3280,6 +3280,142 @@ def _pending_loop_handoff_review_scopes(conn: sqlite3.Connection) -> list[dict[s
     return [dict(row) for row in rows]
 
 
+def _loop_handoff_origin_session_candidates(
+    conn: sqlite3.Connection,
+    *,
+    tenant: Optional[str],
+    root_task_id: str,
+) -> list[str]:
+    """Return foreground session ids that may own a pending handoff scope."""
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        sid = str(value or "").strip()
+        if not sid or sid in seen:
+            return
+        candidates.append(sid)
+        seen.add(sid)
+
+    rows = conn.execute(
+        """
+        SELECT originating_session_id, tenant
+          FROM loop_handoffs
+         WHERE tenant = ?
+           AND root_task_id = ?
+           AND state IN ('recorded', 'queued', 'batched')
+         ORDER BY created_at ASC, id ASC
+        """,
+        (tenant, root_task_id),
+    ).fetchall()
+    for row in rows:
+        add(row["originating_session_id"])
+        # In the desktop/Loop path the tenant is often the originating session
+        # id. Treat it as a candidate, but only a real SessionDB hit below can
+        # make it authoritative; named tenants safely fall through.
+        add(row["tenant"])
+
+    root = conn.execute(
+        "SELECT session_id, tenant FROM tasks WHERE id = ?",
+        (root_task_id,),
+    ).fetchone()
+    if root is not None:
+        add(root["session_id"])
+        add(root["tenant"])
+    return candidates
+
+
+def _live_loop_handoff_session_id(session_db: Any, candidates: Iterable[str]) -> Optional[str]:
+    """Pick the live foreground session/tip for candidate ids, if any.
+
+    Handoffs should return to the originating foreground conversation when it
+    is still live. If that conversation was compacted, route to the current
+    compression tip. Ended non-compression sessions are not treated as live;
+    those use the dedicated tenant-review fallback.
+    """
+    for session_id in candidates:
+        try:
+            if not session_db.get_session(session_id):
+                continue
+        except Exception:
+            continue
+        try:
+            lineage = session_db.get_compression_lineage_root_to_tip(session_id)
+        except Exception:
+            lineage = [session_id]
+        for candidate in reversed(lineage or [session_id]):
+            try:
+                row = session_db.get_session(candidate)
+            except Exception:
+                row = None
+            if row and row.get("ended_at") is None:
+                return candidate
+    return None
+
+
+def _current_session_profile_name() -> str:
+    """Best-effort profile name for the SessionDB opened by SessionDB()."""
+    home = str(os.environ.get("HERMES_HOME") or "").strip()
+    if home:
+        try:
+            path = Path(home).expanduser()
+            if path.parent.name == "profiles" and path.name:
+                return path.name
+        except Exception:
+            pass
+    return "default"
+
+
+def _loop_handoff_review_target(
+    conn: sqlite3.Connection,
+    *,
+    tenant: Optional[str],
+    root_task_id: str,
+    session_db: Any = None,
+) -> tuple[Any, str, str, str]:
+    """Resolve where a foreground handoff batch should be injected.
+
+    Prefer the live originating/root foreground session (or its compression
+    tip). If none is live, create/resume the deterministic tenant-review
+    session in the reviewer profile DB so the reviewer subprocess can resume it.
+    """
+    from hermes_state import SessionDB
+
+    try:
+        default_session_db = session_db or SessionDB()
+    except Exception:
+        default_session_db = None
+    live_session_id = None
+    if default_session_db is not None:
+        live_session_id = _live_loop_handoff_session_id(
+            default_session_db,
+            _loop_handoff_origin_session_candidates(
+                conn,
+                tenant=tenant,
+                root_task_id=root_task_id,
+            ),
+        )
+    if live_session_id:
+        return default_session_db, live_session_id, _current_session_profile_name(), "foreground"
+
+    if session_db is not None:
+        reviewer_session_id = _ensure_loop_handoff_review_session(
+            session_db,
+            tenant=tenant,
+            root_task_id=root_task_id,
+        )
+        return session_db, reviewer_session_id, _current_session_profile_name(), "dedicated"
+
+    reviewer_profile = _loop_handoff_reviewer_profile()
+    reviewer_session_db = _loop_handoff_reviewer_session_db(reviewer_profile)
+    reviewer_session_id = _ensure_loop_handoff_review_session(
+        reviewer_session_db,
+        tenant=tenant,
+        root_task_id=root_task_id,
+    )
+    return reviewer_session_db, reviewer_session_id, reviewer_profile, "dedicated"
+
+
 def claim_next_loop_handoff_review_batch(
     conn: sqlite3.Connection,
     *,
@@ -3288,22 +3424,21 @@ def claim_next_loop_handoff_review_batch(
 ) -> Optional[dict[str, Any]]:
     """Scheduler entrypoint: claim one queued Loop handoff batch into a review session.
 
-    This is the production caller for ``claim_loop_handoff_batch``. It creates
-    or resumes a stable foreground session keyed by tenant/root, injects one
-    compact proof-packet message, and audits the source task events with the
-    reviewer session id plus the injected message id (stored as
-    ``review_run_id`` for this foreground-review run).
+    This is the production caller for ``claim_loop_handoff_batch``. It routes
+    the compact proof-packet message back into the live originating foreground
+    session when possible; otherwise it creates/resumes a deterministic
+    tenant-review session. It audits the source task events with the reviewer
+    session id plus the injected message id (stored as ``review_run_id`` for
+    this foreground-review run).
     """
-    if session_db is None:
-        session_db = _loop_handoff_reviewer_session_db()
-
     for scope in _pending_loop_handoff_review_scopes(conn):
         tenant = str(scope.get("tenant") or scope["root_task_id"])
         root_task_id = scope["root_task_id"]
-        reviewer_session_id = _ensure_loop_handoff_review_session(
-            session_db,
+        target_session_db, reviewer_session_id, reviewer_profile, review_route = _loop_handoff_review_target(
+            conn,
             tenant=tenant,
             root_task_id=root_task_id,
+            session_db=session_db,
         )
         batch_id = f"loop-review:{tenant or 'default'}:{root_task_id}:{int(time.time())}"
         handoffs = claim_loop_handoff_batch(
@@ -3323,12 +3458,33 @@ def claim_next_loop_handoff_review_batch(
             batch_id=batch_id,
             handoffs=handoffs,
         )
-        review_message_id = session_db.append_message(
+        review_message_id = target_session_db.append_message(
             reviewer_session_id,
             "user",
             message,
             observed=True,
         )
+        try:
+            from hermes_cli import kanban_live_events
+
+            getattr(kanban_live_events, "emit_session_message_appended")(
+                session_id=reviewer_session_id,
+                message_id=review_message_id,
+                role="user",
+                observed=True,
+                reason="loop_handoff_review_batch",
+                profile=reviewer_profile,
+                metadata={
+                    "review_batch_id": batch_id,
+                    "review_route": review_route,
+                    "root_task_id": root_task_id,
+                    "tenant": tenant,
+                },
+            )
+        except Exception:
+            # Live transcript invalidation is best-effort; the SessionDB append
+            # above is authoritative and resume/manual refresh will recover.
+            pass
         ids = [int(handoff["id"]) for handoff in handoffs]
         placeholders = ",".join("?" for _ in ids)
         now = int(time.time())
@@ -3343,6 +3499,8 @@ def claim_next_loop_handoff_review_batch(
                     "root_task_id": root_task_id,
                     "tenant": tenant,
                     "reviewer_session_id": reviewer_session_id,
+                    "reviewer_profile": reviewer_profile,
+                    "review_route": review_route,
                     "review_batch_id": batch_id,
                     "review_run_id": review_message_id,
                     "source_run_id": handoff.get("run_id"),
@@ -3369,6 +3527,8 @@ def claim_next_loop_handoff_review_batch(
             "tenant": tenant,
             "root_task_id": root_task_id,
             "reviewer_session_id": reviewer_session_id,
+            "reviewer_profile": reviewer_profile,
+            "review_route": review_route,
             "review_batch_id": batch_id,
             "review_message_id": review_message_id,
             "handoffs": ordered,
@@ -3411,6 +3571,8 @@ def _append_loop_handoff_review_run_events(
         "tenant": batch.get("tenant"),
         "root_task_id": batch.get("root_task_id"),
         "reviewer_session_id": batch.get("reviewer_session_id"),
+        "reviewer_profile": batch.get("reviewer_profile"),
+        "review_route": batch.get("review_route"),
         "review_batch_id": batch.get("review_batch_id"),
         "review_message_id": batch.get("review_message_id"),
     }
@@ -3520,7 +3682,8 @@ def start_loop_handoff_review_process(
     reviewer_session_id = str(batch.get("reviewer_session_id") or "").strip()
     if not reviewer_session_id:
         raise ValueError("reviewer_session_id is required")
-    profile_arg = (profile or _loop_handoff_reviewer_profile()).strip() or "reviewer-qa"
+    profile_source = profile if profile is not None else batch.get("reviewer_profile")
+    profile_arg = (str(profile_source or _loop_handoff_reviewer_profile()).strip()) or "reviewer-qa"
     resolve_profile_env = None
     try:
         from hermes_cli.profiles import normalize_profile_name, resolve_profile_env as _resolve_profile_env

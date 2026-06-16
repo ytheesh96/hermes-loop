@@ -2,10 +2,12 @@ import { QueryClient } from '@tanstack/react-query'
 import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { createClientSessionState } from '@/lib/chat-runtime'
 import { $loopagentsBySession } from '@/store/loopagents'
 import type { RpcEvent } from '@/types/hermes'
 
 import type { ClientSessionState } from '../../types'
+
 import { useMessageStream } from './use-message-stream'
 
 describe('useMessageStream loopagent events', () => {
@@ -57,5 +59,74 @@ describe('useMessageStream loopagent events', () => {
     })
     expect($loopagentsBySession.get()['logical-root']?.[0]?.id).toBe('loopagent:worker:t_loop:7')
     expect($loopagentsBySession.get()['source-root']?.[0]?.id).toBe('loopagent:worker:t_loop:7')
+  })
+
+  it('hydrates the active stored session when an external message append event arrives', () => {
+    const queryClient = new QueryClient()
+    const activeSessionIdRef = { current: 'runtime-active' }
+    const sessionStateByRuntimeIdRef = { current: new Map<string, ClientSessionState>() }
+    const hydrateFromStoredSession = vi.fn(async () => undefined)
+    const refreshSessions = vi.fn(async () => undefined)
+
+    sessionStateByRuntimeIdRef.current.set('runtime-active', createClientSessionState('stored-active'))
+
+    const { result } = renderHook(() =>
+      useMessageStream({
+        activeSessionIdRef,
+        hydrateFromStoredSession,
+        queryClient,
+        refreshHermesConfig: vi.fn(async () => undefined),
+        refreshSessions,
+        sessionStateByRuntimeIdRef,
+        updateSessionState: vi.fn()
+      })
+    )
+
+    act(() => {
+      result.current.handleGatewayEvent({
+        session_id: 'stored-active',
+        payload: {
+          stored_session_id: 'stored-active',
+          message_id: 123,
+          role: 'user',
+          observed: true
+        },
+        type: 'session.message.appended'
+      } as RpcEvent)
+    })
+
+    expect(hydrateFromStoredSession).toHaveBeenCalledWith(3, 'stored-active', 'runtime-active')
+    expect(refreshSessions).toHaveBeenCalled()
+  })
+
+  it('does not hydrate the active runtime for a background external message append', () => {
+    const queryClient = new QueryClient()
+    const activeSessionIdRef = { current: 'runtime-active' }
+    const sessionStateByRuntimeIdRef = { current: new Map<string, ClientSessionState>() }
+    const hydrateFromStoredSession = vi.fn(async () => undefined)
+
+    sessionStateByRuntimeIdRef.current.set('runtime-active', createClientSessionState('stored-active'))
+
+    const { result } = renderHook(() =>
+      useMessageStream({
+        activeSessionIdRef,
+        hydrateFromStoredSession,
+        queryClient,
+        refreshHermesConfig: vi.fn(async () => undefined),
+        refreshSessions: vi.fn(async () => undefined),
+        sessionStateByRuntimeIdRef,
+        updateSessionState: vi.fn()
+      })
+    )
+
+    act(() => {
+      result.current.handleGatewayEvent({
+        session_id: 'stored-background',
+        payload: { stored_session_id: 'stored-background', message_id: 456 },
+        type: 'session.message.appended'
+      } as RpcEvent)
+    })
+
+    expect(hydrateFromStoredSession).not.toHaveBeenCalled()
   })
 })

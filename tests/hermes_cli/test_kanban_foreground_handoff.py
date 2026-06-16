@@ -545,6 +545,125 @@ def test_scheduler_default_review_session_db_matches_reviewer_profile(kanban_hom
     assert default_messages == []
 
 
+def test_scheduler_routes_live_originating_session_instead_of_synthetic_review(kanban_home, monkeypatch):
+    import hermes_state
+    from hermes_state import SessionDB
+    from hermes_cli import kanban_live_events
+
+    origin_session_id = "20260615_origin_live"
+    published_messages = []
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", kanban_home / "state.db")
+    monkeypatch.setattr(
+        kanban_live_events,
+        "emit_session_message_appended",
+        lambda **kwargs: published_messages.append(kwargs) or True,
+    )
+    session_db = SessionDB()
+    session_db.create_session(origin_session_id, "tui", model="gpt-test")
+
+    with kb.connect() as conn:
+        task_id = _loop_node(
+            conn,
+            title="live foreground handoff node",
+            tenant=origin_session_id,
+            session_id=origin_session_id,
+        )
+        assert kb.claim_task(conn, task_id, claimer="worker-host:123") is not None
+        assert kb.complete_task(conn, task_id, summary="ready for originating session", metadata={"tests_run": ["pytest -q"]})
+
+        batch = kb.claim_next_loop_handoff_review_batch(conn, limit=10)
+        handoff = kb.list_loop_handoffs(conn, task_id=task_id)[0]
+        events = [event for event in kb.list_events(conn, task_id) if event.kind == "loop_handoff_review_session"]
+
+    synthetic_session_id = kb.loop_handoff_reviewer_session_id(origin_session_id, "t_looproot")
+    messages = session_db.get_messages(origin_session_id)
+
+    assert batch is not None
+    assert batch["reviewer_session_id"] == origin_session_id
+    assert batch["reviewer_profile"] == "default"
+    assert batch["review_route"] == "foreground"
+    assert handoff["reviewer_session_id"] == origin_session_id
+    assert handoff["review_run_id"] == batch["review_message_id"]
+    assert session_db.get_session(synthetic_session_id) is None
+    assert messages and "kanban_loop_handoff_review_batch" in messages[0]["content"]
+    assert published_messages
+    assert published_messages[-1]["session_id"] == origin_session_id
+    assert published_messages[-1]["message_id"] == batch["review_message_id"]
+    assert published_messages[-1]["reason"] == "loop_handoff_review_batch"
+    assert published_messages[-1]["metadata"]["review_route"] == "foreground"
+    assert events
+    assert events[-1].payload is not None
+    assert events[-1].payload["review_route"] == "foreground"
+
+
+def test_scheduler_routes_originating_compression_root_to_live_tip(kanban_home, monkeypatch):
+    import hermes_state
+    from hermes_state import SessionDB
+
+    root_session_id = "20260615_origin_root"
+    tip_session_id = "20260615_origin_tip"
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", kanban_home / "state.db")
+    session_db = SessionDB()
+    session_db.create_session(root_session_id, "tui", model="gpt-test")
+    session_db.end_session(root_session_id, "compression")
+    session_db.create_session(tip_session_id, "tui", parent_session_id=root_session_id, model="gpt-test")
+
+    with kb.connect() as conn:
+        task_id = _loop_node(
+            conn,
+            title="compressed foreground handoff node",
+            tenant=root_session_id,
+            session_id=root_session_id,
+        )
+        assert kb.claim_task(conn, task_id, claimer="worker-host:123") is not None
+        assert kb.complete_task(conn, task_id, summary="ready for compression tip", metadata={"tests_run": ["pytest -q"]})
+
+        batch = kb.claim_next_loop_handoff_review_batch(conn, limit=10)
+        handoff = kb.list_loop_handoffs(conn, task_id=task_id)[0]
+
+    assert batch is not None
+    assert batch["reviewer_session_id"] == tip_session_id
+    assert batch["review_route"] == "foreground"
+    assert handoff["reviewer_session_id"] == tip_session_id
+    assert session_db.get_messages(root_session_id) == []
+    tip_messages = session_db.get_messages(tip_session_id)
+    assert tip_messages and "kanban_loop_handoff_review_batch" in tip_messages[0]["content"]
+
+
+def test_review_runner_uses_claimed_reviewer_profile(monkeypatch, tmp_path):
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["env"] = kwargs.get("env", {})
+            self.pid = 4242
+
+    default_home = tmp_path / ".hermes"
+    default_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(default_home))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(default_home))
+    monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
+    monkeypatch.setattr("subprocess.Popen", _FakePopen)
+
+    result = kb.start_loop_handoff_review_process(
+        {
+            "tenant": "tenant-a",
+            "root_task_id": "t_looproot",
+            "reviewer_session_id": "origin-session",
+            "reviewer_profile": "default",
+            "review_batch_id": "batch-1",
+            "handoffs": [],
+        }
+    )
+
+    assert result["profile"] == "default"
+    assert captured["cmd"][:4] == ["hermes", "-p", "default", "--resume"]
+    assert captured["cmd"][4] == "origin-session"
+    assert captured["env"]["HERMES_HOME"] == str(default_home)
+    assert captured["env"]["HERMES_KANBAN_DB"] == str(default_home / "kanban.db")
+
+
 def test_review_batch_runner_executes_after_claim_and_closes_handoff(kanban_home):
     from hermes_state import SessionDB
 

@@ -27,6 +27,7 @@ import type {
   CompactLoopTask,
   LoopPanelState,
   LoopRow,
+  LoopTaskComment,
   LoopTaskDetail,
   LoopWorkerActivity,
   TenantLoopTask
@@ -50,6 +51,8 @@ export type LoopTaskAction =
   | 'unblock'
   | 'worker-run'
   | 'worker-session'
+
+type LoopTaskCommentSubmit = (taskId: string, body: string) => Promise<void> | void
 
 export type LoopArtifactSourceKind = 'artifact' | 'changed-file' | 'source'
 
@@ -233,7 +236,9 @@ function isRootLoopRow(row: LoopRow): boolean {
 }
 
 function rootLoopRow(rows: LoopRow[], rootTaskId?: string): LoopRow | null {
-  return (rootTaskId ? rows.find(row => row.taskId === rootTaskId) : null) || rows.find(isRootLoopRow) || rows[0] || null
+  return (
+    (rootTaskId ? rows.find(row => row.taskId === rootTaskId) : null) || rows.find(isRootLoopRow) || rows[0] || null
+  )
 }
 
 function isDoneLoopRow(row: LoopRow): boolean {
@@ -566,11 +571,12 @@ interface LoopPanelProps {
   hidden?: boolean
   onFocusTaskId?: (taskId: string) => void
   onHide?: () => void
-  onRefresh?: () => void
   onSelectTaskId?: (taskId: string) => void
+  onAddTaskComment?: LoopTaskCommentSubmit
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
   open?: boolean
   selectedTaskDetail?: LoopTaskDetail | null
+  selectedTaskDetailError?: null | string
   selectedTaskId?: null | string
   state: LoopPanelState | null
 }
@@ -589,6 +595,153 @@ function DetailSection({ children, testId, title }: { children: ReactNode; testI
 
 function EmptyDetail({ children }: { children: ReactNode }) {
   return <p className="m-0 text-xs text-(--ui-text-tertiary)">{children}</p>
+}
+
+function loopCommentKey(comment: LoopTaskComment, index: number): string {
+  return String(comment.id ?? `${comment.task_id || 'comment'}:${comment.created_at ?? index}:${index}`)
+}
+
+function formatLoopCommentTime(createdAt?: number): string {
+  if (!createdAt) {
+    return ''
+  }
+
+  const timestampMs = createdAt < 10_000_000_000 ? createdAt * 1000 : createdAt
+  const date = new Date(timestampMs)
+
+  if (Number.isNaN(date.getTime())) {
+    return ''
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    month: 'short'
+  }).format(date)
+}
+
+function LoopTaskCommentsCard({
+  detail,
+  detailError,
+  onAddComment,
+  row
+}: {
+  detail?: LoopTaskDetail | null
+  detailError?: null | string
+  onAddComment?: LoopTaskCommentSubmit
+  row: LoopRow
+}) {
+  const comments = detail?.comments || []
+  const visibleCount = Math.max(comments.length, row.commentCount || 0)
+  const [draft, setDraft] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState<null | string>(null)
+  const canSubmit = Boolean(onAddComment) && draft.trim().length > 0 && !submitting
+  const helperText = submitError ? submitError : !onAddComment ? 'Commenting is unavailable in this context.' : ''
+
+  useEffect(() => {
+    setDraft('')
+    setSubmitError(null)
+  }, [row.taskId])
+
+  const submitComment = useCallback(async () => {
+    const body = draft.trim()
+
+    if (!body || !onAddComment || submitting) {
+      return
+    }
+
+    setSubmitting(true)
+    setSubmitError(null)
+
+    try {
+      await onAddComment(row.taskId, body)
+      setDraft('')
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSubmitting(false)
+    }
+  }, [draft, onAddComment, row.taskId, submitting])
+
+  return (
+    <DetailSection testId="loop-task-comments-card" title={`Comments (${visibleCount})`}>
+      <div className="grid gap-2">
+        {comments.length === 0 ? (
+          <EmptyDetail>
+            {detailError
+              ? `Couldn't load comments: ${detailError}`
+              : detail
+                ? 'No comments yet.'
+                : visibleCount > 0
+                  ? `${visibleCount} comments recorded. Loading comments…`
+                  : 'No comments yet.'}
+          </EmptyDetail>
+        ) : (
+          <div className="grid gap-2" data-testid="loop-task-comments-list">
+            {comments.map((comment, index) => {
+              const timestamp = formatLoopCommentTime(comment.created_at)
+
+              return (
+                <article
+                  className="grid gap-1 border-b border-(--ui-stroke-tertiary) pb-2 last:border-b-0 last:pb-0"
+                  data-testid="loop-task-comment"
+                  key={loopCommentKey(comment, index)}
+                >
+                  <div className="flex min-w-0 items-center gap-2 text-[0.66rem] text-(--ui-text-tertiary)">
+                    <span className="truncate font-medium text-(--ui-text-secondary)">{comment.author || 'anon'}</span>
+                    {timestamp ? <time className="shrink-0 text-(--ui-text-quaternary)">{timestamp}</time> : null}
+                  </div>
+                  <CompactMarkdown className="text-(--ui-text-secondary)" text={comment.body || ''} />
+                </article>
+              )
+            })}
+          </div>
+        )}
+
+        <form
+          className="grid gap-1 rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-fill-quaternary) p-1.5 transition-colors focus-within:border-(--ui-stroke-secondary)"
+          data-testid="loop-task-comment-composer"
+          onSubmit={event => {
+            event.preventDefault()
+            void submitComment()
+          }}
+        >
+          <div className="flex min-w-0 items-center gap-2">
+            <textarea
+              aria-label={`Comment on ${row.taskId}`}
+              className="h-6 min-h-6 flex-1 resize-none rounded-[3px] border-0 bg-transparent px-1.5 py-1 text-xs leading-4 text-(--ui-text-primary) outline-none placeholder:text-(--ui-text-quaternary) focus:ring-0 disabled:cursor-default disabled:opacity-50"
+              disabled={!onAddComment || submitting}
+              onChange={event => setDraft(event.target.value)}
+              onKeyDown={event => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault()
+                  void submitComment()
+                }
+              }}
+              placeholder="Add a comment…"
+              rows={1}
+              value={draft}
+            />
+            <Button className="h-6 shrink-0 px-2 text-[0.68rem]" disabled={!canSubmit} type="submit" variant="ghost">
+              {submitting ? 'Commenting…' : 'Comment'}
+            </Button>
+          </div>
+          {helperText ? (
+            <span
+              className={cn(
+                'min-w-0 truncate text-[0.66rem] text-(--ui-text-tertiary)',
+                submitError && 'text-destructive'
+              )}
+            >
+              {helperText}
+            </span>
+          ) : null}
+        </form>
+      </div>
+    </DetailSection>
+  )
 }
 
 function relationTitle(taskId: string, rowById: Map<string, LoopRow>): string {
@@ -635,50 +788,59 @@ function relatedTaskById(taskId: string, relatedTasks?: CompactLoopTask[]): Comp
   return relatedTasks?.find(task => task.id === taskId) || null
 }
 
-function copyTaskId(taskId: string): void {
-  void navigator.clipboard?.writeText(taskId)
-}
-
 function LoopTaskActions({
-  onRefresh,
   onTaskAction,
   row
 }: {
-  onRefresh?: () => void
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
   row: LoopRow
 }) {
+  const status = normalizedLoopValue(row.status)
+  const blocked = status === 'blocked'
+  const archived = status === 'archived'
+  const terminal = TERMINAL_LOOP_STATUSES.has(status)
+  const statusAction: LoopTaskAction = blocked ? 'unblock' : 'block'
+  const statusLabel = blocked ? 'Unblock' : 'Block'
+
   return (
     <div className="flex flex-wrap gap-1.5" data-testid="loop-task-actions">
+      {!terminal && (
+        <Button
+          aria-label={`${statusLabel} ${row.taskId}`}
+          className="h-7 gap-1.5 px-2 text-xs"
+          disabled={!onTaskAction}
+          onClick={() => onTaskAction?.(statusAction, row)}
+          type="button"
+          variant="outline"
+        >
+          <Codicon name={blocked ? 'unlock' : 'lock'} size="0.82rem" />
+          <span>{statusLabel}</span>
+        </Button>
+      )}
       <Button
-        aria-label={`Copy ID for ${row.taskId}`}
-        className="h-7 px-2 text-xs"
-        onClick={() => copyTaskId(row.taskId)}
-        type="button"
-        variant="outline"
-      >
-        Copy ID
-      </Button>
-      <Button
-        aria-label={`Open source task/details for ${row.taskId}`}
-        className="h-7 px-2 text-xs"
+        aria-label={`Ask to chat about ${row.taskId}`}
+        className="h-7 gap-1.5 px-2 text-xs"
         disabled={!onTaskAction}
-        onClick={() => onTaskAction?.('details', row)}
+        onClick={() => onTaskAction?.('ask-hermes', row)}
         type="button"
         variant="outline"
       >
-        Open source task/details
+        <Codicon name="comment-discussion" size="0.82rem" />
+        <span>Ask to chat</span>
       </Button>
-      <Button
-        aria-label={`Refresh details for ${row.taskId}`}
-        className="h-7 px-2 text-xs"
-        disabled={!onRefresh}
-        onClick={onRefresh}
-        type="button"
-        variant="outline"
-      >
-        Refresh
-      </Button>
+      {!archived && (
+        <Button
+          aria-label={`Archive ${row.taskId}`}
+          className="h-7 gap-1.5 px-2 text-xs"
+          disabled={!onTaskAction}
+          onClick={() => onTaskAction?.('archive', row)}
+          type="button"
+          variant="outline"
+        >
+          <Codicon name="archive" size="0.82rem" />
+          <span>Archive</span>
+        </Button>
+      )}
     </div>
   )
 }
@@ -992,7 +1154,9 @@ function artifactSourceSummary(items: { entry: LoopArtifactSourceEntry; row: Loo
     }
 
     return `${count} source${count === 1 ? '' : 's'}`
-  }).filter(Boolean).join(' · ')
+  })
+    .filter(Boolean)
+    .join(' · ')
 }
 
 function LoopArtifactSourcesCard({
@@ -1045,12 +1209,17 @@ function LoopArtifactSourcesCard({
                   type="button"
                   variant="secondary"
                 >
-                  <Codicon className="shrink-0 text-(--ui-text-tertiary)" name={artifactSourceIcon(entry.kind)} size="0.82rem" />
+                  <Codicon
+                    className="shrink-0 text-(--ui-text-tertiary)"
+                    name={artifactSourceIcon(entry.kind)}
+                    size="0.82rem"
+                  />
                   <span className="grid min-w-0 flex-1 gap-0.5">
                     <span className="truncate text-(--ui-text-primary)">{entry.label}</span>
                     <span className="truncate font-mono text-[0.64rem] text-(--ui-text-tertiary)">{entry.target}</span>
                     <span className="truncate text-[0.65rem] text-(--ui-text-tertiary)">
-                      {entry.sourceLabel}{rows.length > 1 ? ` · ${row.title || row.taskId}` : ''}
+                      {entry.sourceLabel}
+                      {rows.length > 1 ? ` · ${row.title || row.taskId}` : ''}
                     </span>
                   </span>
                   <span className="shrink-0 rounded bg-(--ui-fill-quaternary) px-1.5 py-0.5 text-[0.62rem] font-medium text-(--ui-text-tertiary)">
@@ -1109,7 +1278,11 @@ function LoopArtifactViewButton({
 
 function LoopArtifactPreviewView({ tab }: { tab: LoopPanelArtifactTab }) {
   if (tab.status === 'loading') {
-    return <div className="grid h-full min-h-[24rem] place-items-center text-xs text-(--ui-text-tertiary)">Loading preview...</div>
+    return (
+      <div className="grid h-full min-h-[24rem] place-items-center text-xs text-(--ui-text-tertiary)">
+        Loading preview...
+      </div>
+    )
   }
 
   if (tab.status === 'error') {
@@ -1124,7 +1297,11 @@ function LoopArtifactPreviewView({ tab }: { tab: LoopPanelArtifactTab }) {
     return <LocalFilePreview reloadKey={0} target={tab.target} />
   }
 
-  return <div className="grid h-full min-h-[24rem] place-items-center text-xs text-(--ui-text-tertiary)">Preview unavailable.</div>
+  return (
+    <div className="grid h-full min-h-[24rem] place-items-center text-xs text-(--ui-text-tertiary)">
+      Preview unavailable.
+    </div>
+  )
 }
 
 function LoopArtifactDiffView({ tab }: { tab: LoopPanelArtifactTab }) {
@@ -1137,7 +1314,11 @@ function LoopArtifactDiffView({ tab }: { tab: LoopPanelArtifactTab }) {
   }
 
   if (tab.diffStatus === 'loading') {
-    return <div className="grid h-full min-h-[24rem] place-items-center text-xs text-(--ui-text-tertiary)">Loading diff...</div>
+    return (
+      <div className="grid h-full min-h-[24rem] place-items-center text-xs text-(--ui-text-tertiary)">
+        Loading diff...
+      </div>
+    )
   }
 
   if (tab.diffStatus === 'error') {
@@ -1185,11 +1366,12 @@ function LoopArtifactDetailRow({ label, value }: { label: string; value?: null |
 }
 
 function LoopArtifactDetailsView({ tab }: { tab: LoopPanelArtifactTab }) {
-  const diffLine = tab.entry.kind === 'changed-file'
-    ? [tab.diffSource === 'inline' ? 'inline' : tab.diffSource === 'git' ? 'git' : '', tab.diffStatus]
-        .filter(Boolean)
-        .join(' · ')
-    : undefined
+  const diffLine =
+    tab.entry.kind === 'changed-file'
+      ? [tab.diffSource === 'inline' ? 'inline' : tab.diffSource === 'git' ? 'git' : '', tab.diffStatus]
+          .filter(Boolean)
+          .join(' · ')
+      : undefined
 
   return (
     <div className="h-full min-h-[24rem] overflow-auto p-3 text-xs">
@@ -1235,7 +1417,10 @@ function LoopArtifactSourceTab({
             </div>
             <div className="break-all font-mono">{tab.entry.target}</div>
           </div>
-          <div aria-label="Artifact view" className="flex w-fit max-w-full items-center gap-0.5 rounded border border-(--ui-stroke-tertiary) bg-(--ui-fill-quaternary) p-0.5">
+          <div
+            aria-label="Artifact view"
+            className="flex w-fit max-w-full items-center gap-0.5 rounded border border-(--ui-stroke-tertiary) bg-(--ui-fill-quaternary) p-0.5"
+          >
             <LoopArtifactViewButton
               active={tab.view === 'preview'}
               icon="open-preview"
@@ -1272,7 +1457,13 @@ function LoopArtifactSourceTab({
   )
 }
 
-function ReviewDecisionControls({ onTaskAction, row }: { onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void; row: LoopRow }) {
+function ReviewDecisionControls({
+  onTaskAction,
+  row
+}: {
+  onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
+  row: LoopRow
+}) {
   const unavailable = !onTaskAction
 
   return (
@@ -1309,7 +1500,11 @@ function ReviewDecisionControls({ onTaskAction, row }: { onTaskAction?: (action:
           Escalate
         </Button>
       </div>
-      {unavailable && <EmptyDetail>Review decisions are unavailable until this view is connected to the gateway action handler.</EmptyDetail>}
+      {unavailable && (
+        <EmptyDetail>
+          Review decisions are unavailable until this view is connected to the gateway action handler.
+        </EmptyDetail>
+      )}
     </div>
   )
 }
@@ -1458,6 +1653,7 @@ function loopWorkerCurrentTool(row: LoopRow): string | undefined {
 function loopAgentActivityLabel(row: LoopRow): string | undefined {
   const profile =
     loopTextValue(row.workerActivity?.profile) || loopTextValue(row.latestRun?.profile) || loopTextValue(row.assignee)
+
   const currentTool = loopWorkerCurrentTool(row)
 
   return [profile, currentTool].filter(Boolean).join(' · ') || profile || currentTool
@@ -1484,10 +1680,7 @@ function loopOverviewItemState(row: LoopRow): StatusItemState {
   return 'done'
 }
 
-function loopOverviewStatusItem(
-  row: LoopRow,
-  options: { preferAssigneeForQueued?: boolean } = {}
-): ComposerStatusItem {
+function loopOverviewStatusItem(row: LoopRow, options: { preferAssigneeForQueued?: boolean } = {}): ComposerStatusItem {
   const queued = isQueuedLoopRow(row)
   const activityLabel = loopAgentActivityLabel(row)
 
@@ -1548,6 +1741,7 @@ function loopRelatedTaskAgentStatusItem(
   rowById: Map<string, LoopRow>
 ): ComposerStatusItem {
   const status = related?.status
+
   const activity =
     loopTextValue(related?.assignee) ||
     (normalizedLoopValue(status) === 'archived'
@@ -1708,9 +1902,10 @@ function LoopRootOverview({
 function LoopTaskDetails({
   backLabel,
   detail,
+  detailError,
+  onAddComment,
   onBack,
   onOpenArtifactTab,
-  onRefresh,
   onSelectTaskId,
   onTaskAction,
   row,
@@ -1718,9 +1913,10 @@ function LoopTaskDetails({
 }: {
   backLabel?: null | string
   detail?: LoopTaskDetail | null
+  detailError?: null | string
+  onAddComment?: LoopTaskCommentSubmit
   onBack?: () => void
   onOpenArtifactTab?: (entry: LoopArtifactSourceEntry, row: LoopRow) => void
-  onRefresh?: () => void
   onSelectTaskId?: (taskId: string) => void
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
   row: LoopRow
@@ -1760,16 +1956,18 @@ function LoopTaskDetails({
             <h3 className="m-0 min-w-0 truncate text-sm font-semibold text-(--ui-text-primary)">{row.title}</h3>
           </div>
           <div className="font-mono text-(--ui-text-tertiary)">{row.taskId}</div>
-          <LoopTaskActions onRefresh={onRefresh} onTaskAction={onTaskAction} row={row} />
+          <LoopTaskActions onTaskAction={onTaskAction} row={row} />
         </div>
       </section>
-
+      {/* Markdown task description/spec with a graceful empty state. */}
       <DetailSection title="Description">
         {row.body?.trim() ? <TaskDescription text={row.body} /> : <EmptyDetail>No description provided.</EmptyDetail>}
       </DetailSection>
 
-      <LoopTaskAgentsCard onSelectTaskId={onSelectTaskId} row={row} rowById={rowById} />
+      <LoopTaskCommentsCard detail={detail} detailError={detailError} onAddComment={onAddComment} row={row} />
 
+      {/* Child/parent agent rows for navigating the task execution graph. */}
+      <LoopTaskAgentsCard onSelectTaskId={onSelectTaskId} row={row} rowById={rowById} />
       <LoopArtifactSourcesCard detail={detail} onOpenArtifactSource={onOpenArtifactTab} rows={[row]} />
 
       <DetailSection title="Worker activity">
@@ -1848,6 +2046,7 @@ function LoopPanelTabBar({
     : activeTaskTabId
       ? `loop-task:${activeTaskTabId}`
       : LOOP_OVERVIEW_TAB_ID
+
   const activeTabRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -1871,8 +2070,17 @@ function LoopPanelTabBar({
               ? tab.taskId === activeTaskTabId && !activeArtifactTabId
               : !activeTaskTabId && !activeArtifactTabId
 
-          const closeTab = tab.artifactTabId ? () => onCloseArtifactTab(tab.artifactTabId!) : tab.taskId ? () => onCloseTaskTab(tab.taskId!) : onClosePane
-          const selectTab = tab.artifactTabId ? () => onSelectArtifactTab(tab.artifactTabId!) : tab.taskId ? () => onSelectTaskTab(tab.taskId!) : onSelectBaseTab
+          const closeTab = tab.artifactTabId
+            ? () => onCloseArtifactTab(tab.artifactTabId!)
+            : tab.taskId
+              ? () => onCloseTaskTab(tab.taskId!)
+              : onClosePane
+
+          const selectTab = tab.artifactTabId
+            ? () => onSelectArtifactTab(tab.artifactTabId!)
+            : tab.taskId
+              ? () => onSelectTaskTab(tab.taskId!)
+              : onSelectBaseTab
 
           return (
             <div
@@ -1949,16 +2157,6 @@ function LoopPanelTabBar({
           )
         })}
       </div>
-      {onClosePane && (
-        <button
-          aria-label="Hide Loop panel"
-          className="mr-1.5 grid size-6 shrink-0 self-center place-items-center rounded-md text-(--ui-text-tertiary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring group-hover/loop-tabs:opacity-100 [-webkit-app-region:no-drag]"
-          onClick={onClosePane}
-          type="button"
-        >
-          <Codicon name="close" size="0.75rem" />
-        </button>
-      )}
     </div>
   )
 }
@@ -1993,11 +2191,12 @@ export function LoopPanel({
   hidden = false,
   onFocusTaskId,
   onHide,
-  onRefresh,
   onSelectTaskId,
+  onAddTaskComment,
   onTaskAction,
   open = false,
   selectedTaskDetail,
+  selectedTaskDetailError,
   selectedTaskId,
   state
 }: LoopPanelProps) {
@@ -2054,13 +2253,16 @@ export function LoopPanel({
 
   const rootOverviewEligible = Boolean(
     rootRow &&
-      (rootRow.children.length > 0 ||
-        rootRow.childCount > 0 ||
-        (rootRowIsAnchored && (rootRow.parents.length > 0 || rootRow.parentCount > 0)) ||
-        normalizedLoopValue(rootRow.status) === 'triage')
+    (rootRow.children.length > 0 ||
+      rootRow.childCount > 0 ||
+      (rootRowIsAnchored && (rootRow.parents.length > 0 || rootRow.parentCount > 0)) ||
+      normalizedLoopValue(rootRow.status) === 'triage')
   )
 
-  const showingRootOverview = Boolean(rootOverviewEligible && rootRow && (!focusedTaskId || focusedTaskId === rootRow.taskId))
+  const showingRootOverview = Boolean(
+    rootOverviewEligible && rootRow && (!focusedTaskId || focusedTaskId === rootRow.taskId)
+  )
+
   const renderedTaskId = activeTaskTabId || focusedTaskId
 
   const rowById = useMemo(() => {
@@ -2091,6 +2293,9 @@ export function LoopPanel({
 
   const selectRelatedTask = useCallback(
     (taskId: string) => {
+      setActiveTaskTabId(null)
+      setActiveArtifactTabId(null)
+
       if (selected && selected.taskId !== taskId) {
         setNavigationStack(stack => [...stack, selected].slice(-8))
       }
@@ -2143,112 +2348,155 @@ export function LoopPanel({
     }
   }, [activeTaskTabId, focusDrawerTask, focusedTaskId, rootRow])
 
-  const openArtifactTab = useCallback((entry: LoopArtifactSourceEntry, row: LoopRow) => {
-    const tabId = entry.id
+  const openArtifactTab = useCallback(
+    (entry: LoopArtifactSourceEntry, row: LoopRow) => {
+      const tabId = entry.id
 
-    const nextTab: LoopPanelArtifactTab = {
-      diff: entry.kind === 'changed-file' ? entry.inlineDiff : undefined,
-      diffSource: entry.kind === 'changed-file' && entry.inlineDiff ? 'inline' : undefined,
-      diffStatus: initialArtifactDiffStatus(entry),
-      entry,
-      id: tabId,
-      rowTaskId: row.taskId,
-      rowTitle: row.title || row.taskId,
-      status: 'loading',
-      view: defaultArtifactTabView(entry)
-    }
-
-    const baseDir = row.workspacePath || artifactSourceBaseDir || undefined
-
-    setArtifactTabs(tabs => {
-      const existingIndex = tabs.findIndex(tab => tab.id === tabId)
-
-      if (existingIndex >= 0) {
-        return tabs.map(tab => tab.id === tabId ? {
-          ...tab,
-          diff: entry.kind === 'changed-file' ? entry.inlineDiff || tab.diff : undefined,
-          diffSource: entry.kind === 'changed-file' && entry.inlineDiff ? 'inline' : tab.diffSource,
-          diffStatus: entry.kind === 'changed-file' && entry.inlineDiff ? 'ready' : tab.diffStatus,
-          entry,
-          rowTaskId: row.taskId,
-          rowTitle: row.title || row.taskId,
-          view: tab.view
-        } : tab)
+      const nextTab: LoopPanelArtifactTab = {
+        diff: entry.kind === 'changed-file' ? entry.inlineDiff : undefined,
+        diffSource: entry.kind === 'changed-file' && entry.inlineDiff ? 'inline' : undefined,
+        diffStatus: initialArtifactDiffStatus(entry),
+        entry,
+        id: tabId,
+        rowTaskId: row.taskId,
+        rowTitle: row.title || row.taskId,
+        status: 'loading',
+        view: defaultArtifactTabView(entry)
       }
 
-      return [...tabs, nextTab]
-    })
-    setActiveArtifactTabId(tabId)
-    setActiveTaskTabId(null)
-    setNavigationStack([])
+      const baseDir = row.workspacePath || artifactSourceBaseDir || undefined
 
-    void normalizeOrLocalPreviewTarget(entry.target, baseDir).then(
-      target => {
-        setArtifactTabs(tabs => tabs.map(tab => tab.id === tabId ? {
-          ...tab,
-          error: target ? undefined : 'Preview unavailable.',
-          status: target ? 'ready' : 'error',
-          target: target || undefined
-        } : tab))
+      setArtifactTabs(tabs => {
+        const existingIndex = tabs.findIndex(tab => tab.id === tabId)
 
-        if (entry.kind !== 'changed-file' || entry.inlineDiff) {
-          return
+        if (existingIndex >= 0) {
+          return tabs.map(tab =>
+            tab.id === tabId
+              ? {
+                  ...tab,
+                  diff: entry.kind === 'changed-file' ? entry.inlineDiff || tab.diff : undefined,
+                  diffSource: entry.kind === 'changed-file' && entry.inlineDiff ? 'inline' : tab.diffSource,
+                  diffStatus: entry.kind === 'changed-file' && entry.inlineDiff ? 'ready' : tab.diffStatus,
+                  entry,
+                  rowTaskId: row.taskId,
+                  rowTitle: row.title || row.taskId,
+                  view: tab.view
+                }
+              : tab
+          )
         }
 
-        const diffPath = artifactDiffPath(entry, target)
+        return [...tabs, nextTab]
+      })
+      setActiveArtifactTabId(tabId)
+      setActiveTaskTabId(null)
+      setNavigationStack([])
 
-        if (!diffPath) {
-          setArtifactTabs(tabs => tabs.map(tab => tab.id === tabId ? {
-            ...tab,
-            diffError: 'Diff unavailable for this target.',
-            diffStatus: 'error'
-          } : tab))
+      void normalizeOrLocalPreviewTarget(entry.target, baseDir).then(
+        target => {
+          setArtifactTabs(tabs =>
+            tabs.map(tab =>
+              tab.id === tabId
+                ? {
+                    ...tab,
+                    error: target ? undefined : 'Preview unavailable.',
+                    status: target ? 'ready' : 'error',
+                    target: target || undefined
+                  }
+                : tab
+            )
+          )
 
-          return
-        }
-
-        void desktopGitDiff(diffPath).then(
-          result => {
-            const diff = (result.diff || '').trim()
-
-            setArtifactTabs(tabs => tabs.map(tab => tab.id === tabId ? {
-              ...tab,
-              diff: diff || undefined,
-              diffError: result.error,
-              diffSource: 'git',
-              diffStatus: result.error ? 'error' : diff ? 'ready' : 'empty',
-              diffTruncated: Boolean(result.truncated)
-            } : tab))
-          },
-          error => {
-            setArtifactTabs(tabs => tabs.map(tab => tab.id === tabId ? {
-              ...tab,
-              diffError: error instanceof Error ? error.message : String(error),
-              diffStatus: 'error'
-            } : tab))
+          if (entry.kind !== 'changed-file' || entry.inlineDiff) {
+            return
           }
-        )
-      },
-      error => {
-        setArtifactTabs(tabs => tabs.map(tab => tab.id === tabId ? {
-          ...tab,
-          error: error instanceof Error ? error.message : String(error),
-          status: 'error'
-        } : tab))
 
-        if (entry.kind === 'changed-file' && !entry.inlineDiff) {
-          setArtifactTabs(tabs => tabs.map(tab => tab.id === tabId ? {
-            ...tab,
-            diffError: 'Diff unavailable while resolving the file preview.',
-            diffStatus: 'error'
-          } : tab))
+          const diffPath = artifactDiffPath(entry, target)
+
+          if (!diffPath) {
+            setArtifactTabs(tabs =>
+              tabs.map(tab =>
+                tab.id === tabId
+                  ? {
+                      ...tab,
+                      diffError: 'Diff unavailable for this target.',
+                      diffStatus: 'error'
+                    }
+                  : tab
+              )
+            )
+
+            return
+          }
+
+          void desktopGitDiff(diffPath).then(
+            result => {
+              const diff = (result.diff || '').trim()
+
+              setArtifactTabs(tabs =>
+                tabs.map(tab =>
+                  tab.id === tabId
+                    ? {
+                        ...tab,
+                        diff: diff || undefined,
+                        diffError: result.error,
+                        diffSource: 'git',
+                        diffStatus: result.error ? 'error' : diff ? 'ready' : 'empty',
+                        diffTruncated: Boolean(result.truncated)
+                      }
+                    : tab
+                )
+              )
+            },
+            error => {
+              setArtifactTabs(tabs =>
+                tabs.map(tab =>
+                  tab.id === tabId
+                    ? {
+                        ...tab,
+                        diffError: error instanceof Error ? error.message : String(error),
+                        diffStatus: 'error'
+                      }
+                    : tab
+                )
+              )
+            }
+          )
+        },
+        error => {
+          setArtifactTabs(tabs =>
+            tabs.map(tab =>
+              tab.id === tabId
+                ? {
+                    ...tab,
+                    error: error instanceof Error ? error.message : String(error),
+                    status: 'error'
+                  }
+                : tab
+            )
+          )
+
+          if (entry.kind === 'changed-file' && !entry.inlineDiff) {
+            setArtifactTabs(tabs =>
+              tabs.map(tab =>
+                tab.id === tabId
+                  ? {
+                      ...tab,
+                      diffError: 'Diff unavailable while resolving the file preview.',
+                      diffStatus: 'error'
+                    }
+                  : tab
+              )
+            )
+          }
         }
-      }
-    )
-  }, [artifactSourceBaseDir])
+      )
+    },
+    [artifactSourceBaseDir]
+  )
 
   const selectArtifactView = useCallback((tabId: string, view: LoopArtifactTabView) => {
-    setArtifactTabs(tabs => tabs.map(tab => tab.id === tabId ? { ...tab, view } : tab))
+    setArtifactTabs(tabs => tabs.map(tab => (tab.id === tabId ? { ...tab, view } : tab)))
   }, [])
 
   const closeTaskTab = useCallback(
@@ -2338,12 +2586,14 @@ export function LoopPanel({
 
   const detailBack = detailBackLabel ? goBack : undefined
   const loopTabTitle = rootRow?.title || selected?.title || 'Loop'
+
   const baseTabLabel =
     activeTaskTabId && rootOverviewEligible
       ? loopTabTitle
       : showingRootOverview
         ? loopTabTitle
         : selected?.title || loopTabTitle
+
   const missingTaskId = activeTaskTabId || focusedTaskId
 
   const startResize = useCallback(
@@ -2457,8 +2707,8 @@ export function LoopPanel({
                   <LoopTaskDetails
                     backLabel={null}
                     detail={selectedTaskDetail}
+                    onAddComment={onAddTaskComment}
                     onOpenArtifactTab={openArtifactTab}
-                    onRefresh={onRefresh}
                     onSelectTaskId={selectRelatedTask}
                     onTaskAction={onTaskAction}
                     row={activeTaskTabRow}
@@ -2490,9 +2740,10 @@ export function LoopPanel({
                 <LoopTaskDetails
                   backLabel={detailBackLabel}
                   detail={selectedTaskDetail}
+                  detailError={selectedTaskDetailError}
+                  onAddComment={onAddTaskComment}
                   onBack={detailBack}
                   onOpenArtifactTab={openArtifactTab}
-                  onRefresh={onRefresh}
                   onSelectTaskId={selectRelatedTask}
                   onTaskAction={onTaskAction}
                   row={selected}

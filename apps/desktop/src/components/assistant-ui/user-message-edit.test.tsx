@@ -8,8 +8,8 @@ import { ExportedMessageRepository } from '@assistant-ui/core/internal'
 // bubbles) is not reproducible in jsdom — see USER_BUBBLE_BASE_CLASS's no-drag
 // carve-out in thread.tsx.
 import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 
@@ -30,6 +30,10 @@ vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
 vi.stubGlobal('cancelAnimationFrame', (id: number) => window.clearTimeout(id))
 
 Element.prototype.scrollTo = function scrollTo() {}
+
+afterEach(() => {
+  cleanup()
+})
 
 function stubOffsetDimension(
   prop: 'offsetHeight' | 'offsetWidth',
@@ -77,6 +81,44 @@ function assistantMessage(): ThreadMessage {
   } as ThreadMessage
 }
 
+function handoffMessage(): ThreadMessage {
+  return {
+    id: 'handoff-user-1',
+    role: 'user',
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify(
+          {
+            handoff_count: 1,
+            instructions: [
+              'Treat visible_cards as transcript artifacts only: title, one-line summary, and Open drawer.'
+            ],
+            kind: 'kanban_loop_handoff_review_batch',
+            review_batch_id: 'loop-review:sess:t_root:123',
+            root_task_id: 't_root',
+            tenant: 'sess',
+            transcript_card_contract: 'handoff-a-minimal',
+            visible_cards: [
+              {
+                action: 'Open drawer',
+                payload_ref: 'loop_handoff:5',
+                summary: 'Worker found a UI issue that needs review.',
+                task_title: 'Foreground handoff smoke loop'
+              }
+            ]
+          },
+          null,
+          2
+        ).replace(/^ +/gm, spaces => '\u00a0'.repeat(spaces.length))
+      }
+    ],
+    attachments: [],
+    createdAt,
+    metadata: { custom: {} }
+  } as ThreadMessage
+}
+
 // Mirrors chat/index.tsx: incremental runtime + messageRepository + onEdit.
 function IncrementalHarness({ onEdit }: { onEdit: () => Promise<void> }) {
   const repository = ExportedMessageRepository.fromArray([userMessage(), assistantMessage()])
@@ -114,6 +156,21 @@ function StockHarness({ onEdit }: { onEdit: () => Promise<void> }) {
   )
 }
 
+function HandoffHarness({ onOpenKanbanTask }: { onOpenKanbanTask?: (taskId: string) => void }) {
+  const runtime = useExternalStoreRuntime<ThreadMessage>({
+    messages: [handoffMessage()],
+    isRunning: false,
+    onNew: async () => {},
+    onEdit: async () => {}
+  })
+
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <Thread onOpenKanbanTask={onOpenKanbanTask} />
+    </AssistantRuntimeProvider>
+  )
+}
+
 describe('click-to-edit user message', () => {
   it('opens the edit composer with the incremental runtime', async () => {
     const { container } = render(<IncrementalHarness onEdit={async () => {}} />)
@@ -137,5 +194,28 @@ describe('click-to-edit user message', () => {
     await waitFor(() => {
       expect(container.querySelector('[data-slot="aui_edit-composer-root"]')).toBeTruthy()
     })
+  })
+
+  it('renders foreground handoff payloads as non-editable review cards', async () => {
+    render(<HandoffHarness />)
+
+    const card = await screen.findByTestId('loop-handoff-review-batch')
+
+    expect(card.textContent).toContain('Loop handoff review')
+    expect(card.textContent).toContain('Foreground handoff smoke loop')
+    expect(card.textContent).toContain('Worker found a UI issue that needs review.')
+    expect(card.textContent).toContain('loop_handoff:5')
+    expect(screen.queryByRole('button', { name: 'Edit message' })).toBeNull()
+    expect(screen.queryByText(/"kind"\s*:\s*"kanban_loop_handoff_review_batch"/)).toBeNull()
+  })
+
+  it('opens the Loop drawer for a foreground handoff card', async () => {
+    const onOpenKanbanTask = vi.fn()
+
+    render(<HandoffHarness onOpenKanbanTask={onOpenKanbanTask} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open drawer for Foreground handoff smoke loop' }))
+
+    expect(onOpenKanbanTask).toHaveBeenCalledWith('t_root')
   })
 })
