@@ -2801,6 +2801,34 @@ def _loop_root_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     return root_task_id or None
 
 
+def _lineage_session_id(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    root_task_id: Optional[str] = None,
+) -> Optional[str]:
+    """Best-effort foreground session id from a task, root, or ancestors."""
+    candidates = [str(task_id or "").strip()]
+    root = str(root_task_id or "").strip()
+    if root and root not in candidates:
+        candidates.append(root)
+    candidates.extend(pid for pid in parent_ids(conn, task_id) if pid not in candidates)
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            row = conn.execute(
+                "SELECT session_id FROM tasks WHERE id = ?",
+                (candidate,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        session_id = row["session_id"] if row and "session_id" in row.keys() else None
+        if isinstance(session_id, str) and session_id.strip():
+            return session_id.strip()
+    return None
+
+
 def _is_loop_root_handoff_source(
     conn: sqlite3.Connection,
     task_id: str,
@@ -2976,6 +3004,13 @@ def _record_loop_handoff(
         worker_session_id = None
     else:
         worker_session_id = worker_session_id.strip()
+    originating_session_id = md.get("originating_session_id")
+    if not isinstance(originating_session_id, str) or not originating_session_id.strip():
+        originating_session_id = (
+            task_row["session_id"] if "session_id" in task_row.keys() else None
+        )
+    else:
+        originating_session_id = originating_session_id.strip()
     parent_ids_snapshot = parent_ids(conn, task_id)
     child_ids_snapshot = child_ids(conn, task_id)
     key = _loop_handoff_idempotency_key(
@@ -3007,7 +3042,7 @@ def _record_loop_handoff(
             handoff_kind,
             task_row["assignee"],
             worker_session_id,
-            task_row["session_id"] if "session_id" in task_row.keys() else None,
+            originating_session_id,
             task_row["title"],
             task_row["body"],
             summary,
@@ -6069,7 +6104,7 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, session_id "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -6078,6 +6113,17 @@ def decompose_triage_task(
         if root_row["status"] != "triage":
             return None
         tenant = root_row["tenant"]
+        root_loop_task_id = _loop_root_for_task(conn, task_id)
+        child_created_by = (
+            f"loop:{root_loop_task_id}"
+            if root_loop_task_id
+            else (author or "decomposer")
+        )
+        child_session_id = None
+        if root_loop_task_id:
+            child_session_id = _lineage_session_id(conn, root_loop_task_id, root_task_id=root_loop_task_id)
+            if child_session_id is None:
+                child_session_id = _lineage_session_id(conn, task_id, root_task_id=root_loop_task_id)
         # Children inherit the root's workspace by default so a fan-out
         # of a code-gen task lands in the parent's project dir/worktree
         # rather than throwaway scratch tmp dirs. A child dict can still
@@ -6109,8 +6155,8 @@ def decompose_triage_task(
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
-                " workspace_path, tenant, created_at, created_by) "
-                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+                " workspace_path, tenant, created_at, created_by, session_id) "
+                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -6120,12 +6166,16 @@ def decompose_triage_task(
                     child_ws_path,
                     tenant,
                     now,
-                    (author or "decomposer"),
+                    child_created_by,
+                    child_session_id,
                 ),
             )
+            created_payload = {"by": author or "decomposer", "from_decompose_of": task_id}
+            if root_loop_task_id:
+                created_payload["loop_root_task_id"] = root_loop_task_id
             _append_event(
                 conn, new_id, "created",
-                {"by": author or "decomposer", "from_decompose_of": task_id},
+                created_payload,
             )
             child_ids.append(new_id)
 
@@ -7227,6 +7277,80 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     return crashed
 
 
+def _loop_child_failure_handoff_exists(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    root_task_id: str,
+    handoff_kind: str,
+) -> bool:
+    """Return True when a non-terminal child-failure handoff already exists."""
+    terminal_placeholders = ",".join("?" for _ in _LOOP_HANDOFF_TERMINAL_STATES)
+    row = conn.execute(
+        "SELECT 1 FROM loop_handoffs "
+        "WHERE root_task_id = ? AND task_id = ? AND handoff_kind = ? "
+        f"AND state NOT IN ({terminal_placeholders}) LIMIT 1",
+        (root_task_id, task_id, handoff_kind, *_LOOP_HANDOFF_TERMINAL_STATES),
+    ).fetchone()
+    return row is not None
+
+
+def _append_loop_child_gave_up_handoff(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    root_task_id: str,
+    run_id: Optional[int],
+    source_event_id: Optional[int],
+    payload: dict[str, Any],
+) -> None:
+    """Surface a Loop child circuit-breaker failure to the foreground lane."""
+    handoff_kind = "worker_gave_up"
+    if _loop_child_failure_handoff_exists(
+        conn,
+        task_id=task_id,
+        root_task_id=root_task_id,
+        handoff_kind=handoff_kind,
+    ):
+        return
+
+    task_row = conn.execute(
+        "SELECT tenant, session_id FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    tenant = task_row["tenant"] if task_row else None
+    child_session_id = (
+        task_row["session_id"]
+        if task_row and "session_id" in task_row.keys()
+        else None
+    )
+    originating_session_id = _lineage_session_id(conn, task_id, root_task_id=root_task_id)
+    trigger_outcome = str(payload.get("trigger_outcome") or "failure")
+    metadata = {
+        "failed_task_id": task_id,
+        "loop_root_task_id": root_task_id,
+        "board": get_current_board(),
+        "tenant": tenant,
+        "originating_session_id": originating_session_id,
+        "child_session_id": child_session_id,
+        "latest_failure": dict(payload),
+    }
+    reason = (
+        f"Loop child task gave up after {trigger_outcome} "
+        "before completing or blocking."
+    )
+    _append_loop_foreground_handoff_event(
+        conn,
+        task_id,
+        root_task_id=root_task_id,
+        handoff_kind=handoff_kind,
+        run_id=run_id,
+        source_event_id=source_event_id,
+        reason=reason,
+        metadata=metadata,
+    )
+
+
 def _record_task_failure(
     conn: sqlite3.Connection,
     task_id: str,
@@ -7341,9 +7465,23 @@ def _record_task_failure(
             }
             if event_payload_extra:
                 payload.update(event_payload_extra)
-            _append_event(
+            gave_up_event_id = _append_event(
                 conn, task_id, "gave_up", payload, run_id=run_id,
             )
+            loop_root_task_id = _loop_root_for_task(conn, task_id)
+            if loop_root_task_id and not _is_loop_root_handoff_source(
+                conn,
+                task_id,
+                root_task_id=loop_root_task_id,
+            ):
+                _append_loop_child_gave_up_handoff(
+                    conn,
+                    task_id,
+                    root_task_id=loop_root_task_id,
+                    run_id=run_id,
+                    source_event_id=gave_up_event_id,
+                    payload=payload,
+                )
             blocked = True
         else:
             # Below threshold.

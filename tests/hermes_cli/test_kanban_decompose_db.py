@@ -168,6 +168,118 @@ def test_decompose_records_audit_comment_and_event(kanban_home):
     assert any(ev.kind == "decomposed" for ev in events)
 
 
+def test_decompose_loop_root_children_keep_root_provenance_and_session(kanban_home):
+    """Loop fan-out children remain traceable to the real root/session."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Loop root",
+            assignee="foreground",
+            tenant="loop-tenant",
+            triage=True,
+            session_id="logical-session-123",
+        )
+        conn.execute("UPDATE tasks SET created_by = ? WHERE id = ?", (f"loop:{tid}", tid))
+        child_ids = kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="orchestrator",
+            children=[{"title": "implementation", "assignee": "engineer"}],
+            author="foreground",
+        )
+    assert child_ids is not None
+
+    with kb.connect() as conn:
+        child = kb.get_task(conn, child_ids[0])
+        events = kb.list_events(conn, child_ids[0])
+        assert child is not None
+        assert child.created_by == f"loop:{tid}"
+        assert child.tenant == "loop-tenant"
+        assert child.session_id == "logical-session-123"
+        assert kb._loop_root_for_task(conn, child_ids[0]) == tid
+
+    created_payloads = [ev.payload for ev in events if ev.kind == "created"]
+    assert created_payloads == [
+        {"by": "foreground", "from_decompose_of": tid, "loop_root_task_id": tid}
+    ]
+
+
+def test_decompose_loop_child_triage_children_inherit_real_root_session(kanban_home):
+    """Nested Loop triage decompositions keep the real root logical session."""
+    with kb.connect() as conn:
+        root_id = kb.create_task(
+            conn,
+            title="Loop root",
+            assignee="foreground",
+            tenant="loop-tenant",
+            session_id="session-root",
+        )
+        conn.execute(
+            "UPDATE tasks SET created_by = ? WHERE id = ?",
+            (f"loop:{root_id}", root_id),
+        )
+        triage_id = kb.create_task(
+            conn,
+            title="triage under root",
+            assignee="planner",
+            tenant="loop-tenant",
+            triage=True,
+            parents=[root_id],
+            session_id="triage-session-should-not-win",
+        )
+        conn.execute(
+            "UPDATE tasks SET created_by = ? WHERE id = ?",
+            (f"loop:{root_id}", triage_id),
+        )
+        child_ids = kb.decompose_triage_task(
+            conn,
+            triage_id,
+            root_assignee="planner",
+            children=[{"title": "child", "assignee": "eng"}],
+            author="planner",
+        )
+    assert child_ids is not None
+
+    with kb.connect() as conn:
+        child = kb.get_task(conn, child_ids[0])
+        events = kb.list_events(conn, child_ids[0])
+        assert child is not None
+        assert child.created_by == f"loop:{root_id}"
+        assert child.session_id == "session-root"
+        assert kb._loop_root_for_task(conn, child_ids[0]) == root_id
+
+    created_payloads = [ev.payload for ev in events if ev.kind == "created"]
+    assert created_payloads == [
+        {"by": "planner", "from_decompose_of": triage_id, "loop_root_task_id": root_id}
+    ]
+
+
+def test_decompose_non_loop_children_keep_author_provenance(kanban_home):
+    """Ordinary decomposition remains compatible with existing author metadata."""
+    with kb.connect() as conn:
+        tid = _create_triage(conn, tenant="plain-tenant")
+        child_ids = kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="orch",
+            children=[{"title": "task A", "assignee": "researcher"}],
+            author="alice",
+        )
+    assert child_ids is not None
+
+    with kb.connect() as conn:
+        child = kb.get_task(conn, child_ids[0])
+        events = kb.list_events(conn, child_ids[0])
+        assert child is not None
+        assert child.created_by == "alice"
+        assert child.tenant == "plain-tenant"
+        assert child.session_id is None
+        assert kb._loop_root_for_task(conn, child_ids[0]) is None
+
+    created_payloads = [ev.payload for ev in events if ev.kind == "created"]
+    assert created_payloads == [{"by": "alice", "from_decompose_of": tid}]
+
+
 def test_decompose_children_inherit_dir_workspace(kanban_home):
     """Fan-out children inherit the root's dir workspace, not scratch."""
     proj = "/home/teknium/myproject"
