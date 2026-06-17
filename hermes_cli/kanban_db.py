@@ -2834,13 +2834,15 @@ def _is_loop_root_handoff_source(
     task_id: str,
     root_task_id: Optional[str] = None,
 ) -> bool:
-    """Whether ``task_id`` is a Loop root/final-closeout handoff source.
+    """Whether ``task_id`` is the Loop root/final-closeout handoff source.
 
-    Routine Loop children have dependency parents and hand off only through
-    their run rows/drawer. Root closeout rows, however, can also be modeled as
-    the Loop identity itself (``created_by='loop:<task_id>'``) while depending
-    on implementation/QA/adoption parents. Treat that self-root identity as a
-    final/root handoff source instead of using parent absence alone.
+    Loop children can be parent-free when they are the first runnable nodes in a
+    decomposed graph, so parent absence alone is not a reliable root signal. A
+    task is the root/final closeout source when its Loop identity points at
+    itself (``created_by='loop:<task_id>'``). Legacy single-node Loop roots used
+    a synthetic root id with no separate root task row; keep that shape as a
+    root source only when the task has no dependency parents and the root id is
+    not another canonical task.
     """
     task_id = str(task_id or "").strip()
     if not task_id:
@@ -2848,7 +2850,44 @@ def _is_loop_root_handoff_source(
     root_task_id = str(root_task_id or _loop_root_for_task(conn, task_id) or "").strip()
     if not root_task_id:
         return False
-    return root_task_id == task_id or not parent_ids(conn, task_id)
+    if root_task_id == task_id:
+        return True
+    if parent_ids(conn, task_id):
+        return False
+    root_row = conn.execute("SELECT 1 FROM tasks WHERE id = ?", (root_task_id,)).fetchone()
+    return root_row is None
+
+
+def _is_explicit_loop_foreground_boundary_reason(reason: Optional[str]) -> bool:
+    """Return True for block reasons that deliberately wake foreground/human review."""
+    normalized = str(reason or "").strip().lower()
+    return normalized.startswith(
+        (
+            "review-required:",
+            "foreground-required:",
+            "foreground-handoff:",
+            "human-required:",
+            "human-review:",
+            "needs-user:",
+        )
+    )
+
+
+def _should_emit_loop_foreground_handoff(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    root_task_id: Optional[str] = None,
+    handoff_kind: str,
+    reason: Optional[str] = None,
+) -> bool:
+    """Central Loop foreground wakeup predicate for completion/block paths."""
+    root_task_id = str(root_task_id or _loop_root_for_task(conn, task_id) or "").strip()
+    if not root_task_id:
+        return False
+    if _is_loop_root_handoff_source(conn, task_id, root_task_id):
+        return True
+    return handoff_kind == "worker_blocked" and _is_explicit_loop_foreground_boundary_reason(reason)
 
 
 _LOOP_HANDOFF_ACTIVE_STATES = {"assigned", "reviewing"}
@@ -5290,7 +5329,12 @@ def complete_task(
         }
         if verified_cards:
             completed_payload["verified_cards"] = verified_cards
-        should_emit_loop_handoff = _is_loop_root_handoff_source(conn, task_id, loop_root_task_id)
+        should_emit_loop_handoff = _should_emit_loop_foreground_handoff(
+            conn,
+            task_id,
+            root_task_id=loop_root_task_id,
+            handoff_kind="worker_completed",
+        )
         # Carry artifact paths in the event payload so the gateway
         # notifier can upload them as native attachments alongside the
         # completion message. Workers pass these via
@@ -5780,11 +5824,18 @@ def block_task(
                 summary=reason,
             )
         blocked_event_id = _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
-        if loop_root_task_id:
+        should_emit_loop_handoff = _should_emit_loop_foreground_handoff(
+            conn,
+            task_id,
+            root_task_id=loop_root_task_id,
+            handoff_kind="worker_blocked",
+            reason=reason,
+        )
+        if should_emit_loop_handoff:
             _append_loop_foreground_handoff_event(
                 conn,
                 task_id,
-                root_task_id=loop_root_task_id,
+                root_task_id=loop_root_task_id or "",
                 handoff_kind="worker_blocked",
                 run_id=run_id,
                 source_event_id=blocked_event_id,

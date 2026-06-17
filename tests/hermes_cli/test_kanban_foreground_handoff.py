@@ -54,6 +54,36 @@ def _loop_node(
     return task_id
 
 
+def _loop_root_node(
+    conn,
+    *,
+    title: str = "loop root node",
+    tenant: str | None = None,
+    session_id: str | None = None,
+) -> str:
+    task_id = _loop_node(
+        conn,
+        root_task_id="pending-root",
+        title=title,
+        tenant=tenant,
+        session_id=session_id,
+    )
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET created_by = ? WHERE id = ?", (f"loop:{task_id}", task_id))
+        kb._append_event(
+            conn,
+            task_id,
+            "loop_node_state",
+            {
+                "root_task_id": task_id,
+                "client_id": title.replace(" ", "-"),
+                "active": True,
+                "frontier": True,
+            },
+        )
+    return task_id
+
+
 def _handoff_events(conn, task_id: str):
     return [event for event in kb.list_events(conn, task_id) if event.kind == "loop_foreground_handoff"]
 
@@ -96,9 +126,9 @@ def _parented_loop_closeout(
     return closeout_id, (parent_a, parent_b)
 
 
-def test_completing_loop_node_emits_compact_foreground_handoff_event(kanban_home):
+def test_completing_loop_root_node_emits_compact_foreground_handoff_event(kanban_home):
     with kb.connect() as conn:
-        task_id = _loop_node(conn)
+        task_id = _loop_root_node(conn)
         claimed = kb.claim_task(conn, task_id, claimer="worker-host:123")
         assert claimed is not None
 
@@ -114,7 +144,7 @@ def test_completing_loop_node_emits_compact_foreground_handoff_event(kanban_home
     assert len(handoffs) == 1
     payload = handoffs[0].payload
     assert payload == {
-        "root_task_id": "t_looproot",
+        "root_task_id": task_id,
         "handoff_kind": "worker_completed",
         "attention": "needs-orchestrator",
         "verification_state": "needs-orchestrator",
@@ -150,6 +180,21 @@ def test_routine_child_completion_records_run_but_no_foreground_handoff(kanban_h
     assert child_handoffs == []
     assert runs[-1].summary == "routine child evidence is stored on the run"
     assert runs[-1].metadata["changed_files"] == ["worker.py"]
+
+
+def test_parent_free_loop_child_completion_records_run_but_no_foreground_handoff(kanban_home):
+    with kb.connect() as conn:
+        root_id = _loop_root_node(conn, title="loop root")
+        child_id = _loop_node(conn, root_task_id=root_id, title="first decomposed child")
+        assert kb.claim_task(conn, child_id, claimer="worker-host:child") is not None
+
+        assert kb.complete_task(conn, child_id, summary="parent-free child finished")
+
+        assert _handoff_events(conn, child_id) == []
+        assert kb.list_loop_handoffs(conn, task_id=child_id) == []
+        runs = kb.list_runs(conn, child_id)
+
+    assert runs[-1].summary == "parent-free child finished"
 
 
 def test_loop_child_gave_up_creates_one_foreground_attention_handoff(kanban_home, monkeypatch):
@@ -382,9 +427,9 @@ def test_decomposed_loop_children_inherit_root_routing_for_failure_handoff(kanba
     assert created_event.payload["loop_root_task_id"] == "t_looproot"
 
 
-def test_blocking_loop_node_emits_pending_foreground_handoff_reason(kanban_home):
+def test_blocking_loop_root_node_emits_pending_foreground_handoff_reason(kanban_home):
     with kb.connect() as conn:
-        task_id = _loop_node(conn, title="loop blocker")
+        task_id = _loop_root_node(conn, title="loop blocker")
         claimed = kb.claim_task(conn, task_id, claimer="worker-host:456")
         assert claimed is not None
 
@@ -394,13 +439,49 @@ def test_blocking_loop_node_emits_pending_foreground_handoff_reason(kanban_home)
 
     assert len(handoffs) == 1
     assert handoffs[0].payload == {
-        "root_task_id": "t_looproot",
+        "root_task_id": task_id,
         "handoff_kind": "worker_blocked",
         "attention": "needs-orchestrator",
         "verification_state": "needs-orchestrator",
         "run_id": handoffs[0].run_id,
         "reason": "needs product decision",
     }
+
+
+def test_routine_loop_child_block_records_run_but_no_foreground_handoff(kanban_home):
+    with kb.connect() as conn:
+        root_id = _loop_root_node(conn, title="loop root")
+        child_id = _loop_node(conn, root_task_id=root_id, title="routine blocker")
+        assert kb.claim_task(conn, child_id, claimer="worker-host:child") is not None
+
+        assert kb.block_task(conn, child_id, reason="blocked on unit test failure")
+
+        assert _handoff_events(conn, child_id) == []
+        assert kb.list_loop_handoffs(conn, task_id=child_id) == []
+        runs = kb.list_runs(conn, child_id)
+
+    assert runs[-1].summary == "blocked on unit test failure"
+
+
+def test_review_required_loop_child_block_emits_foreground_handoff(kanban_home):
+    with kb.connect() as conn:
+        root_id = _loop_root_node(conn, title="loop root")
+        child_id = _loop_node(conn, root_task_id=root_id, title="review blocker")
+        assert kb.claim_task(conn, child_id, claimer="worker-host:child") is not None
+
+        assert kb.block_task(conn, child_id, reason="review-required: verify branch before merge")
+
+        handoffs = _handoff_events(conn, child_id)
+        durable_handoffs = kb.list_loop_handoffs(conn, task_id=child_id)
+
+    assert len(handoffs) == 1
+    payload = handoffs[0].payload
+    assert payload is not None
+    assert payload["root_task_id"] == root_id
+    assert payload["handoff_kind"] == "worker_blocked"
+    assert payload["reason"] == "review-required: verify branch before merge"
+    assert len(durable_handoffs) == 1
+    assert durable_handoffs[0]["reason"] == "review-required: verify branch before merge"
 
 
 def test_non_loop_completion_and_block_do_not_emit_foreground_handoff_events(kanban_home):
