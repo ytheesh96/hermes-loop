@@ -2,7 +2,6 @@ import { type ReactNode } from 'react'
 
 import { Codicon } from '@/components/ui/codicon'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
-import { AlertCircle } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 
 export type StatusIndicatorKind = 'active' | 'attention' | 'done' | 'failed' | 'pending' | 'triage' | 'unknown'
@@ -35,12 +34,12 @@ function statusGlyph(kind: StatusIndicatorKind, ariaLabel?: string): ReactNode {
     case 'done':
       return <Codicon aria-hidden="true" className="text-emerald-500/80" name="pass-filled" size="0.8rem" />
     case 'failed':
-      return <Codicon aria-hidden="true" className="size-3.5 text-destructive/80" name="circle-slash" />
+      return <Codicon aria-hidden="true" className="text-destructive/70" name="circle-slash" size="0.8rem" />
     case 'attention':
-      return <AlertCircle aria-hidden="true" className="size-3.5 text-amber-500/85" />
+      return <Codicon aria-hidden="true" className="text-amber-500/80" name="warning" size="0.8rem" />
     case 'unknown':
     default:
-      return <Codicon aria-hidden="true" className="size-3.5 text-muted-foreground/40" name="question" />
+      return <Codicon aria-hidden="true" className="text-muted-foreground/40" name="question" size="0.8rem" />
   }
 }
 

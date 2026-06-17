@@ -61,7 +61,7 @@ describe('StatusItemRow worker visuals', () => {
       </I18nProvider>
     )
 
-    expect(container.querySelector('.tabler-icon-alert-circle')).toBeTruthy()
+    expect(container.querySelector('.codicon-warning')).toBeTruthy()
     expect(screen.getByText('Review required child').className).not.toContain('text-destructive')
 
     rerender(
