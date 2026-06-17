@@ -2869,8 +2869,40 @@ def _is_explicit_loop_foreground_boundary_reason(reason: Optional[str]) -> bool:
             "human-required:",
             "human-review:",
             "needs-user:",
+            "product-decision:",
+            "safety-boundary:",
         )
     )
+
+
+_LOOP_FOREGROUND_HANDOFF_METADATA_KINDS = {
+    "needs_user",
+    "review_required",
+    "safety_boundary",
+    "product_decision",
+}
+
+
+def _is_explicit_loop_foreground_boundary_metadata(
+    metadata: Optional[dict[str, Any]],
+) -> bool:
+    """Return True when metadata explicitly requests a foreground handoff.
+
+    The flag alone is intentionally insufficient: routine worker metadata is
+    often rich and arbitrary, so foreground wakeups require both an explicit
+    opt-in and a typed boundary/escalation kind.
+    """
+    if not isinstance(metadata, dict):
+        return False
+    if metadata.get("foreground_handoff") is not True:
+        return False
+    for key in ("handoff_kind", "escalation_kind"):
+        raw_kind = metadata.get(key)
+        if isinstance(raw_kind, str):
+            normalized = raw_kind.strip().lower().replace("-", "_")
+            if normalized in _LOOP_FOREGROUND_HANDOFF_METADATA_KINDS:
+                return True
+    return False
 
 
 def _should_emit_loop_foreground_handoff(
@@ -2880,6 +2912,7 @@ def _should_emit_loop_foreground_handoff(
     root_task_id: Optional[str] = None,
     handoff_kind: str,
     reason: Optional[str] = None,
+    metadata: Optional[dict[str, Any]] = None,
 ) -> bool:
     """Central Loop foreground wakeup predicate for completion/block paths."""
     root_task_id = str(root_task_id or _loop_root_for_task(conn, task_id) or "").strip()
@@ -2887,7 +2920,10 @@ def _should_emit_loop_foreground_handoff(
         return False
     if _is_loop_root_handoff_source(conn, task_id, root_task_id):
         return True
-    return handoff_kind == "worker_blocked" and _is_explicit_loop_foreground_boundary_reason(reason)
+    return handoff_kind == "worker_blocked" and (
+        _is_explicit_loop_foreground_boundary_reason(reason)
+        or _is_explicit_loop_foreground_boundary_metadata(metadata)
+    )
 
 
 _LOOP_HANDOFF_ACTIVE_STATES = {"assigned", "reviewing"}
@@ -5776,6 +5812,8 @@ def block_task(
     task_id: str,
     *,
     reason: Optional[str] = None,
+    summary: Optional[str] = None,
+    metadata: Optional[dict] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
     """Transition ``running -> blocked``."""
@@ -5813,23 +5851,31 @@ def block_task(
         run_id = _end_run(
             conn, task_id,
             outcome="blocked", status="blocked",
-            summary=reason,
+            summary=summary if summary is not None else reason,
+            metadata=metadata,
         )
         # Synthesize a run when blocking a never-claimed task so the
-        # reason is preserved in attempt history.
-        if run_id is None and reason:
+        # structured handoff fields are preserved in attempt history.
+        if run_id is None and (summary or metadata or reason):
             run_id = _synthesize_ended_run(
                 conn, task_id,
                 outcome="blocked",
-                summary=reason,
+                summary=summary if summary is not None else reason,
+                metadata=metadata,
             )
-        blocked_event_id = _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
+        blocked_payload: dict[str, Any] = {"reason": reason}
+        ev_summary = (summary if summary is not None else "") or ""
+        ev_summary = ev_summary.strip().splitlines()[0][:400] if ev_summary else ""
+        if ev_summary:
+            blocked_payload["summary"] = ev_summary
+        blocked_event_id = _append_event(conn, task_id, "blocked", blocked_payload, run_id=run_id)
         should_emit_loop_handoff = _should_emit_loop_foreground_handoff(
             conn,
             task_id,
             root_task_id=loop_root_task_id,
             handoff_kind="worker_blocked",
             reason=reason,
+            metadata=metadata,
         )
         if should_emit_loop_handoff:
             _append_loop_foreground_handoff_event(
@@ -5839,7 +5885,9 @@ def block_task(
                 handoff_kind="worker_blocked",
                 run_id=run_id,
                 source_event_id=blocked_event_id,
+                summary=summary,
                 reason=reason,
+                metadata=metadata,
             )
         return True
 

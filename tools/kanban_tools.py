@@ -608,6 +608,13 @@ def _handle_block(args: dict, **kw) -> str:
     reason = args.get("reason")
     if not reason or not str(reason).strip():
         return tool_error("reason is required — explain what input you need")
+    summary = args.get("summary")
+    metadata = args.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return tool_error(
+            f"metadata must be an object/dict, got {type(metadata).__name__}"
+        )
+    metadata = _stamp_worker_session_metadata(tid, metadata)
     board = args.get("board")
     try:
         kb, conn = _connect(board=board)
@@ -615,6 +622,8 @@ def _handle_block(args: dict, **kw) -> str:
             ok = kb.block_task(
                 conn, tid,
                 reason=reason,
+                summary=summary,
+                metadata=metadata,
                 expected_run_id=_worker_run_id(tid),
             )
             if not ok:
@@ -1091,6 +1100,24 @@ KANBAN_BLOCK_SCHEMA = {
                     "What you need answered, in one or two sentences. "
                     "Don't paste the whole conversation; the human has "
                     "the board and can ask follow-ups via comments."
+                ),
+            },
+            "summary": {
+                "type": "string",
+                "description": (
+                    "Optional structured handoff summary for durable Loop "
+                    "handoffs. For ordinary blocks, omit this and put deeper "
+                    "context in a kanban_comment."
+                ),
+            },
+            "metadata": {
+                "type": "object",
+                "description": (
+                    "Optional structured facts for the blocked handoff/run. "
+                    "Does not wake the foreground agent unless paired with "
+                    "foreground_handoff=true and an allowed handoff_kind or "
+                    "escalation_kind, or unless the reason uses a legacy "
+                    "foreground boundary prefix."
                 ),
             },
             "board": _board_schema_prop(),

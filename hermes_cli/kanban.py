@@ -554,6 +554,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_block.add_argument("reason", nargs="*", help="Reason (also appended as a comment)")
     p_block.add_argument("--ids", nargs="+", default=None,
                          help="Additional task ids to block with the same reason (bulk mode)")
+    p_block.add_argument("--summary", default=None,
+                         help="Structured blocked-handoff summary for downstream Loop audit rows.")
+    p_block.add_argument("--metadata", default=None,
+                         help='JSON dict of structured facts for the blocked handoff/run.')
 
     p_schedule = sub.add_parser("schedule", help="Park one or more tasks in Scheduled (waiting on time, not human input)")
     p_schedule.add_argument("task_id")
@@ -1938,8 +1942,27 @@ def _cmd_edit(args: argparse.Namespace) -> int:
 
 def _cmd_block(args: argparse.Namespace) -> int:
     reason = " ".join(args.reason).strip() if args.reason else None
+    summary = getattr(args, "summary", None)
+    raw_meta = getattr(args, "metadata", None)
     author = _profile_author()
     ids = [args.task_id] + list(getattr(args, "ids", None) or [])
+    if len(ids) > 1 and (summary or raw_meta):
+        print(
+            "kanban: --summary / --metadata are per-task and can't be used "
+            "with multiple ids (would apply the same blocked handoff to every task). "
+            "Block tasks one at a time, or drop the flags for the bulk block.",
+            file=sys.stderr,
+        )
+        return 2
+    metadata = None
+    if raw_meta:
+        try:
+            metadata = json.loads(raw_meta)
+            if not isinstance(metadata, dict):
+                raise ValueError("must be a JSON object")
+        except (ValueError, json.JSONDecodeError) as exc:
+            print(f"kanban: --metadata: {exc}", file=sys.stderr)
+            return 2
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
@@ -1949,6 +1972,8 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 conn,
                 tid,
                 reason=reason,
+                summary=summary,
+                metadata=metadata,
                 expected_run_id=_worker_run_id_for(tid),
             ):
                 failed.append(tid)

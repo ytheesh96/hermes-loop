@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -482,6 +483,105 @@ def test_review_required_loop_child_block_emits_foreground_handoff(kanban_home):
     assert payload["reason"] == "review-required: verify branch before merge"
     assert len(durable_handoffs) == 1
     assert durable_handoffs[0]["reason"] == "review-required: verify branch before merge"
+
+
+def test_structured_loop_child_block_metadata_emits_and_persists_handoff(kanban_home):
+    with kb.connect() as conn:
+        root_id = _loop_root_node(conn, title="loop root")
+        child_id = _loop_node(conn, root_task_id=root_id, title="structured blocker")
+        assert kb.claim_task(conn, child_id, claimer="worker-host:child") is not None
+
+        assert kb.block_task(
+            conn,
+            child_id,
+            reason="blocked pending user choice",
+            summary="choose launch region before continuing",
+            metadata={
+                "foreground_handoff": True,
+                "handoff_kind": "needs_user",
+                "changed_files": ["launch.py"],
+                "artifacts": ["/tmp/launch-plan.md"],
+                "worker_session_id": "worker-session-42",
+            },
+        )
+
+        handoffs = _handoff_events(conn, child_id)
+        durable_handoffs = kb.list_loop_handoffs(conn, task_id=child_id)
+        raw_handoff = conn.execute(
+            """
+            SELECT summary, reason, worker_metadata_json, artifacts_json, changed_files_json
+              FROM loop_handoffs
+             WHERE task_id = ?
+            """,
+            (child_id,),
+        ).fetchone()
+        runs = kb.list_runs(conn, child_id)
+
+    assert len(handoffs) == 1
+    payload = handoffs[0].payload
+    assert payload is not None
+    assert payload["root_task_id"] == root_id
+    assert payload["handoff_kind"] == "worker_blocked"
+    assert payload["summary"] == "choose launch region before continuing"
+    assert payload["reason"] == "blocked pending user choice"
+    assert payload["worker_session_id"] == "worker-session-42"
+    assert payload["artifacts"] == ["/tmp/launch-plan.md"]
+    assert len(durable_handoffs) == 1
+    handoff = durable_handoffs[0]
+    assert handoff["summary"] == "choose launch region before continuing"
+    assert handoff["reason"] == "blocked pending user choice"
+    assert handoff["worker_metadata"] is not None
+    assert handoff["worker_metadata"]["foreground_handoff"] is True
+    assert handoff["artifacts"] == ["/tmp/launch-plan.md"]
+    assert handoff["changed_files"] == ["launch.py"]
+    assert raw_handoff is not None
+    assert raw_handoff["summary"] == "choose launch region before continuing"
+    assert raw_handoff["reason"] == "blocked pending user choice"
+    assert json.loads(raw_handoff["worker_metadata_json"])["handoff_kind"] == "needs_user"
+    assert json.loads(raw_handoff["artifacts_json"]) == ["/tmp/launch-plan.md"]
+    assert json.loads(raw_handoff["changed_files_json"]) == ["launch.py"]
+    assert runs[-1].summary == "choose launch region before continuing"
+    assert runs[-1].metadata is not None
+    assert runs[-1].metadata["handoff_kind"] == "needs_user"
+
+
+def test_loop_child_block_with_arbitrary_metadata_does_not_emit_handoff(kanban_home):
+    with kb.connect() as conn:
+        root_id = _loop_root_node(conn, title="loop root")
+        child_id = _loop_node(conn, root_task_id=root_id, title="ordinary structured blocker")
+        assert kb.claim_task(conn, child_id, claimer="worker-host:child") is not None
+
+        assert kb.block_task(
+            conn,
+            child_id,
+            reason="blocked on flaky unit test",
+            summary="unit test needs local diagnosis",
+            metadata={"foreground_handoff": True, "handoff_kind": "routine_note"},
+        )
+
+        assert _handoff_events(conn, child_id) == []
+        assert kb.list_loop_handoffs(conn, task_id=child_id) == []
+        runs = kb.list_runs(conn, child_id)
+
+    assert runs[-1].summary == "unit test needs local diagnosis"
+    assert runs[-1].metadata is not None
+    assert runs[-1].metadata["handoff_kind"] == "routine_note"
+
+
+def test_product_decision_prefix_loop_child_block_emits_foreground_handoff(kanban_home):
+    with kb.connect() as conn:
+        root_id = _loop_root_node(conn, title="loop root")
+        child_id = _loop_node(conn, root_task_id=root_id, title="product blocker")
+        assert kb.claim_task(conn, child_id, claimer="worker-host:child") is not None
+
+        assert kb.block_task(conn, child_id, reason="product-decision: pick copy")
+        handoffs = _handoff_events(conn, child_id)
+
+    assert len(handoffs) == 1
+    payload = handoffs[0].payload
+    assert payload is not None
+    assert payload["root_task_id"] == root_id
+    assert payload["reason"] == "product-decision: pick copy"
 
 
 def test_non_loop_completion_and_block_do_not_emit_foreground_handoff_events(kanban_home):

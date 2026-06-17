@@ -609,6 +609,43 @@ def test_block_happy_path(worker_env):
         conn.close()
 
 
+def test_block_accepts_summary_and_metadata(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    out = kt._handle_block({
+        "reason": "needs-user: choose rollout window",
+        "summary": "rollout window decision needed",
+        "metadata": {"foreground_handoff": True, "handoff_kind": "needs_user"},
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+
+    conn = kb.connect()
+    try:
+        run = kb.latest_run(conn, worker_env)
+        assert run is not None
+        assert run.outcome == "blocked"
+        assert run.summary == "rollout window decision needed"
+        assert run.metadata == {"foreground_handoff": True, "handoff_kind": "needs_user"}
+    finally:
+        conn.close()
+
+
+def test_block_rejects_non_dict_metadata(worker_env):
+    from tools import kanban_tools as kt
+    out = kt._handle_block({"reason": "needs input", "metadata": [1, 2, 3]})
+    assert "metadata must be an object/dict" in json.loads(out).get("error", "")
+
+
+def test_block_schema_exposes_structured_handoff_fields():
+    from tools import kanban_tools as kt
+
+    props = kt.KANBAN_BLOCK_SCHEMA["parameters"]["properties"]
+    assert "summary" in props
+    assert "metadata" in props
+
+
 def test_block_rejects_empty_reason(worker_env):
     from tools import kanban_tools as kt
     for bad in ["", "   ", None]:
