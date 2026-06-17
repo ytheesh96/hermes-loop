@@ -94,6 +94,9 @@ class _FakeAgent:
     def _persist_session(self, *_a, **_k):
         self._persist_calls += 1
 
+    def _set_active_turn_persistence_history(self, conversation_history=None):
+        self._active_turn_persistence_history_len = len(conversation_history or [])
+
 
 @pytest.fixture(autouse=True)
 def _stub_runtime_main():

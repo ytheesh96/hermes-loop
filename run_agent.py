@@ -1620,18 +1620,19 @@ class AIAgent:
             if not isinstance(flushed_ids, set):
                 flushed_ids = set()
                 self._flushed_db_message_ids = flushed_ids
+            history_len = len(conversation_history or [])
             history_ids = {
                 id(item) for item in (conversation_history or [])
                 if isinstance(item, dict)
             }
 
-            for msg in messages:
+            for idx, msg in enumerate(messages):
                 if not isinstance(msg, dict):
                     continue
                 msg_id = id(msg)
                 if msg_id in flushed_ids:
                     continue
-                if msg_id in history_ids:
+                if msg_id in history_ids or (not history_ids and idx < history_len):
                     flushed_ids.add(msg_id)
                     continue
                 role = msg.get("role", "unknown")

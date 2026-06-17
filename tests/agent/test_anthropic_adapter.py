@@ -29,6 +29,15 @@ from agent.anthropic_adapter import (
 from agent.transports import get_transport
 
 
+@pytest.fixture(autouse=True)
+def no_real_claude_code_keychain(monkeypatch):
+    """Keep Anthropic adapter tests from reading the developer's real Keychain."""
+    monkeypatch.setattr(
+        "agent.anthropic_adapter._read_claude_code_credentials_from_keychain",
+        lambda: None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
