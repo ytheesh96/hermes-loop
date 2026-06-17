@@ -109,6 +109,7 @@ interface ChatViewProps extends Omit<React.ComponentProps<'div'>, 'onSubmit'> {
   onReload: (parentId: string | null) => Promise<void>
   onRestoreToMessage?: (messageId: string) => Promise<void>
   onTranscribeAudio?: (audio: Blob) => Promise<string>
+  onDismissError?: (messageId: string) => void
 }
 
 interface ChatHeaderProps {
@@ -328,7 +329,8 @@ export function ChatView({
   onEdit,
   onReload,
   onRestoreToMessage,
-  onTranscribeAudio
+  onTranscribeAudio,
+  onDismissError
 }: ChatViewProps) {
   const location = useLocation()
   const activeSessionId = useStore($activeSessionId)
@@ -733,6 +735,7 @@ export function ChatView({
                 loading={threadLoading}
                 onBranchInNewChat={onBranchInNewChat}
                 onCancel={onCancel}
+                onDismissError={onDismissError}
                 onOpenKanbanTask={handleSelectLoopTaskId}
                 onRestoreToMessage={onRestoreToMessage}
                 sessionId={activeSessionId}
