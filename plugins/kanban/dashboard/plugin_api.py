@@ -259,10 +259,19 @@ def _task_has_unresolved_loop_intake(conn: sqlite3.Connection, task_id: str) -> 
     return str(intake.get("state") or "").strip().lower() not in {"spec-ready", "spec_ready", "approved"}
 
 
+def _task_has_loop_intake_pending_submit(conn: sqlite3.Connection, task_id: str) -> bool:
+    intake = _loop_intake_state_for_task(conn, task_id)
+    if not intake:
+        return False
+    if intake.get("needed") is not True or intake.get("dispatchable") is True:
+        return False
+    return True
+
+
 def _loop_intake_required_reason(task_id: str) -> str:
     return (
-        f"Loop intake is still required for {task_id}; keep the row in triage until "
-        "Vaitheesh explicitly approves Decompose/activation."
+        f"Loop intake is still required for {task_id}; use Loop drawer Submit or an explicit "
+        "activation request to approve and dispatch it."
     )
 
 
@@ -3254,6 +3263,7 @@ def auto_describe_profile(profile_name: str, payload: DescribeAutoBody):
 
 class DecomposeBody(BaseModel):
     author: Optional[str] = None
+    approve_intake: bool = False
 
 
 @router.post("/tasks/{task_id}/decompose")
@@ -3276,6 +3286,19 @@ def decompose_task_endpoint(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
+        if payload.approve_intake and _task_has_loop_intake_pending_submit(conn, task_id):
+            with kanban_db.write_txn(conn):
+                kanban_db._append_event(
+                    conn,
+                    task_id,
+                    _LOOP_INTAKE_EVENT_KIND,
+                    {
+                        "needed": True,
+                        "state": "approved",
+                        "source": "desktop_submit",
+                        "dispatchable": True,
+                    },
+                )
         if _task_has_unresolved_loop_intake(conn, task_id):
             return {
                 "ok": False,

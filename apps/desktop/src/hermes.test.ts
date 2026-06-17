@@ -150,6 +150,20 @@ describe('Hermes REST session helpers', () => {
     })
   })
 
+  it('marks Loop intake approval when Submit decomposes a clarified draft', async () => {
+    api.mockResolvedValue({ child_ids: [], fanout: false, ok: true, task_id: 't_root' })
+
+    await decomposeLoopTask('t_root', 'peacock', { approveIntake: true })
+
+    expect(api).toHaveBeenCalledWith({
+      body: { approve_intake: true },
+      method: 'POST',
+      path: '/api/plugins/kanban/tasks/t_root/decompose',
+      profile: 'peacock',
+      timeoutMs: 600_000
+    })
+  })
+
   it('submits Loop handoff accept decisions through the profile-scoped kanban API', async () => {
     api
       .mockResolvedValueOnce({

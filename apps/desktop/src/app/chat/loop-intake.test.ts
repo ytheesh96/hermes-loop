@@ -43,10 +43,13 @@ describe('Loop intake foreground trigger', () => {
 
     expect(draft).toContain('For Loop row t_intake (Launch a Peacock workflow)')
     expect(draft).toContain('start the grill-me Loop intake path')
-    expect(draft).toContain('ask exactly one unresolved decision')
+    expect(draft).toContain('Interview me relentlessly')
+    expect(draft).toContain('Ask exactly one unresolved decision')
+    expect(draft).toContain('Asking multiple questions at once is bewildering')
     expect(draft).toContain('mark the recommended option inline')
     expect(draft).toContain('write each locked decision into the canonical task body')
-    expect(draft).toContain('leave the row triage/non-dispatchable until I explicitly approve Decompose or activation')
+    expect(draft).not.toContain('triage/non-dispatchable')
+    expect(draft).not.toContain('Decompose or activation')
   })
 
   it('keeps ordinary Loop chat drafts for rows without durable intake state', () => {

@@ -12,6 +12,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -330,6 +331,47 @@ def test_loop_intake_needed_blocks_ready_and_decompose_until_approved(client):
     ready_after_approval = client.patch(f"/api/plugins/kanban/tasks/{task_id}", json={"status": "ready"})
     assert ready_after_approval.status_code == 200, ready_after_approval.text
     assert ready_after_approval.json()["task"]["status"] == "ready"
+
+
+def test_decompose_submit_approves_loop_intake_before_decomposing(client, monkeypatch):
+    created = client.post(
+        "/api/plugins/kanban/loop-drafts",
+        json={"title": "Submit approves intake", "session_id": "session-intake-submit"},
+    )
+    task_id = created.json()["task"]["id"]
+    calls = []
+
+    def fake_decompose_task(decompose_task_id, *, author=None):
+        calls.append((decompose_task_id, author))
+
+        return SimpleNamespace(
+            ok=True,
+            task_id=decompose_task_id,
+            reason=None,
+            fanout=False,
+            child_ids=[],
+            new_title=None,
+        )
+
+    monkeypatch.setattr("hermes_cli.kanban_decompose.decompose_task", fake_decompose_task)
+
+    submitted = client.post(
+        f"/api/plugins/kanban/tasks/{task_id}/decompose",
+        json={"approve_intake": True, "author": "desktop-submit"},
+    )
+
+    assert submitted.status_code == 200, submitted.text
+    assert submitted.json()["ok"] is True
+    assert calls == [(task_id, "desktop-submit")]
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{task_id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["task"]["loop_intake"] == {
+        "needed": True,
+        "state": "approved",
+        "source": "desktop_submit",
+        "dispatchable": True,
+    }
 
 
 def test_bodyful_loop_draft_and_unrelated_triage_rows_do_not_need_intake(client):

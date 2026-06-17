@@ -32,6 +32,7 @@ import { cn } from '@/lib/utils'
 import type { ComposerAttachment } from '@/store/composer'
 import { reconcileKanbanSessionSourceForComposer } from '@/store/composer-status'
 import { $pinnedSessionIds } from '@/store/layout'
+import { notify, notifyError } from '@/store/notifications'
 import { $activeGatewayProfile, $gatewaySwapTarget } from '@/store/profile'
 import {
   $activeSessionId,
@@ -135,6 +136,16 @@ function archiveableLoopRows(state: LoopPanelState | null, fallback: LoopRow): L
 
     return true
   })
+}
+
+function shouldApproveLoopIntakeOnSubmit(row: LoopRow): boolean {
+  const intake = row.loopIntake
+
+  if (!intake || intake.needed !== true || intake.dispatchable === true) {
+    return false
+  }
+
+  return true
 }
 
 function ChatHeader({
@@ -491,12 +502,24 @@ export function ChatView({
   })
 
   const loopTaskDecomposeMutation = useMutation({
-    mutationFn: ({ taskId }: { taskId: string }) => decomposeLoopTask(taskId, activeGatewayProfile),
-    onSuccess: async () => {
+    mutationFn: ({ approveIntake, taskId }: { approveIntake?: boolean; taskId: string }) =>
+      decomposeLoopTask(taskId, activeGatewayProfile, { approveIntake }),
+    onSuccess: async result => {
+      if (!result.ok) {
+        notify({
+          kind: 'warning',
+          title: 'Loop submit blocked',
+          message: result.reason || `Could not submit ${result.task_id || 'Loop task'}`
+        })
+      }
+
       await queryClient.invalidateQueries({
         queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId]
       })
       await queryClient.invalidateQueries({ queryKey: ['loop-task-detail', activeGatewayProfile] })
+    },
+    onError: error => {
+      notifyError(error, 'Loop submit failed')
     }
   })
 
@@ -579,7 +602,7 @@ export function ChatView({
       }
 
       if (action === 'decompose') {
-        loopTaskDecomposeMutation.mutate({ taskId: row.taskId })
+        loopTaskDecomposeMutation.mutate({ approveIntake: shouldApproveLoopIntakeOnSubmit(row), taskId: row.taskId })
 
         return
       }

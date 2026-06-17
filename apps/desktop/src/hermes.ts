@@ -471,12 +471,16 @@ export interface LoopTaskDecomposeResult {
   task_id: string
 }
 
-export function decomposeLoopTask(taskId: string, profile?: string | null): Promise<LoopTaskDecomposeResult> {
+export function decomposeLoopTask(
+  taskId: string,
+  profile?: string | null,
+  options: { approveIntake?: boolean } = {}
+): Promise<LoopTaskDecomposeResult> {
   return window.hermesDesktop.api<LoopTaskDecomposeResult>({
     ...(profile ? { profile } : profileScoped()),
     path: `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/decompose`,
     method: 'POST',
-    body: {},
+    body: options.approveIntake ? { approve_intake: true } : {},
     timeoutMs: 10 * 60_000
   })
 }

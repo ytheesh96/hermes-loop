@@ -25,9 +25,11 @@ export function buildLoopChatDraft(row: LoopRow): string {
 
   return [
     `For Loop row ${row.taskId} (${title}): start the grill-me Loop intake path for this slash-created title-only draft.`,
-    'Use the durable loop_intake state on the row as the trigger, ask exactly one unresolved decision at a time, and mark the recommended option inline in the A/B/C choice text.',
-    'Use retrievable repo/session/task facts when available; do not make hidden product decisions or draft implementation promises before I answer.',
-    'Before asking any follow-up after I answer, write each locked decision into the canonical task body under Resolved decisions, keeping assumptions/open questions current.',
-    'leave the row triage/non-dispatchable until I explicitly approve Decompose or activation.'
+    'Interview me relentlessly about every aspect of this task until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one by one.',
+    'Ask exactly one unresolved decision at a time, waiting for feedback before continuing. Asking multiple questions at once is bewildering.',
+    'For each question, provide your recommended answer and mark the recommended option inline.',
+    'If a question can be answered by exploring the codebase, repo state, session history, or existing task facts, explore those sources instead of asking me.',
+    'Do not make hidden product decisions or draft implementation promises before I answer.',
+    'Before asking the next follow-up after I answer, write each locked decision into the canonical task body under Resolved decisions, and keep assumptions/open questions current.'
   ].join('\n')
 }

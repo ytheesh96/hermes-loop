@@ -2,6 +2,8 @@ import type { AppendMessage, ThreadMessage } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
+import { buildLoopChatDraft } from '@/app/chat/loop-intake'
+import { deriveLoopPanelStateFromTenantSource } from '@/app/chat/loop-state'
 import { createLoopDraftTask, getProfiles, transcribeAudio } from '@/hermes'
 import { translateNow, type Translations, useI18n } from '@/i18n'
 import { stripAnsi } from '@/lib/ansi'
@@ -36,6 +38,7 @@ import {
   terminalContextBlocksFromDraft,
   updateComposerAttachment
 } from '@/store/composer'
+import { enqueueQueuedPrompt } from '@/store/composer-queue'
 import { reconcileKanbanSessionSourceForComposer, resetSessionBackground } from '@/store/composer-status'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
@@ -1101,6 +1104,37 @@ export function usePromptActions({
               queryClient.setQueryData(['loop-session-source', profile, sourceSessionId], source)
               void queryClient.invalidateQueries({ queryKey: ['loop-session-source', profile, sourceSessionId] })
               reconcileKanbanSessionSourceForComposer({ activeSessionId: sessionId, source, sourceSessionId })
+            }
+
+            const intakeRow = source
+              ? deriveLoopPanelStateFromTenantSource(source)?.rows.find(row => {
+                  if (row.taskId !== result.task?.id) {
+                    return false
+                  }
+
+                  const intake = row.loopIntake
+                  const state = (intake?.state || '').trim().toLowerCase()
+
+                  return (
+                    intake?.needed === true &&
+                    intake.dispatchable !== true &&
+                    !['spec-ready', 'spec_ready', 'approved'].includes(state)
+                  )
+                })
+              : null
+
+            if (intakeRow) {
+              const intakePrompt = buildLoopChatDraft(intakeRow)
+
+              if (busyRef.current) {
+                enqueueQueuedPrompt(sessionId, { attachments: [], text: intakePrompt })
+              } else {
+                const submitted = await submitPromptText(intakePrompt)
+
+                if (!submitted) {
+                  enqueueQueuedPrompt(sessionId, { attachments: [], text: intakePrompt })
+                }
+              }
             }
 
             const title = result.task?.title || source?.tasks?.[0]?.title || arg.trim() || 'Loop draft'

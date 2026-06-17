@@ -257,18 +257,6 @@ function isQueuedLoopRow(row: LoopRow): boolean {
   return QUEUED_OVERVIEW_STATUSES.has(status)
 }
 
-function isReviewDecisionRow(row: LoopRow): boolean {
-  const text = attentionText(row)
-
-  return (
-    text.includes('review-required') ||
-    text.includes('review required') ||
-    text.includes('review decision') ||
-    text.includes('foreground acceptance') ||
-    text.includes('user acceptance')
-  )
-}
-
 interface RootOverviewGroups {
   active: LoopRow[]
   attention: LoopRow[]
@@ -581,10 +569,23 @@ interface LoopPanelProps {
   state: LoopPanelState | null
 }
 
-function DetailSection({ children, testId, title }: { children: ReactNode; testId?: string; title: string }) {
+function DetailSection({
+  children,
+  className,
+  testId,
+  title
+}: {
+  children: ReactNode
+  className?: string
+  testId?: string
+  title: string
+}) {
   return (
     <section
-      className="min-w-0 max-w-full overflow-hidden rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-surface-background) p-3 text-xs"
+      className={cn(
+        'min-w-0 max-w-full overflow-hidden rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-surface-background) p-3 text-xs',
+        className
+      )}
       data-testid={testId}
     >
       <h3 className="m-0 mb-2 text-xs font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">{title}</h3>
@@ -666,8 +667,8 @@ function LoopTaskCommentsCard({
   }, [draft, onAddComment, row.taskId, submitting])
 
   return (
-    <DetailSection testId="loop-task-comments-card" title={`Comments (${visibleCount})`}>
-      <div className="grid gap-2">
+    <DetailSection className="overflow-visible" testId="loop-task-comments-card" title={`Comments (${visibleCount})`}>
+      <div className="grid min-w-0 gap-2">
         {comments.length === 0 ? (
           <EmptyDetail>
             {detailError
@@ -679,13 +680,13 @@ function LoopTaskCommentsCard({
                   : 'No comments yet.'}
           </EmptyDetail>
         ) : (
-          <div className="grid gap-2" data-testid="loop-task-comments-list">
+          <div className="grid min-w-0 gap-2" data-testid="loop-task-comments-list">
             {comments.map((comment, index) => {
               const timestamp = formatLoopCommentTime(comment.created_at)
 
               return (
                 <article
-                  className="grid gap-1 border-b border-(--ui-stroke-tertiary) pb-2 last:border-b-0 last:pb-0"
+                  className="grid min-w-0 gap-1 border-b border-(--ui-stroke-tertiary) pb-2 last:border-b-0 last:pb-0"
                   data-testid="loop-task-comment"
                   key={loopCommentKey(comment, index)}
                 >
@@ -693,7 +694,7 @@ function LoopTaskCommentsCard({
                     <span className="truncate font-medium text-(--ui-text-secondary)">{comment.author || 'anon'}</span>
                     {timestamp ? <time className="shrink-0 text-(--ui-text-quaternary)">{timestamp}</time> : null}
                   </div>
-                  <CompactMarkdown className="text-(--ui-text-secondary)" text={comment.body || ''} />
+                  <CompactMarkdown className="min-w-0 text-(--ui-text-secondary)" text={comment.body || ''} />
                 </article>
               )
             })}
@@ -857,7 +858,19 @@ function LoopRootActions({
   root: LoopRow
 }) {
   const status = normalizedLoopValue(root.status)
+
+  const intakeState = (root.loopIntake?.state || '').trim().toLowerCase()
+
+  const intakeBlocksSubmit =
+    root.loopIntake?.needed === true &&
+    root.loopIntake.dispatchable !== true &&
+    !['spec-ready', 'spec_ready', 'approved'].includes(intakeState)
+
   const canSubmit = !decomposed && !TERMINAL_LOOP_STATUSES.has(status)
+
+  const submitTitle = intakeBlocksSubmit
+    ? 'Submit approves and dispatches this Loop intake row.'
+    : undefined
 
   return (
     <div className="flex flex-wrap gap-1.5" data-testid="loop-root-actions">
@@ -866,6 +879,7 @@ function LoopRootActions({
         className="h-7 gap-1.5 px-2 text-xs"
         disabled={!onTaskAction || !canSubmit}
         onClick={() => onTaskAction?.('decompose', root)}
+        title={submitTitle}
         type="button"
         variant="default"
       >
@@ -1457,58 +1471,6 @@ function LoopArtifactSourceTab({
   )
 }
 
-function ReviewDecisionControls({
-  onTaskAction,
-  row
-}: {
-  onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
-  row: LoopRow
-}) {
-  const unavailable = !onTaskAction
-
-  return (
-    <div className="grid gap-2">
-      <div className="flex flex-wrap gap-1.5" data-testid="loop-review-decision-controls">
-        <Button
-          aria-label="Accept review"
-          className="h-7 px-2 text-xs"
-          disabled={unavailable}
-          onClick={() => onTaskAction?.('accept-review', row)}
-          type="button"
-          variant="default"
-        >
-          Accept
-        </Button>
-        <Button
-          aria-label="Reject review"
-          className="h-7 px-2 text-xs"
-          disabled={unavailable}
-          onClick={() => onTaskAction?.('reject-review', row)}
-          type="button"
-          variant="outline"
-        >
-          Reject
-        </Button>
-        <Button
-          aria-label="Escalate review"
-          className="h-7 px-2 text-xs"
-          disabled={unavailable}
-          onClick={() => onTaskAction?.('escalate-review', row)}
-          type="button"
-          variant="outline"
-        >
-          Escalate
-        </Button>
-      </div>
-      {unavailable && (
-        <EmptyDetail>
-          Review decisions are unavailable until this view is connected to the gateway action handler.
-        </EmptyDetail>
-      )}
-    </div>
-  )
-}
-
 function WorkerActivityDetails({
   onTaskAction,
   row
@@ -1880,7 +1842,6 @@ function LoopRootOverview({
             <LoopStatusIndicator row={root} />
             <h3 className="m-0 min-w-0 truncate text-sm font-semibold text-(--ui-text-primary)">{root.title}</h3>
           </div>
-          <div className="font-mono text-(--ui-text-tertiary)">{root.taskId}</div>
           <LoopRootActions
             archiveableTaskCount={archiveableTaskCount}
             decomposed={decomposed}
@@ -1922,18 +1883,8 @@ function LoopTaskDetails({
   row: LoopRow
   rowById: Map<string, LoopRow>
 }) {
-  const reviewMode = isReviewDecisionRow(row)
-
   return (
     <div className="grid min-w-0 max-w-full gap-3">
-      {reviewMode && (
-        <DetailSection title="Review decision">
-          <div className="grid gap-2">
-            <p className="m-0 text-xs text-(--ui-text-secondary)">{attentionReason(row)}</p>
-            <ReviewDecisionControls onTaskAction={onTaskAction} row={row} />
-          </div>
-        </DetailSection>
-      )}
       <section
         className="min-w-0 max-w-full overflow-hidden rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-surface-background) p-3 text-xs"
         data-testid="loop-task-card"
@@ -1955,7 +1906,6 @@ function LoopTaskDetails({
             <LoopPriorityIndicator row={row} />
             <h3 className="m-0 min-w-0 truncate text-sm font-semibold text-(--ui-text-primary)">{row.title}</h3>
           </div>
-          <div className="font-mono text-(--ui-text-tertiary)">{row.taskId}</div>
           <LoopTaskActions onTaskAction={onTaskAction} row={row} />
         </div>
       </section>

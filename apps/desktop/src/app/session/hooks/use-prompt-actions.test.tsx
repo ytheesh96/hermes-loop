@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { textPart } from '@/lib/chat-messages'
 import { $composerAttachments, type ComposerAttachment } from '@/store/composer'
+import { $queuedPromptsBySession, getQueuedPrompts } from '@/store/composer-queue'
 import { $kanbanStatusBySession } from '@/store/composer-status'
 import { $busy, $connection, $messages, $sessions, setSessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
@@ -218,6 +219,7 @@ describe('usePromptActions /loop', () => {
   beforeEach(() => {
     setSessions(() => [sessionInfo()])
     $kanbanStatusBySession.set({})
+    $queuedPromptsBySession.set({})
     vi.mocked(createLoopDraftTask).mockResolvedValue({
       source: {
         include_archived: false,
@@ -268,6 +270,7 @@ describe('usePromptActions /loop', () => {
   afterEach(() => {
     cleanup()
     $kanbanStatusBySession.set({})
+    $queuedPromptsBySession.set({})
     vi.restoreAllMocks()
   })
 
@@ -286,7 +289,14 @@ describe('usePromptActions /loop', () => {
       title: 'Draft product loop'
     })
     expect(requestGateway).not.toHaveBeenCalledWith('slash.exec', expect.anything())
-    expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything())
+    expect(requestGateway).toHaveBeenCalledWith('prompt.submit', {
+      session_id: RUNTIME_SESSION_ID,
+      text: expect.stringContaining('start the grill-me Loop intake path')
+    })
+    expect(requestGateway).toHaveBeenCalledWith('prompt.submit', {
+      session_id: RUNTIME_SESSION_ID,
+      text: expect.stringContaining('For Loop row t_loop (Draft product loop)')
+    })
     expect($kanbanStatusBySession.get()[RUNTIME_SESSION_ID]?.[0]).toMatchObject({
       currentTool: 'Loop',
       kanbanTaskId: 't_loop',
@@ -294,6 +304,29 @@ describe('usePromptActions /loop', () => {
       todoStatus: 'pending',
       type: 'todo'
     })
+  })
+
+  it('queues the Loop intake interview when the foreground turn is still busy', async () => {
+    const refreshSessions = vi.fn(async () => undefined)
+    const requestGateway = vi.fn(async () => ({}) as never)
+    const busyRef = { current: true }
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        busyRef={busyRef}
+        onReady={h => (handle = h)}
+        refreshSessions={refreshSessions}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/loop Draft product loop')
+
+    expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything())
+    expect(getQueuedPrompts(RUNTIME_SESSION_ID)).toHaveLength(1)
+    expect(getQueuedPrompts(RUNTIME_SESSION_ID)[0]?.text).toContain('start the grill-me Loop intake path')
+    expect(getQueuedPrompts(RUNTIME_SESSION_ID)[0]?.text).toContain('For Loop row t_loop (Draft product loop)')
   })
 
   it('anchors a draft Loop root to the selected stored session while displaying it under the runtime session', async () => {

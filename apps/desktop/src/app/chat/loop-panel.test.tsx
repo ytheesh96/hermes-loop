@@ -561,6 +561,7 @@ describe('LoopPanel', () => {
     expect(screen.queryByRole('heading', { name: 'Blocking' })).toBeNull()
     const taskCard = screen.getByTestId('loop-task-card')
     expect(within(taskCard).getByRole('heading', { name: /Build child/i })).toBeTruthy()
+    expect(within(taskCard).queryByText('t_child')).toBeNull()
     expect(within(taskCard).getByRole('button', { name: /unblock t_child/i })).toBeTruthy()
     expect(within(taskCard).getByRole('button', { name: /ask in chat about t_child/i })).toBeTruthy()
     expect(within(taskCard).getByText('Ask in chat')).toBeTruthy()
@@ -628,7 +629,7 @@ describe('LoopPanel', () => {
             },
             {
               author: 'reviewer-qa',
-              body: 'Please add a regression test.',
+              body: 'Please add a regression test.\n\n```json\n{"long":"comment content should be allowed to scroll instead of being clipped by the card"}\n```',
               created_at: 1_700_000_060,
               id: 2,
               task_id: 't_child'
@@ -641,6 +642,8 @@ describe('LoopPanel', () => {
     )
 
     const commentsCard = screen.getByTestId('loop-task-comments-card')
+    expect(commentsCard.className).toContain('overflow-visible')
+    expect(commentsCard.className).not.toContain('overflow-hidden')
     expect(within(commentsCard).getByRole('heading', { name: /Comments \(2\)/i })).toBeTruthy()
     expect(within(commentsCard).queryByText('Task discussion and review breadcrumbs')).toBeNull()
     expect(within(commentsCard).queryByText('2 comments')).toBeNull()
@@ -650,8 +653,11 @@ describe('LoopPanel', () => {
     expect(within(commentsCard).getByText(/Please add a regression test/i)).toBeTruthy()
 
     for (const comment of within(commentsCard).getAllByTestId('loop-task-comment')) {
+      expect(comment.className).toContain('min-w-0')
       expect(comment.className).not.toContain('grid-cols-[1.35rem_minmax(0,1fr)]')
     }
+
+    expect(within(commentsCard).getByText(/comment content should be allowed/i)).toBeTruthy()
 
     const composer = within(commentsCard).getByTestId('loop-task-comment-composer')
     const input = within(composer).getByRole('textbox', { name: /comment on t_child/i }) as HTMLTextAreaElement
@@ -844,14 +850,13 @@ describe('LoopPanel', () => {
     const closeReviewTab = screen.getByRole('button', { name: /Close Review child/i })
     expect(closeReviewTab.className).toContain('pointer-events-auto')
     expect(closeReviewTab.className).toContain('opacity-100')
-    expect(screen.getByRole('heading', { name: /Review decision/i })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: /Review decision/i })).toBeNull()
     expect(screen.getByRole('heading', { name: /Review child/i })).toBeTruthy()
     expect(screen.queryByText('review-required: inspect proof')).toBeNull()
-    expect(screen.getByRole('button', { name: /accept review/i })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /reject review/i })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /escalate review/i })).toBeTruthy()
-    expect((screen.getByRole('button', { name: /accept review/i }) as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.getByText(/Review decisions are unavailable/i)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /accept review/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /reject review/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /escalate review/i })).toBeNull()
+    expect(screen.queryByText(/Review decisions are unavailable/i)).toBeNull()
     expect(screen.queryByRole('button', { name: /Back to root overview/i })).toBeNull()
 
     const reviewAgentsCard = screen.getByTestId('loop-task-agents-card')
@@ -874,44 +879,6 @@ describe('LoopPanel', () => {
     expect(screen.getByRole('heading', { name: /Root Task/i })).toBeTruthy()
   })
 
-  it('enables review decision controls when a Loop action handler is connected', () => {
-    const state = deriveLoopPanelStateFromTenantSource({
-      session_id: 'sess-review-actions',
-      tenant: 'tenant-a',
-      latest_event_id: 405,
-      tasks: [
-        {
-          id: 't_review',
-          title: 'Review handoff child',
-          status: 'ready',
-          tenant: 'tenant-a',
-          latest_summary: 'review-required: inspect proof packet',
-          included_child_ids: [],
-          included_parent_ids: []
-        }
-      ]
-    })!
-
-    const onTaskAction = vi.fn()
-
-    render(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_review" state={state} />)
-
-    const accept = screen.getByRole('button', { name: /accept review/i }) as HTMLButtonElement
-    const reject = screen.getByRole('button', { name: /reject review/i }) as HTMLButtonElement
-    const escalate = screen.getByRole('button', { name: /escalate review/i }) as HTMLButtonElement
-
-    expect(accept.disabled).toBe(false)
-    expect(reject.disabled).toBe(false)
-    expect(escalate.disabled).toBe(false)
-
-    fireEvent.click(accept)
-    fireEvent.click(reject)
-    fireEvent.click(escalate)
-
-    expect(onTaskAction).toHaveBeenNthCalledWith(1, 'accept-review', expect.objectContaining({ taskId: 't_review' }))
-    expect(onTaskAction).toHaveBeenNthCalledWith(2, 'reject-review', expect.objectContaining({ taskId: 't_review' }))
-    expect(onTaskAction).toHaveBeenNthCalledWith(3, 'escalate-review', expect.objectContaining({ taskId: 't_review' }))
-  })
 
   it('keeps a decomposed draft root anchored as the root overview even when children block the root', () => {
     const state = deriveLoopPanelStateFromTenantSource({
@@ -1027,6 +994,43 @@ describe('LoopPanel', () => {
     expect(submit.disabled).toBe(false)
     fireEvent.click(submit)
     expect(onTaskAction).toHaveBeenCalledWith('decompose', expect.objectContaining({ taskId: 't_draft_root' }))
+  })
+
+  it('keeps submit clickable for slash Loop intake rows so the handler can approve and dispatch', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-intake-root',
+      root_task_id: 't_intake_root',
+      tenant: 'tenant-a',
+      latest_event_id: 505,
+      tasks: [
+        {
+          id: 't_intake_root',
+          title: 'Title-only intake root',
+          body: 'Needs explicit activation approval',
+          status: 'triage',
+          tenant: 'tenant-a',
+          loop_intake: {
+            dispatchable: false,
+            needed: true,
+            source: 'slash_loop_draft',
+            state: 'drafted'
+          },
+          included_child_ids: [],
+          included_parent_ids: []
+        }
+      ]
+    })
+
+    const onTaskAction = vi.fn()
+
+    render(<LoopPanel onTaskAction={onTaskAction} open state={state} />)
+
+    const submit = screen.getByRole('button', { name: /Submit t_intake_root/i }) as HTMLButtonElement
+    expect(submit.disabled).toBe(false)
+    expect(submit.title).toMatch(/Submit approves and dispatches/i)
+
+    fireEvent.click(submit)
+    expect(onTaskAction).toHaveBeenCalledWith('decompose', expect.objectContaining({ taskId: 't_intake_root' }))
   })
 
   it('defaults the overview to the original root even after decomposition links children before the root', () => {
@@ -1601,6 +1605,7 @@ describe('LoopPanel', () => {
     expect(screen.queryByRole('heading', { name: 'Blocking' })).toBeNull()
     const taskCard = screen.getByTestId('loop-task-card')
     expect(within(taskCard).getByRole('heading', { name: /Build child/i })).toBeTruthy()
+    expect(within(taskCard).queryByText('t_child')).toBeNull()
     expect(within(taskCard).getByRole('button', { name: /unblock t_child/i })).toBeTruthy()
     expect(within(taskCard).getByRole('button', { name: /ask in chat about t_child/i })).toBeTruthy()
     expect(within(taskCard).getByText('Ask in chat')).toBeTruthy()
@@ -1681,7 +1686,7 @@ describe('LoopPanel', () => {
 
     expect(screen.getByRole('heading', { name: /External parent/i })).toBeTruthy()
     expect(screen.getByText('Fetched external body')).toBeTruthy()
-    expect(screen.getAllByText('t_external').length).toBeGreaterThan(0)
+    expect(within(screen.getByTestId('loop-task-card')).queryByText('t_external')).toBeNull()
     expect(
       within(screen.getByTestId('loop-task-agents-card')).getByRole('button', { name: /Build child/i })
     ).toBeTruthy()
@@ -1799,6 +1804,7 @@ describe('LoopPanel', () => {
     const rootCard = screen.getByTestId('loop-root-card')
     const rootActions = screen.getByTestId('loop-root-actions')
     expect(within(rootCard).getByTestId('loop-root-actions')).toBe(rootActions)
+    expect(within(rootCard).queryByText('t_triage')).toBeNull()
     expect(within(rootCard).queryByTestId('loop-root-spec')).toBeNull()
     const rootSpec = screen.getByTestId('loop-root-spec')
     expect(within(rootSpec).getByRole('heading', { name: /Description/i })).toBeTruthy()
