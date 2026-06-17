@@ -262,6 +262,25 @@ export function DesktopController() {
     setMessages
   })
 
+  const resolveActiveStoredSessionId = useCallback(
+    (runtimeSessionId: string) => {
+      const cached = sessionStateByRuntimeIdRef.current.get(runtimeSessionId)?.storedSessionId
+
+      if (cached) {
+        return cached
+      }
+
+      for (const [storedSessionId, mappedRuntimeId] of runtimeIdByStoredSessionIdRef.current.entries()) {
+        if (mappedRuntimeId === runtimeSessionId) {
+          return storedSessionId
+        }
+      }
+
+      return null
+    },
+    [runtimeIdByStoredSessionIdRef, sessionStateByRuntimeIdRef]
+  )
+
   const { connectionRef, gatewayRef, requestGateway } = useGatewayRequest()
 
   useEffect(() => {
@@ -786,6 +805,7 @@ export function DesktopController() {
     handleSkinCommand,
     refreshSessions,
     requestGateway,
+    resolveActiveStoredSessionId,
     resumeStoredSession: resumeSession,
     selectedStoredSessionIdRef,
     startFreshSessionDraft,

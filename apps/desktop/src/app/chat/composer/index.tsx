@@ -21,7 +21,7 @@ import { useResizeObserver } from '@/hooks/use-resize-observer'
 import { useI18n } from '@/i18n'
 import { chatMessageText } from '@/lib/chat-messages'
 import { SLASH_COMMAND_RE } from '@/lib/chat-runtime'
-import { desktopSlashCommandTakesArgs } from '@/lib/desktop-slash-commands'
+import { desktopSlashCommandHasArgOptions } from '@/lib/desktop-slash-commands'
 import { DATA_IMAGE_URL_RE } from '@/lib/embedded-images'
 import { triggerHaptic } from '@/lib/haptics'
 import { cn } from '@/lib/utils'
@@ -583,10 +583,11 @@ export function ChatBar({
     const found = detectTrigger(before ?? composerPlainText(editor))
 
     // The arg-stage popover is only useful for commands with an options screen.
-    // For a no-arg command it would dead-end on "No matches", so drop it — the
-    // directive is already complete.
+    // For no-arg and free-form commands (e.g. `/loop my draft title`) it would
+    // either dead-end on "No matches" or wrap arbitrary user text into a
+    // non-editable slash pill, so drop it once we're past the command token.
     const detected =
-      found?.kind === '/' && slashArgStage(found.query) && !desktopSlashCommandTakesArgs(slashCommandToken(found.query))
+      found?.kind === '/' && slashArgStage(found.query) && !desktopSlashCommandHasArgOptions(slashCommandToken(found.query))
         ? null
         : found
 
@@ -754,7 +755,7 @@ export function ChatBar({
     // already an arg pick (`/personality alice`), so it commits normally.
     const command = (item.metadata as { command?: string } | undefined)?.command ?? ''
 
-    const expandsToArgs = trigger.kind === '/' && !serialized.includes(' ') && desktopSlashCommandTakesArgs(command)
+    const expandsToArgs = trigger.kind === '/' && !serialized.includes(' ') && desktopSlashCommandHasArgOptions(command)
 
     const text = starter || serialized.endsWith(' ') ? serialized : `${serialized} `
     const directive = !starter && serialized.match(/^@([^:]+):(.+)$/)
@@ -915,6 +916,7 @@ export function ChatBar({
       !triggerItems.length &&
       (event.key === ' ' || event.key === 'Tab') &&
       slashArgStage(trigger.query) &&
+      desktopSlashCommandHasArgOptions(slashCommandToken(trigger.query)) &&
       trigger.query.trim()
     ) {
       event.preventDefault()

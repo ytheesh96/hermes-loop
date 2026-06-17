@@ -267,6 +267,44 @@ function kanbanBoardQuery(board?: null | string): string {
   return `?${query.toString()}`
 }
 
+export interface CreateLoopDraftTaskPayload {
+  body?: null | string
+  board?: null | string
+  profile?: null | string
+  sessionId: string
+  tenant?: null | string
+  title?: null | string
+}
+
+type TenantLoopTaskResponse = NonNullable<TenantLoopSource['tasks']>[number]
+
+export interface CreateLoopDraftTaskResponse {
+  source?: TenantLoopSource
+  task?: null | TenantLoopTaskResponse
+}
+
+export function createLoopDraftTask({
+  body,
+  board,
+  profile,
+  sessionId,
+  tenant,
+  title
+}: CreateLoopDraftTaskPayload): Promise<CreateLoopDraftTaskResponse> {
+  return window.hermesDesktop.api<CreateLoopDraftTaskResponse>({
+    ...(profile ? { profile } : profileScoped()),
+    body: {
+      assignee: 'orchestrator',
+      body: body?.trim() || undefined,
+      session_id: sessionId,
+      tenant: tenant?.trim() || sessionId,
+      title: title?.trim() || 'Loop draft'
+    },
+    method: 'POST',
+    path: `/api/plugins/kanban/loop-drafts${kanbanBoardQuery(board)}`
+  })
+}
+
 export function getLoopTaskDetail(
   taskId: string,
   profile?: string | null,

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   addLoopTaskComment,
+  createLoopDraftTask,
   decomposeLoopTask,
   getLoopSessionSource,
   getLoopTaskDetail,
@@ -80,6 +81,25 @@ describe('Hermes REST session helpers', () => {
     })
     expect(api).toHaveBeenNthCalledWith(2, {
       path: '/api/plugins/kanban/tasks/t_child?board=developer',
+      profile: 'peacock'
+    })
+  })
+
+  it('creates a draft Loop task through the profile-scoped kanban API', async () => {
+    api.mockResolvedValue({ task: { id: 't_loop', title: 'Draft Loop root' } })
+
+    await createLoopDraftTask({ board: 'developer', profile: 'peacock', sessionId: 'session-1', title: 'Draft Loop root' })
+
+    expect(api).toHaveBeenCalledWith({
+      body: {
+        assignee: 'orchestrator',
+        body: undefined,
+        session_id: 'session-1',
+        tenant: 'session-1',
+        title: 'Draft Loop root'
+      },
+      method: 'POST',
+      path: '/api/plugins/kanban/loop-drafts?board=developer',
       profile: 'peacock'
     })
   })

@@ -2,7 +2,7 @@ import type { AppendMessage, ThreadMessage } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
-import { getProfiles, transcribeAudio } from '@/hermes'
+import { createLoopDraftTask, getProfiles, transcribeAudio } from '@/hermes'
 import { translateNow, type Translations, useI18n } from '@/i18n'
 import { stripAnsi } from '@/lib/ansi'
 import { branchGroupForUser, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
@@ -26,6 +26,7 @@ import {
 import { triggerHaptic } from '@/lib/haptics'
 import { setMutableRef } from '@/lib/mutable-ref'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
+import { queryClient } from '@/lib/query-client'
 import { setSessionYolo } from '@/lib/yolo-session'
 import {
   $composerAttachments,
@@ -35,7 +36,7 @@ import {
   terminalContextBlocksFromDraft,
   updateComposerAttachment
 } from '@/store/composer'
-import { resetSessionBackground } from '@/store/composer-status'
+import { reconcileKanbanSessionSourceForComposer, resetSessionBackground } from '@/store/composer-status'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
 import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile, normalizeProfileKey } from '@/store/profile'
@@ -57,8 +58,8 @@ import { clearSessionSubagents } from '@/store/subagents'
 import { clearSessionTodos } from '@/store/todos'
 
 import type {
-  ClientSessionState,
   BrowserManageResponse,
+  ClientSessionState,
   FileAttachResponse,
   HandoffFailResponse,
   HandoffRequestResponse,
@@ -110,6 +111,43 @@ function inlineErrorMessage(error: unknown, fallback: string): string {
   const raw = error instanceof Error ? error.message : typeof error === 'string' ? error : fallback
 
   return (raw.match(/Error invoking remote method '[^']+': Error: (.+)$/)?.[1] ?? raw).replace(/^Error:\s*/, '').trim()
+}
+
+function sourceFromLoopDraftResult(sessionId: string, result: Awaited<ReturnType<typeof createLoopDraftTask>>) {
+  if (result.source) {
+    return result.source
+  }
+
+  const task = result.task
+
+  if (!task?.id) {
+    return null
+  }
+
+  const tenant = task.tenant || sessionId
+
+  return {
+    external_links: [],
+    include_archived: false,
+    latest_event_id: 0,
+    lineage_session_ids: [sessionId],
+    links: [],
+    root_task_id: task.id,
+    session_id: sessionId,
+    tasks: [
+      {
+        ...task,
+        included_child_ids: task.included_child_ids ?? [],
+        included_parent_ids: task.included_parent_ids ?? [],
+        links: task.links ?? { children: [], parents: [] },
+        session_id: task.session_id || sessionId,
+        tenant
+      }
+    ],
+    tenant,
+    tenants: [tenant],
+    workers: []
+  }
 }
 
 function isSessionNotFoundError(error: unknown): boolean {
@@ -313,6 +351,7 @@ interface PromptActionsOptions {
   handleSkinCommand: (arg: string) => string
   refreshSessions: () => Promise<void>
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
+  resolveActiveStoredSessionId?: (runtimeSessionId: string) => null | string | undefined
   resumeStoredSession: (storedSessionId: string) => Promise<void> | void
   selectedStoredSessionIdRef: MutableRefObject<string | null>
   startFreshSessionDraft: () => void
@@ -388,6 +427,7 @@ export function usePromptActions({
   handleSkinCommand,
   refreshSessions,
   requestGateway,
+  resolveActiveStoredSessionId,
   resumeStoredSession,
   selectedStoredSessionIdRef,
   startFreshSessionDraft,
@@ -1035,6 +1075,40 @@ export function usePromptActions({
             appendSessionTextMessage(sid, 'system', recordInput ? slashStatusText(command, result.error) : result.error)
           }
         },
+        loop: async ({ arg, sessionHint }) => {
+          const sessionId = await ensureSessionId(sessionHint)
+
+          if (!sessionId) {
+            notify({ kind: 'error', title: copy.sessionUnavailable, message: copy.createSessionFailed })
+
+            return
+          }
+
+          try {
+            const profile = $activeGatewayProfile.get()
+            const resolvedStoredSessionId = sessionHint ? null : resolveActiveStoredSessionId?.(sessionId)
+            const sourceSessionId = sessionHint || resolvedStoredSessionId || selectedStoredSessionIdRef.current || sessionId
+
+            const result = await createLoopDraftTask({
+              profile,
+              sessionId: sourceSessionId,
+              title: arg.trim() || undefined
+            })
+
+            const source = sourceFromLoopDraftResult(sourceSessionId, result)
+
+            if (source) {
+              queryClient.setQueryData(['loop-session-source', profile, sourceSessionId], source)
+              void queryClient.invalidateQueries({ queryKey: ['loop-session-source', profile, sourceSessionId] })
+              reconcileKanbanSessionSourceForComposer({ activeSessionId: sessionId, source, sourceSessionId })
+            }
+
+            const title = result.task?.title || source?.tasks?.[0]?.title || arg.trim() || 'Loop draft'
+            notify({ kind: 'success', message: `Loop draft ready: ${title}` })
+          } catch (err) {
+            notifyError(err, 'Create Loop draft failed')
+          }
+        },
         // /profile selects which profile new chats open in — no app relaunch.
         // A profile is per-session now, so an existing thread can't change its
         // profile mid-stream; `/profile <name>` points the next new chat (and
@@ -1320,6 +1394,7 @@ export function usePromptActions({
       handoffSession,
       refreshSessions,
       requestGateway,
+      resolveActiveStoredSessionId,
       resumeStoredSession,
       startFreshSessionDraft,
       submitPromptText

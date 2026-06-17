@@ -101,6 +101,13 @@ export interface CompactLoopTask {
   title?: null | string
 }
 
+export interface LoopIntakeState {
+  dispatchable?: boolean
+  needed: boolean
+  source?: null | string
+  state?: null | string
+}
+
 export interface TenantLoopTask {
   age?: Record<string, null | number>
   assignee?: null | string
@@ -121,6 +128,7 @@ export interface TenantLoopTask {
   included_parent_ids?: string[]
   latest_run?: null | LoopLatestRun
   latest_summary?: null | string
+  loop_intake?: null | LoopIntakeState
   links?: {
     children?: string[]
     parents?: string[]
@@ -217,6 +225,7 @@ export interface LoopRow {
   frontier: boolean
   latestRun?: null | LoopLatestRun
   latestSummary?: null | string
+  loopIntake?: null | LoopIntakeState
   parentCount: number
   parents: string[]
   priority?: number
@@ -573,6 +582,7 @@ function tenantRowFromTask(
     latestRun,
     latestSummary:
       task.latest_summary || workerActivity?.summary || workerActivity?.summary_preview || latestRun?.summary || null,
+    loopIntake: task.loop_intake || null,
     parentCount: parents.length || task.parent_count || task.parents_count || 0,
     parents,
     priority: task.priority,

@@ -67,6 +67,7 @@ import { droppedFileInlineRefs, type SessionDragPayload, sessionInlineRef } from
 import type { ChatBarState } from './composer/types'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { useFileDropZone } from './hooks/use-file-drop-zone'
+import { buildLoopChatDraft } from './loop-intake'
 import { LoopPanel, type LoopTaskAction } from './loop-panel'
 import { loopSessionSourceRefetchInterval } from './loop-refresh'
 import {
@@ -134,12 +135,6 @@ function archiveableLoopRows(state: LoopPanelState | null, fallback: LoopRow): L
 
     return true
   })
-}
-
-function buildLoopChatDraft(row: LoopRow): string {
-  const title = row.title?.trim()
-
-  return title ? `Help me with Loop task ${row.taskId}: ${title}` : `Help me with Loop task ${row.taskId}.`
 }
 
 function ChatHeader({

@@ -5,16 +5,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { textPart } from '@/lib/chat-messages'
 import { $composerAttachments, type ComposerAttachment } from '@/store/composer'
+import { $kanbanStatusBySession } from '@/store/composer-status'
 import { $busy, $connection, $messages, $sessions, setSessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
 
 import { uploadComposerAttachment, usePromptActions } from './use-prompt-actions'
 
 vi.mock('@/hermes', () => ({
+  createLoopDraftTask: vi.fn(),
   getProfiles: vi.fn(async () => ({ profiles: [] })),
   setApiRequestProfile: vi.fn(),
   transcribeAudio: vi.fn()
 }))
+
+const { createLoopDraftTask } = await import('@/hermes')
 
 // The active id the desktop holds is the *runtime* session id from
 // session.create — deliberately distinct from the stored DB id here, because
@@ -22,6 +26,8 @@ vi.mock('@/hermes', () => ({
 // the stored sessions table and 404s on a runtime id. session.title accepts
 // the runtime id directly.
 const RUNTIME_SESSION_ID = 'rt-abc123'
+const STORED_SESSION_ID = '20260616_133540_67ff1b'
+const BRANCH_STORED_SESSION_ID = '20260616_140112_abc987'
 
 function sessionInfo(overrides: Partial<SessionInfo> = {}): SessionInfo {
   return {
@@ -58,6 +64,7 @@ function Harness({
   onSeedState,
   refreshSessions,
   requestGateway,
+  resolveActiveStoredSessionId,
   resumeStoredSession,
   seedMessages,
   storedSessionId
@@ -67,6 +74,7 @@ function Harness({
   onSeedState?: (state: Record<string, unknown>) => void
   refreshSessions: () => Promise<void>
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
+  resolveActiveStoredSessionId?: (runtimeSessionId: string) => null | string | undefined
   resumeStoredSession?: (storedSessionId: string) => Promise<void> | void
   seedMessages?: unknown[]
   storedSessionId?: null | string
@@ -92,6 +100,7 @@ function Harness({
     handleSkinCommand: () => '',
     refreshSessions,
     requestGateway,
+    resolveActiveStoredSessionId,
     resumeStoredSession: resumeStoredSession ?? (() => undefined),
     selectedStoredSessionIdRef,
     startFreshSessionDraft: () => undefined,
@@ -202,6 +211,220 @@ describe('usePromptActions /title', () => {
     expect(requestGateway).toHaveBeenCalledWith('session.title', expect.objectContaining({ title: 'way too long title' }))
     expect(refreshSessions).not.toHaveBeenCalled()
     expect($sessions.get()[0]?.title).toBe('Old title')
+  })
+})
+
+describe('usePromptActions /loop', () => {
+  beforeEach(() => {
+    setSessions(() => [sessionInfo()])
+    $kanbanStatusBySession.set({})
+    vi.mocked(createLoopDraftTask).mockResolvedValue({
+      source: {
+        include_archived: false,
+        latest_event_id: 1,
+        lineage_session_ids: [RUNTIME_SESSION_ID],
+        links: [],
+        root_task_id: 't_loop',
+        session_id: RUNTIME_SESSION_ID,
+        tasks: [
+          {
+            created_by: 'loop:t_loop',
+            id: 't_loop',
+            included_child_ids: [],
+            included_parent_ids: [],
+            session_id: RUNTIME_SESSION_ID,
+            status: 'triage',
+            tenant: RUNTIME_SESSION_ID,
+            title: 'Draft product loop',
+            loop_intake: {
+              dispatchable: false,
+              needed: true,
+              source: 'slash_loop_draft',
+              state: 'drafted'
+            }
+          }
+        ],
+        tenant: RUNTIME_SESSION_ID,
+        tenants: [RUNTIME_SESSION_ID],
+        workers: []
+      },
+      task: {
+        created_by: 'loop:t_loop',
+        id: 't_loop',
+        session_id: RUNTIME_SESSION_ID,
+        status: 'triage',
+        tenant: RUNTIME_SESSION_ID,
+        title: 'Draft product loop',
+        loop_intake: {
+          dispatchable: false,
+          needed: true,
+          source: 'slash_loop_draft',
+          state: 'drafted'
+        }
+      }
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    $kanbanStatusBySession.set({})
+    vi.restoreAllMocks()
+  })
+
+  it('creates a draft Loop root locally and surfaces it in the composer stack', async () => {
+    const refreshSessions = vi.fn(async () => undefined)
+    const requestGateway = vi.fn(async () => ({}) as never)
+
+    let handle: HarnessHandle | null = null
+    render(<Harness onReady={h => (handle = h)} refreshSessions={refreshSessions} requestGateway={requestGateway} />)
+
+    await handle!.submitText('/loop Draft product loop')
+
+    expect(createLoopDraftTask).toHaveBeenCalledWith({
+      profile: 'default',
+      sessionId: RUNTIME_SESSION_ID,
+      title: 'Draft product loop'
+    })
+    expect(requestGateway).not.toHaveBeenCalledWith('slash.exec', expect.anything())
+    expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything())
+    expect($kanbanStatusBySession.get()[RUNTIME_SESSION_ID]?.[0]).toMatchObject({
+      currentTool: 'Loop',
+      kanbanTaskId: 't_loop',
+      title: 'Draft product loop',
+      todoStatus: 'pending',
+      type: 'todo'
+    })
+  })
+
+  it('anchors a draft Loop root to the selected stored session while displaying it under the runtime session', async () => {
+    vi.mocked(createLoopDraftTask).mockResolvedValue({
+      source: {
+        include_archived: false,
+        latest_event_id: 2,
+        lineage_session_ids: [STORED_SESSION_ID],
+        links: [],
+        root_task_id: 't_stored_loop',
+        session_id: STORED_SESSION_ID,
+        tasks: [
+          {
+            created_by: 'loop:t_stored_loop',
+            id: 't_stored_loop',
+            included_child_ids: [],
+            included_parent_ids: [],
+            session_id: STORED_SESSION_ID,
+            status: 'triage',
+            tenant: STORED_SESSION_ID,
+            title: 'Stored draft loop'
+          }
+        ],
+        tenant: STORED_SESSION_ID,
+        tenants: [STORED_SESSION_ID],
+        workers: []
+      },
+      task: {
+        created_by: 'loop:t_stored_loop',
+        id: 't_stored_loop',
+        session_id: STORED_SESSION_ID,
+        status: 'triage',
+        tenant: STORED_SESSION_ID,
+        title: 'Stored draft loop'
+      }
+    })
+    const refreshSessions = vi.fn(async () => undefined)
+    const requestGateway = vi.fn(async () => ({}) as never)
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={refreshSessions}
+        requestGateway={requestGateway}
+        storedSessionId={STORED_SESSION_ID}
+      />
+    )
+
+    await handle!.submitText('/loop Stored draft loop')
+
+    expect(createLoopDraftTask).toHaveBeenCalledWith({
+      profile: 'default',
+      sessionId: STORED_SESSION_ID,
+      title: 'Stored draft loop'
+    })
+    expect(requestGateway).not.toHaveBeenCalledWith('slash.exec', expect.anything())
+    expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything())
+    expect($kanbanStatusBySession.get()[RUNTIME_SESSION_ID]?.[0]).toMatchObject({
+      currentTool: 'Loop',
+      kanbanTaskId: 't_stored_loop',
+      title: 'Stored draft loop',
+      todoStatus: 'pending',
+      type: 'todo'
+    })
+    expect($kanbanStatusBySession.get()[STORED_SESSION_ID] ?? []).toEqual([])
+  })
+
+  it('prefers the active runtime stored session over a stale selected branch when creating a Loop draft', async () => {
+    vi.mocked(createLoopDraftTask).mockResolvedValue({
+      source: {
+        include_archived: false,
+        latest_event_id: 3,
+        lineage_session_ids: [STORED_SESSION_ID],
+        links: [],
+        root_task_id: 't_original_loop',
+        session_id: STORED_SESSION_ID,
+        tasks: [
+          {
+            created_by: 'loop:t_original_loop',
+            id: 't_original_loop',
+            included_child_ids: [],
+            included_parent_ids: [],
+            session_id: STORED_SESSION_ID,
+            status: 'triage',
+            tenant: STORED_SESSION_ID,
+            title: 'Original session follow-up'
+          }
+        ],
+        tenant: STORED_SESSION_ID,
+        tenants: [STORED_SESSION_ID],
+        workers: []
+      },
+      task: {
+        created_by: 'loop:t_original_loop',
+        id: 't_original_loop',
+        session_id: STORED_SESSION_ID,
+        status: 'triage',
+        tenant: STORED_SESSION_ID,
+        title: 'Original session follow-up'
+      }
+    })
+    const refreshSessions = vi.fn(async () => undefined)
+    const requestGateway = vi.fn(async () => ({}) as never)
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={refreshSessions}
+        requestGateway={requestGateway}
+        resolveActiveStoredSessionId={runtimeSessionId =>
+          runtimeSessionId === RUNTIME_SESSION_ID ? STORED_SESSION_ID : null
+        }
+        storedSessionId={BRANCH_STORED_SESSION_ID}
+      />
+    )
+
+    await handle!.submitText('/loop Original session follow-up')
+
+    expect(createLoopDraftTask).toHaveBeenCalledWith({
+      profile: 'default',
+      sessionId: STORED_SESSION_ID,
+      title: 'Original session follow-up'
+    })
+    expect($kanbanStatusBySession.get()[RUNTIME_SESSION_ID]?.[0]).toMatchObject({
+      kanbanTaskId: 't_original_loop',
+      title: 'Original session follow-up',
+      type: 'todo'
+    })
+    expect($kanbanStatusBySession.get()[BRANCH_STORED_SESSION_ID] ?? []).toEqual([])
   })
 })
 

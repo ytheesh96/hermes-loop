@@ -818,7 +818,7 @@ function LoopTaskActions({
         </Button>
       )}
       <Button
-        aria-label={`Ask to chat about ${row.taskId}`}
+        aria-label={`Ask in chat about ${row.taskId}`}
         className="h-7 gap-1.5 px-2 text-xs"
         disabled={!onTaskAction}
         onClick={() => onTaskAction?.('ask-hermes', row)}
@@ -826,7 +826,7 @@ function LoopTaskActions({
         variant="outline"
       >
         <Codicon name="comment-discussion" size="0.82rem" />
-        <span>Ask to chat</span>
+        <span>Ask in chat</span>
       </Button>
       {!archived && (
         <Button
@@ -884,7 +884,7 @@ function LoopRootActions({
         <span>Archive</span>
       </Button>
       <Button
-        aria-label={`Ask Hermes about ${root.taskId}`}
+        aria-label={`Ask in chat about ${root.taskId}`}
         className="h-7 gap-1.5 px-2 text-xs"
         disabled={!onTaskAction}
         onClick={() => onTaskAction?.('ask-hermes', root)}
@@ -892,7 +892,7 @@ function LoopRootActions({
         variant="outline"
       >
         <Codicon name="comment-discussion" size="0.82rem" />
-        <span>Ask Hermes</span>
+        <span>Ask in chat</span>
       </Button>
     </div>
   )

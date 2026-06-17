@@ -154,6 +154,13 @@ BOARD_COLUMNS: list[str] = [
 
 
 _CARD_SUMMARY_PREVIEW_CHARS = 200
+_LOOP_INTAKE_EVENT_KIND = "loop_intake_state"
+_LOOP_INTAKE_DRAFT_PAYLOAD = {
+    "needed": True,
+    "state": "drafted",
+    "source": "slash_loop_draft",
+    "dispatchable": False,
+}
 
 
 def _task_dict(
@@ -175,6 +182,88 @@ def _task_dict(
     d["latest_summary"] = latest_summary
     # Keep body short on list endpoints; full body comes from /tasks/:id.
     return d
+
+
+def _normalized_loop_intake_payload(payload: Any) -> Optional[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("needed") is not True:
+        return None
+    state = str(payload.get("state") or "").strip() or "drafted"
+    source = str(payload.get("source") or "").strip() or "slash_loop_draft"
+    dispatchable = bool(payload.get("dispatchable") is True)
+    return {
+        "needed": True,
+        "state": state,
+        "source": source,
+        "dispatchable": dispatchable,
+    }
+
+
+def _loop_intake_states_for_tasks(
+    conn: sqlite3.Connection,
+    task_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    if not task_ids:
+        return {}
+    placeholders = ",".join("?" for _ in task_ids)
+    rows = conn.execute(
+        f"""
+        SELECT * FROM (
+            SELECT e.*, ROW_NUMBER() OVER (
+                PARTITION BY e.task_id ORDER BY e.created_at DESC, e.id DESC
+            ) AS rn
+            FROM task_events e
+            WHERE e.task_id IN ({placeholders})
+              AND e.kind = ?
+        ) ranked
+        WHERE rn = 1
+        """,
+        tuple(task_ids) + (_LOOP_INTAKE_EVENT_KIND,),
+    ).fetchall()
+    states: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"]) if row["payload"] else None
+        except Exception:
+            payload = None
+        normalized = _normalized_loop_intake_payload(payload)
+        if normalized:
+            states[str(row["task_id"])] = normalized
+    return states
+
+
+def _loop_intake_state_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]]:
+    return _loop_intake_states_for_tasks(conn, [task_id]).get(task_id)
+
+
+def _task_dict_with_loop_intake(
+    conn: sqlite3.Connection,
+    task: kanban_db.Task,
+    *,
+    latest_summary: Optional[str] = None,
+) -> dict[str, Any]:
+    item = _task_dict(task, latest_summary=latest_summary)
+    intake = _loop_intake_state_for_task(conn, task.id)
+    if intake:
+        item["loop_intake"] = intake
+    return item
+
+
+def _task_has_unresolved_loop_intake(conn: sqlite3.Connection, task_id: str) -> bool:
+    intake = _loop_intake_state_for_task(conn, task_id)
+    if not intake:
+        return False
+    if intake.get("dispatchable") is True:
+        return False
+    return str(intake.get("state") or "").strip().lower() not in {"spec-ready", "spec_ready", "approved"}
+
+
+def _loop_intake_required_reason(task_id: str) -> str:
+    return (
+        f"Loop intake is still required for {task_id}; keep the row in triage until "
+        "Vaitheesh explicitly approves Decompose/activation."
+    )
 
 
 def _event_dict(event: kanban_db.Event) -> dict[str, Any]:
@@ -961,12 +1050,15 @@ def get_session_source(
             }
         diagnostics = _compute_task_diagnostics(conn, task_ids=task_ids) if task_ids else {}
 
+        intake_states = _loop_intake_states_for_tasks(conn, task_ids)
         root_task_id = _session_source_root_task_id(conn, tasks, included_links)
         ordered_tasks = _topologically_order_tasks(tasks, included_links)
         payload_tasks: list[dict[str, Any]] = []
         for task in ordered_tasks:
             task_links = _links_for(conn, task.id)
             item = _task_dict(task, latest_summary=summary_map.get(task.id))
+            if task.id in intake_states:
+                item["loop_intake"] = intake_states[task.id]
             item["is_container"] = False
             item["links"] = task_links
             item["included_parent_ids"] = [pid for pid in task_links["parents"] if pid in task_id_set]
@@ -1189,7 +1281,7 @@ def get_task(
         # operators can read the complete worker handoff without making
         # a second round-trip. Cards on /board carry a 200-char preview.
         full_summary = kanban_db.latest_summary(conn, task_id)
-        task_d = _task_dict(task, latest_summary=full_summary)
+        task_d = _task_dict_with_loop_intake(conn, task, latest_summary=full_summary)
         latest_runs = _latest_runs_for_tasks(conn, [task_id])
         worker_activity = _worker_activity_for_tasks(conn, [task_id], latest_runs, board=board).get(task_id)
         if worker_activity:
@@ -1233,6 +1325,7 @@ class CreateTaskBody(BaseModel):
     body: Optional[str] = None
     assignee: Optional[str] = None
     tenant: Optional[str] = None
+    session_id: Optional[str] = None
     priority: int = 0
     workspace_kind: str = "scratch"
     workspace_path: Optional[str] = None
@@ -1267,6 +1360,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             skills=payload.skills,
             goal_mode=payload.goal_mode,
             goal_max_turns=payload.goal_max_turns,
+            session_id=payload.session_id,
         )
         task = kanban_db.get_task(conn, task_id)
         body: dict[str, Any] = {"task": _task_dict(task) if task else None}
@@ -1285,6 +1379,164 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
                 # Probe failure must never block the create itself.
                 pass
         return body
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+
+
+class CreateLoopDraftBody(BaseModel):
+    title: Optional[str] = None
+    body: Optional[str] = None
+    assignee: Optional[str] = "orchestrator"
+    tenant: Optional[str] = None
+    session_id: Optional[str] = None
+    priority: int = 0
+    workspace_kind: str = "scratch"
+    workspace_path: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+
+def _draft_title(value: Optional[str]) -> str:
+    title = (value or "").strip()
+    return title or "Loop draft"
+
+
+def _create_loop_draft_root(
+    conn: sqlite3.Connection,
+    payload: CreateLoopDraftBody,
+    *,
+    board: Optional[str],
+) -> str:
+    """Create/upsert the real triage row that anchors a desktop Loop draft."""
+    title = _draft_title(payload.title)
+    session_id = (payload.session_id or os.environ.get("HERMES_SESSION_ID") or "").strip() or None
+    tenant = (payload.tenant or session_id or "").strip() or None
+    idempotency_key = (payload.idempotency_key or (f"loop-draft:{session_id}" if session_id else "")).strip() or None
+    needs_intake = not (payload.body or "").strip()
+
+    if payload.workspace_kind not in kanban_db.VALID_WORKSPACE_KINDS:
+        raise ValueError(
+            f"workspace_kind must be one of {sorted(kanban_db.VALID_WORKSPACE_KINDS)}, "
+            f"got {payload.workspace_kind!r}"
+        )
+
+    if idempotency_key:
+        row = conn.execute(
+            "SELECT id, created_by FROM tasks WHERE idempotency_key = ? "
+            "AND status != 'archived' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (idempotency_key,),
+        ).fetchone()
+        if row:
+            task_id = str(row["id"])
+            marker = f"loop:{task_id}"
+            with kanban_db.write_txn(conn):
+                if row["created_by"] != marker:
+                    conn.execute("UPDATE tasks SET created_by = ? WHERE id = ?", (marker, task_id))
+                    kanban_db._append_event(conn, task_id, "edited", {"created_by": marker, "loop_root": True})
+                if needs_intake and not _loop_intake_state_for_task(conn, task_id):
+                    kanban_db._append_event(conn, task_id, _LOOP_INTAKE_EVENT_KIND, dict(_LOOP_INTAKE_DRAFT_PAYLOAD))
+            return task_id
+
+    if payload.workspace_path is None and payload.workspace_kind in {"dir", "worktree"}:
+        board_meta = kanban_db.read_board_metadata(board if board else kanban_db.get_current_board())
+        board_default = board_meta.get("default_workdir")
+        if board_default:
+            payload.workspace_path = str(board_default)
+
+    now = int(time.time())
+    for attempt in range(2):
+        task_id = kanban_db._new_task_id()
+        try:
+            with kanban_db.write_txn(conn):
+                conn.execute(
+                    """
+                    INSERT INTO tasks (
+                        id, title, body, assignee, status, priority,
+                        created_by, created_at, workspace_kind, workspace_path,
+                        branch_name, tenant, idempotency_key, max_runtime_seconds,
+                        skills, max_retries, goal_mode, goal_max_turns, session_id
+                    ) VALUES (?, ?, ?, ?, 'triage', ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL, 0, NULL, ?)
+                    """,
+                    (
+                        task_id,
+                        title,
+                        payload.body,
+                        payload.assignee,
+                        payload.priority,
+                        f"loop:{task_id}",
+                        now,
+                        payload.workspace_kind,
+                        payload.workspace_path,
+                        tenant,
+                        idempotency_key,
+                        session_id,
+                    ),
+                )
+                kanban_db._append_event(
+                    conn,
+                    task_id,
+                    "created",
+                    {
+                        "assignee": payload.assignee,
+                        "status": "triage",
+                        "parents": [],
+                        "tenant": tenant,
+                        "loop_root": True,
+                    },
+                )
+                if needs_intake:
+                    kanban_db._append_event(conn, task_id, _LOOP_INTAKE_EVENT_KIND, dict(_LOOP_INTAKE_DRAFT_PAYLOAD))
+            return task_id
+        except sqlite3.IntegrityError:
+            if attempt == 1:
+                raise
+            continue
+    raise RuntimeError("unreachable")
+
+
+def _loop_draft_source_payload(
+    conn: sqlite3.Connection,
+    task: kanban_db.Task,
+    *,
+    board: Optional[str],
+) -> dict[str, Any]:
+    task_item = _task_dict_with_loop_intake(conn, task)
+    task_links = _links_for(conn, task.id)
+    task_item["links"] = task_links
+    task_item["included_parent_ids"] = []
+    task_item["included_child_ids"] = []
+    latest_event_id = _latest_event_id_for_tasks(conn, [task.id])
+    tenant = task.tenant
+    session_id = task.session_id
+    return {
+        "board": board,
+        "external_links": [],
+        "include_archived": False,
+        "latest_event_id": latest_event_id,
+        "lineage_session_ids": [session_id] if session_id else [],
+        "links": [],
+        "now": int(time.time()),
+        "root_task_id": task.id,
+        "session_id": session_id,
+        "tasks": [task_item],
+        "tenant": tenant,
+        "tenants": [tenant] if tenant else [],
+        "workers": [],
+    }
+
+
+@router.post("/loop-drafts")
+def create_loop_draft(payload: CreateLoopDraftBody, board: Optional[str] = Query(None)):
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        task_id = _create_loop_draft_root(conn, payload, board=board)
+        task = kanban_db.get_task(conn, task_id)
+        if task is None:
+            raise HTTPException(status_code=500, detail=f"draft task {task_id} was not persisted")
+        return {"task": _task_dict_with_loop_intake(conn, task), "source": _loop_draft_source_payload(conn, task, board=board)}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -1598,6 +1850,7 @@ class UpdateTaskBody(BaseModel):
     # complete --summary ... --metadata ...``.
     summary: Optional[str] = None
     metadata: Optional[dict] = None
+    loop_intake: Optional[dict[str, Any]] = None
 
 
 @router.patch("/tasks/{task_id}")
@@ -1608,6 +1861,14 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         task = kanban_db.get_task(conn, task_id)
         if task is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+
+        # --- intake state -------------------------------------------------
+        if payload.loop_intake is not None:
+            normalized_intake = _normalized_loop_intake_payload(payload.loop_intake)
+            if not normalized_intake:
+                raise HTTPException(status_code=400, detail="loop_intake must include needed=true")
+            with kanban_db.write_txn(conn):
+                kanban_db._append_event(conn, task_id, _LOOP_INTAKE_EVENT_KIND, normalized_intake)
 
         # --- assignee ----------------------------------------------------
         if payload.assignee is not None:
@@ -1624,6 +1885,8 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         if payload.status is not None:
             s = payload.status
             ok = True
+            if s == "ready" and _task_has_unresolved_loop_intake(conn, task_id):
+                raise HTTPException(status_code=409, detail=_loop_intake_required_reason(task_id))
             if s == "done":
                 ok = kanban_db.complete_task(
                     conn, task_id,
@@ -1714,7 +1977,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                 )
 
         updated = kanban_db.get_task(conn, task_id)
-        return {"task": _task_dict(updated) if updated else None}
+        return {"task": _task_dict_with_loop_intake(conn, updated) if updated else None}
     finally:
         conn.close()
 
@@ -3011,6 +3274,19 @@ def decompose_task_endpoint(
     can take minutes on reasoning models.
     """
     board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        if _task_has_unresolved_loop_intake(conn, task_id):
+            return {
+                "ok": False,
+                "task_id": task_id,
+                "reason": _loop_intake_required_reason(task_id),
+                "fanout": False,
+                "child_ids": [],
+                "new_title": None,
+            }
+    finally:
+        conn.close()
     # Context-local board pin (see specify endpoint above): this sync
     # endpoint runs in FastAPI's threadpool, so mutating the process-global
     # HERMES_KANBAN_BOARD env var would let concurrent requests for

@@ -63,12 +63,26 @@ const profileMatches = (key: QueryKey, activeProfile?: null | string) => {
 const sourceKeyMatches = (key: QueryKey, sessionIds: ReadonlySet<string>) =>
   key[0] === 'loop-session-source' && (sessionIds.size === 0 || (typeof key[2] === 'string' && sessionIds.has(key[2])))
 
+const taskDetailIdFromKey = (key: QueryKey): string => {
+  if (key[0] !== 'loop-task-detail') {
+    return ''
+  }
+
+  // Current detail keys are ['loop-task-detail', profile, board, taskId, revision].
+  // Older keys omitted board: ['loop-task-detail', profile, taskId, revision].
+  // Accept both shapes so live kanban.comment/task events keep refreshing the
+  // focused drawer across upgrades.
+  const currentTaskId = key.length >= 5 ? key[3] : key[2]
+
+  return typeof currentTaskId === 'string' ? currentTaskId : ''
+}
+
 const taskDetailKeyMatches = (key: QueryKey, affectedTaskIds: ReadonlySet<string>, selectedTaskId?: null | string) => {
   if (key[0] !== 'loop-task-detail') {
     return false
   }
 
-  const taskId = typeof key[2] === 'string' ? key[2] : ''
+  const taskId = taskDetailIdFromKey(key)
 
   if (selectedTaskId && taskId === selectedTaskId) {
     return true

@@ -15,8 +15,8 @@ describe('loop source live invalidation', () => {
   it('invalidates active lineage source and selected task detail only for newer source changes', async () => {
     const queryClient = new QueryClient()
     const staleKey = ['loop-session-source', 'peacock', 'session-root'] as const
-    const selectedTaskKey = ['loop-task-detail', 'peacock', 't_selected', 12] as const
-    const unrelatedTaskKey = ['loop-task-detail', 'peacock', 't_other', 12] as const
+    const selectedTaskKey = ['loop-task-detail', 'peacock', 'developer', 't_selected', 12] as const
+    const unrelatedTaskKey = ['loop-task-detail', 'peacock', 'developer', 't_other', 12] as const
 
     queryClient.setQueryData(staleKey, { latest_event_id: 10, rows: [] })
     queryClient.setQueryData(selectedTaskKey, { task: { id: 't_selected', title: 'Old title' } })

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  desktopSlashCommandHasArgOptions,
   desktopSkinSlashCompletions,
   desktopSlashDescription,
   desktopSlashUnavailableMessage,
@@ -61,6 +62,16 @@ describe('desktop slash command curation', () => {
     expect(resolveDesktopCommand('/browser')?.surface).toEqual({ kind: 'action', action: 'browser' })
     // Bare /browser expands to its sub-action options in the popover.
     expect(resolveDesktopCommand('/browser')?.args).toBe(true)
+  })
+
+  it('treats /loop as a desktop-native draft creation action', () => {
+    expect(isDesktopSlashCommand('/loop')).toBe(true)
+    expect(isDesktopSlashSuggestion('/loop')).toBe(true)
+    expect(desktopSlashUnavailableMessage('/loop')).toBeNull()
+    expect(resolveDesktopCommand('/loop')?.surface).toEqual({ kind: 'action', action: 'loop' })
+    expect(resolveDesktopCommand('/loop')?.args).toBe('freeform')
+    expect(desktopSlashCommandHasArgOptions('/loop')).toBe(false)
+    expect(desktopSlashCommandHasArgOptions('/skin')).toBe(true)
   })
 
   it('allows aliases to execute without cluttering the popover', () => {

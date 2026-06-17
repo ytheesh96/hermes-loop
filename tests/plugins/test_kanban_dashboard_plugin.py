@@ -179,6 +179,175 @@ def test_create_task_upserts_triage_draft_root_without_dispatch_run(client):
     assert runs == []
 
 
+def test_create_loop_draft_anchors_session_source_and_real_root(client):
+    payload = {
+        "title": "Draft overview",
+        "body": "User-visible draft spec",
+        "session_id": "session-draft-1",
+    }
+
+    first = client.post("/api/plugins/kanban/loop-drafts", json=payload)
+    second = client.post("/api/plugins/kanban/loop-drafts", json={**payload, "title": "duplicate ignored"})
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    task = first.json()["task"]
+    assert task["id"] == second.json()["task"]["id"]
+    assert task["title"] == "Draft overview"
+    assert task["status"] == "triage"
+    assert task["session_id"] == "session-draft-1"
+    assert task["tenant"] == "session-draft-1"
+    assert task["created_by"] == f"loop:{task['id']}"
+
+    source = first.json()["source"]
+    assert source["root_task_id"] == task["id"]
+    assert source["session_id"] == "session-draft-1"
+    assert source["tasks"][0]["id"] == task["id"]
+
+    session_source = client.get("/api/plugins/kanban/session-source", params={"session_id": "session-draft-1"})
+    assert session_source.status_code == 200, session_source.text
+    session_payload = session_source.json()
+    assert session_payload["root_task_id"] == task["id"]
+    assert [item["id"] for item in session_payload["tasks"]] == [task["id"]]
+
+    conn = kb.connect()
+    try:
+        persisted = kb.get_task(conn, task["id"])
+        runs = kb.list_runs(conn, task["id"])
+    finally:
+        conn.close()
+
+    assert persisted is not None
+    assert persisted.created_by == f"loop:{task['id']}"
+    assert persisted.status == "triage"
+    assert runs == []
+
+
+def test_title_only_loop_draft_records_durable_intake_needed_state(client):
+    """Title-only /loop rows expose a durable, machine-readable intake marker."""
+
+    created = client.post(
+        "/api/plugins/kanban/loop-drafts",
+        json={"title": "Needs intake", "session_id": "session-intake-1"},
+    )
+
+    assert created.status_code == 200, created.text
+    task = created.json()["task"]
+    assert task["body"] is None
+    assert task["status"] == "triage"
+    assert task["loop_intake"] == {
+        "needed": True,
+        "state": "drafted",
+        "source": "slash_loop_draft",
+        "dispatchable": False,
+    }
+    assert created.json()["source"]["tasks"][0]["loop_intake"] == task["loop_intake"]
+
+    session_source = client.get(
+        "/api/plugins/kanban/session-source",
+        params={"session_id": "session-intake-1"},
+    )
+    assert session_source.status_code == 200, session_source.text
+    assert session_source.json()["tasks"][0]["loop_intake"] == task["loop_intake"]
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{task['id']}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["task"]["loop_intake"] == task["loop_intake"]
+
+    conn = kb.connect()
+    try:
+        events = kb.list_events(conn, task["id"])
+    finally:
+        conn.close()
+
+    intake_events = [event for event in events if event.kind == "loop_intake_state"]
+    assert len(intake_events) == 1
+    assert intake_events[0].payload["needed"] is True
+    assert intake_events[0].payload["state"] == "drafted"
+
+
+def test_loop_intake_needed_blocks_ready_and_decompose_until_approved(client):
+    created = client.post(
+        "/api/plugins/kanban/loop-drafts",
+        json={"title": "Blocked activation", "session_id": "session-intake-2"},
+    )
+    task_id = created.json()["task"]["id"]
+    initial_assignee = created.json()["task"].get("assignee")
+
+    ready = client.patch(f"/api/plugins/kanban/tasks/{task_id}", json={"status": "ready"})
+    assert ready.status_code == 409
+    assert "Loop intake is still required" in ready.json()["detail"]
+
+    decompose = client.post(f"/api/plugins/kanban/tasks/{task_id}/decompose", json={})
+    assert decompose.status_code == 200, decompose.text
+    assert decompose.json()["ok"] is False
+    assert "Loop intake is still required" in decompose.json()["reason"]
+
+    still_triage = client.get(f"/api/plugins/kanban/tasks/{task_id}")
+    assert still_triage.json()["task"]["status"] == "triage"
+
+    approved_body = "## Resolved decisions\n- Decision: First intake gate\n  - Chosen: A\n"
+    approved = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}",
+        json={
+            "body": approved_body,
+            "loop_intake": {
+                "needed": True,
+                "state": "approved",
+                "source": "user_approval",
+                "dispatchable": True,
+            },
+        },
+    )
+    assert approved.status_code == 200, approved.text
+    approved_task = approved.json()["task"]
+    assert approved_task["body"] == approved_body
+    assert approved_task["status"] == "triage"
+    assert approved_task["assignee"] == initial_assignee
+    assert approved_task["loop_intake"]["state"] == "approved"
+    assert approved_task["loop_intake"]["dispatchable"] is True
+
+    approval_source = client.get("/api/plugins/kanban/session-source", params={"session_id": "session-intake-2"})
+    assert approval_source.status_code == 200, approval_source.text
+    assert approval_source.json()["root_task_id"] == task_id
+    assert [item["id"] for item in approval_source.json()["tasks"]] == [task_id]
+    assert approval_source.json()["workers"] == []
+
+    conn = kb.connect()
+    try:
+        persisted_after_approval = kb.get_task(conn, task_id)
+        runs_after_approval = kb.list_runs(conn, task_id)
+        children_after_approval = kb.child_ids(conn, task_id)
+    finally:
+        conn.close()
+
+    assert persisted_after_approval is not None
+    assert persisted_after_approval.status == "triage"
+    assert persisted_after_approval.assignee == initial_assignee
+    assert runs_after_approval == []
+    assert children_after_approval == []
+
+    ready_after_approval = client.patch(f"/api/plugins/kanban/tasks/{task_id}", json={"status": "ready"})
+    assert ready_after_approval.status_code == 200, ready_after_approval.text
+    assert ready_after_approval.json()["task"]["status"] == "ready"
+
+
+def test_bodyful_loop_draft_and_unrelated_triage_rows_do_not_need_intake(client):
+    bodyful = client.post(
+        "/api/plugins/kanban/loop-drafts",
+        json={"title": "Has body", "body": "Already specified", "session_id": "session-specified"},
+    )
+    assert bodyful.status_code == 200, bodyful.text
+    assert "loop_intake" not in bodyful.json()["task"]
+
+    unrelated = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "Plain triage", "triage": True, "tenant": "session-specified"},
+    )
+    assert unrelated.status_code == 200, unrelated.text
+    assert "loop_intake" not in unrelated.json()["task"]
+
+
 def test_scheduled_tasks_have_their_own_column_not_todo(client):
     """Scheduled/time-delay tasks must not be silently bucketed into todo."""
 

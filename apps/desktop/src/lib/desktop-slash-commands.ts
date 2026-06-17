@@ -33,6 +33,7 @@ export type DesktopActionId =
   | 'browser'
   | 'handoff'
   | 'help'
+  | 'loop'
   | 'new'
   | 'profile'
   | 'skin'
@@ -77,11 +78,14 @@ export interface DesktopCommandSpec {
    */
   hidden?: boolean
   /**
-   * The command has an inline options "screen" (theme / personality / session /
-   * platform / toolset list). Picking the bare command in the popover expands to
-   * that argument step instead of committing — mirroring typing `/<cmd> ` by hand.
+   * Argument behavior for slash completions.
+   * - true / "options": an inline options screen (theme / personality /
+   *   session / platform / toolset list). Picking the bare command expands to
+   *   that argument step.
+   * - "freeform": accepts arbitrary text; do not keep the slash trigger alive
+   *   or wrap the typed argument in a non-editable pill.
    */
-  args?: boolean
+  args?: boolean | 'freeform' | 'options'
 }
 
 const exec = (): DesktopCommandSurface => ({ kind: 'exec' })
@@ -100,6 +104,7 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
   { name: '/branch', description: 'Branch the latest message into a new chat', aliases: ['/fork'], surface: action('branch') },
   { name: '/yolo', description: 'Toggle YOLO — auto-approve dangerous commands', surface: action('yolo') },
   { name: '/handoff', description: 'Hand off this session to a messaging platform', surface: action('handoff'), args: true },
+  { name: '/loop', description: 'Create a draft Loop task for this session', surface: action('loop'), args: 'freeform' },
   { name: '/profile', description: 'Switch the active Hermes profile', surface: action('profile') },
   { name: '/skin', description: 'Switch desktop theme or cycle to the next one', surface: action('skin'), args: true },
   { name: '/title', description: 'Rename the current session', surface: action('title') },
@@ -298,12 +303,15 @@ export function desktopSlashDescription(command: string, fallback = ''): string 
 }
 
 /**
- * True when picking the bare command should expand to its inline argument
- * options (theme / personality / session / platform / toolset) rather than
- * committing immediately. Lets the popover act as a two-step picker.
+ * True when picking the bare command should expand to inline argument options
+ * (theme / personality / session / platform / toolset) rather than committing
+ * immediately. Free-form argument commands intentionally return false so their
+ * user-typed text stays editable/plain.
  */
-export function desktopSlashCommandTakesArgs(command: string): boolean {
-  return resolveDesktopCommand(command)?.args ?? false
+export function desktopSlashCommandHasArgOptions(command: string): boolean {
+  const args = resolveDesktopCommand(command)?.args
+
+  return args === true || args === 'options'
 }
 
 export function desktopSkinSlashCompletions(
