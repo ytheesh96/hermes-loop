@@ -927,6 +927,9 @@ def test_scheduler_claims_next_handoff_into_stable_review_session(kanban_home):
     prompt = kb._loop_handoff_review_runner_prompt(first)
     assert "payload_ref" in prompt
     assert "drawer/API" in prompt
+    assert "review_loop_handoff_autonomous_action" in prompt
+    assert "Do not finish with prose" in prompt
+    assert "durable action returns ok" in prompt
     assert "proof packets" not in prompt
 
 
