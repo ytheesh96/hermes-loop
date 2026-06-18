@@ -48,15 +48,17 @@ kanban_complete(
 )
 ```
 
-**Coding task that needs review (review-required):**
+**Coding task that needs review (review lane):**
 
-For most code-changing tasks, the work isn't truly *done* until a reviewer has eyes on it. Block instead of complete, with `reason` prefixed `review-required: ` so the dashboard surfaces the row as needing review. Drop the structured metadata (changed files, test counts, diff/PR url) into a comment first, since `kanban_block` only carries the readable reason — comments are the durable annotation channel. The reviewer/orchestrator decides whether to approve, route safe follow-up work, ask for changes, or escalate to the user.
+For most code-changing tasks, the work isn't truly *done* until a reviewer has eyes on it. When the implementation/artifact is ready for ordinary QA, move the same task into the review lane with `kanban_request_review(...)` instead of creating a dependent reviewer child or blocking with `review-required:`. The dispatcher will claim that same row, assign/run the reviewer profile, and force-load `sdlc-review`.
+
+Use `kanban_block(reason="...")` for true unresolved blockers, but keep the reason neutral: the tool routes ordinary worker blockers into orchestrator `blocker_triage` on the same task row instead of leaving a passive blocked card. Only explicitly terminal/system cases should remain non-runnable; mark those narrowly with `metadata={"terminal_blocker": True, "terminal_blocker_kind": "system|credentials|external_access|policy|not_routable"}`. Do not create a reviewer card as a child of a blocked task; that can deadlock because the reviewer waits for the reviewed task to finish while the reviewed task waits for review.
 
 ```python
 import json
 
 kanban_comment(
-    body="review-required handoff:\n" + json.dumps({
+    body="review handoff:\n" + json.dumps({
         "changed_files": ["rate_limiter.py", "tests/test_rate_limiter.py"],
         "tests_run": 14,
         "tests_passed": 14,
@@ -64,8 +66,14 @@ kanban_comment(
         "decisions": ["user_id primary, IP fallback for unauthenticated requests"],
     }, indent=2),
 )
-kanban_block(
-    reason="review-required: rate limiter shipped, 14/14 tests pass — needs eyes on the user_id/IP fallback choice before merging",
+kanban_request_review(
+    summary="rate limiter shipped; 14/14 tests pass; needs QA on user_id/IP fallback choice before merging",
+    metadata={
+        "changed_files": ["rate_limiter.py", "tests/test_rate_limiter.py"],
+        "tests_run": 14,
+        "tests_passed": 14,
+        "review_scope": "user_id/IP fallback choice and merge safety",
+    },
 )
 ```
 
@@ -187,6 +195,7 @@ Every tool has a CLI equivalent for human operators and scripts:
 - `kanban_show` ↔ `hermes kanban show <id> --json`
 - `kanban_complete` ↔ `hermes kanban complete <id> --summary "..." --metadata '{...}'`
 - `kanban_block` ↔ `hermes kanban block <id> "reason"`
+- `kanban_request_review` ↔ `hermes kanban request-review <id> "reason" --summary "..."`
 - `kanban_create` ↔ `hermes kanban create "title" --assignee <profile> [--parent <id>]`
 - etc.
 

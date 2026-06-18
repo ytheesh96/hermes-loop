@@ -84,7 +84,7 @@ import threading
 import logging
 import time
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -163,6 +163,27 @@ DEFAULT_CRASH_GRACE_SECONDS = 30
 # conventional "temporary failure, retry later" code, and well clear of the
 # 0/1/2 codes the worker uses for success / generic failure / usage error.
 KANBAN_RATE_LIMIT_EXIT_CODE = 75
+
+ORCHESTRATOR_REVIEW_KINDS = {"blocker_triage", "foreground_judgment"}
+
+BLOCKER_TRIAGE_REVIEW_KIND = "blocker_triage"
+BLOCKER_TRIAGE_ASSIGNEE = "orchestrator"
+BLOCKER_TRIAGE_TERMINAL_METADATA_FLAG = "terminal_blocker"
+BLOCKER_TRIAGE_TERMINAL_KINDS = {
+    "system",
+    "credentials",
+    "external_access",
+    "policy",
+    "not_routable",
+}
+
+BLOCKER_TRIAGE_ACTIONS = {
+    "approve_complete",
+    "return_to_worker",
+    "create_followups",
+    "route_reviewer_qa",
+    "foreground_handoff",
+}
 
 
 def _resolve_crash_grace_seconds() -> int:
@@ -801,6 +822,14 @@ class Task:
     # set the env var. Lets clients render a per-session board without
     # relying on tenant + time-window heuristics.
     session_id: Optional[str] = None
+    # Review-lane routing metadata. Ordinary QA review leaves these NULL;
+    # orchestrator/foreground review paths use them to distinguish why the
+    # row is in status='review' and how downstream session code should resume.
+    review_kind: Optional[str] = None
+    resume_mode: Optional[str] = None
+    review_subject_assignee: Optional[str] = None
+    foreground_parent_session_id: Optional[str] = None
+    foreground_fork_session_id: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -875,6 +904,21 @@ class Task:
             ),
             session_id=(
                 row["session_id"] if "session_id" in keys else None
+            ),
+            review_kind=(
+                row["review_kind"] if "review_kind" in keys else None
+            ),
+            resume_mode=(
+                row["resume_mode"] if "resume_mode" in keys else None
+            ),
+            review_subject_assignee=(
+                row["review_subject_assignee"] if "review_subject_assignee" in keys else None
+            ),
+            foreground_parent_session_id=(
+                row["foreground_parent_session_id"] if "foreground_parent_session_id" in keys else None
+            ),
+            foreground_fork_session_id=(
+                row["foreground_fork_session_id"] if "foreground_fork_session_id" in keys else None
             ),
         )
 
@@ -1037,7 +1081,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- for tasks created from the CLI, dashboard, or any path that doesn't
     -- set the env var. Indexed so per-session list queries stay cheap on
     -- larger boards.
-    session_id           TEXT
+    session_id           TEXT,
+    -- Review-lane routing metadata. NULL preserves ordinary QA behavior.
+    review_kind          TEXT,
+    resume_mode          TEXT,
+    review_subject_assignee TEXT,
+    foreground_parent_session_id TEXT,
+    foreground_fork_session_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1741,6 +1791,16 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(
             conn, "tasks", "session_id", "session_id TEXT"
         )
+
+    for column in (
+        "review_kind",
+        "resume_mode",
+        "review_subject_assignee",
+        "foreground_parent_session_id",
+        "foreground_fork_session_id",
+    ):
+        if column not in cols:
+            _add_column_if_missing(conn, "tasks", column, f"{column} TEXT")
 
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
@@ -2459,6 +2519,46 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
 # Links
 # ---------------------------------------------------------------------------
 
+def _latest_block_reason(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'blocked' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except Exception:
+        return None
+    reason = payload.get("reason") if isinstance(payload, dict) else None
+    return str(reason).strip() if reason else None
+
+
+def _is_review_required_block(conn: sqlite3.Connection, task_id: str) -> bool:
+    row = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    if not row or row["status"] != "blocked":
+        return False
+    reason = _latest_block_reason(conn, task_id)
+    return bool(reason and reason.lower().startswith("review-required:"))
+
+
+def _looks_like_reviewer_task(conn: sqlite3.Connection, task_id: str) -> bool:
+    row = conn.execute(
+        "SELECT title, body, assignee FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    if not row:
+        return False
+    assignee = str(row["assignee"] or "").strip().lower()
+    if assignee == "reviewer-qa":
+        return True
+    haystack = f"{row['title'] or ''}\n{row['body'] or ''}".lower()
+    return any(marker in haystack for marker in ("reviewer", "review gate", " qa ", "qa "))
+
+
 def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
     if parent_id == child_id:
         raise ValueError("a task cannot depend on itself")
@@ -2469,6 +2569,13 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
         if _would_cycle(conn, parent_id, child_id):
             raise ValueError(
                 f"linking {parent_id} -> {child_id} would create a cycle"
+            )
+        if _is_review_required_block(conn, parent_id) and _looks_like_reviewer_task(conn, child_id):
+            raise ValueError(
+                "review gate dependency would deadlock: a task blocked with "
+                "review-required must not be the parent of its reviewer task. "
+                "Move the same task to status='review' or link the reviewer "
+                "as an upstream gate instead."
             )
         conn.execute(
             "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
@@ -4006,6 +4113,201 @@ def start_loop_handoff_review_process(
         log_f.close()
         raise
     return {"ok": True, "pid": proc.pid, "mode": "subprocess", "profile": profile_arg, "log_path": str(log_path)}
+
+
+_ORCHESTRATOR_DISPATCH_SOURCE = "kanban-orchestrator-fork"
+
+
+def _is_orchestrator_dispatch_task(task: Task) -> bool:
+    """Return True when a dispatcher-spawned run uses the orchestrator lane."""
+    return (task.assignee or "").strip() == "orchestrator"
+
+
+def _orchestrator_profile_session_db(profile: Optional[str]) -> Any:
+    """Return the SessionDB that the spawned orchestrator process will read."""
+    from hermes_state import SessionDB
+
+    profile_arg = (str(profile or "orchestrator").strip()) or "orchestrator"
+    try:
+        from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+
+        profile_arg = normalize_profile_name(profile_arg)
+        profile_home = Path(resolve_profile_env(profile_arg))
+        return SessionDB(db_path=profile_home / "state.db")
+    except FileNotFoundError:
+        return SessionDB()
+    except Exception:
+        return SessionDB()
+
+
+def _orchestrator_parent_session_id(task: Task, session_db: Any) -> Optional[str]:
+    """Resolve the foreground session that owns an orchestrator dispatch."""
+    candidates = [
+        task.foreground_parent_session_id,
+        task.session_id,
+        task.tenant,
+    ]
+    seen: set[str] = set()
+    for value in candidates:
+        session_id = str(value or "").strip()
+        if not session_id or session_id in seen:
+            continue
+        seen.add(session_id)
+        try:
+            if session_db.get_session(session_id):
+                return session_id
+        except Exception:
+            continue
+    explicit = str(task.foreground_parent_session_id or "").strip()
+    return explicit or None
+
+
+def _orchestrator_fork_session_id(task: Task, parent_session_id: str) -> str:
+    run_part = str(task.current_run_id or "no-run")
+    digest = hashlib.sha256(
+        f"{parent_session_id}\0{task.id}\0{run_part}".encode("utf-8")
+    ).hexdigest()[:32]
+    return f"kanban-orch-{digest}"
+
+
+def _compact_orchestrator_dispatch_packet(task: Task, parent_session_id: str, fork_session_id: str) -> str:
+    body = task.body or ""
+    if len(body) > 2000:
+        body = body[:2000] + "…"
+    payload = {
+        "kind": "kanban_orchestrator_dispatch",
+        "task": {
+            "id": task.id,
+            "title": task.title,
+            "body": body,
+            "status": task.status,
+            "assignee": task.assignee,
+            "tenant": task.tenant,
+            "review_kind": task.review_kind,
+            "resume_mode": task.resume_mode,
+            "review_subject_assignee": task.review_subject_assignee,
+        },
+        "audit_ids": {
+            "task_id": task.id,
+            "run_id": task.current_run_id,
+            "parent_foreground_session_id": parent_session_id,
+            "fork_session_id": fork_session_id,
+        },
+        "instructions": [
+            "This is an isolated orchestrator fork of the foreground session.",
+            "Do not mutate the live foreground parent transcript directly.",
+            "Use Kanban tools to route child work and record durable decisions.",
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def ensure_orchestrator_fork_for_dispatch(conn: sqlite3.Connection, task: Task) -> Task:
+    """Create/reuse the foreground-session fork for an orchestrator run.
+
+    The dispatcher calls this after a task has been claimed, so
+    ``task.current_run_id`` is the idempotency key for the run. The fork id is
+    deterministic for ``(parent_session_id, task_id, run_id)`` and the DB update
+    only appends one audit event, so duplicate dispatcher ticks for one claimed
+    run cannot create duplicate branch sessions.
+    """
+    if not _is_orchestrator_dispatch_task(task):
+        return task
+    existing_fork = str(task.foreground_fork_session_id or "").strip()
+    if existing_fork:
+        return task
+
+    from hermes_state import SessionDB
+
+    parent_session_db = SessionDB()
+    parent_session_id = _orchestrator_parent_session_id(task, parent_session_db)
+    if not parent_session_id:
+        return task
+
+    fork_session_id = _orchestrator_fork_session_id(task, parent_session_id)
+    fork_session_db = _orchestrator_profile_session_db(task.assignee)
+
+    try:
+        parent_messages = parent_session_db.get_messages(parent_session_id)
+    except Exception:
+        parent_messages = []
+
+    model_config = {
+        "_branched_from": parent_session_id,
+        "_kanban_orchestrator_fork": {
+            "task_id": task.id,
+            "run_id": task.current_run_id,
+            "parent_foreground_session_id": parent_session_id,
+            "fork_session_id": fork_session_id,
+        },
+    }
+    fork_session_db.create_session(
+        fork_session_id,
+        _ORCHESTRATOR_DISPATCH_SOURCE,
+        model_config=model_config,
+        parent_session_id=parent_session_id,
+    )
+    try:
+        if not fork_session_db.get_messages(fork_session_id):
+            if parent_messages:
+                fork_session_db.replace_messages(fork_session_id, parent_messages)
+            fork_session_db.append_message(
+                fork_session_id,
+                "user",
+                _compact_orchestrator_dispatch_packet(task, parent_session_id, fork_session_id),
+                observed=True,
+            )
+    except Exception:
+        _log.debug(
+            "kanban orchestrator: failed to seed fork transcript for task %s",
+            task.id,
+            exc_info=True,
+        )
+
+    payload = {
+        "task_id": task.id,
+        "run_id": task.current_run_id,
+        "parent_foreground_session_id": parent_session_id,
+        "fork_session_id": fork_session_id,
+        "session_source": _ORCHESTRATOR_DISPATCH_SOURCE,
+    }
+    with write_txn(conn):
+        conn.execute(
+            """
+            UPDATE tasks
+               SET foreground_parent_session_id = COALESCE(foreground_parent_session_id, ?),
+                   foreground_fork_session_id = ?
+             WHERE id = ?
+               AND current_run_id IS ?
+               AND (foreground_fork_session_id IS NULL OR foreground_fork_session_id = ?)
+            """,
+            (parent_session_id, fork_session_id, task.id, task.current_run_id, fork_session_id),
+        )
+        already = conn.execute(
+            """
+            SELECT 1 FROM task_events
+             WHERE task_id = ?
+               AND kind = 'orchestrator_fork_session'
+               AND run_id IS ?
+               AND json_extract(payload, '$.fork_session_id') = ?
+             LIMIT 1
+            """,
+            (task.id, task.current_run_id, fork_session_id),
+        ).fetchone()
+        if already is None:
+            _append_event(
+                conn,
+                task.id,
+                "orchestrator_fork_session",
+                payload,
+                run_id=task.current_run_id,
+            )
+
+    return replace(
+        task,
+        foreground_parent_session_id=parent_session_id,
+        foreground_fork_session_id=fork_session_id,
+    )
 
 
 def _extract_acceptance_criteria(body: Optional[str]) -> Optional[str]:
@@ -6061,6 +6363,359 @@ def block_task(
                 metadata=metadata,
             )
         return True
+
+
+def request_review_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reviewer: Optional[str] = "reviewer-qa",
+    review_kind: Optional[str] = None,
+    resume_mode: Optional[str] = None,
+    review_subject_assignee: Optional[str] = None,
+    foreground_parent_session_id: Optional[str] = None,
+    foreground_fork_session_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    summary: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    expected_run_id: Optional[int] = None,
+) -> bool:
+    """Route the same task into the review lane.
+
+    This is the Loop-native alternative to creating a dependent reviewer
+    child task. The implementation worker's run is closed with
+    ``review_requested`` and the task itself moves to ``status='review'``;
+    the dispatcher later claims it with :func:`claim_review_task` and
+    force-loads ``sdlc-review``.
+    """
+    def _clean(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    review_assignee = str(reviewer or "reviewer-qa").strip() or "reviewer-qa"
+    review_kind = _clean(review_kind)
+    resume_mode = _clean(resume_mode)
+    foreground_parent_session_id = _clean(foreground_parent_session_id)
+    foreground_fork_session_id = _clean(foreground_fork_session_id)
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, assignee FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if not row:
+            return False
+        previous_assignee = row["assignee"]
+        review_subject = _clean(review_subject_assignee) or _clean(previous_assignee)
+        status = row["status"]
+        if expected_run_id is None:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status       = 'review',
+                       assignee     = ?,
+                       review_kind  = ?,
+                       resume_mode  = ?,
+                       review_subject_assignee = ?,
+                       foreground_parent_session_id = ?,
+                       foreground_fork_session_id = ?,
+                       claim_lock   = NULL,
+                       claim_expires= NULL,
+                       worker_pid   = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'ready', 'blocked', 'review')
+                """,
+                (
+                    review_assignee,
+                    review_kind,
+                    resume_mode,
+                    review_subject,
+                    foreground_parent_session_id,
+                    foreground_fork_session_id,
+                    task_id,
+                ),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status       = 'review',
+                       assignee     = ?,
+                       review_kind  = ?,
+                       resume_mode  = ?,
+                       review_subject_assignee = ?,
+                       foreground_parent_session_id = ?,
+                       foreground_fork_session_id = ?,
+                       claim_lock   = NULL,
+                       claim_expires= NULL,
+                       worker_pid   = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'ready', 'blocked', 'review')
+                   AND current_run_id = ?
+                """,
+                (
+                    review_assignee,
+                    review_kind,
+                    resume_mode,
+                    review_subject,
+                    foreground_parent_session_id,
+                    foreground_fork_session_id,
+                    task_id,
+                    int(expected_run_id),
+                ),
+            )
+        if cur.rowcount != 1:
+            return False
+        if status == "blocked":
+            _supersede_pending_loop_handoffs(
+                conn,
+                task_id,
+                reason="task routed to review lane",
+                handoff_kinds=("worker_blocked",),
+            )
+        review_metadata = dict(metadata or {})
+        routing_metadata = {
+            "review_kind": review_kind,
+            "resume_mode": resume_mode,
+            "review_subject_assignee": review_subject,
+            "foreground_parent_session_id": foreground_parent_session_id,
+            "foreground_fork_session_id": foreground_fork_session_id,
+        }
+        for key, value in routing_metadata.items():
+            if value is not None and key not in review_metadata:
+                review_metadata[key] = value
+        run_id = _end_run(
+            conn,
+            task_id,
+            outcome="review_requested",
+            status="review_requested",
+            summary=summary if summary is not None else reason,
+            metadata=review_metadata or None,
+        )
+        if run_id is None and (summary or metadata or reason):
+            run_id = _synthesize_ended_run(
+                conn,
+                task_id,
+                outcome="review_requested",
+                summary=summary if summary is not None else reason,
+                metadata=review_metadata or None,
+            )
+        payload: dict[str, Any] = {
+            "reviewer": review_assignee,
+            "previous_assignee": previous_assignee,
+        }
+        if reason:
+            payload["reason"] = reason
+        if summary:
+            payload["summary"] = summary.strip().splitlines()[0][:400]
+        for key, value in routing_metadata.items():
+            if value is not None:
+                payload[key] = value
+        _append_event(conn, task_id, "review_requested", payload, run_id=run_id)
+        return True
+
+
+def _task_has_undone_parents(conn: sqlite3.Connection, task_id: str) -> bool:
+    return bool(
+        conn.execute(
+            "SELECT 1 FROM task_links l "
+            "JOIN tasks p ON p.id = l.parent_id "
+            "WHERE l.child_id = ? AND p.status != 'done' LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    )
+
+
+def _clear_review_routing_sql() -> str:
+    return (
+        "review_kind = NULL, resume_mode = NULL, "
+        "review_subject_assignee = NULL, "
+        "foreground_parent_session_id = NULL, "
+        "foreground_fork_session_id = NULL"
+    )
+
+
+def resolve_blocker_triage_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    action: str,
+    actor: str,
+    reason: Optional[str] = None,
+    instructions: Optional[str] = None,
+    assignee: Optional[str] = None,
+    reviewer: Optional[str] = None,
+    summary: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    followups: Optional[Iterable[dict[str, Any]]] = None,
+    expected_run_id: Optional[int] = None,
+) -> dict[str, Any]:
+    """Resolve an orchestrator blocker-triage review on the same task row.
+
+    Workers route ordinary blockers into ``status='review'`` with
+    ``review_kind='blocker_triage'`` instead of parking them in ``blocked``.
+    This helper is the matching explicit outcome surface for the orchestrator
+    lane: complete/approve, return the same row to the original worker with
+    instructions, create upstream follow-up cards, route to QA review, or make
+    a visible foreground/user handoff attached to this task.
+    """
+    action = str(action or "").strip().lower()
+    actor = str(actor or "").strip() or "orchestrator"
+    if action not in BLOCKER_TRIAGE_ACTIONS:
+        raise ValueError(
+            f"unsupported blocker triage action {action!r}; expected one of "
+            + ", ".join(sorted(BLOCKER_TRIAGE_ACTIONS))
+        )
+
+    task = get_task(conn, task_id)
+    if task is None:
+        return {"ok": False, "outcome": "not_found"}
+    if task.review_kind != BLOCKER_TRIAGE_REVIEW_KIND:
+        return {"ok": False, "outcome": "not_blocker_triage"}
+    if task.status not in {"running", "review"}:
+        return {"ok": False, "outcome": "invalid_status", "status": task.status}
+    if expected_run_id is not None and task.current_run_id != int(expected_run_id):
+        return {"ok": False, "outcome": "stale_run"}
+
+    triage_summary = summary if summary is not None else reason
+    base_metadata = dict(metadata or {})
+    base_metadata.setdefault("blocker_triage_action", action)
+    base_metadata.setdefault("blocker_triage_actor", actor)
+    if instructions:
+        base_metadata.setdefault("instructions", instructions)
+
+    if action == "approve_complete":
+        ok = complete_task(
+            conn,
+            task_id,
+            result=reason,
+            summary=triage_summary or "blocker triage approved completion",
+            metadata=base_metadata,
+            expected_run_id=expected_run_id,
+        )
+        return {"ok": bool(ok), "outcome": "completed" if ok else "not_completed"}
+
+    if action == "route_reviewer_qa":
+        ok = request_review_task(
+            conn,
+            task_id,
+            reviewer=reviewer or "reviewer-qa",
+            review_kind=None,
+            resume_mode=None,
+            review_subject_assignee=task.review_subject_assignee or task.assignee,
+            reason=reason,
+            summary=triage_summary or instructions or "blocker triage routed to QA",
+            metadata=base_metadata,
+            expected_run_id=expected_run_id,
+        )
+        return {"ok": bool(ok), "outcome": "routed_reviewer_qa" if ok else "not_routed"}
+
+    if action == "foreground_handoff":
+        handoff_metadata = dict(base_metadata)
+        handoff_metadata.setdefault("foreground_handoff", True)
+        handoff_metadata.setdefault("handoff_kind", "blocked_waiting")
+        ok = block_task(
+            conn,
+            task_id,
+            reason=reason or instructions or "blocker triage requires visible foreground handoff",
+            summary=triage_summary or instructions,
+            metadata=handoff_metadata,
+            expected_run_id=expected_run_id,
+        )
+        return {"ok": bool(ok), "outcome": "foreground_handoff" if ok else "not_blocked"}
+
+    created_cards: list[str] = []
+    if action == "create_followups":
+        for item in followups or []:
+            if not isinstance(item, dict):
+                raise ValueError("each followup must be an object")
+            title = str(item.get("title") or "").strip()
+            followup_assignee = str(item.get("assignee") or "").strip()
+            if not title or not followup_assignee:
+                raise ValueError("each followup requires title and assignee")
+            child_id = create_task(
+                conn,
+                title=title,
+                body=str(item.get("body") or ""),
+                assignee=followup_assignee,
+                created_by=f"blocker-triage:{task_id}",
+                tenant=task.tenant,
+                priority=int(item.get("priority") or 0),
+                workspace_kind=str(item.get("workspace_kind") or task.workspace_kind or "scratch"),
+                workspace_path=(
+                    str(item.get("workspace_path"))
+                    if item.get("workspace_path")
+                    else task.workspace_path
+                ),
+            )
+            # The same blocked task waits on the follow-up before it can run
+            # again; this keeps incomplete work runnable without silently
+            # declaring the original task done.
+            link_tasks(conn, parent_id=child_id, child_id=task_id)
+            created_cards.append(child_id)
+        if not created_cards:
+            raise ValueError("create_followups requires at least one followup")
+
+    target_assignee = _canonical_assignee(assignee or task.review_subject_assignee or task.assignee)
+    new_status = "todo" if _task_has_undone_parents(conn, task_id) else "ready"
+    now = int(time.time())
+    with write_txn(conn):
+        cur = conn.execute(
+            f"""
+            UPDATE tasks
+               SET status = ?, assignee = ?, claim_lock = NULL,
+                   claim_expires = NULL, worker_pid = NULL,
+                   {_clear_review_routing_sql()}
+             WHERE id = ? AND status IN ('running', 'review')
+            """,
+            (new_status, target_assignee, task_id),
+        )
+        if cur.rowcount != 1:
+            return {"ok": False, "outcome": "not_routed"}
+        run_id = _end_run(
+            conn,
+            task_id,
+            outcome="blocker_triage_routed",
+            status="blocker_triage_routed",
+            summary=triage_summary or instructions,
+            metadata=base_metadata or None,
+        )
+        if run_id is None and (triage_summary or instructions or base_metadata):
+            run_id = _synthesize_ended_run(
+                conn,
+                task_id,
+                outcome="blocker_triage_routed",
+                summary=triage_summary or instructions,
+                metadata=base_metadata or None,
+            )
+        payload: dict[str, Any] = {
+            "action": action,
+            "actor": actor,
+            "assignee": target_assignee,
+            "status": new_status,
+        }
+        if reason:
+            payload["reason"] = reason
+        if instructions:
+            payload["instructions"] = instructions
+        if created_cards:
+            payload["created_cards"] = created_cards
+        _append_event(conn, task_id, "blocker_triage_resolved", payload, run_id=run_id)
+        if instructions:
+            conn.execute(
+                "INSERT INTO task_comments (task_id, author, body, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (task_id, actor, f"BLOCKER TRIAGE: {instructions}", now),
+            )
+
+    recompute_ready(conn)
+    return {
+        "ok": True,
+        "outcome": "followups_created" if created_cards else "returned_to_worker",
+        "status": new_status,
+        "assignee": target_assignee,
+        "created_cards": created_cards,
+    }
 
 
 
@@ -8304,6 +8959,7 @@ def dispatch_once(
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+        claimed = ensure_orchestrator_fork_for_dispatch(conn, claimed)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             # Back-compat: older spawn_fn signatures accept only
@@ -8390,12 +9046,17 @@ def dispatch_once(
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
-        # Force-load sdlc-review skill for review agents.  The
-        # _default_spawn function already auto-loads kanban-worker, and
-        # appends task.skills via --skills.  Setting task.skills here
-        # means the review agent gets both kanban-worker (lifecycle)
-        # and sdlc-review (review logic: AC verification, merge, etc.).
-        claimed.skills = ["sdlc-review"]
+        # Force-load sdlc-review for ordinary QA review agents. Orchestrator
+        # review kinds deliberately route to the orchestrator profile without
+        # the QA-specific skill so blocker/foreground triage follows the
+        # orchestrator lane instead of the sdlc-review lane.
+        orchestrator_review = (
+            (claimed.assignee or "").strip() == "orchestrator"
+            and (claimed.review_kind or "").strip() in ORCHESTRATOR_REVIEW_KINDS
+        )
+        if not orchestrator_review:
+            claimed.skills = ["sdlc-review"]
+        claimed = ensure_orchestrator_fork_for_dispatch(conn, claimed)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             import inspect
@@ -8771,6 +9432,16 @@ def _default_spawn(
     env["HERMES_KANBAN_WORKSPACE"] = workspace
     if task.branch_name:
         env["HERMES_KANBAN_BRANCH"] = task.branch_name
+    if task.review_kind:
+        env["HERMES_KANBAN_REVIEW_KIND"] = task.review_kind
+    if task.resume_mode:
+        env["HERMES_KANBAN_RESUME_MODE"] = task.resume_mode
+    if task.review_subject_assignee:
+        env["HERMES_KANBAN_REVIEW_SUBJECT_ASSIGNEE"] = task.review_subject_assignee
+    if task.foreground_parent_session_id:
+        env["HERMES_FOREGROUND_PARENT_SESSION_ID"] = task.foreground_parent_session_id
+    if task.foreground_fork_session_id:
+        env["HERMES_FOREGROUND_FORK_SESSION_ID"] = task.foreground_fork_session_id
     if task.current_run_id is not None:
         env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
     if task.claim_lock:
@@ -8822,6 +9493,8 @@ def _default_spawn(
         # profile-local worker sessions still register configured hooks.
         "--accept-hooks",
     ]
+    if _is_orchestrator_dispatch_task(task) and task.foreground_fork_session_id:
+        cmd.extend(["--resume", task.foreground_fork_session_id])
     # Auto-load the kanban-worker skill so every dispatched worker
     # has the pattern library (good summary/metadata shapes, retry
     # diagnostics, block-reason examples) in its context, even if

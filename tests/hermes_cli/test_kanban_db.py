@@ -1547,6 +1547,109 @@ def test_dispatch_promotes_ready_and_spawns(kanban_home, all_assignees_spawnable
         assert kb.get_task(conn, c).status == "running"
 
 
+def test_dispatch_orchestrator_task_runs_in_foreground_session_fork(
+    kanban_home, all_assignees_spawnable
+):
+    """Ready orchestrator tasks must branch the owning foreground session.
+
+    The dispatcher should copy the active transcript into a fork session and
+    hand that fork to the spawned orchestrator worker. It must not append the
+    Kanban proof packet into the live parent foreground session.
+    """
+    from hermes_state import SessionDB
+
+    parent_session_id = "foreground-parent"
+    session_db = SessionDB()
+    session_db.create_session(parent_session_id, "cli")
+    session_db.append_message(parent_session_id, "user", "original user message")
+    parent_before = session_db.get_messages(parent_session_id)
+    spawns = []
+
+    def fake_spawn(task, workspace):
+        spawns.append((task.id, task.foreground_parent_session_id, task.foreground_fork_session_id))
+
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="orchestrate next work",
+            body="Split this into child tasks",
+            assignee="orchestrator",
+            session_id=parent_session_id,
+        )
+
+        kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        task = kb.get_task(conn, task_id)
+        events = kb.list_events(conn, task_id)
+
+    assert len(spawns) == 1
+    assert task.foreground_parent_session_id == parent_session_id
+    assert task.foreground_fork_session_id
+    assert spawns[0] == (task_id, parent_session_id, task.foreground_fork_session_id)
+
+    fork = session_db.get_session(task.foreground_fork_session_id)
+    assert fork is not None
+    assert fork["parent_session_id"] == parent_session_id
+    assert '\"_branched_from\": \"foreground-parent\"' in (fork["model_config"] or "")
+
+    fork_messages = session_db.get_messages(task.foreground_fork_session_id)
+    assert [m["role"] for m in fork_messages] == ["user", "user"]
+    assert fork_messages[0]["content"] == "original user message"
+    assert "kanban_orchestrator_dispatch" in fork_messages[1]["content"]
+    assert task_id in fork_messages[1]["content"]
+
+    assert session_db.get_messages(parent_session_id) == parent_before
+    audit_events = [e for e in events if e.kind == "orchestrator_fork_session"]
+    assert len(audit_events) == 1
+    assert audit_events[0].payload["task_id"] == task_id
+    assert audit_events[0].payload["parent_foreground_session_id"] == parent_session_id
+    assert audit_events[0].payload["fork_session_id"] == task.foreground_fork_session_id
+
+
+def test_dispatch_orchestrator_review_task_reuses_single_fork_for_claimed_run(
+    kanban_home, all_assignees_spawnable
+):
+    """Duplicate spawn invocations for one claimed run must not make forks.
+
+    This covers the review-lane orchestrator path and the idempotency guard:
+    calling the fork preparation helper twice with the same claimed run returns
+    the same fork session and writes one audit event.
+    """
+    from hermes_state import SessionDB
+
+    parent_session_id = "review-parent"
+    session_db = SessionDB()
+    session_db.create_session(parent_session_id, "cli")
+    session_db.append_message(parent_session_id, "user", "review this blocker")
+
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="needs orchestrator review",
+            assignee="implementer",
+            session_id=parent_session_id,
+        )
+        assert kb.request_review_task(
+            conn,
+            task_id,
+            reviewer="orchestrator",
+            review_kind="foreground_judgment",
+            resume_mode="fork",
+            foreground_parent_session_id=parent_session_id,
+        )
+        claimed = kb.claim_review_task(conn, task_id)
+        assert claimed is not None
+
+        first = kb.ensure_orchestrator_fork_for_dispatch(conn, claimed)
+        second = kb.ensure_orchestrator_fork_for_dispatch(conn, first)
+        refreshed = kb.get_task(conn, task_id)
+        events = kb.list_events(conn, task_id)
+
+    assert first.foreground_fork_session_id == second.foreground_fork_session_id
+    assert refreshed.foreground_fork_session_id == first.foreground_fork_session_id
+    assert session_db.get_session(first.foreground_fork_session_id)["parent_session_id"] == parent_session_id
+    assert [e.kind for e in events].count("orchestrator_fork_session") == 1
+
+
 def test_dispatch_spawn_failure_releases_claim(kanban_home, all_assignees_spawnable):
     def boom(task, workspace):
         raise RuntimeError("spawn failed")
@@ -2547,6 +2650,11 @@ class TestSharedBoardPaths:
             claim_expires=None,
             tenant=None,
             branch_name="wt/t_dispatch_env",
+            review_kind="foreground_judgment",
+            resume_mode="fork",
+            review_subject_assignee="implementer",
+            foreground_parent_session_id="parent-sess",
+            foreground_fork_session_id="fork-sess",
         )
         kb._default_spawn(task, str(tmp_path / "ws"))
 
@@ -2557,6 +2665,11 @@ class TestSharedBoardPaths:
         )
         assert env["HERMES_KANBAN_TASK"] == "t_dispatch_env"
         assert env["HERMES_KANBAN_BRANCH"] == "wt/t_dispatch_env"
+        assert env["HERMES_KANBAN_REVIEW_KIND"] == "foreground_judgment"
+        assert env["HERMES_KANBAN_RESUME_MODE"] == "fork"
+        assert env["HERMES_KANBAN_REVIEW_SUBJECT_ASSIGNEE"] == "implementer"
+        assert env["HERMES_FOREGROUND_PARENT_SESSION_ID"] == "parent-sess"
+        assert env["HERMES_FOREGROUND_FORK_SESSION_ID"] == "fork-sess"
 
 
 # ---------------------------------------------------------------------------
@@ -3308,6 +3421,229 @@ def test_claim_review_task_fails_when_already_claimed(kanban_home):
     assert second is None
 
 
+def test_request_review_task_moves_same_row_to_review(kanban_home):
+    """Implementation workers request QA on the same task row."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review me", assignee="alice")
+        claimed = kb.claim_task(conn, t)
+        assert claimed is not None
+        assert kb.request_review_task(
+            conn,
+            t,
+            reviewer="reviewer-qa",
+            summary="implementation complete; verify tests",
+            metadata={"tests_run": ["pytest -q"]},
+            expected_run_id=claimed.current_run_id,
+        )
+        task = kb.get_task(conn, t)
+        run = kb.latest_run(conn, t)
+        events = kb.list_events(conn, t)
+
+    assert task.status == "review"
+    assert task.assignee == "reviewer-qa"
+    assert task.claim_lock is None
+    assert task.current_run_id is None
+    assert run is not None
+    assert run.outcome == "review_requested"
+    assert run.summary == "implementation complete; verify tests"
+    assert run.metadata["tests_run"] == ["pytest -q"]
+    assert run.metadata["review_subject_assignee"] == "alice"
+    assert events[-1].kind == "review_requested"
+
+
+def test_request_review_task_persists_orchestrator_review_metadata(kanban_home):
+    """Foreground/orchestrator review requests survive as task state."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="triage blocker", assignee="worker-a")
+        claimed = kb.claim_task(conn, t)
+        assert claimed is not None
+        assert kb.request_review_task(
+            conn,
+            t,
+            reviewer="orchestrator",
+            review_kind="blocker_triage",
+            resume_mode="fork",
+            review_subject_assignee="worker-a",
+            foreground_parent_session_id="parent-sess",
+            foreground_fork_session_id="fork-sess",
+            summary="decide how to route blocker",
+            metadata={"risk": "medium"},
+            expected_run_id=claimed.current_run_id,
+        )
+        task = kb.get_task(conn, t)
+        run = kb.latest_run(conn, t)
+        event = kb.list_events(conn, t)[-1]
+
+    assert task.status == "review"
+    assert task.assignee == "orchestrator"
+    assert task.review_kind == "blocker_triage"
+    assert task.resume_mode == "fork"
+    assert task.review_subject_assignee == "worker-a"
+    assert task.foreground_parent_session_id == "parent-sess"
+    assert task.foreground_fork_session_id == "fork-sess"
+    assert run is not None
+    assert run.metadata["risk"] == "medium"
+    assert run.metadata["review_kind"] == "blocker_triage"
+    assert run.metadata["resume_mode"] == "fork"
+    assert run.metadata["foreground_parent_session_id"] == "parent-sess"
+    assert run.metadata["foreground_fork_session_id"] == "fork-sess"
+    assert event.payload["review_kind"] == "blocker_triage"
+    assert event.payload["resume_mode"] == "fork"
+
+
+def test_resolve_blocker_triage_returns_same_task_to_original_assignee(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked implementation", assignee="worker-a")
+        assert kb.request_review_task(
+            conn,
+            t,
+            reviewer="orchestrator",
+            review_kind="blocker_triage",
+            review_subject_assignee="worker-a",
+            reason="tests need a narrower repro",
+        )
+        claimed = kb.claim_review_task(conn, t)
+        assert claimed is not None
+        result = kb.resolve_blocker_triage_task(
+            conn,
+            t,
+            action="return_to_worker",
+            actor="orchestrator",
+            instructions="Add the missing regression test and rerun targeted suite.",
+            expected_run_id=claimed.current_run_id,
+        )
+        task = kb.get_task(conn, t)
+        run = kb.latest_run(conn, t)
+        event = kb.list_events(conn, t)[-1]
+        comments = kb.list_comments(conn, t)
+
+    assert result["ok"] is True
+    assert result["outcome"] == "returned_to_worker"
+    assert task.status == "ready"
+    assert task.assignee == "worker-a"
+    assert task.review_kind is None
+    assert task.review_subject_assignee is None
+    assert run.outcome == "blocker_triage_routed"
+    assert event.kind == "blocker_triage_resolved"
+    assert event.payload["action"] == "return_to_worker"
+    assert comments[-1].body.startswith("BLOCKER TRIAGE:")
+
+
+def test_resolve_blocker_triage_creates_followups_as_upstream_work(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked implementation", assignee="worker-a")
+        assert kb.request_review_task(
+            conn,
+            t,
+            reviewer="orchestrator",
+            review_kind="blocker_triage",
+            review_subject_assignee="worker-a",
+            reason="needs specialist check",
+        )
+        claimed = kb.claim_review_task(conn, t)
+        assert claimed is not None
+        result = kb.resolve_blocker_triage_task(
+            conn,
+            t,
+            action="create_followups",
+            actor="orchestrator",
+            followups=[{"title": "Add missing fixture", "assignee": "worker-b"}],
+            reason="fixture work should happen first",
+            expected_run_id=claimed.current_run_id,
+        )
+        task = kb.get_task(conn, t)
+        child = kb.get_task(conn, result["created_cards"][0])
+        links = conn.execute(
+            "SELECT parent_id, child_id FROM task_links WHERE child_id = ?",
+            (t,),
+        ).fetchall()
+
+    assert result["ok"] is True
+    assert result["outcome"] == "followups_created"
+    assert task.status == "todo"
+    assert task.assignee == "worker-a"
+    assert child.assignee == "worker-b"
+    assert any(row["parent_id"] == child.id and row["child_id"] == t for row in links)
+
+
+def test_resolve_blocker_triage_routes_to_reviewer_qa(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked implementation", assignee="worker-a")
+        assert kb.request_review_task(
+            conn,
+            t,
+            reviewer="orchestrator",
+            review_kind="blocker_triage",
+            review_subject_assignee="worker-a",
+            reason="needs QA judgment",
+        )
+        claimed = kb.claim_review_task(conn, t)
+        assert claimed is not None
+        result = kb.resolve_blocker_triage_task(
+            conn,
+            t,
+            action="route_reviewer_qa",
+            actor="orchestrator",
+            reason="QA should verify acceptance evidence",
+            expected_run_id=claimed.current_run_id,
+        )
+        task = kb.get_task(conn, t)
+        run = kb.latest_run(conn, t)
+
+    assert result["ok"] is True
+    assert task.status == "review"
+    assert task.assignee == "reviewer-qa"
+    assert task.review_kind is None
+    assert run.outcome == "review_requested"
+
+
+def test_resolve_blocker_triage_foreground_handoff_attaches_to_same_task(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="blocked implementation", assignee="worker-a")
+        assert kb.request_review_task(
+            conn,
+            t,
+            reviewer="orchestrator",
+            review_kind="blocker_triage",
+            review_subject_assignee="worker-a",
+            reason="needs foreground handoff",
+        )
+        claimed = kb.claim_review_task(conn, t)
+        assert claimed is not None
+        result = kb.resolve_blocker_triage_task(
+            conn,
+            t,
+            action="foreground_handoff",
+            actor="orchestrator",
+            reason="product priority decision required",
+            metadata={"handoff_kind": "product_decision"},
+            expected_run_id=claimed.current_run_id,
+        )
+        task = kb.get_task(conn, t)
+        run = kb.latest_run(conn, t)
+
+    assert result["ok"] is True
+    assert result["outcome"] == "foreground_handoff"
+    assert task.status == "blocked"
+    assert run.outcome == "blocked"
+    assert run.metadata["foreground_handoff"] is True
+    assert run.metadata["handoff_kind"] == "product_decision"
+
+
+def test_link_tasks_rejects_review_required_parent_to_reviewer_child(kanban_home):
+    """Blocked-for-review task -> reviewer child is a dependency deadlock."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="implementation", assignee="alice")
+        child = kb.create_task(conn, title="QA review", assignee="reviewer-qa")
+        assert kb.block_task(
+            conn,
+            parent,
+            reason="review-required: verify the implementation",
+        )
+        with pytest.raises(ValueError, match="review gate dependency would deadlock"):
+            kb.link_tasks(conn, parent, child)
+
+
 def test_dispatch_review_dry_run(kanban_home, all_assignees_spawnable):
     """dispatch_once dry-run sees review tasks and reports them as spawned."""
     with kb.connect() as conn:
@@ -3338,6 +3674,35 @@ def test_dispatch_review_spawns_with_correct_skills(
     assert len(res.spawned) == 1
     assert len(spawned_tasks) == 1
     assert spawned_tasks[0].skills == ["sdlc-review"]
+
+
+def test_dispatch_orchestrator_review_kind_does_not_force_sdlc_review(
+    kanban_home, all_assignees_spawnable,
+):
+    """Orchestrator review kinds route to the orchestrator profile, not QA."""
+    spawned_tasks = []
+
+    def capture_spawn(task, workspace, board=None):
+        spawned_tasks.append(task)
+        return 42
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="triage blocker", assignee="worker-a")
+        assert kb.request_review_task(
+            conn,
+            t,
+            reviewer="orchestrator",
+            review_kind="foreground_judgment",
+            resume_mode="fork",
+            summary="foreground should judge next step",
+        )
+        res = kb.dispatch_once(conn, spawn_fn=capture_spawn)
+
+    assert len(res.spawned) == 1
+    assert len(spawned_tasks) == 1
+    assert spawned_tasks[0].assignee == "orchestrator"
+    assert spawned_tasks[0].review_kind == "foreground_judgment"
+    assert spawned_tasks[0].skills in (None, [])
 
 
 def test_dispatch_review_skips_unassigned(kanban_home):

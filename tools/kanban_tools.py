@@ -595,8 +595,18 @@ def _handle_complete(args: dict, **kw) -> str:
         return tool_error(f"kanban_complete: {e}")
 
 
+def _metadata_requests_terminal_block(metadata: Optional[dict]) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    if metadata.get("terminal_blocker") is not True:
+        return False
+    kind = str(metadata.get("terminal_blocker_kind") or "").strip().lower().replace("-", "_")
+    allowed = {"system", "credentials", "external_access", "policy", "not_routable"}
+    return kind in allowed
+
+
 def _handle_block(args: dict, **kw) -> str:
-    """Transition the task to blocked with a reason reviewers can route."""
+    """Record a blocker and route ordinary worker blockers to orchestrator triage."""
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         return tool_error(
@@ -619,20 +629,63 @@ def _handle_block(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
-            ok = kb.block_task(
-                conn, tid,
-                reason=reason,
-                summary=summary,
-                metadata=metadata,
+            task = kb.get_task(conn, tid)
+            terminal_block = _metadata_requests_terminal_block(metadata)
+            already_triaging = bool(
+                task
+                and (task.assignee or "").strip() == "orchestrator"
+                and (task.review_kind or "").strip() == "blocker_triage"
+            )
+            if terminal_block or already_triaging:
+                ok = kb.block_task(
+                    conn, tid,
+                    reason=reason,
+                    summary=summary,
+                    metadata=metadata,
+                    expected_run_id=_worker_run_id(tid),
+                )
+                if not ok:
+                    return tool_error(
+                        f"could not block {tid} (unknown id or not in "
+                        f"running/ready)"
+                    )
+                run = kb.latest_run(conn, tid)
+                return _ok(
+                    task_id=tid,
+                    run_id=run.id if run else None,
+                    status="blocked",
+                    routed_to="blocked_terminal" if terminal_block else "blocked_from_triage",
+                )
+
+            triage_metadata = dict(metadata or {})
+            triage_metadata.setdefault("blocker_triage", True)
+            triage_metadata.setdefault("blocker_reason", str(reason).strip())
+            if summary:
+                triage_metadata.setdefault("blocker_summary", str(summary).strip())
+            ok = kb.request_review_task(
+                conn,
+                tid,
+                reviewer="orchestrator",
+                review_kind="blocker_triage",
+                review_subject_assignee=(task.assignee if task else None),
+                reason=str(reason).strip(),
+                summary=summary or str(reason).strip(),
+                metadata=triage_metadata,
                 expected_run_id=_worker_run_id(tid),
             )
             if not ok:
                 return tool_error(
-                    f"could not block {tid} (unknown id or not in "
-                    f"running/ready)"
+                    f"could not route blocker for {tid} to orchestrator triage "
+                    f"(unknown id, terminal state, or stale run)"
                 )
             run = kb.latest_run(conn, tid)
-            return _ok(task_id=tid, run_id=run.id if run else None)
+            return _ok(
+                task_id=tid,
+                run_id=run.id if run else None,
+                status="review",
+                routed_to="orchestrator",
+                review_kind="blocker_triage",
+            )
         finally:
             conn.close()
     except ValueError as e:
@@ -640,6 +693,124 @@ def _handle_block(args: dict, **kw) -> str:
     except Exception as e:
         logger.exception("kanban_block failed")
         return tool_error(f"kanban_block: {e}")
+
+
+def _handle_request_review(args: dict, **kw) -> str:
+    """Move the current task into the review lane for QA dispatch."""
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error(
+            "task_id is required (or set HERMES_KANBAN_TASK in the env)"
+        )
+    ownership_err = _enforce_worker_task_ownership(tid)
+    if ownership_err:
+        return ownership_err
+    reason = args.get("reason")
+    summary = args.get("summary")
+    if not (str(reason or "").strip() or str(summary or "").strip()):
+        return tool_error(
+            "provide a reason or summary so the reviewer knows what to verify"
+        )
+    reviewer = args.get("reviewer") or "reviewer-qa"
+    review_kind = args.get("review_kind")
+    resume_mode = args.get("resume_mode")
+    if args.get("fork") is True and not str(resume_mode or "").strip():
+        resume_mode = "fork"
+    review_subject_assignee = args.get("review_subject_assignee")
+    foreground_parent_session_id = args.get("foreground_parent_session_id")
+    foreground_fork_session_id = args.get("foreground_fork_session_id")
+    metadata = args.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return tool_error(
+            f"metadata must be an object/dict, got {type(metadata).__name__}"
+        )
+    metadata = _stamp_worker_session_metadata(tid, metadata)
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            ok = kb.request_review_task(
+                conn,
+                tid,
+                reviewer=reviewer,
+                review_kind=review_kind,
+                resume_mode=resume_mode,
+                review_subject_assignee=review_subject_assignee,
+                foreground_parent_session_id=foreground_parent_session_id,
+                foreground_fork_session_id=foreground_fork_session_id,
+                reason=reason,
+                summary=summary,
+                metadata=metadata,
+                expected_run_id=_worker_run_id(tid),
+            )
+            if not ok:
+                return tool_error(
+                    f"could not request review for {tid} "
+                    f"(unknown id, terminal state, or stale run)"
+                )
+            note = str(summary or reason or "").strip()
+            if note:
+                author = (
+                    os.environ.get("HERMES_PROFILE")
+                    or os.environ.get("HERMES_PROFILE_NAME")
+                    or "kanban-worker"
+                )
+                kb.add_comment(conn, tid, author, f"REQUEST REVIEW: {note}")
+            run = kb.latest_run(conn, tid)
+            return _ok(task_id=tid, run_id=run.id if run else None)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_request_review: {e}")
+    except Exception as e:
+        logger.exception("kanban_request_review failed")
+        return tool_error(f"kanban_request_review: {e}")
+
+
+def _handle_resolve_blocker(args: dict, **kw) -> str:
+    """Resolve the current blocker-triage review with an explicit outcome."""
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error("task_id is required (or set HERMES_KANBAN_TASK in the env)")
+    ownership_err = _enforce_worker_task_ownership(tid)
+    if ownership_err:
+        return ownership_err
+    action = args.get("action")
+    actor = os.environ.get("HERMES_PROFILE") or os.environ.get("HERMES_PROFILE_NAME") or "orchestrator"
+    metadata = args.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return tool_error(f"metadata must be an object/dict, got {type(metadata).__name__}")
+    followups = args.get("followups")
+    if followups is not None and not isinstance(followups, list):
+        return tool_error(f"followups must be a list, got {type(followups).__name__}")
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            result = kb.resolve_blocker_triage_task(
+                conn,
+                tid,
+                action=str(action or ""),
+                actor=actor,
+                reason=args.get("reason"),
+                instructions=args.get("instructions"),
+                assignee=args.get("assignee"),
+                reviewer=args.get("reviewer"),
+                summary=args.get("summary"),
+                metadata=metadata,
+                followups=followups,
+                expected_run_id=_worker_run_id(tid),
+            )
+            if not result.get("ok"):
+                return tool_error(f"kanban_resolve_blocker failed: {result}")
+            return _ok(task_id=tid, **result)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_resolve_blocker: {e}")
+    except Exception as e:
+        logger.exception("kanban_resolve_blocker failed")
+        return tool_error(f"kanban_resolve_blocker: {e}")
 
 
 def _handle_heartbeat(args: dict, **kw) -> str:
@@ -1130,6 +1301,126 @@ KANBAN_BLOCK_SCHEMA = {
     },
 }
 
+KANBAN_REQUEST_REVIEW_SCHEMA = {
+    "name": "kanban_request_review",
+    "description": (
+        "Move the current task itself into the review lane when the "
+        "implementation/artifact is ready for QA. This closes your worker "
+        "run as review_requested, assigns the same task to a reviewer "
+        "(default reviewer-qa), and lets the Kanban dispatcher spawn a "
+        "review agent with sdlc-review. Use this instead of creating a "
+        "dependent reviewer child or blocking with review-required when "
+        "ordinary QA is the next step."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": _DESC_TASK_ID_DEFAULT,
+            },
+            "reason": {
+                "type": "string",
+                "description": (
+                    "One or two sentences naming what the reviewer should "
+                    "verify and where the evidence lives."
+                ),
+            },
+            "summary": {
+                "type": "string",
+                "description": (
+                    "Optional structured review handoff summary. Prefer "
+                    "this for concise proof packets; put deeper details in "
+                    "a kanban_comment or metadata."
+                ),
+            },
+            "metadata": {
+                "type": "object",
+                "description": (
+                    "Optional structured facts for the review handoff/run, "
+                    "for example changed_files, tests_run, artifacts, "
+                    "diff_path, risk_level, or review_scope."
+                ),
+            },
+            "reviewer": {
+                "type": "string",
+                "description": "Reviewer profile to assign (default reviewer-qa).",
+            },
+            "review_kind": {
+                "type": "string",
+                "description": (
+                    "Optional review routing kind. Use values like "
+                    "blocker_triage or foreground_judgment with "
+                    "reviewer='orchestrator' to route through the "
+                    "orchestrator lane instead of ordinary QA."
+                ),
+            },
+            "resume_mode": {
+                "type": "string",
+                "description": (
+                    "Optional downstream session resume mode, for example "
+                    "fork for foreground review sessions."
+                ),
+            },
+            "fork": {
+                "type": "boolean",
+                "description": "Convenience flag equivalent to resume_mode='fork'.",
+            },
+            "review_subject_assignee": {
+                "type": "string",
+                "description": (
+                    "Original worker/assignee whose work is being reviewed; "
+                    "defaults to the task's previous assignee."
+                ),
+            },
+            "foreground_parent_session_id": {
+                "type": "string",
+                "description": "Foreground parent session id associated with this review request.",
+            },
+            "foreground_fork_session_id": {
+                "type": "string",
+                "description": "Foreground fork session id associated with this review request.",
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": [],
+    },
+}
+
+KANBAN_RESOLVE_BLOCKER_SCHEMA = {
+    "name": "kanban_resolve_blocker",
+    "description": (
+        "Resolve an orchestrator blocker-triage review for the same task row. "
+        "Use only when this task was routed with review_kind='blocker_triage'. "
+        "Supported actions: approve_complete, return_to_worker, create_followups, "
+        "route_reviewer_qa, foreground_handoff."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": _DESC_TASK_ID_DEFAULT},
+            "action": {
+                "type": "string",
+                "description": "One of approve_complete, return_to_worker, create_followups, route_reviewer_qa, foreground_handoff.",
+            },
+            "reason": {"type": "string", "description": "Concise reason/evidence for the triage decision."},
+            "instructions": {"type": "string", "description": "Fix instructions when returning to a worker or creating a visible handoff."},
+            "assignee": {"type": "string", "description": "Assignee for return_to_worker; defaults to review_subject_assignee."},
+            "reviewer": {"type": "string", "description": "Reviewer for route_reviewer_qa; defaults to reviewer-qa."},
+            "summary": {"type": "string", "description": "Optional run summary for the triage decision."},
+            "metadata": {"type": "object", "description": "Optional structured triage decision facts."},
+            "followups": {
+                "type": "array",
+                "description": "Follow-up cards for create_followups. Each needs title and assignee; optional body, priority, workspace_kind, workspace_path.",
+                "items": {"type": "object"},
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["action"],
+    },
+}
+
+
 KANBAN_HEARTBEAT_SCHEMA = {
     "name": "kanban_heartbeat",
     "description": (
@@ -1415,6 +1706,25 @@ registry.register(
     check_fn=_check_kanban_mode,
     emoji="⏸",
 )
+
+registry.register(
+    name="kanban_request_review",
+    toolset="kanban",
+    schema=KANBAN_REQUEST_REVIEW_SCHEMA,
+    handler=_handle_request_review,
+    check_fn=_check_kanban_mode,
+    emoji="◐",
+)
+
+registry.register(
+    name="kanban_resolve_blocker",
+    toolset="kanban",
+    schema=KANBAN_RESOLVE_BLOCKER_SCHEMA,
+    handler=_handle_resolve_blocker,
+    check_fn=_check_kanban_mode,
+    emoji="🧭",
+)
+
 
 registry.register(
     name="kanban_heartbeat",

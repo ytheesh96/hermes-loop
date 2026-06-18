@@ -67,8 +67,8 @@ _HERMES_CORE_TOOLS = [
     # tools/kanban_tools.py.
     "kanban_show", "kanban_list",
     "kanban_complete", "kanban_block", "kanban_heartbeat",
-    "kanban_comment", "kanban_create", "kanban_link",
-    "kanban_unblock",
+    "kanban_request_review", "kanban_resolve_blocker", "kanban_comment",
+    "kanban_create", "kanban_link", "kanban_unblock",
     # Loop graph editing — one compact tool, default-enabled but gated by
     # loop.enabled so users can remove the schema surface if needed.
     "loop_graph",
@@ -265,7 +265,7 @@ TOOLSETS = {
         ),
         "tools": [
             "kanban_show", "kanban_list", "kanban_complete", "kanban_block",
-            "kanban_heartbeat", "kanban_comment",
+            "kanban_request_review", "kanban_heartbeat", "kanban_comment",
             "kanban_create", "kanban_link",
             "kanban_unblock",
         ],
