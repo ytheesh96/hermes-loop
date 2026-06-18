@@ -369,6 +369,7 @@ interface PromptActionsOptions {
 interface SubmitTextOptions {
   attachments?: ComposerAttachment[]
   fromQueue?: boolean
+  sessionId?: string
 }
 
 /** Everything a slash handler needs about the invocation it's serving. */
@@ -701,7 +702,7 @@ export function usePromptActions({
       setAwaitingResponse(true)
       clearNotifications()
 
-      let sessionId: null | string = activeSessionId
+      let sessionId: null | string = options?.sessionId || activeSessionId || activeSessionIdRef.current
 
       if (sessionId) {
         seedOptimistic(sessionId)
@@ -822,6 +823,7 @@ export function usePromptActions({
     },
     [
       activeSessionId,
+      activeSessionIdRef,
       busyRef,
       copy,
       createBackendSessionForSend,
@@ -1129,7 +1131,7 @@ export function usePromptActions({
               if (busyRef.current) {
                 enqueueQueuedPrompt(sessionId, { attachments: [], text: intakePrompt })
               } else {
-                const submitted = await submitPromptText(intakePrompt)
+                const submitted = await submitPromptText(intakePrompt, { sessionId })
 
                 if (!submitted) {
                   enqueueQueuedPrompt(sessionId, { attachments: [], text: intakePrompt })

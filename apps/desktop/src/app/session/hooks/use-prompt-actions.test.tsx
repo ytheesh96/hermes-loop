@@ -27,6 +27,7 @@ const { createLoopDraftTask } = await import('@/hermes')
 // the stored sessions table and 404s on a runtime id. session.title accepts
 // the runtime id directly.
 const RUNTIME_SESSION_ID = 'rt-abc123'
+const SECOND_RUNTIME_SESSION_ID = 'rt-def456'
 const STORED_SESSION_ID = '20260616_133540_67ff1b'
 const BRANCH_STORED_SESSION_ID = '20260616_140112_abc987'
 
@@ -60,31 +61,40 @@ interface HarnessHandle {
 }
 
 function Harness({
+  activeSessionId = RUNTIME_SESSION_ID,
   busyRef,
+  createBackendSessionForSend,
   onReady,
   onSeedState,
   refreshSessions,
   requestGateway,
   resolveActiveStoredSessionId,
+  runtimeSessionId = RUNTIME_SESSION_ID,
   resumeStoredSession,
   seedMessages,
   storedSessionId
 }: {
+  activeSessionId?: null | string
   busyRef?: MutableRefObject<boolean>
+  createBackendSessionForSend?: (preview?: null | string) => Promise<null | string>
   onReady: (handle: HarnessHandle) => void
   onSeedState?: (state: Record<string, unknown>) => void
   refreshSessions: () => Promise<void>
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
   resolveActiveStoredSessionId?: (runtimeSessionId: string) => null | string | undefined
+  runtimeSessionId?: null | string
   resumeStoredSession?: (storedSessionId: string) => Promise<void> | void
   seedMessages?: unknown[]
   storedSessionId?: null | string
 }) {
-  const activeSessionIdRef: MutableRefObject<string | null> = { current: RUNTIME_SESSION_ID }
+  const activeSessionIdRef: MutableRefObject<string | null> = { current: runtimeSessionId }
+
   const selectedStoredSessionIdRef: MutableRefObject<string | null> = {
     current: storedSessionId === undefined ? RUNTIME_SESSION_ID : storedSessionId
   }
+
   const localBusyRef = busyRef ?? { current: false }
+
   const stateRef = useRef({
     messages: seedMessages ?? [],
     busy: false,
@@ -93,11 +103,11 @@ function Harness({
   } as never)
 
   const actions = usePromptActions({
-    activeSessionId: RUNTIME_SESSION_ID,
+    activeSessionId,
     activeSessionIdRef,
     branchCurrentSession: async () => true,
     busyRef: localBusyRef,
-    createBackendSessionForSend: async () => RUNTIME_SESSION_ID,
+    createBackendSessionForSend: createBackendSessionForSend ?? (async () => RUNTIME_SESSION_ID),
     handleSkinCommand: () => '',
     refreshSessions,
     requestGateway,
@@ -304,6 +314,42 @@ describe('usePromptActions /loop', () => {
       todoStatus: 'pending',
       type: 'todo'
     })
+  })
+
+  it('submits the Loop intake to the freshly ensured session while active state catches up', async () => {
+    const createBackendSessionForSend = vi.fn(async () => SECOND_RUNTIME_SESSION_ID)
+    const refreshSessions = vi.fn(async () => undefined)
+    const requestGateway = vi.fn(async () => ({}) as never)
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        activeSessionId={null}
+        createBackendSessionForSend={createBackendSessionForSend}
+        onReady={h => (handle = h)}
+        refreshSessions={refreshSessions}
+        requestGateway={requestGateway}
+        runtimeSessionId={RUNTIME_SESSION_ID}
+        storedSessionId={null}
+      />
+    )
+
+    await handle!.submitText('/loop Draft product loop')
+
+    expect(createLoopDraftTask).toHaveBeenCalledWith({
+      profile: 'default',
+      sessionId: RUNTIME_SESSION_ID,
+      title: 'Draft product loop'
+    })
+    expect(createBackendSessionForSend).not.toHaveBeenCalled()
+    expect(requestGateway).toHaveBeenCalledWith('prompt.submit', {
+      session_id: RUNTIME_SESSION_ID,
+      text: expect.stringContaining('start the grill-me Loop intake path')
+    })
+    expect(requestGateway).not.toHaveBeenCalledWith(
+      'prompt.submit',
+      expect.objectContaining({ session_id: SECOND_RUNTIME_SESSION_ID })
+    )
   })
 
   it('queues the Loop intake interview when the foreground turn is still busy', async () => {
