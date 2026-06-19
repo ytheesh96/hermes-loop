@@ -62,10 +62,12 @@ export function ChatPreviewRail({ embedded = false, onRestartServer, setTitlebar
 
   const tabs = useMemo<readonly RailTab[]>(
     () => [
-      ...(previewTarget ? [{ id: RIGHT_RAIL_PREVIEW_TAB_ID, label: t.preview.tab, target: previewTarget } as RailTab] : []),
+      ...(previewTarget
+        ? [{ id: RIGHT_RAIL_PREVIEW_TAB_ID, label: tabLabelFor(previewTarget), target: previewTarget } as RailTab]
+        : []),
       ...filePreviewTabs.map(({ id, target }) => ({ id, label: tabLabelFor(target), target }) as RailTab)
     ],
-    [filePreviewTabs, previewTarget, t.preview.tab]
+    [filePreviewTabs, previewTarget]
   )
 
   const activeTab = tabs.find(tab => tab.id === activeTabId) ?? tabs[0]

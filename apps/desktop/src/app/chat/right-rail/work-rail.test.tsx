@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { clearSessionPreviewRegistry, type PreviewTarget, setPreviewTarget } from '@/store/preview'
@@ -80,9 +80,12 @@ describe('ChatWorkRail', () => {
 
     expect(screen.getByTestId('work-rail-tab-loop')).toBeTruthy()
     expect(screen.getByTestId('work-rail-tab-preview')).toBeTruthy()
+    expect(within(screen.getByTestId('work-rail-tab-loop')).getByRole('tab', { name: 'Loop' })).toBeTruthy()
+    expect(within(screen.getByTestId('work-rail-tab-preview')).getByRole('tab', { name: 'Preview' })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'Preview artifact' })).toBeTruthy()
     expect((await screen.findByTestId('preview-pane')).textContent).toBe('Preview artifact')
 
-    fireEvent.click(screen.getByRole('tab', { name: /Loop root/i }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Loop' }))
 
     const loopPanel = screen.getByTestId('loop-panel')
     expect(loopPanel.getAttribute('data-layout')).toBe('tabbed')

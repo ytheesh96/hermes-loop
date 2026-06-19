@@ -33,6 +33,7 @@ interface WorkRailTab {
   id: WorkRailTabId
   label: string
   onClose: () => void
+  title: string
 }
 
 function loopRailLabel(loop: LoopPanelController): string {
@@ -58,8 +59,12 @@ export function ChatWorkRail({
 
   const tabs = useMemo<WorkRailTab[]>(
     () => [
-      ...(loopOpen ? [{ id: 'loop' as const, label: loopRailLabel(loop), onClose: loop.onHide }] : []),
-      ...(previewOpen ? [{ id: 'preview' as const, label: previewLabel || 'Preview', onClose: closeRightRail }] : [])
+      ...(loopOpen
+        ? [{ id: 'loop' as const, label: 'Loop', onClose: loop.onHide, title: loopRailLabel(loop) }]
+        : []),
+      ...(previewOpen
+        ? [{ id: 'preview' as const, label: 'Preview', onClose: closeRightRail, title: previewLabel || 'Preview' }]
+        : [])
     ],
     [loop, loopOpen, previewLabel, previewOpen]
   )
@@ -139,7 +144,7 @@ export function ChatWorkRail({
                   className="flex h-full min-w-0 max-w-full items-center overflow-hidden pl-3 pr-2 text-left outline-none"
                   onClick={() => setActiveTabId(tab.id)}
                   role="tab"
-                  title={tab.label}
+                  title={tab.title}
                   type="button"
                 >
                   <span className="block min-w-0 truncate">{tab.label}</span>
@@ -152,7 +157,7 @@ export function ChatWorkRail({
                   )}
                 />
                 <button
-                  aria-label={`Close ${tab.label}`}
+                  aria-label={`Close ${tab.title}`}
                   className={cn(
                     'absolute right-1.5 top-1/2 grid size-4 -translate-y-1/2 place-items-center rounded-sm text-(--ui-text-tertiary) transition-[background-color,color,opacity] hover:bg-(--ui-bg-secondary) hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100',
                     active
