@@ -1758,6 +1758,7 @@ export const ja = defineLocale({
     collapseAll: 'すべてのフォルダーを折りたたむ',
     previewUnavailable: 'プレビューは利用できません',
     couldNotPreview: path => `${path} をプレビューできませんでした`,
+    viewSource: 'ソースを表示',
     noProjectTitle: 'プロジェクトなし',
     noProjectBody: 'ステータスバーから作業ディレクトリを設定してファイルを閲覧してください。',
     unreadableTitle: '読み取り不可',

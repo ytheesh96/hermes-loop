@@ -1628,6 +1628,7 @@ export const en: Translations = {
     collapseAll: 'Collapse all folders',
     previewUnavailable: 'Preview unavailable',
     couldNotPreview: path => `Could not preview ${path}`,
+    viewSource: 'View source',
     noProjectTitle: 'No project',
     noProjectBody: 'Set a working directory from the status bar to browse files.',
     unreadableTitle: 'Unreadable',

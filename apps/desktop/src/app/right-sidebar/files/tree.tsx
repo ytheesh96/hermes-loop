@@ -3,6 +3,7 @@ import { type NodeApi, type NodeRendererProps, Tree, type TreeApi } from 'react-
 
 import { PageLoader } from '@/components/page-loader'
 import { Codicon } from '@/components/ui/codicon'
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { useResizeObserver } from '@/hooks/use-resize-observer'
 import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
@@ -24,6 +25,7 @@ interface ProjectTreeProps {
   onLoadChildren: (id: string) => void | Promise<void>
   onNodeOpenChange: (id: string, open: boolean) => void
   onPreviewFile?: (path: string) => void
+  onViewSourceFile?: (path: string) => void
   openState: Record<string, boolean>
 }
 
@@ -36,6 +38,7 @@ export function ProjectTree({
   onLoadChildren,
   onNodeOpenChange,
   onPreviewFile,
+  onViewSourceFile,
   openState
 }: ProjectTreeProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -116,6 +119,7 @@ export function ProjectTree({
               onAttachFile={onActivateFile}
               onAttachFolder={onActivateFolder}
               onPreviewFile={onPreviewFile}
+              onViewSourceFile={onViewSourceFile}
             />
           )}
         </Tree>
@@ -138,12 +142,16 @@ function ProjectTreeRow({
   onAttachFile,
   onAttachFolder,
   onPreviewFile,
+  onViewSourceFile,
   style
 }: NodeRendererProps<TreeNode> & {
   onAttachFile: (path: string) => void
   onAttachFolder: (path: string) => void
   onPreviewFile?: (path: string) => void
+  onViewSourceFile?: (path: string) => void
 }) {
+  const { t } = useI18n()
+
   if (!node.data) {
     return <div style={style} />
   }
@@ -151,8 +159,9 @@ function ProjectTreeRow({
   const isFolder = node.data.isDirectory
   const isPlaceholder = Boolean(node.data.placeholder)
   const isErrorPlaceholder = node.data.placeholder === 'error'
+  const isHtmlFile = /\.(?:html?|xhtml)$/i.test(node.data.name)
 
-  return (
+  const row = (
     <div
       aria-expanded={isFolder ? node.isOpen : undefined}
       aria-selected={node.isSelected}
@@ -179,6 +188,7 @@ function ProjectTreeRow({
           node.toggle()
         } else {
           node.select()
+          onPreviewFile?.(node.data.id)
         }
       }}
       onDoubleClick={event => {
@@ -225,5 +235,21 @@ function ProjectTreeRow({
       </span>
       <span className="min-w-0 flex-1 truncate">{node.data.name}</span>
     </div>
+  )
+
+  if (isFolder || isPlaceholder || !isHtmlFile || !onViewSourceFile) {
+    return row
+  }
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
+      <ContextMenuContent aria-label={node.data.name} className="w-40">
+        <ContextMenuItem onSelect={() => onViewSourceFile(node.data.id)}>
+          <Codicon name="code" size="0.8125rem" />
+          <span>{t.rightSidebar.viewSource}</span>
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   )
 }

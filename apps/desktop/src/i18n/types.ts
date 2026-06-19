@@ -1270,6 +1270,7 @@ export interface Translations {
     collapseAll: string
     previewUnavailable: string
     couldNotPreview: (path: string) => string
+    viewSource: string
     noProjectTitle: string
     noProjectBody: string
     unreadableTitle: string

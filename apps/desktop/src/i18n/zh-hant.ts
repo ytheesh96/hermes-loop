@@ -1702,6 +1702,7 @@ export const zhHant = defineLocale({
     collapseAll: '收合所有資料夾',
     previewUnavailable: '預覽不可用',
     couldNotPreview: path => `無法預覽 ${path}`,
+    viewSource: '檢視原始碼',
     noProjectTitle: '沒有專案',
     noProjectBody: '從狀態列設定工作目錄後即可瀏覽檔案。',
     unreadableTitle: '無法讀取',

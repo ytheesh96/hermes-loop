@@ -1808,6 +1808,7 @@ export const zh: Translations = {
     collapseAll: '折叠所有文件夹',
     previewUnavailable: '预览不可用',
     couldNotPreview: path => `无法预览 ${path}`,
+    viewSource: '查看源代码',
     noProjectTitle: '没有项目',
     noProjectBody: '从状态栏设置工作目录后即可浏览文件。',
     unreadableTitle: '无法读取',

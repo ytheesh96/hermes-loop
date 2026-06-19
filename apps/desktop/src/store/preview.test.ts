@@ -120,6 +120,26 @@ describe('preview store', () => {
     expect($previewTarget.get()).toEqual(withRenderMode(preview, 'preview'))
   })
 
+  it('opens file-browser html in rendered preview mode when requested', () => {
+    const target = previewTarget('/work/demo.html')
+
+    setCurrentSessionPreviewTarget(target, 'file-browser', target.source, { mode: 'preview' })
+
+    expect($filePreviewTarget.get()).toBeNull()
+    expect($previewTarget.get()).toEqual(withRenderMode(target, 'preview'))
+    expect(getSessionPreviewRecord('session-1')?.normalized).toEqual(withRenderMode(target, 'preview'))
+  })
+
+  it('opens file-browser html source as a file tab when requested', () => {
+    const target = previewTarget('/work/demo.html')
+
+    setCurrentSessionPreviewTarget(target, 'file-browser', target.source, { mode: 'source' })
+
+    expect($filePreviewTarget.get()).toEqual(withRenderMode(target, 'source'))
+    expect($previewTarget.get()).toBeNull()
+    expect(getSessionPreviewRecord('session-1')).toBeNull()
+  })
+
   it('keeps file tabs when a live preview opens', () => {
     const file = previewTarget('/work/file.html')
     const live = previewTarget('/work/live.html')

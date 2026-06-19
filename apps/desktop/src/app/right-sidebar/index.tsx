@@ -11,7 +11,7 @@ import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
 import { cn } from '@/lib/utils'
 import { $panesFlipped } from '@/store/layout'
 import { notifyError } from '@/store/notifications'
-import { setCurrentSessionPreviewTarget } from '@/store/preview'
+import { type PreviewOpenMode, setCurrentSessionPreviewTarget } from '@/store/preview'
 import { $currentCwd } from '@/store/session'
 
 import { SidebarPanelLabel } from '../shell/sidebar-label'
@@ -68,7 +68,7 @@ export function RightSidebarPane({ onActivateFile, onActivateFolder, onChangeCwd
     }
   }
 
-  const previewFile = async (path: string) => {
+  const previewFile = async (path: string, mode?: PreviewOpenMode) => {
     try {
       const preview = await normalizeOrLocalPreviewTarget(path, effectiveCwd || undefined)
 
@@ -76,7 +76,9 @@ export function RightSidebarPane({ onActivateFile, onActivateFolder, onChangeCwd
         throw new Error(r.couldNotPreview(path))
       }
 
-      setCurrentSessionPreviewTarget(preview, 'file-browser', path)
+      setCurrentSessionPreviewTarget(preview, 'file-browser', path, {
+        mode: mode ?? (preview.previewKind === 'html' ? 'preview' : 'source')
+      })
     } catch (error) {
       notifyError(error, r.previewUnavailable)
     }
@@ -111,6 +113,7 @@ export function RightSidebarPane({ onActivateFile, onActivateFolder, onChangeCwd
         onNodeOpenChange={setNodeOpen}
         onPreviewFile={previewFile}
         onRefresh={() => void refreshRoot()}
+        onViewSourceFile={path => void previewFile(path, 'source')}
         openState={openState}
       />
     </aside>
@@ -233,6 +236,7 @@ interface FileTreeBodyProps {
   /** Force-reload the root. The hook also auto-retries while errored, so this
    *  is the impatient-user path. */
   onRetry?: () => void
+  onViewSourceFile?: (path: string) => void
   openState: ReturnType<typeof useProjectTree>['openState']
 }
 
@@ -248,6 +252,7 @@ function FileTreeBody({
   onNodeOpenChange,
   onPreviewFile,
   onRetry,
+  onViewSourceFile,
   openState
 }: FileTreeBodyProps) {
   const { t } = useI18n()
@@ -308,6 +313,7 @@ function FileTreeBody({
         onLoadChildren={onLoadChildren}
         onNodeOpenChange={onNodeOpenChange}
         onPreviewFile={onPreviewFile}
+        onViewSourceFile={onViewSourceFile}
         openState={openState}
       />
     </ErrorBoundary>

@@ -50,6 +50,12 @@ export interface FilePreviewTab {
   target: PreviewTarget
 }
 
+export type PreviewOpenMode = 'preview' | 'source'
+
+export interface PreviewOpenOptions {
+  mode?: PreviewOpenMode
+}
+
 const REGISTRY_STORAGE_KEY = 'hermes.desktop.sessionPreviews.v1'
 const MAX_RECORDS_PER_SESSION = 1
 const MAX_SESSIONS = 120
@@ -124,20 +130,48 @@ function isFilePreviewSource(source: PreviewRecordSource): boolean {
   return source === 'file-browser' || source === 'manual'
 }
 
-function previewTargetForSource(target: PreviewTarget, source: PreviewRecordSource): PreviewTarget {
+function previewTargetForSource(
+  target: PreviewTarget,
+  source: PreviewRecordSource,
+  options: PreviewOpenOptions = {}
+): PreviewTarget {
   if (target.kind !== 'file' || target.previewKind !== 'html') {
     return target
   }
 
-  return { ...target, renderMode: isFilePreviewSource(source) ? 'source' : 'preview' }
+  return { ...target, renderMode: options.mode ?? (isFilePreviewSource(source) ? 'source' : 'preview') }
 }
 
-function tryOpenFilePreview(target: PreviewTarget, source: PreviewRecordSource): boolean {
-  if (target.kind !== 'file' || !isFilePreviewSource(source)) {
+function shouldOpenFilePreviewTab(
+  target: PreviewTarget,
+  source: PreviewRecordSource,
+  options: PreviewOpenOptions = {}
+): boolean {
+  if (target.kind !== 'file') {
     return false
   }
 
-  openFilePreviewTarget(previewTargetForSource(target, source))
+  if (options.mode === 'preview') {
+    return false
+  }
+
+  if (options.mode === 'source') {
+    return true
+  }
+
+  return isFilePreviewSource(source)
+}
+
+function tryOpenFilePreview(
+  target: PreviewTarget,
+  source: PreviewRecordSource,
+  options: PreviewOpenOptions = {}
+): boolean {
+  if (!shouldOpenFilePreviewTab(target, source, options)) {
+    return false
+  }
+
+  openFilePreviewTarget(previewTargetForSource(target, source, options))
 
   return true
 }
@@ -254,7 +288,8 @@ export function registerSessionPreview(
   sessionId: string | null | undefined,
   target: PreviewTarget,
   source: PreviewRecordSource,
-  rawTarget = target.source
+  rawTarget = target.source,
+  options: PreviewOpenOptions = {}
 ): SessionPreviewRecord | null {
   const id = sessionId?.trim()
 
@@ -266,7 +301,7 @@ export function registerSessionPreview(
   const now = Date.now()
   const records = current[id] ?? []
   const existing = records.find(record => record.normalized.url === target.url)
-  const normalized = previewTargetForSource(target, source)
+  const normalized = previewTargetForSource(target, source, options)
 
   const nextRecord: SessionPreviewRecord = {
     autoOpen: true,
@@ -292,15 +327,16 @@ export function setSessionPreviewTarget(
   sessionId: string | null | undefined,
   target: PreviewTarget,
   source: PreviewRecordSource,
-  rawTarget = target.source
+  rawTarget = target.source,
+  options: PreviewOpenOptions = {}
 ): SessionPreviewRecord | null {
-  if (tryOpenFilePreview(target, source)) {
+  if (tryOpenFilePreview(target, source, options)) {
     return null
   }
 
-  const record = registerSessionPreview(sessionId, target, source, rawTarget)
+  const record = registerSessionPreview(sessionId, target, source, rawTarget, options)
 
-  setPreviewTarget(record?.normalized ?? previewTargetForSource(target, source))
+  setPreviewTarget(record?.normalized ?? previewTargetForSource(target, source, options))
 
   return record
 }
@@ -308,9 +344,10 @@ export function setSessionPreviewTarget(
 export function setCurrentSessionPreviewTarget(
   target: PreviewTarget,
   source: PreviewRecordSource,
-  rawTarget = target.source
+  rawTarget = target.source,
+  options: PreviewOpenOptions = {}
 ): SessionPreviewRecord | null {
-  return setSessionPreviewTarget(currentPreviewSessionId(), target, source, rawTarget)
+  return setSessionPreviewTarget(currentPreviewSessionId(), target, source, rawTarget, options)
 }
 
 export function getSessionPreviewRecord(sessionId: string | null | undefined): SessionPreviewRecord | null {
