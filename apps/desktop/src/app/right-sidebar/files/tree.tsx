@@ -87,7 +87,7 @@ export function ProjectTree({
   const handleActivate = useCallback(
     (node: NodeApi<TreeNode>) => {
       if (node.data && !node.data.isDirectory) {
-        onPreviewFile?.(node.data.id)
+        onPreviewFile?.(node.data.path || node.data.id)
       }
     },
     [onPreviewFile]
@@ -164,6 +164,7 @@ function ProjectTreeRow({
     return <div style={style} />
   }
 
+  const nodePath = node.data.path || node.data.id
   const isFolder = node.data.isDirectory
   const isPlaceholder = Boolean(node.data.placeholder)
   const isErrorPlaceholder = node.data.placeholder === 'error'
@@ -190,7 +191,7 @@ function ProjectTreeRow({
         }
 
         if (event.shiftKey) {
-          ;(isFolder ? onAttachFolder : onAttachFile)(node.data.id)
+          ;(isFolder ? onAttachFolder : onAttachFile)(nodePath)
 
           return
         }
@@ -199,14 +200,14 @@ function ProjectTreeRow({
           node.toggle()
         } else {
           node.select()
-          onPreviewFile?.(node.data.id)
+          onPreviewFile?.(nodePath)
         }
       }}
       onDoubleClick={event => {
         event.stopPropagation()
 
         if (!isFolder && !isPlaceholder) {
-          onPreviewFile?.(node.data.id)
+          onPreviewFile?.(nodePath)
         }
       }}
       onDragStart={event => {
@@ -216,11 +217,11 @@ function ProjectTreeRow({
           return
         }
 
-        const payload = JSON.stringify([{ isDirectory: isFolder, path: node.data.id }])
+        const payload = JSON.stringify([{ isDirectory: isFolder, path: nodePath }])
 
         event.dataTransfer.effectAllowed = 'copy'
         event.dataTransfer.setData('application/x-hermes-paths', payload)
-        event.dataTransfer.setData('text/plain', node.data.id)
+        event.dataTransfer.setData('text/plain', nodePath)
       }}
       ref={dragHandle}
       style={{
@@ -271,7 +272,7 @@ function ProjectTreeRow({
     <ContextMenu>
       <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
       <ContextMenuContent aria-label={node.data.name} className="w-40">
-        <ContextMenuItem onSelect={() => onViewSourceFile(node.data.id)}>
+        <ContextMenuItem onSelect={() => onViewSourceFile(nodePath)}>
           <Codicon name="code" size="0.8125rem" />
           <span>{t.rightSidebar.viewSource}</span>
         </ContextMenuItem>

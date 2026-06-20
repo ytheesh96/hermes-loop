@@ -1,6 +1,6 @@
 import { atom, computed } from 'nanostores'
 
-import { inferLoopRootTaskIdFromTenantSource, type LoopWorkerActivity, type TenantLoopSource, type TenantLoopTask } from '@/app/chat/loop-state'
+import { inferLoopRootTasksFromTenantSource, type LoopWorkerActivity, type TenantLoopSource, type TenantLoopTask } from '@/app/chat/loop-state'
 import type { StatusIndicatorKind } from '@/components/chat/status-indicator'
 import { translateNow } from '@/i18n'
 import type { TodoItem, TodoStatus } from '@/lib/todos'
@@ -103,10 +103,6 @@ const humanToolLabel = (name: string): string =>
     .filter(Boolean)
     .map(part => part[0]!.toUpperCase() + part.slice(1))
     .join(' ') || name
-
-const taskParentIds = (task: TenantLoopTask): string[] => task.included_parent_ids || task.links?.parents || []
-
-const isRootKanbanTask = (task: TenantLoopTask): boolean => taskParentIds(task).length === 0
 
 const kanbanTaskTodoStatus = (task: TenantLoopTask): TodoStatus => {
   const status = normalized(task.status)
@@ -482,14 +478,13 @@ export function reconcileKanbanSessionSource(sid: string, source: TenantLoopSour
   }
 
   const visibleTasks = (source.tasks || []).filter(task => task.id && normalized(task.status) !== 'archived')
-  const rootTaskId = inferLoopRootTaskIdFromTenantSource(source, visibleTasks)
-  const rootTask = visibleTasks.find(task => task.id === rootTaskId) || visibleTasks.find(isRootKanbanTask) || visibleTasks[0]
-  const tasks = rootTask ? [kanbanTaskToItem(rootTask)] : []
+  const rootTasks = inferLoopRootTasksFromTenantSource(source, visibleTasks)
+  const tasks = rootTasks.map(kanbanTaskToItem)
 
-  const visibleRootTaskId = rootTask?.id
+  const visibleRootTaskIds = new Set(rootTasks.map(task => task.id))
 
   const agents = (source.workers || [])
-    .filter(worker => worker.task_id && Number.isFinite(worker.run_id) && worker.task_id !== visibleRootTaskId)
+    .filter(worker => worker.task_id && Number.isFinite(worker.run_id) && !visibleRootTaskIds.has(worker.task_id))
     .filter(worker => workerIsActive(worker) || workerNeedsForegroundAttention(worker))
     .map(kanbanWorkerToItem)
 

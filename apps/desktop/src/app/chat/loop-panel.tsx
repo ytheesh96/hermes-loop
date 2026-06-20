@@ -24,6 +24,7 @@ import { cn } from '@/lib/utils'
 import type { ComposerStatusItem, StatusItemState } from '@/store/composer-status'
 import type { PreviewTarget } from '@/store/preview'
 
+import { loopConnectedTaskIds } from './loop-state'
 import type {
   CompactLoopTask,
   LoopPanelState,
@@ -297,35 +298,13 @@ interface RootOverviewGroups {
   active: LoopRow[]
   attention: LoopRow[]
   completed: LoopRow[]
+  other: LoopRow[]
   queued: LoopRow[]
 }
 
 function rootDescendantRows(state: LoopPanelState, root: LoopRow): LoopRow[] {
-  const rowsById = new Map(state.rows.map(row => [row.taskId, row]))
-  const seen = new Set<string>()
-
-  const queue = [
-    ...root.parents,
-    ...root.children,
-    ...root.parents,
-    ...state.rows.filter(row => row.taskId !== root.taskId && row.parents.includes(root.taskId)).map(row => row.taskId)
-  ]
-
-  while (queue.length) {
-    const taskId = queue.shift()!
-
-    if (seen.has(taskId) || taskId === root.taskId) {
-      continue
-    }
-
-    seen.add(taskId)
-
-    const row = rowsById.get(taskId)
-
-    if (row) {
-      queue.push(...row.children)
-    }
-  }
+  const seen = new Set(loopConnectedTaskIds(state, root.taskId))
+  seen.delete(root.taskId)
 
   return state.rows.filter(row => seen.has(row.taskId))
 }
@@ -334,12 +313,22 @@ function rootOverviewGroups(state: LoopPanelState, root: LoopRow): RootOverviewG
   const descendants = rootDescendantRows(state, root)
   const attention = attentionRows(descendants)
   const attentionIds = new Set(attention.map(row => row.taskId))
+  const active = descendants.filter(row => !attentionIds.has(row.taskId) && isActiveLoopRow(row))
+  const queued = descendants.filter(row => !attentionIds.has(row.taskId) && isQueuedLoopRow(row))
+  const completed = descendants.filter(row => !attentionIds.has(row.taskId) && isDoneLoopRow(row))
+  const groupedIds = new Set([
+    ...attention.map(row => row.taskId),
+    ...active.map(row => row.taskId),
+    ...queued.map(row => row.taskId),
+    ...completed.map(row => row.taskId)
+  ])
 
   return {
-    active: descendants.filter(row => !attentionIds.has(row.taskId) && isActiveLoopRow(row)),
+    active,
     attention,
-    queued: descendants.filter(row => !attentionIds.has(row.taskId) && isQueuedLoopRow(row)),
-    completed: descendants.filter(row => !attentionIds.has(row.taskId) && isDoneLoopRow(row))
+    queued,
+    other: descendants.filter(row => !groupedIds.has(row.taskId)),
+    completed
   }
 }
 
@@ -1889,7 +1878,7 @@ function LoopRootAgentsCard({
   onOpenTaskTab?: (row: LoopRow) => void
   root: LoopRow
 }) {
-  const rows = [root, ...groups.active, ...groups.attention, ...groups.queued, ...groups.completed]
+  const rows = [root, ...groups.active, ...groups.attention, ...groups.queued, ...groups.other, ...groups.completed]
 
   return (
     <DetailSection testId="loop-root-agents-card" title="Agents">
@@ -1970,24 +1959,22 @@ function LoopTaskAgentsCard({
 }
 
 function LoopRootOverview({
-  onOpenArtifactTab,
   onOpenTaskTab,
   onTaskAction,
   root,
   state
 }: {
-  onOpenArtifactTab?: (entry: LoopArtifactSourceEntry, row: LoopRow) => void
   onOpenTaskTab?: (row: LoopRow) => void
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
   root: LoopRow
   state: LoopPanelState
 }) {
   const groups = rootOverviewGroups(state, root)
-  const groupedCount = groups.active.length + groups.attention.length + groups.queued.length + groups.completed.length
+  const groupedCount =
+    groups.active.length + groups.attention.length + groups.queued.length + groups.other.length + groups.completed.length
   const childCount = Math.max(root.childCount, root.children.length, groupedCount)
   const decomposed = childCount > 0
   const archiveableTaskCount = state.rows.filter(row => normalizedLoopValue(row.status) !== 'archived').length
-  const artifactSourceRows = [root, ...rootDescendantRows(state, root)]
 
   return (
     <div className="grid min-w-0 max-w-full gap-3">
@@ -2012,8 +1999,6 @@ function LoopRootOverview({
       {decomposed ? <LoopRootAgentsCard groups={groups} onOpenTaskTab={onOpenTaskTab} root={root} /> : null}
 
       <LoopRootSpec root={root} />
-
-      <LoopArtifactSourcesCard hideEmpty onOpenArtifactSource={onOpenArtifactTab} rows={artifactSourceRows} />
     </div>
   )
 }
@@ -2025,7 +2010,6 @@ function LoopTaskDetails({
   commentsError,
   onAddComment,
   onBack,
-  onOpenArtifactTab,
   onSelectTaskId,
   onTaskAction,
   row,
@@ -2037,7 +2021,6 @@ function LoopTaskDetails({
   commentsError?: null | string
   onAddComment?: LoopTaskCommentSubmit
   onBack?: () => void
-  onOpenArtifactTab?: (entry: LoopArtifactSourceEntry, row: LoopRow) => void
   onSelectTaskId?: (taskId: string) => void
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
   row: LoopRow
@@ -2086,8 +2069,6 @@ function LoopTaskDetails({
         onAddComment={onAddComment}
         row={row}
       />
-
-      <LoopArtifactSourcesCard detail={detail} onOpenArtifactSource={onOpenArtifactTab} rows={[row]} />
 
       <DetailSection title="Worker activity">
         <WorkerActivityDetails onTaskAction={onTaskAction} row={row} />
@@ -2725,6 +2706,19 @@ export function LoopPanel({
       : backTarget?.title || (rootRow && focusedTaskId !== rootRow.taskId ? 'root overview' : null)
 
   const detailBack = detailBackLabel ? goBack : undefined
+
+  const openRootOverviewTask = embedded
+    ? (row: LoopRow) => {
+        if (row.taskId === rootRow?.taskId) {
+          openTaskTab(row)
+
+          return
+        }
+
+        selectRelatedTask(row.taskId)
+      }
+    : openTaskTab
+
   const loopTabTitle = rootRow?.title || selected?.title || 'Loop'
 
   const baseTabLabel =
@@ -2815,19 +2809,21 @@ export function LoopPanel({
       )}
 
       <div className="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-(--ui-editor-surface-background)">
-        <LoopPanelTabBar
-          activeArtifactTabId={activeArtifactTabId}
-          activeTaskTabId={activeTaskTabId}
-          artifactTabs={artifactTabs}
-          baseLabel={baseTabLabel}
-          onCloseArtifactTab={closeArtifactTab}
-          onClosePane={onHide}
-          onCloseTaskTab={closeTaskTab}
-          onSelectArtifactTab={selectArtifactTab}
-          onSelectBaseTab={selectBaseTab}
-          onSelectTaskTab={selectTaskTab}
-          taskTabs={taskTabs}
-        />
+        {!embedded && (
+          <LoopPanelTabBar
+            activeArtifactTabId={activeArtifactTabId}
+            activeTaskTabId={activeTaskTabId}
+            artifactTabs={artifactTabs}
+            baseLabel={baseTabLabel}
+            onCloseArtifactTab={closeArtifactTab}
+            onClosePane={onHide}
+            onCloseTaskTab={closeTaskTab}
+            onSelectArtifactTab={selectArtifactTab}
+            onSelectBaseTab={selectBaseTab}
+            onSelectTaskTab={selectTaskTab}
+            taskTabs={taskTabs}
+          />
+        )}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col p-3">
           {state.message && (
             <div
@@ -2849,11 +2845,13 @@ export function LoopPanel({
               activeTaskTabRow ? (
                 <div className="grid min-w-0 max-w-full gap-3">
                   <LoopTaskDetails
-                    backLabel={null}
+                    backLabel={embedded && activeTaskTabId === rootRow?.taskId && rootOverviewEligible ? 'root overview' : null}
                     commentsError={selectedTaskCommentsError}
                     detail={mergedDetail}
                     onAddComment={onAddTaskComment}
-                    onOpenArtifactTab={openArtifactTab}
+                    onBack={
+                      embedded && activeTaskTabId === rootRow?.taskId && rootOverviewEligible ? selectBaseTab : undefined
+                    }
                     onSelectTaskId={selectRelatedTask}
                     onTaskAction={onTaskAction}
                     row={activeTaskTabRow}
@@ -2873,8 +2871,7 @@ export function LoopPanel({
             ) : showingRootOverview && rootRow ? (
               <div className="grid min-w-0 max-w-full gap-3">
                 <LoopRootOverview
-                  onOpenArtifactTab={openArtifactTab}
-                  onOpenTaskTab={openTaskTab}
+                  onOpenTaskTab={openRootOverviewTask}
                   onTaskAction={onTaskAction}
                   root={rootRow}
                   state={state}
@@ -2889,7 +2886,6 @@ export function LoopPanel({
                   detailError={selectedTaskDetailError}
                   onAddComment={onAddTaskComment}
                   onBack={detailBack}
-                  onOpenArtifactTab={openArtifactTab}
                   onSelectTaskId={selectRelatedTask}
                   onTaskAction={onTaskAction}
                   row={selected}

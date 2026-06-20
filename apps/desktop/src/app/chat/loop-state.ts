@@ -282,6 +282,63 @@ export interface LoopPanelState {
   status: LoopPanelStatus
 }
 
+export function loopConnectedTaskIds(state?: LoopPanelState | null, rootTaskId?: null | string): string[] {
+  const rows = state?.rows || []
+  const taskId = rootTaskId?.trim() || state?.rootTaskId || ''
+
+  if (!taskId) {
+    return []
+  }
+
+  const rowById = new Map(rows.map(row => [row.taskId, row]))
+
+  if (!rowById.has(taskId)) {
+    return rows.map(row => row.taskId)
+  }
+
+  const neighbors = new Map(rows.map(row => [row.taskId, new Set<string>()]))
+
+  const link = (left?: null | string, right?: null | string) => {
+    if (!left || !right || !rowById.has(left) || !rowById.has(right)) {
+      return
+    }
+
+    neighbors.get(left)?.add(right)
+    neighbors.get(right)?.add(left)
+  }
+
+  for (const row of rows) {
+    for (const parentId of row.parents) {
+      link(row.taskId, parentId)
+    }
+
+    for (const childId of row.children) {
+      link(row.taskId, childId)
+    }
+  }
+
+  const seen = new Set<string>()
+  const queue = [taskId]
+
+  while (queue.length) {
+    const currentId = queue.shift()!
+
+    if (seen.has(currentId) || !rowById.has(currentId)) {
+      continue
+    }
+
+    seen.add(currentId)
+
+    for (const nextId of neighbors.get(currentId) || []) {
+      if (!seen.has(nextId)) {
+        queue.push(nextId)
+      }
+    }
+  }
+
+  return rows.filter(row => seen.has(row.taskId)).map(row => row.taskId)
+}
+
 const ARCHIVED_STATUSES = new Set(['archived'])
 const COMPLETE_STATUSES = new Set(['done', 'complete', 'completed', 'cancelled', 'archived'])
 const ACTIVE_STATUSES = new Set(['ready', 'running', 'claimed', 'in_progress'])
@@ -499,6 +556,95 @@ function taskChildren(task: TenantLoopTask): string[] {
   return Array.from(new Set([...explicit, ...external]))
 }
 
+const isSelfAnchoredLoopTask = (task: TenantLoopTask): boolean => task.created_by === `loop:${task.id}`
+
+function taskNeighborMap(source: TenantLoopSource, tasks: readonly TenantLoopTask[]): Map<string, Set<string>> {
+  const taskIds = new Set(tasks.map(task => task.id))
+  const neighbors = new Map(tasks.map(task => [task.id, new Set<string>()]))
+
+  const link = (left?: null | string, right?: null | string) => {
+    if (!left || !right || !taskIds.has(left) || !taskIds.has(right)) {
+      return
+    }
+
+    neighbors.get(left)?.add(right)
+    neighbors.get(right)?.add(left)
+  }
+
+  for (const task of tasks) {
+    for (const parentId of taskParents(task)) {
+      link(task.id, parentId)
+    }
+
+    for (const childId of taskChildren(task)) {
+      link(task.id, childId)
+    }
+  }
+
+  for (const sourceLink of [...(source.links || []), ...(source.external_links || [])]) {
+    link(sourceLink.parent_id, sourceLink.child_id)
+  }
+
+  return neighbors
+}
+
+function taskGraphHasPath(startId: string, targetId: string, neighbors: Map<string, Set<string>>): boolean {
+  if (startId === targetId) {
+    return true
+  }
+
+  const seen = new Set<string>()
+  const queue = [startId]
+
+  while (queue.length) {
+    const taskId = queue.shift()!
+
+    if (seen.has(taskId)) {
+      continue
+    }
+
+    seen.add(taskId)
+
+    for (const nextId of neighbors.get(taskId) || []) {
+      if (nextId === targetId) {
+        return true
+      }
+
+      if (!seen.has(nextId)) {
+        queue.push(nextId)
+      }
+    }
+  }
+
+  return false
+}
+
+function topLevelSelfAnchoredRoots(source: TenantLoopSource, tasks: readonly TenantLoopTask[]): TenantLoopTask[] {
+  const neighbors = taskNeighborMap(source, tasks)
+  const selfAnchored = tasks
+    .filter(isSelfAnchoredLoopTask)
+    .sort((a, b) => (a.created_at || 0) - (b.created_at || 0) || a.id.localeCompare(b.id))
+
+  return selfAnchored.filter((task, index) => {
+    const connectedEarlierRoot = selfAnchored
+      .slice(0, index)
+      .find(other => taskGraphHasPath(task.id, other.id, neighbors))
+
+    return !connectedEarlierRoot
+  })
+}
+
+function preferredSelfAnchoredRootForTask(
+  source: TenantLoopSource,
+  tasks: readonly TenantLoopTask[],
+  taskId: string
+): TenantLoopTask | null {
+  const neighbors = taskNeighborMap(source, tasks)
+  const selfAnchored = topLevelSelfAnchoredRoots(source, tasks)
+
+  return selfAnchored.find(root => taskGraphHasPath(taskId, root.id, neighbors)) || null
+}
+
 function orderedSessionLineageIds(source: TenantLoopSource): string[] {
   return Array.from(
     new Set([...(source.lineage_session_ids || []), source.session_id].filter((id): id is string => Boolean(id)))
@@ -509,8 +655,18 @@ export function inferLoopRootTaskIdFromTenantSource(
   source: TenantLoopSource,
   tasks: readonly TenantLoopTask[] = source.tasks || []
 ): string {
-  if (source.root_task_id && tasks.some(task => task.id === source.root_task_id)) {
-    return source.root_task_id
+  const byId = new Map(tasks.map(task => [task.id, task]))
+
+  if (source.root_task_id && byId.has(source.root_task_id)) {
+    const topLevelRoot = preferredSelfAnchoredRootForTask(source, tasks, source.root_task_id)
+
+    return topLevelRoot?.id || source.root_task_id
+  }
+
+  const selfAnchoredRoots = topLevelSelfAnchoredRoots(source, tasks)
+
+  if (selfAnchoredRoots[0]?.id) {
+    return selfAnchoredRoots[0].id
   }
 
   for (const lineageId of orderedSessionLineageIds(source)) {
@@ -528,6 +684,23 @@ export function inferLoopRootTaskIdFromTenantSource(
   }
 
   return source.tenant || source.session_id || source.lineage_session_ids?.[0] || ''
+}
+
+export function inferLoopRootTasksFromTenantSource(
+  source: TenantLoopSource,
+  tasks: readonly TenantLoopTask[] = source.tasks || []
+): TenantLoopTask[] {
+  const roots = topLevelSelfAnchoredRoots(source, tasks)
+
+  if (roots.length > 0) {
+    return roots
+  }
+
+  const byId = new Map(tasks.map(task => [task.id, task]))
+  const inferredRoot = byId.get(inferLoopRootTaskIdFromTenantSource(source, tasks))
+  const fallbackRoot = inferredRoot || tasks.find(task => taskParents(task).length === 0) || tasks[0]
+
+  return fallbackRoot ? [fallbackRoot] : []
 }
 
 function depthByTaskId(tasks: readonly TenantLoopTask[]): Map<string, number> {

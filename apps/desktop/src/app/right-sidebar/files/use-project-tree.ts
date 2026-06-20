@@ -9,6 +9,8 @@ import { clearProjectDirCache, readProjectDir } from './ipc'
 export interface TreeNode {
   /** Absolute filesystem path. Doubles as react-arborist node id. */
   id: string
+  /** Optional real filesystem path when the id must be unique synthetic UI state. */
+  path?: string
   name: string
   /** Drives arborist's leaf-vs-expandable decision via childrenAccessor. */
   isDirectory: boolean

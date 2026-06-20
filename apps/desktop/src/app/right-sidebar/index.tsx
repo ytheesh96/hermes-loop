@@ -1,7 +1,7 @@
 import { useStore } from '@nanostores/react'
 import { useMemo, useState, type ReactNode } from 'react'
 
-import type { LoopPanelState, LoopRow } from '@/app/chat/loop-state'
+import { loopConnectedTaskIds, type LoopPanelState, type LoopRow } from '@/app/chat/loop-state'
 import { ErrorBoundary } from '@/components/error-boundary'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -24,13 +24,20 @@ import { ProjectTree } from './files/tree'
 import { useProjectTree, type TreeNode } from './files/use-project-tree'
 
 interface RightSidebarPaneProps {
+  loopFocusedTaskId?: null | string
   loopState?: LoopPanelState | null
   onActivateFile: (path: string) => void
   onActivateFolder: (path: string) => void
   onChangeCwd: (path: string) => Promise<void> | void
 }
 
-export function RightSidebarPane({ loopState, onActivateFile, onActivateFolder, onChangeCwd }: RightSidebarPaneProps) {
+export function RightSidebarPane({
+  loopFocusedTaskId,
+  loopState,
+  onActivateFile,
+  onActivateFolder,
+  onChangeCwd
+}: RightSidebarPaneProps) {
   const { t } = useI18n()
   const r = t.rightSidebar
   const panesFlipped = useStore($panesFlipped)
@@ -61,7 +68,11 @@ export function RightSidebarPane({ loopState, onActivateFile, onActivateFolder, 
     : r.noFolderSelected
 
   const canCollapse = Object.values(openState).some(Boolean)
-  const changedFiles = useMemo(() => changedFilesFromLoopState(loopState), [loopState])
+  const changedFilesScopeTaskIds = changedFilesTaskScope(loopState, loopFocusedTaskId)
+  const changedFiles = useMemo(
+    () => changedFilesFromLoopState(loopState, changedFilesScopeTaskIds),
+    [changedFilesScopeTaskIds, loopState]
+  )
 
   const chooseFolder = async () => {
     const selected = await selectDesktopPaths({
@@ -290,11 +301,30 @@ function normalizeRelativePath(target: string): string {
   return target.replace(/^[\\/]+/, '').replace(/\\/g, '/')
 }
 
-function changedFilesFromLoopState(loopState?: LoopPanelState | null): ChangedFileEntry[] {
-  const seen = new Set<string>()
-  const entries: ChangedFileEntry[] = []
+function changedFilesTaskScope(loopState?: LoopPanelState | null, focusedTaskId?: null | string): string[] {
+  if (!loopState) {
+    return []
+  }
 
-  for (const row of loopState?.rows || []) {
+  const taskId = focusedTaskId?.trim() || loopState.rootTaskId
+
+  if (!taskId || taskId === loopState.rootTaskId) {
+    return loopConnectedTaskIds(loopState, loopState.rootTaskId)
+  }
+
+  return [taskId]
+}
+
+function changedFilesFromLoopState(
+  loopState?: LoopPanelState | null,
+  taskScopeIds?: readonly string[] | null
+): ChangedFileEntry[] {
+  const entries: ChangedFileEntry[] = []
+  const taskIds = new Set(taskScopeIds || [])
+  const rows = taskIds.size > 0 ? (loopState?.rows || []).filter(row => taskIds.has(row.taskId)) : []
+  let nextEntryId = 0
+
+  for (const row of rows) {
     for (const metadata of changedFileMetadataSources(row)) {
       for (const value of changedFileValues(metadata)) {
         const rawPath = changedFilePath(value)
@@ -306,21 +336,13 @@ function changedFilesFromLoopState(loopState?: LoopPanelState | null): ChangedFi
         const status = changedFileStatus(value)
         const absolutePath =
           isUrlTarget(rawPath) || isAbsolutePath(rawPath) ? rawPath : joinPath(row.workspacePath || '', rawPath)
-        const dedupeKey = absolutePath || rawPath
-
-        if (seen.has(dedupeKey)) {
-          continue
-        }
-
-        seen.add(dedupeKey)
-
         const relativePath = normalizeRelativePath(rawPath)
         const parts = relativePath.split('/').filter(Boolean)
         const name = parts.pop() || relativePath
 
         entries.push({
           absolutePath,
-          id: `${row.taskId}:${dedupeKey}`,
+          id: `${row.taskId}:${nextEntryId++}:${absolutePath || rawPath}`,
           name,
           relativePath,
           status
@@ -333,14 +355,16 @@ function changedFilesFromLoopState(loopState?: LoopPanelState | null): ChangedFi
 }
 
 function changedFileTreeFromEntries(entries: ChangedFileEntry[]): {
-  badgeByPath: Map<string, ChangedFileStatus>
+  badgeByNodeId: Map<string, ChangedFileStatus>
   data: TreeNode[]
   openState: Record<string, boolean>
+  statusByPath: Map<string, ChangedFileStatus>
 } {
   const rootNodes: TreeNode[] = []
   const directories = new Map<string, TreeNode>()
-  const badgeByPath = new Map<string, ChangedFileStatus>()
+  const badgeByNodeId = new Map<string, ChangedFileStatus>()
   const openState: Record<string, boolean> = {}
+  const statusByPath = new Map<string, ChangedFileStatus>()
 
   const directoryNode = (parts: string[]): TreeNode => {
     const key = parts.join('/')
@@ -373,12 +397,14 @@ function changedFileTreeFromEntries(entries: ChangedFileEntry[]): {
     const parts = entry.relativePath.split('/').filter(Boolean)
     const fileName = parts.pop() || entry.name
     const fileNode: TreeNode = {
-      id: entry.absolutePath || entry.relativePath,
+      id: entry.id,
       isDirectory: false,
-      name: fileName
+      name: fileName,
+      path: entry.absolutePath || entry.relativePath
     }
 
-    badgeByPath.set(fileNode.id, entry.status)
+    badgeByNodeId.set(fileNode.id, entry.status)
+    statusByPath.set(fileNode.path || fileNode.id, entry.status)
 
     if (parts.length === 0) {
       rootNodes.push(fileNode)
@@ -387,30 +413,35 @@ function changedFileTreeFromEntries(entries: ChangedFileEntry[]): {
     }
   }
 
-  return { badgeByPath, data: rootNodes, openState }
+  return { badgeByNodeId, data: rootNodes, openState, statusByPath }
 }
 
 function changedFileFlatTreeFromEntries(entries: ChangedFileEntry[]): {
-  badgeByPath: Map<string, ChangedFileStatus>
+  badgeByNodeId: Map<string, ChangedFileStatus>
   data: TreeNode[]
   openState: Record<string, boolean>
+  statusByPath: Map<string, ChangedFileStatus>
 } {
-  const badgeByPath = new Map<string, ChangedFileStatus>()
+  const badgeByNodeId = new Map<string, ChangedFileStatus>()
+  const statusByPath = new Map<string, ChangedFileStatus>()
 
   return {
-    badgeByPath,
+    badgeByNodeId,
     data: entries.map(entry => {
-      const id = entry.absolutePath || entry.relativePath
+      const path = entry.absolutePath || entry.relativePath
 
-      badgeByPath.set(id, entry.status)
+      badgeByNodeId.set(entry.id, entry.status)
+      statusByPath.set(path, entry.status)
 
       return {
-        id,
+        id: entry.id,
         isDirectory: false,
-        name: entry.name
+        name: entry.name,
+        path
       }
     }),
-    openState: {}
+    openState: {},
+    statusByPath
   }
 }
 
@@ -438,18 +469,18 @@ function ChangedFilesSection({
   }
 
   const showingTree = view === 'tree'
-  const { badgeByPath, data, openState } = showingTree
+  const { badgeByNodeId, data, openState, statusByPath } = showingTree
     ? changedFileTreeFromEntries(entries)
     : changedFileFlatTreeFromEntries(entries)
   const nextView = showingTree ? 'list' : 'tree'
   const viewToggleLabel = showingTree ? 'Show changed files as flat list' : 'Show changed files as file tree'
   const openChangedFile = (path: string) => {
-    if (badgeByPath.get(path) !== 'D') {
+    if (statusByPath.get(path) !== 'D') {
       onPreviewFile(path)
     }
   }
   const attachChangedFile = (path: string) => {
-    if (badgeByPath.get(path) !== 'D') {
+    if (statusByPath.get(path) !== 'D') {
       onActivateFile(path)
     }
   }
@@ -492,7 +523,7 @@ function ChangedFilesSection({
           cwd={`loop-changed-files:${view}`}
           data={data}
           getFileBadge={node => {
-            const badge = badgeByPath.get(node.id)
+            const badge = badgeByNodeId.get(node.id)
 
             return badge ? (
               <span aria-hidden className="font-mono text-[0.62rem] text-(--ui-text-quaternary)">

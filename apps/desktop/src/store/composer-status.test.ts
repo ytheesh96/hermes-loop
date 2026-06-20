@@ -238,6 +238,130 @@ describe('reconcileKanbanSessionSource', () => {
     ])
   })
 
+  it('shows multiple self-anchored Loop roots from the same foreground session', () => {
+    reconcileKanbanSessionSource(SID, {
+      root_task_id: 't_new_root',
+      session_id: SID,
+      tenant: SID,
+      tasks: [
+        {
+          id: 't_old_root',
+          created_at: 10,
+          created_by: 'loop:t_old_root',
+          included_child_ids: ['t_old_child'],
+          included_parent_ids: ['t_old_child'],
+          status: 'blocked',
+          title: 'Harden foreground handoff'
+        },
+        {
+          id: 't_old_child',
+          created_at: 11,
+          created_by: 'foreground',
+          included_child_ids: ['t_old_root'],
+          included_parent_ids: [],
+          status: 'running',
+          title: 'Patch handoff child'
+        },
+        {
+          id: 't_new_root',
+          created_at: 20,
+          created_by: 'loop:t_new_root',
+          included_child_ids: ['t_new_child'],
+          included_parent_ids: ['t_new_child'],
+          status: 'done',
+          title: 'Create explainer atlas'
+        },
+        {
+          id: 't_new_child',
+          created_at: 21,
+          created_by: 'loop:t_new_root',
+          included_child_ids: ['t_new_root'],
+          included_parent_ids: [],
+          status: 'done',
+          title: 'Build atlas child'
+        }
+      ],
+      workers: [
+        {
+          run_id: 1,
+          status: 'running',
+          task_id: 't_old_root',
+          task_status: 'running',
+          task_title: 'Harden foreground handoff'
+        },
+        {
+          run_id: 2,
+          status: 'running',
+          task_id: 't_old_child',
+          task_status: 'running',
+          task_title: 'Patch handoff child'
+        }
+      ]
+    })
+
+    const items = $kanbanStatusBySession.get()[SID] ?? []
+    const groups = groupStatusItems(items)
+
+    expect(groups[0]!.items.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus])).toEqual([
+      ['kanban-task:t_old_root', 't_old_root', 'Harden foreground handoff', 'in_progress'],
+      ['kanban-task:t_new_root', 't_new_root', 'Create explainer atlas', 'completed']
+    ])
+    expect(groups[1]!.items.map(item => [item.id, item.kanbanTaskId])).toEqual([
+      ['kanban-agent:t_old_child:2', 't_old_child']
+    ])
+    expect(items.map(item => item.id)).not.toContain('kanban-agent:t_old_root:1')
+  })
+
+  it('keeps a nested non-self sub-loop out of top-level composer rows', () => {
+    reconcileKanbanSessionSource(SID, {
+      root_task_id: 't_nested_loop',
+      session_id: SID,
+      tenant: SID,
+      tasks: [
+        {
+          id: 't_outer_loop',
+          created_at: 10,
+          created_by: 'loop:t_outer_loop',
+          included_child_ids: ['t_nested_loop'],
+          included_parent_ids: ['t_outer_child'],
+          status: 'done',
+          title: 'Outer Loop root'
+        },
+        {
+          id: 't_outer_child',
+          created_at: 11,
+          created_by: 'loop:t_outer_loop',
+          included_child_ids: ['t_outer_loop'],
+          included_parent_ids: [],
+          status: 'done',
+          title: 'Outer child'
+        },
+        {
+          id: 't_nested_loop',
+          created_at: 20,
+          created_by: 'loop:t_outer_loop',
+          included_child_ids: ['t_nested_child'],
+          included_parent_ids: ['t_outer_loop'],
+          status: 'done',
+          title: 'Nested sub-loop'
+        },
+        {
+          id: 't_nested_child',
+          created_at: 21,
+          created_by: 'loop:t_outer_loop',
+          included_child_ids: ['t_nested_loop'],
+          included_parent_ids: [],
+          status: 'done',
+          title: 'Nested child'
+        }
+      ]
+    })
+
+    expect($kanbanStatusBySession.get()[SID]?.map(item => [item.id, item.kanbanTaskId, item.title])).toEqual([
+      ['kanban-task:t_outer_loop', 't_outer_loop', 'Outer Loop root']
+    ])
+  })
+
   it('keeps explicit root_task_id as the composer root when a newer child has a lineage session', () => {
     reconcileKanbanSessionSource(SID, {
       session_id: 'sess-current',

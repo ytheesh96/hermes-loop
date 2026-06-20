@@ -304,4 +304,135 @@ describe('RightSidebarPane', () => {
     })
     expect($previewTarget.get()).toBeNull()
   }, 10000)
+
+  it('changes Loop changed files between overview aggregate and focused task details', () => {
+    const onActivateFile = vi.fn()
+    const loopState = deriveLoopPanelStateFromTenantSource({
+      latest_event_id: 43,
+      root_task_id: 't_root',
+      session_id: 'session-1',
+      tasks: [
+        {
+          id: 't_root',
+          included_child_ids: ['t_child', 't_duplicate'],
+          status: 'todo',
+          tenant: 'tenant-a',
+          title: 'Loop root',
+          workspace_path: '/worktrees/t_root',
+          latest_run: {
+            id: 8,
+            metadata: {
+              changed_files: [{ path: 'src/root-only.ts', status: 'modified' }]
+            },
+            status: 'done'
+          }
+        },
+        {
+          id: 't_blocker',
+          included_child_ids: ['t_child'],
+          status: 'running',
+          tenant: 'tenant-a',
+          title: 'Nested blocker',
+          workspace_path: '/worktrees/t_blocker',
+          latest_run: {
+            id: 10,
+            metadata: {
+              changed_files: [{ path: 'src/nested-blocker.ts', status: 'modified' }]
+            },
+            status: 'running'
+          }
+        },
+        {
+          id: 't_child',
+          included_parent_ids: ['t_root', 't_blocker'],
+          status: 'done',
+          tenant: 'tenant-a',
+          title: 'Loop child',
+          workspace_path: '/worktrees/t_child',
+          latest_run: {
+            id: 9,
+            metadata: {
+              changed_files: [{ path: 'src/child-only.ts', status: 'added' }]
+            },
+            status: 'done'
+          }
+        },
+        {
+          id: 't_duplicate',
+          included_parent_ids: ['t_root'],
+          status: 'done',
+          tenant: 'tenant-a',
+          title: 'Review duplicate changed file',
+          workspace_path: '/worktrees/t_child',
+          latest_run: {
+            id: 12,
+            metadata: {
+              changed_files: [{ path: 'src/child-only.ts', status: 'modified' }]
+            },
+            status: 'done'
+          }
+        },
+        {
+          id: 't_unrelated',
+          included_parent_ids: [],
+          status: 'done',
+          tenant: 'tenant-a',
+          title: 'Unrelated Loop row',
+          workspace_path: '/worktrees/t_unrelated',
+          latest_run: {
+            id: 11,
+            metadata: {
+              changed_files: [{ path: 'src/unrelated.ts', status: 'modified' }]
+            },
+            status: 'done'
+          }
+        }
+      ],
+      tenant: 'tenant-a'
+    })
+
+    const { rerender } = render(
+      <RightSidebarPane
+        loopState={loopState}
+        onActivateFile={onActivateFile}
+        onActivateFolder={vi.fn()}
+        onChangeCwd={vi.fn()}
+      />
+    )
+
+    expect(screen.getByText('root-only.ts')).toBeTruthy()
+    expect(screen.getAllByText('child-only.ts')).toHaveLength(2)
+    expect(screen.getByText('nested-blocker.ts')).toBeTruthy()
+    expect(screen.queryByText('unrelated.ts')).toBeNull()
+
+    rerender(
+      <RightSidebarPane
+        loopFocusedTaskId="t_child"
+        loopState={loopState}
+        onActivateFile={onActivateFile}
+        onActivateFolder={vi.fn()}
+        onChangeCwd={vi.fn()}
+      />
+    )
+
+    expect(screen.queryByText('root-only.ts')).toBeNull()
+    expect(screen.getAllByText('child-only.ts')).toHaveLength(1)
+    expect(screen.queryByText('nested-blocker.ts')).toBeNull()
+    expect(screen.queryByText('unrelated.ts')).toBeNull()
+
+    rerender(
+      <RightSidebarPane
+        loopFocusedTaskId="t_root"
+        loopState={loopState}
+        onActivateFile={onActivateFile}
+        onActivateFolder={vi.fn()}
+        onChangeCwd={vi.fn()}
+      />
+    )
+
+    expect(screen.getByText('root-only.ts')).toBeTruthy()
+    expect(screen.getAllByText('child-only.ts')).toHaveLength(2)
+    expect(screen.getByText('nested-blocker.ts')).toBeTruthy()
+    expect(screen.queryByText('unrelated.ts')).toBeNull()
+  })
 })
