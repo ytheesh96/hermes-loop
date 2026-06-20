@@ -82,7 +82,7 @@ describe('ChatWorkRail', () => {
     expect(screen.getByTestId('work-rail-tab-preview')).toBeTruthy()
     expect(within(screen.getByTestId('work-rail-tab-loop')).getByRole('tab', { name: 'Loop' })).toBeTruthy()
     expect(within(screen.getByTestId('work-rail-tab-preview')).getByRole('tab', { name: 'Preview' })).toBeTruthy()
-    expect(screen.getByRole('tab', { name: 'Preview artifact' })).toBeTruthy()
+    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Loop', 'Preview'])
     expect((await screen.findByTestId('preview-pane')).textContent).toBe('Preview artifact')
 
     fireEvent.click(screen.getByRole('tab', { name: 'Loop' }))
@@ -90,6 +90,7 @@ describe('ChatWorkRail', () => {
     const loopPanel = screen.getByTestId('loop-panel')
     expect(loopPanel.getAttribute('data-layout')).toBe('tabbed')
     expect(loopPanel.style.width).toBe('')
+    expect(screen.queryByTestId('loop-panel-tabbar')).toBeNull()
     expect(screen.queryByRole('separator', { name: /resize loop-panel/i })).toBeNull()
   })
 })

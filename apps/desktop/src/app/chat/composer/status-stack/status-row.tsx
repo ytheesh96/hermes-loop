@@ -101,7 +101,8 @@ export const StatusItemRow = memo(function StatusItemRow({ item, onDismiss, onOp
 
   const canOpen = (item.type === 'subagent' || item.type === 'kanban-agent' || Boolean(item.kanbanTaskId)) && !!onOpen
   const hasOutput = (item.type === 'background' || item.type === 'kanban-agent') && !!item.output
-  const onActivate = canOpen ? onOpen : hasOutput ? () => setOutputOpen(open => !open) : undefined
+  const canToggleOutput = hasOutput && !canOpen
+  const onActivate = canOpen ? onOpen : canToggleOutput ? () => setOutputOpen(open => !open) : undefined
 
   return (
     <Fragment>
@@ -152,9 +153,11 @@ export const StatusItemRow = memo(function StatusItemRow({ item, onDismiss, onOp
             {s.exit(item.exitCode)}
           </span>
         )}
-        {hasOutput && <DisclosureCaret className="shrink-0 text-muted-foreground/45" open={outputOpen} size="0.8em" />}
+        {canToggleOutput && (
+          <DisclosureCaret className="shrink-0 text-muted-foreground/45" open={outputOpen} size="0.8em" />
+        )}
       </StatusRow>
-      {hasOutput && outputOpen && <TerminalOutput className="mx-auto mb-1 max-w-[90%]" text={item.output!} />}
+      {canToggleOutput && outputOpen && <TerminalOutput className="mx-auto mb-1 max-w-[90%]" text={item.output!} />}
     </Fragment>
   )
 })

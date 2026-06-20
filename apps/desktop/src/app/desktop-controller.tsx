@@ -1198,6 +1198,7 @@ export function DesktopController() {
       width={FILE_BROWSER_DEFAULT_WIDTH}
     >
       <RightSidebarPane
+        loopFocusedTaskId={loopPanel.focusedTaskId}
         loopState={loopPanel.state}
         onActivateFile={path => composer.insertContextPathInlineRef(path)}
         onActivateFolder={path => composer.insertContextPathInlineRef(path, true)}
