@@ -114,7 +114,7 @@ describe('reconcileKanbanSessionSource', () => {
     $loopagentsBySession.set({})
   })
 
-  it('shows only the root Kanban task in Tasks and only active/attention children in Subagents', () => {
+  it('keeps Loop task rows out of Tasks and only shows active/attention workers as Loopagents', () => {
     reconcileKanbanSessionSource(SID, {
       tasks: [
         {
@@ -191,14 +191,12 @@ describe('reconcileKanbanSessionSource', () => {
     const items = $kanbanStatusBySession.get()[SID] ?? []
     const groups = groupStatusItems(items)
 
-    expect(groups.map(group => group.type)).toEqual(['todo', 'kanban-agent'])
-    expect(groups[0]!.items.map(item => [item.id, item.kanbanTaskId, item.todoStatus, item.currentTool])).toEqual([
-      ['kanban-task:t_root', 't_root', 'in_progress', 'Loop']
-    ])
-    expect(groups[1]!.items.map(item => [item.id, item.state, item.sessionId, item.output, item.profile, item.currentTool])).toEqual([
+    expect(groups.map(group => group.type)).toEqual(['kanban-agent'])
+    expect(groups[0]!.items.map(item => [item.id, item.state, item.sessionId, item.output, item.profile, item.currentTool])).toEqual([
       ['kanban-agent:t_running:7', 'running', 'worker-session-7', 'worker log tail', 'peacock', 'Terminal'],
       ['kanban-agent:t_review:8', 'failed', undefined, 'review-required: needs eyes', 'reviewer-qa', 'Apply Patch']
     ])
+    expect(items.map(item => item.kanbanTaskId)).not.toContain('t_root')
     expect(items.map(item => item.kanbanTaskId)).not.toContain('t_queued')
     expect(items.map(item => item.kanbanTaskId)).not.toContain('t_done')
   })
@@ -246,7 +244,7 @@ describe('reconcileKanbanSessionSource', () => {
     expect($kanbanStatusBySession.get()).toEqual({})
   })
 
-  it('uses the session-anchored root instead of a parentless child for decomposed Loop roots', () => {
+  it('does not project decomposed Loop task roots into the composer task stack', () => {
     reconcileKanbanSessionSource(SID, {
       session_id: SID,
       tenant: 'tenant-a',
@@ -269,9 +267,7 @@ describe('reconcileKanbanSessionSource', () => {
       ]
     })
 
-    expect($kanbanStatusBySession.get()[SID]?.map(item => [item.id, item.kanbanTaskId, item.title])).toEqual([
-      ['kanban-task:t_root', 't_root', 'Original Loop root']
-    ])
+    expect($kanbanStatusBySession.get()[SID]).toBeUndefined()
   })
 
   it('shows multiple self-anchored Loop roots from the same foreground session', () => {
@@ -338,13 +334,12 @@ describe('reconcileKanbanSessionSource', () => {
     const items = $kanbanStatusBySession.get()[SID] ?? []
     const groups = groupStatusItems(items)
 
-    expect(groups[0]!.items.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus])).toEqual([
-      ['kanban-task:t_new_root', 't_new_root', 'Create explainer atlas', 'completed']
-    ])
-    expect(groups[1]!.items.map(item => [item.id, item.kanbanTaskId])).toEqual([
+    expect(groups.map(group => group.type)).toEqual(['kanban-agent'])
+    expect(groups[0]!.items.map(item => [item.id, item.kanbanTaskId])).toEqual([
       ['kanban-agent:t_old_root:1', 't_old_root'],
       ['kanban-agent:t_old_child:2', 't_old_child']
     ])
+    expect(items.map(item => item.id)).not.toContain('kanban-task:t_new_root')
     expect(items.map(item => item.id)).not.toContain('kanban-task:t_old_root')
   })
 
@@ -393,12 +388,10 @@ describe('reconcileKanbanSessionSource', () => {
       ]
     })
 
-    expect($kanbanStatusBySession.get()[SID]?.map(item => [item.id, item.kanbanTaskId, item.title])).toEqual([
-      ['kanban-task:t_outer_loop', 't_outer_loop', 'Outer Loop root']
-    ])
+    expect($kanbanStatusBySession.get()[SID]).toBeUndefined()
   })
 
-  it('keeps explicit root_task_id as the composer root when a newer child has a lineage session', () => {
+  it('keeps explicit root_task_id source data out of generic composer rows', () => {
     reconcileKanbanSessionSource(SID, {
       session_id: 'sess-current',
       lineage_session_ids: ['sess-root', 'sess-current'],
@@ -426,12 +419,10 @@ describe('reconcileKanbanSessionSource', () => {
       ]
     })
 
-    expect($kanbanStatusBySession.get()[SID]?.map(item => [item.id, item.kanbanTaskId, item.title])).toEqual([
-      ['kanban-task:t_root', 't_root', 'Original Loop root']
-    ])
+    expect($kanbanStatusBySession.get()[SID]).toBeUndefined()
   })
 
-  it('falls back to the oldest lineage row instead of the newest child for composer roots', () => {
+  it('keeps lineage fallback source data out of generic composer rows', () => {
     reconcileKanbanSessionSource(SID, {
       session_id: SID,
       tenant: 'tenant-a',
@@ -457,9 +448,7 @@ describe('reconcileKanbanSessionSource', () => {
       ]
     })
 
-    expect($kanbanStatusBySession.get()[SID]?.map(item => [item.id, item.kanbanTaskId, item.title])).toEqual([
-      ['kanban-task:t_root', 't_root', 'Original Loop root']
-    ])
+    expect($kanbanStatusBySession.get()[SID]).toBeUndefined()
   })
 
   it('writes compressed lineage source under the active composer session key', () => {
@@ -473,9 +462,7 @@ describe('reconcileKanbanSessionSource', () => {
 
     const bySession = $kanbanStatusBySession.get()
     expect(bySession['compression-root']).toBeUndefined()
-    expect(
-      bySession['runtime-tip']?.map(item => [item.id, item.kanbanTaskId, item.todoStatus, item.currentTool])
-    ).toEqual([['kanban-task:t_root', 't_root', 'completed', 'Loop']])
+    expect(bySession['runtime-tip']).toBeUndefined()
   })
 
   it('projects loopagent events into composer status and dedupes against session-source workers', () => {
@@ -519,7 +506,7 @@ describe('reconcileKanbanSessionSource', () => {
     ).toHaveLength(1)
   })
 
-  it('lets a live loopagent task row override a stale session-source task row', () => {
+  it('keeps live loopagent task rows out of the generic composer stack', () => {
     reconcileKanbanSessionSource('runtime-tip', {
       tasks: [{ id: 't_root', status: 'ready', title: 'Snapshot title', included_parent_ids: [], included_child_ids: [] }]
     })
@@ -537,9 +524,7 @@ describe('reconcileKanbanSessionSource', () => {
       'loopagent.task.upsert'
     )
 
-    expect(
-      $statusItemsBySession.get()['runtime-tip']?.map(item => [item.id, item.title, item.todoStatus, item.currentTool])
-    ).toEqual([['kanban-task:t_root', 'Live title', 'in_progress', 'Loop']])
+    expect($statusItemsBySession.get()['runtime-tip']).toBeUndefined()
   })
 
   it('lets a live self-root worker override both live and snapshot task rows', () => {

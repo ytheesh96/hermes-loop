@@ -76,6 +76,7 @@ const todoToItem = (t: TodoItem): ComposerStatusItem => ({
 const ACTIVE_KANBAN_TASK_STATUSES = new Set(['claimed', 'in_progress', 'running'])
 const PENDING_KANBAN_TASK_STATUSES = new Set(['queued', 'ready', 'scheduled', 'todo'])
 const DONE_KANBAN_TASK_STATUSES = new Set(['archived', 'cancelled', 'complete', 'completed', 'done'])
+
 const FAILED_KANBAN_RUN_STATES = new Set([
   'blocked',
   'crashed',
@@ -90,6 +91,7 @@ const FAILED_KANBAN_RUN_STATES = new Set([
 
 const normalized = (value: unknown): string =>
   typeof value === 'string' && value.trim() ? value.trim().toLowerCase().replaceAll('-', '_') : ''
+
 const textValue = (value: unknown): string | undefined =>
   typeof value === 'string' && value.trim() ? value.trim() : undefined
 
@@ -250,6 +252,7 @@ const kanbanWorkerToItem = (worker: LoopWorkerActivity): ComposerStatusItem => (
 const loopagentNeedsForegroundAttention = (agent: LoopagentActivity): boolean => {
   const status = normalized(agent.status)
   const taskStatus = normalized(agent.taskStatus)
+
   const text = [agent.errorPreview, agent.summaryPreview, agent.sourceEvent, agent.taskStatus]
     .filter(Boolean)
     .join(' ')
@@ -278,6 +281,7 @@ const loopagentIsActive = (agent: LoopagentActivity): boolean => {
 const loopagentStatusIndicator = (agent: LoopagentActivity): StatusIndicatorKind => {
   const status = normalized(agent.status)
   const taskStatus = normalized(agent.taskStatus)
+
   const text = [agent.errorPreview, agent.summaryPreview, agent.sourceEvent, agent.taskStatus]
     .filter(Boolean)
     .join(' ')

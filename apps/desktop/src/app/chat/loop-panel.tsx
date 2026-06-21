@@ -154,6 +154,7 @@ const FAILED_LOOP_STATUSES = new Set([
 ])
 
 const ACTIVE_LOOP_HANDOFF_STATES = new Set(['assigned', 'batched', 'queued', 'recorded', 'reviewing', 'escalated'])
+
 const TERMINAL_LOOP_HANDOFF_STATES = new Set([
   'approved',
   'blocked_waiting',
@@ -316,16 +317,6 @@ const ACTIVE_OVERVIEW_STATUSES = new Set(['claimed', 'in_progress', 'running'])
 const QUEUED_OVERVIEW_STATUSES = new Set(['queued', 'ready', 'scheduled', 'todo', 'triage'])
 const DONE_OVERVIEW_STATUSES = new Set(['archived', 'cancelled', 'complete', 'completed', 'done'])
 
-function isRootLoopRow(row: LoopRow): boolean {
-  return row.parents.length === 0 && row.parentCount === 0
-}
-
-function rootLoopRow(rows: LoopRow[], rootTaskId?: string): LoopRow | null {
-  return (
-    (rootTaskId ? rows.find(row => row.taskId === rootTaskId) : null) || rows.find(isRootLoopRow) || rows[0] || null
-  )
-}
-
 function isDoneLoopRow(row: LoopRow): boolean {
   return DONE_OVERVIEW_STATUSES.has(normalizedLoopValue(row.status))
 }
@@ -350,23 +341,76 @@ interface RootOverviewGroups {
   queued: LoopRow[]
 }
 
-interface LoopRootOrchestrationState {
-  activeRows: LoopRow[]
-  attentionRows: LoopRow[]
-  handoffRows: LoopRow[]
-  reviewingRows: LoopRow[]
-  waitingRows: LoopRow[]
+interface LoopDependencyGroup {
+  anchor: LoopRow
+  hasDependencyLink: boolean
+  ids: Set<string>
+  rows: LoopRow[]
 }
 
-function rootDescendantRows(state: LoopPanelState, root: LoopRow): LoopRow[] {
-  const seen = new Set(loopConnectedTaskIds(state, root.taskId))
-  seen.delete(root.taskId)
-
-  return state.rows.filter(row => seen.has(row.taskId))
+function dependencyGroupAnchor(rows: LoopRow[], preferredTaskId?: null | string): LoopRow {
+  return (
+    (preferredTaskId ? rows.find(row => row.taskId === preferredTaskId) : null) ||
+    rows.find(row => row.parents.length === 0 && row.parentCount === 0) ||
+    rows[0]!
+  )
 }
 
-function rootOverviewGroups(state: LoopPanelState, root: LoopRow): RootOverviewGroups {
-  const descendants = rootDescendantRows(state, root)
+function loopDependencyGroups(state?: LoopPanelState | null): LoopDependencyGroup[] {
+  const rows = state?.rows || []
+  const remaining = new Set(rows.map(row => row.taskId))
+  const groups: LoopDependencyGroup[] = []
+
+  for (const row of rows) {
+    if (!remaining.has(row.taskId)) {
+      continue
+    }
+
+    const componentIds = new Set(loopConnectedTaskIds(state, row.taskId))
+
+    if (componentIds.size === 0) {
+      componentIds.add(row.taskId)
+    }
+
+    const groupRows = rows.filter(candidate => componentIds.has(candidate.taskId))
+
+    for (const taskId of componentIds) {
+      remaining.delete(taskId)
+    }
+
+    groups.push({
+      anchor: dependencyGroupAnchor(groupRows, state?.rootTaskId),
+      hasDependencyLink: groupRows.length > 1,
+      ids: new Set(groupRows.map(candidate => candidate.taskId)),
+      rows: groupRows
+    })
+  }
+
+  return groups
+}
+
+function loopDependencyGroupForTask(
+  state: LoopPanelState | null,
+  taskId?: null | string,
+  groups = loopDependencyGroups(state)
+): LoopDependencyGroup | null {
+  if (!groups.length) {
+    return null
+  }
+
+  if (taskId) {
+    return groups.find(group => group.ids.has(taskId)) || null
+  }
+
+  return groups.find(group => group.hasDependencyLink) || groups[0] || null
+}
+
+function loopDependencyGroupMembers(group: LoopDependencyGroup): LoopRow[] {
+  return group.rows.filter(row => row.taskId !== group.anchor.taskId)
+}
+
+function rootOverviewGroups(group: LoopDependencyGroup): RootOverviewGroups {
+  const descendants = loopDependencyGroupMembers(group)
   const attention = attentionRows(descendants)
   const attentionIds = new Set(attention.map(row => row.taskId))
   const active = descendants.filter(row => !attentionIds.has(row.taskId) && isActiveLoopRow(row))
@@ -387,42 +431,6 @@ function rootOverviewGroups(state: LoopPanelState, root: LoopRow): RootOverviewG
     other: descendants.filter(row => !groupedIds.has(row.taskId)),
     completed
   }
-}
-
-function loopRootOrchestrationState(state: LoopPanelState, root: LoopRow): LoopRootOrchestrationState {
-  const rows = [root, ...rootDescendantRows(state, root)]
-
-  const activeRows = rows.filter(row => isActiveLoopRow(row))
-  const attentionRowsList = attentionRows(rows)
-
-  const handoffRows = rows.filter(row => {
-    const status = normalizedLoopValue(row.status)
-    const hasPendingHandoffs = (row.loopHandoffs || []).some(isPendingLoopHandoff)
-
-    return status === 'foreground_handoff' || status === 'review' || hasPendingHandoffs
-  })
-
-  const reviewingRows = rows.filter(row => {
-    const status = normalizedLoopValue(row.status)
-    const text = attentionText(row)
-    const hasActiveReviewHandoff = (row.loopHandoffs || []).some(handoff => {
-      const state = normalizedLoopValue(handoff.state)
-
-      return isPendingLoopHandoff(handoff) && (state === 'assigned' || state === 'reviewing')
-    })
-
-    if (isDoneLoopRow(row)) {
-      return hasActiveReviewHandoff
-    }
-
-    return isOrchestratorReviewRow(row) || status === 'review' || hasActiveReviewHandoff || text.includes('review-required')
-  })
-
-  const waitingRows = rows.filter(
-    row => isQueuedLoopRow(row) || normalizedLoopValue(row.status) === 'foreground_handoff'
-  )
-
-  return { activeRows, attentionRows: attentionRowsList, handoffRows, reviewingRows, waitingRows }
 }
 
 function idsFromTask(task: TenantLoopTask, key: 'children' | 'parents'): string[] {
@@ -508,6 +516,7 @@ function selectedRowFrom(
 }
 
 interface LoopStackRowProps {
+  group?: LoopDependencyGroup
   onSelect: (taskId: string) => void
   row: LoopRow
   selected: boolean
@@ -534,55 +543,80 @@ function LoopPriorityIndicator({ row }: { row: LoopRow }) {
   )
 }
 
-function LoopRelationCount({ count, label }: { count: number; label: string }) {
-  if (count <= 0) {
-    return null
+function loopDependencyGroupStatusIndicator(group: LoopDependencyGroup): StatusIndicatorKind {
+  const indicators = group.rows.map(loopRowStatusIndicator)
+
+  if (indicators.includes('attention')) {
+    return 'attention'
   }
 
-  return (
-    <span
-      aria-label={`${label}: ${count}`}
-      className="rounded bg-(--ui-fill-quaternary) px-1.5 py-0.5 font-mono text-[0.62rem] leading-none text-(--ui-text-tertiary)"
-      role="img"
-      title={`${label}: ${count}`}
-    >
-      {count}
-    </span>
-  )
+  if (indicators.includes('failed')) {
+    return 'failed'
+  }
+
+  if (indicators.includes('active')) {
+    return 'active'
+  }
+
+  if (group.rows.every(isDoneLoopRow)) {
+    return 'done'
+  }
+
+  if (indicators.includes('triage')) {
+    return 'triage'
+  }
+
+  if (indicators.includes('pending')) {
+    return 'pending'
+  }
+
+  return indicators[0] || 'unknown'
 }
 
-function LoopStackRow({ onSelect, row, selected }: LoopStackRowProps) {
-  const blockedByCount = row.parents.length || row.parentCount
-  const blockingCount = row.children.length || row.childCount
-  const followUpCount = row.childCount || row.children.length
+function loopStackStatusIndicator(row: LoopRow, group?: LoopDependencyGroup): StatusIndicatorKind {
+  return group?.hasDependencyLink ? loopDependencyGroupStatusIndicator(group) : loopRowStatusIndicator(row)
+}
+
+function loopStackStateFromIndicator(indicator: StatusIndicatorKind): StatusItemState {
+  if (indicator === 'attention' || indicator === 'failed') {
+    return 'failed'
+  }
+
+  if (indicator === 'active' || indicator === 'pending' || indicator === 'triage') {
+    return 'running'
+  }
+
+  return 'done'
+}
+
+function pluralizeLoopUnit(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`
+}
+
+function loopStackTaskCountLabel(group?: LoopDependencyGroup): string | undefined {
+  return group?.hasDependencyLink ? pluralizeLoopUnit(group.rows.length, 'task') : undefined
+}
+
+function loopStackStatusItem(row: LoopRow, group?: LoopDependencyGroup): ComposerStatusItem {
+  const statusIndicator = loopStackStatusIndicator(row, group)
+
+  return {
+    currentTool: loopStackTaskCountLabel(group),
+    id: `loop-card:${row.taskId}`,
+    kanbanTaskId: row.taskId,
+    state: loopStackStateFromIndicator(statusIndicator),
+    statusIndicator,
+    title: row.title,
+    type: 'kanban-agent'
+  }
+}
+
+function LoopStackRow({ group, onSelect, row, selected }: LoopStackRowProps) {
+  const item = loopStackStatusItem(row, group)
 
   return (
-    <div data-testid={`loop-card-${row.taskId}`}>
-      <StatusRow
-        className={cn(selected && 'bg-(--ui-row-hover-background)')}
-        leading={<LoopStatusIndicator row={row} />}
-        onActivate={() => onSelect(row.taskId)}
-      >
-        <LoopPriorityIndicator row={row} />
-        <span
-          className={cn(
-            'min-w-0 flex-1 truncate text-[0.73rem] leading-4',
-            selected ? 'text-foreground/92' : 'text-muted-foreground/75'
-          )}
-          data-testid={`loop-card-title-${row.taskId}`}
-          title={row.title}
-        >
-          {row.title}
-        </span>
-        <span className="shrink-0 font-mono text-[0.62rem] text-(--ui-text-quaternary)" title={row.taskId}>
-          {row.taskId}
-        </span>
-        <span className="flex shrink-0 items-center gap-1">
-          <LoopRelationCount count={blockedByCount} label="Blocked by" />
-          <LoopRelationCount count={blockingCount} label="Blocking" />
-          <LoopRelationCount count={followUpCount} label="Children/follow-ups" />
-        </span>
-      </StatusRow>
+    <div className={cn('rounded-md', selected && 'bg-(--ui-row-hover-background)')} data-testid={`loop-card-${row.taskId}`}>
+      <StatusItemRow item={item} onOpen={() => onSelect(row.taskId)} />
     </div>
   )
 }
@@ -599,17 +633,22 @@ function LoopAttentionRow({ onSelect, row }: { onSelect: (taskId: string) => voi
 }
 
 function LoopCollapsedAttentionQueue({
+  groups,
   onSelectTaskId,
   rows
 }: {
+  groups?: LoopDependencyGroup[]
   onSelectTaskId: (taskId: string) => void
   rows: LoopRow[]
 }) {
-  if (rows.length === 0) {
+  const attentionGroups = groups?.filter(group => group.rows.some(row => attentionScore(row) > 0)) || []
+  const attentionRowsList = attentionGroups.length ? attentionGroups.map(group => group.anchor) : rows
+
+  if (attentionRowsList.length === 0) {
     return null
   }
 
-  const visibleRows = rows.slice(0, 3)
+  const visibleRows = attentionRowsList.slice(0, 3)
 
   return (
     <div
@@ -617,7 +656,7 @@ function LoopCollapsedAttentionQueue({
       data-testid="loop-attention-queue"
     >
       <div className="px-1.5 pb-0.5 text-[0.67rem] font-medium uppercase tracking-wide text-amber-700 dark:text-amber-300">
-        {rows.length} need attention
+        {attentionRowsList.length} need attention
       </div>
       {visibleRows.map(row => (
         <LoopAttentionRow key={row.taskId} onSelect={onSelectTaskId} row={row} />
@@ -642,6 +681,7 @@ export function LoopTaskStack({
   state
 }: LoopTaskStackProps) {
   const selected = useMemo(() => selectedRowFrom(state, selectedTaskId), [selectedTaskId, state])
+  const groups = useMemo(() => loopDependencyGroups(state), [state])
   const collapsedAttentionRows = useMemo(() => attentionRows(state?.rows || []), [state])
 
   if (!state || state.rows.length === 0) {
@@ -665,13 +705,21 @@ export function LoopTaskStack({
           </Button>
         ) : null
       }
-      collapsedContent={<LoopCollapsedAttentionQueue onSelectTaskId={onSelectTaskId} rows={collapsedAttentionRows} />}
+      collapsedContent={
+        <LoopCollapsedAttentionQueue groups={groups} onSelectTaskId={onSelectTaskId} rows={collapsedAttentionRows} />
+      }
       defaultCollapsed={false}
       icon={<Codicon className="text-muted-foreground/70" name="checklist" size="0.8rem" />}
       label={`Loop ${completedLoopRows(state.rows)}/${state.rows.length}`}
     >
-      {state.rows.map(row => (
-        <LoopStackRow key={row.taskId} onSelect={onSelectTaskId} row={row} selected={selected?.taskId === row.taskId} />
+      {groups.map(group => (
+        <LoopStackRow
+          group={group}
+          key={group.anchor.taskId}
+          onSelect={onSelectTaskId}
+          row={group.anchor}
+          selected={Boolean(selected && group.ids.has(selected.taskId))}
+        />
       ))}
     </StatusSection>
   )
@@ -927,6 +975,20 @@ function relatedTaskById(taskId: string, relatedTasks?: CompactLoopTask[]): Comp
   return relatedTasks?.find(task => task.id === taskId) || null
 }
 
+function loopIntakeBlocksSubmit(row: LoopRow): boolean {
+  const intakeState = (row.loopIntake?.state || '').trim().toLowerCase()
+
+  return (
+    row.loopIntake?.needed === true &&
+    row.loopIntake.dispatchable !== true &&
+    !['spec-ready', 'spec_ready', 'approved'].includes(intakeState)
+  )
+}
+
+function loopSubmitTitle(row: LoopRow): string | undefined {
+  return loopIntakeBlocksSubmit(row) ? 'Submit approves and dispatches this Loop intake row.' : undefined
+}
+
 function LoopTaskActions({
   onTaskAction,
   row
@@ -938,11 +1000,26 @@ function LoopTaskActions({
   const blocked = status === 'blocked'
   const archived = status === 'archived'
   const terminal = TERMINAL_LOOP_STATUSES.has(status)
+  const canSubmit = status === 'triage' && !terminal
   const statusAction: LoopTaskAction = blocked ? 'unblock' : 'block'
   const statusLabel = blocked ? 'Unblock' : 'Block'
 
   return (
     <div className="flex flex-wrap gap-1.5" data-testid="loop-task-actions">
+      {canSubmit && (
+        <Button
+          aria-label={`Submit ${row.taskId}`}
+          className="h-7 gap-1.5 px-2 text-xs"
+          disabled={!onTaskAction}
+          onClick={() => onTaskAction?.('decompose', row)}
+          title={loopSubmitTitle(row)}
+          type="button"
+          variant="default"
+        >
+          <Codicon name="send" size="0.82rem" />
+          <span>Submit</span>
+        </Button>
+      )}
       {!terminal && (
         <Button
           aria-label={`${statusLabel} ${row.taskId}`}
@@ -984,98 +1061,6 @@ function LoopTaskActions({
   )
 }
 
-function loopPlural(count: number, singular: string, plural = `${singular}s`): string {
-  return `${count} ${count === 1 ? singular : plural}`
-}
-
-function loopDisplayStatus(value?: null | string): string {
-  const status = normalizedLoopValue(value)
-
-  if (status === 'triage') {
-    return 'Draft'
-  }
-
-  if (status === 'foreground_handoff') {
-    return 'Foreground handoff'
-  }
-
-  return status ? loopMetadataLabel(status) : 'Unknown'
-}
-
-function LoopRootStateChip({
-  count,
-  label,
-  tone = 'neutral'
-}: {
-  count: number
-  label: string
-  tone?: 'active' | 'attention' | 'neutral' | 'waiting'
-}) {
-  if (count <= 0) {
-    return null
-  }
-
-  return (
-    <span
-      className={cn(
-        'rounded border px-2 py-1 text-[0.66rem] font-medium',
-        tone === 'active' && 'border-sky-500/30 bg-sky-500/10 text-sky-600 dark:text-sky-300',
-        tone === 'attention' && 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300',
-        tone === 'waiting' && 'border-violet-500/30 bg-violet-500/10 text-violet-600 dark:text-violet-300',
-        tone === 'neutral' && 'border-(--ui-stroke-tertiary) bg-(--ui-fill-quaternary) text-(--ui-text-tertiary)'
-      )}
-    >
-      {count} {label}
-    </span>
-  )
-}
-
-function LoopRootStateCard({ orchestration, root }: { orchestration: LoopRootOrchestrationState; root: LoopRow }) {
-  const activeCount = orchestration.activeRows.length
-  const waitingCount = orchestration.waitingRows.length
-  const handoffCount = orchestration.handoffRows.length
-  const reviewingCount = orchestration.reviewingRows.length
-  const attentionCount = orchestration.attentionRows.length
-  const status = normalizedLoopValue(root.status)
-
-  const activityMessage =
-    reviewingCount > 0
-      ? `Hermes is reviewing ${loopPlural(reviewingCount, 'task')}`
-      : activeCount > 0
-        ? `Hermes is coordinating ${loopPlural(activeCount, 'active task')}`
-        : waitingCount > 0 || handoffCount > 0
-          ? `Waiting on ${loopPlural(Math.max(waitingCount, handoffCount), 'worker handoff')}`
-          : isDoneLoopRow(root)
-            ? 'Loop root is complete'
-            : 'Loop orchestration is idle'
-
-  return (
-    <DetailSection testId="loop-root-state-card" title="Loop state">
-      <div className="grid gap-2 text-[0.72rem] text-(--ui-text-secondary)">
-        <div className="flex items-start gap-2 rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-fill-quaternary) px-2 py-1.5">
-          <StatusIndicator
-            ariaLabel={`Root status: ${root.status}`}
-            kind={reviewingCount > 0 || handoffCount > 0 ? 'attention' : loopRowStatusIndicator(root)}
-          />
-          <div className="grid min-w-0 gap-0.5">
-            <p className="m-0 font-medium text-(--ui-text-primary)">{activityMessage}</p>
-            <p className="m-0 text-[0.66rem] text-(--ui-text-tertiary)">
-              Root {root.taskId} is {loopDisplayStatus(status)}.
-            </p>
-          </div>
-        </div>
-        <div className="flex flex-wrap gap-1.5" data-testid="loop-root-state-counts">
-          <LoopRootStateChip count={activeCount} label="active" tone="active" />
-          <LoopRootStateChip count={reviewingCount} label="reviewing" tone="attention" />
-          <LoopRootStateChip count={handoffCount} label="handoff" tone="attention" />
-          <LoopRootStateChip count={waitingCount} label="waiting" tone="waiting" />
-          <LoopRootStateChip count={attentionCount} label="attention" tone="attention" />
-        </div>
-      </div>
-    </DetailSection>
-  )
-}
-
 function LoopRootActions({
   archiveableTaskCount,
   decomposed,
@@ -1088,17 +1073,7 @@ function LoopRootActions({
   root: LoopRow
 }) {
   const status = normalizedLoopValue(root.status)
-
-  const intakeState = (root.loopIntake?.state || '').trim().toLowerCase()
-
-  const intakeBlocksSubmit =
-    root.loopIntake?.needed === true &&
-    root.loopIntake.dispatchable !== true &&
-    !['spec-ready', 'spec_ready', 'approved'].includes(intakeState)
-
   const canSubmit = !decomposed && !TERMINAL_LOOP_STATUSES.has(status)
-
-  const submitTitle = intakeBlocksSubmit ? 'Submit approves and dispatches this Loop intake row.' : undefined
 
   return (
     <div className="flex flex-wrap gap-1.5" data-testid="loop-root-actions">
@@ -1107,7 +1082,7 @@ function LoopRootActions({
         className="h-7 gap-1.5 px-2 text-xs"
         disabled={!onTaskAction || !canSubmit}
         onClick={() => onTaskAction?.('decompose', root)}
-        title={submitTitle}
+        title={loopSubmitTitle(root)}
         type="button"
         variant="default"
       >
@@ -2145,6 +2120,7 @@ function LoopTaskGraph({ rows, onOpenTaskTab }: { rows: LoopRow[]; onOpenTaskTab
 
         let startX: number, startY: number, endX: number, endY: number
         let d: string
+
         if (isSameRow) {
           startX = from.x + LOOP_GRAPH_NODE_WIDTH
           startY = from.y + LOOP_GRAPH_NODE_HEIGHT / 2
@@ -2317,7 +2293,7 @@ function loopHandoffSummary(handoff: LoopTaskHandoff): string {
 
 function LoopForegroundHandoffCard({ row }: { row: LoopRow }) {
   const lines = loopHandoffLinesForRow(row)
-  const handoffs = row.loopHandoffs || []
+  const handoffs = (row.loopHandoffs || []).filter(isPendingLoopHandoff)
 
   const hasReviewRouting = Boolean(
     row.reviewKind || row.resumeMode || row.foregroundParentSessionId || row.foregroundForkSessionId
@@ -2661,6 +2637,10 @@ function LoopTaskAgentsCard({
   const showAction = items.length > 0
   const showCanvas = showAction && view === 'canvas'
 
+  if (items.length === 0) {
+    return null
+  }
+
   return (
     <DetailSection
       action={
@@ -2689,9 +2669,7 @@ function LoopTaskAgentsCard({
       testId="loop-task-agents-card"
       title={showCanvas ? 'Loop graph' : 'Agents'}
     >
-      {items.length === 0 ? (
-        <EmptyDetail>No agents yet.</EmptyDetail>
-      ) : showCanvas ? (
+      {showCanvas ? (
         <LoopTaskGraph onOpenTaskTab={targetRow => onSelectTaskId?.(targetRow.taskId)} rows={subgraphRows} />
       ) : (
         <div className="flex flex-col gap-0.5" data-testid="loop-task-agents-list">
@@ -2709,18 +2687,18 @@ function LoopTaskAgentsCard({
 }
 
 function LoopRootOverview({
+  group,
   onOpenTaskTab,
   onTaskAction,
-  root,
   state
 }: {
+  group: LoopDependencyGroup
   onOpenTaskTab?: (row: LoopRow) => void
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
-  root: LoopRow
   state: LoopPanelState
 }) {
-  const groups = rootOverviewGroups(state, root)
-  const orchestration = loopRootOrchestrationState(state, root)
+  const root = group.anchor
+  const groups = rootOverviewGroups(group)
 
   const groupedCount =
     groups.active.length +
@@ -2752,8 +2730,6 @@ function LoopRootOverview({
           />
         </div>
       </section>
-
-      <LoopRootStateCard orchestration={orchestration} root={root} />
 
       {decomposed ? <LoopRootAgentsCard groups={groups} onOpenTaskTab={onOpenTaskTab} root={root} /> : null}
 
@@ -3132,25 +3108,18 @@ export function LoopPanel({
     [activeArtifactTabId, artifactTabs]
   )
 
-  const rootRow = useMemo(() => rootLoopRow(state?.rows || [], stateRootTaskId), [state, stateRootTaskId])
-  const rootRowIsAnchored = Boolean(rootRow && stateRootTaskId && rootRow.taskId === stateRootTaskId)
+  const dependencyGroups = useMemo(() => loopDependencyGroups(state), [state])
 
-  const rootDescendantCount = useMemo(
-    () => (state && rootRow ? rootDescendantRows(state, rootRow).length : 0),
-    [state, rootRow]
+  const selectedOverviewGroup = useMemo(
+    () => loopDependencyGroupForTask(state, focusedTaskId || stateRootTaskId || null, dependencyGroups),
+    [dependencyGroups, focusedTaskId, state, stateRootTaskId]
   )
 
-  const rootOverviewEligible = Boolean(
-    rootRow &&
-    (rootRow.children.length > 0 ||
-      rootRow.childCount > 0 ||
-      rootDescendantCount > 0 ||
-      (rootRowIsAnchored && (rootRow.parents.length > 0 || rootRow.parentCount > 0)) ||
-      normalizedLoopValue(rootRow.status) === 'triage')
-  )
+  const overviewAnchor = selectedOverviewGroup?.anchor || null
+  const loopOverviewEligible = Boolean(selectedOverviewGroup?.hasDependencyLink)
 
-  const showingRootOverview = Boolean(
-    rootOverviewEligible && rootRow && (!focusedTaskId || focusedTaskId === rootRow.taskId)
+  const showingLoopOverview = Boolean(
+    loopOverviewEligible && overviewAnchor && (!focusedTaskId || focusedTaskId === overviewAnchor.taskId)
   )
 
   const rowById = useMemo(() => {
@@ -3227,14 +3196,14 @@ export function LoopPanel({
     setActiveArtifactTabId(null)
     setNavigationStack([])
 
-    if (activeTaskTabId && rootRow) {
-      focusDrawerTask(rootRow.taskId)
-    } else if (!focusedTaskId && rootRow) {
-      focusDrawerTask(rootRow.taskId)
+    if (activeTaskTabId && overviewAnchor) {
+      focusDrawerTask(overviewAnchor.taskId)
+    } else if (!focusedTaskId && overviewAnchor) {
+      focusDrawerTask(overviewAnchor.taskId)
     } else if (!focusedTaskId) {
       setFocusedTaskId(null)
     }
-  }, [activeTaskTabId, focusDrawerTask, focusedTaskId, rootRow])
+  }, [activeTaskTabId, focusDrawerTask, focusedTaskId, overviewAnchor])
 
   const openArtifactTab = useCallback(
     (entry: LoopArtifactSourceEntry, row: LoopRow) => {
@@ -3414,13 +3383,13 @@ export function LoopPanel({
 
       setActiveTaskTabId(null)
 
-      if (rootRow) {
-        focusDrawerTask(rootRow.taskId)
+      if (overviewAnchor) {
+        focusDrawerTask(overviewAnchor.taskId)
       } else {
         setFocusedTaskId(null)
       }
     },
-    [activeTaskTabId, focusDrawerTask, rootRow, taskTabs]
+    [activeTaskTabId, focusDrawerTask, overviewAnchor, taskTabs]
   )
 
   const selectArtifactTab = useCallback((tabId: string) => {
@@ -3447,11 +3416,11 @@ export function LoopPanel({
       const nextTab = nextTabs[index] || nextTabs[index - 1] || null
       setActiveArtifactTabId(nextTab?.id || null)
 
-      if (!nextTab && !focusedTaskId && rootRow) {
-        focusDrawerTask(rootRow.taskId)
+      if (!nextTab && !focusedTaskId && overviewAnchor) {
+        focusDrawerTask(overviewAnchor.taskId)
       }
     },
-    [activeArtifactTabId, artifactTabs, focusDrawerTask, focusedTaskId, rootRow]
+    [activeArtifactTabId, artifactTabs, focusDrawerTask, focusedTaskId, overviewAnchor]
   )
 
   const goBack = useCallback(() => {
@@ -3460,23 +3429,23 @@ export function LoopPanel({
     if (previous) {
       focusDrawerTask(previous.taskId)
       setNavigationStack(stack => stack.slice(0, -1))
-    } else if (rootRow && focusedTaskId !== rootRow.taskId) {
-      focusDrawerTask(rootRow.taskId)
+    } else if (overviewAnchor && focusedTaskId !== overviewAnchor.taskId) {
+      focusDrawerTask(overviewAnchor.taskId)
     }
-  }, [focusDrawerTask, focusedTaskId, navigationStack, rootRow])
+  }, [focusDrawerTask, focusedTaskId, navigationStack, overviewAnchor])
 
   const backTarget = navigationStack.at(-1)
 
   const detailBackLabel =
-    backTarget?.taskId === rootRow?.taskId
-      ? 'root overview'
-      : backTarget?.title || (rootRow && focusedTaskId !== rootRow.taskId ? 'root overview' : null)
+    backTarget?.taskId === overviewAnchor?.taskId
+      ? 'Loop overview'
+      : backTarget?.title || (overviewAnchor && focusedTaskId !== overviewAnchor.taskId ? 'Loop overview' : null)
 
   const detailBack = detailBackLabel ? goBack : undefined
 
-  const openRootOverviewTask = embedded
+  const openLoopOverviewTask = embedded
     ? (row: LoopRow) => {
-        if (row.taskId === rootRow?.taskId) {
+        if (row.taskId === overviewAnchor?.taskId) {
           openTaskTab(row)
 
           return
@@ -3486,12 +3455,12 @@ export function LoopPanel({
       }
     : openTaskTab
 
-  const loopTabTitle = rootRow?.title || selected?.title || 'Loop'
+  const loopTabTitle = overviewAnchor?.title || selected?.title || 'Loop'
 
   const baseTabLabel =
-    activeTaskTabId && rootOverviewEligible
+    activeTaskTabId && loopOverviewEligible
       ? loopTabTitle
-      : showingRootOverview
+      : showingLoopOverview
         ? loopTabTitle
         : selected?.title || loopTabTitle
 
@@ -3613,13 +3582,15 @@ export function LoopPanel({
                 <div className="grid min-w-0 max-w-full gap-3">
                   <LoopTaskDetails
                     backLabel={
-                      embedded && activeTaskTabId === rootRow?.taskId && rootOverviewEligible ? 'root overview' : null
+                      embedded && activeTaskTabId === overviewAnchor?.taskId && loopOverviewEligible
+                        ? 'Loop overview'
+                        : null
                     }
                     commentsError={selectedTaskCommentsError}
                     detail={mergedDetail}
                     onAddComment={onAddTaskComment}
                     onBack={
-                      embedded && activeTaskTabId === rootRow?.taskId && rootOverviewEligible
+                      embedded && activeTaskTabId === overviewAnchor?.taskId && loopOverviewEligible
                         ? selectBaseTab
                         : undefined
                     }
@@ -3639,12 +3610,12 @@ export function LoopPanel({
                   </p>
                 </section>
               )
-            ) : showingRootOverview && rootRow ? (
+            ) : showingLoopOverview && overviewAnchor && selectedOverviewGroup ? (
               <div className="grid min-w-0 max-w-full gap-3">
                 <LoopRootOverview
-                  onOpenTaskTab={openRootOverviewTask}
+                  group={selectedOverviewGroup}
+                  onOpenTaskTab={openLoopOverviewTask}
                   onTaskAction={onTaskAction}
-                  root={rootRow}
                   state={state}
                 />
               </div>
