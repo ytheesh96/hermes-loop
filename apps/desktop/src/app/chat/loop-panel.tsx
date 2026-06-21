@@ -153,8 +153,37 @@ const FAILED_LOOP_STATUSES = new Set([
   'timeout'
 ])
 
+const ACTIVE_LOOP_HANDOFF_STATES = new Set(['assigned', 'batched', 'queued', 'recorded', 'reviewing', 'escalated'])
+const TERMINAL_LOOP_HANDOFF_STATES = new Set([
+  'approved',
+  'blocked_waiting',
+  'cancelled_superseded',
+  'closed',
+  'ignored_duplicate',
+  'rejected',
+  'released'
+])
+
 function normalizedLoopValue(value?: null | string): string {
   return (value || '').trim().toLowerCase().replaceAll('-', '_')
+}
+
+function isPendingLoopHandoff(handoff: LoopTaskHandoff): boolean {
+  if ((handoff as { resolved_at?: unknown }).resolved_at != null) {
+    return false
+  }
+
+  const state = normalizedLoopValue(handoff.state)
+
+  if (!state) {
+    return true
+  }
+
+  if (TERMINAL_LOOP_HANDOFF_STATES.has(state)) {
+    return false
+  }
+
+  return ACTIVE_LOOP_HANDOFF_STATES.has(state)
 }
 
 function attentionText(row: LoopRow): string {
@@ -355,8 +384,9 @@ function loopRootOrchestrationState(state: LoopPanelState, root: LoopRow): LoopR
 
   const handoffRows = rows.filter(row => {
     const status = normalizedLoopValue(row.status)
+    const hasPendingHandoffs = (row.loopHandoffs || []).some(isPendingLoopHandoff)
 
-    return status === 'foreground_handoff' || status === 'review' || (row.loopHandoffs || []).length > 0
+    return status === 'foreground_handoff' || status === 'review' || hasPendingHandoffs
   })
 
   const reviewingRows = rows.filter(row => {

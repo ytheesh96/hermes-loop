@@ -1120,6 +1120,55 @@ describe('LoopPanel', () => {
     expect(screen.getByRole('heading', { name: /Root Task/i })).toBeTruthy()
   })
 
+  it('does not count approved durable handoffs as pending root orchestration work', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-approved-handoff-root',
+      root_task_id: 't_root',
+      tenant: 'tenant-a',
+      latest_event_id: 406,
+      tasks: [
+        {
+          id: 't_root',
+          title: 'Root Task',
+          status: 'done',
+          tenant: 'tenant-a',
+          included_child_ids: ['t_child'],
+          included_parent_ids: []
+        },
+        {
+          id: 't_child',
+          title: 'Completed child with approved handoff',
+          status: 'done',
+          tenant: 'tenant-a',
+          included_child_ids: [],
+          included_parent_ids: ['t_root'],
+          loop_handoffs: [
+            {
+              id: 12,
+              root_task_id: 't_root',
+              task_id: 't_child',
+              handoff_kind: 'blocked_waiting',
+              state: 'approved',
+              verification_state: 'approved',
+              verification_status: 'approved',
+              summary: 'review approved and released'
+            }
+          ]
+        }
+      ]
+    })!
+
+    render(<LoopPanel open selectedTaskId="t_root" state={state} />)
+
+    const stateCard = screen.getByTestId('loop-root-state-card')
+    const counts = within(stateCard).getByTestId('loop-root-state-counts')
+
+    expect(within(stateCard).getByText('Loop root is complete')).toBeTruthy()
+    expect(within(counts).queryByText('1 handoff')).toBeNull()
+    expect(within(counts).queryByText('1 waiting')).toBeNull()
+    expect(within(stateCard).queryByText(/Waiting on worker handoff/i)).toBeNull()
+  })
+
   it('shows nested sub-loop blockers in the root overview agents card', () => {
     const state = deriveLoopPanelStateFromTenantSource({
       session_id: 'sess-nested-agents',
