@@ -190,17 +190,28 @@ _LOOP_HANDOFF_TASK_FIELDS = (
     "task_id",
     "run_id",
     "handoff_kind",
+    "intent",
+    "target_actor",
     "state",
+    "queue_state",
     "attention",
     "verification_state",
     "verification_status",
+    "claimed_by",
+    "claimed_at",
     "worker_profile",
     "worker_session_id",
     "summary",
     "reason",
+    "payload",
     "review_task_id",
     "review_run_id",
     "reviewer_session_id",
+    "decision_actor",
+    "decision_reason",
+    "resolution_action",
+    "resolution_summary",
+    "resolved_by",
 )
 
 
@@ -1787,6 +1798,13 @@ class LoopHandoffAutoActionBody(BaseModel):
     repair_attempts: int = 0
 
 
+class HandoffResolveBody(BaseModel):
+    action: str
+    actor: Optional[str] = None
+    resolution_summary: Optional[str] = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 @router.get("/loop-handoffs/{handoff_id}")
 def get_loop_handoff_details(handoff_id: int, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
@@ -1798,6 +1816,48 @@ def get_loop_handoff_details(handoff_id: int, board: Optional[str] = Query(None)
             raise HTTPException(status_code=404, detail=str(exc))
     finally:
         conn.close()
+
+
+def _resolve_handoff_response(
+    handoff_id: int,
+    payload: HandoffResolveBody,
+    *,
+    board: Optional[str],
+):
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        try:
+            return kanban_db.resolve_handoff(
+                conn,
+                handoff_id,
+                action=payload.action,
+                actor=payload.actor or "dashboard",
+                resolution_summary=payload.resolution_summary,
+                payload=payload.payload,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@router.post("/handoffs/{handoff_id}/resolve")
+def resolve_handoff(
+    handoff_id: int,
+    payload: HandoffResolveBody,
+    board: Optional[str] = Query(None),
+):
+    return _resolve_handoff_response(handoff_id, payload, board=board)
+
+
+@router.post("/loop-handoffs/{handoff_id}/resolve")
+def resolve_loop_handoff(
+    handoff_id: int,
+    payload: HandoffResolveBody,
+    board: Optional[str] = Query(None),
+):
+    return _resolve_handoff_response(handoff_id, payload, board=board)
 
 
 @router.post("/loop-handoffs/{handoff_id}/auto-action")

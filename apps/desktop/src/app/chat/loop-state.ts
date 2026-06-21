@@ -92,10 +92,20 @@ export interface LoopWorkerCounts {
 
 export interface LoopTaskHandoff {
   attention?: null | string
+  claimed_at?: null | number
+  claimed_by?: null | string
+  decision_actor?: null | string
+  decision_reason?: null | string
   handoff_kind?: null | string
   id?: number
+  intent?: null | string
+  payload?: null | Record<string, unknown>
+  queue_state?: null | string
   reason?: null | string
+  resolution_action?: null | string
   resolved_at?: null | number
+  resolution_summary?: null | string
+  resolved_by?: null | string
   review_run_id?: null | number
   review_task_id?: null | string
   reviewer_session_id?: null | string
@@ -103,9 +113,11 @@ export interface LoopTaskHandoff {
   run_id?: null | number
   state?: null | string
   summary?: null | string
+  target_actor?: null | string
   task_id?: null | string
   verification_state?: null | string
   verification_status?: null | string
+  worker_metadata?: null | Record<string, unknown>
   worker_profile?: null | string
   worker_session_id?: null | string
 }

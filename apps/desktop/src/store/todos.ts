@@ -16,6 +16,8 @@ export const $todosBySession = atom<Record<string, TodoItem[]>>({})
 export const todoListActive = (todos: readonly TodoItem[]) =>
   todos.some(t => t.status === 'pending' || t.status === 'in_progress')
 
+const todoStillOpen = (todo: TodoItem) => todo.status === 'pending' || todo.status === 'in_progress'
+
 // Once a list finishes (every item completed/cancelled), the final state
 // lingers just long enough to see the last checkmark land, then the group
 // drops out of the stack on its own.
@@ -61,4 +63,20 @@ export function clearSessionTodos(sid: string) {
 
   const { [sid]: _drop, ...rest } = map
   $todosBySession.set(rest)
+}
+
+export function settleSessionTodos(
+  sid: string,
+  status: Extract<TodoItem['status'], 'cancelled' | 'completed'> = 'completed'
+) {
+  const todos = $todosBySession.get()[sid]
+
+  if (!todos?.length || !todoListActive(todos)) {
+    return
+  }
+
+  setSessionTodos(
+    sid,
+    todos.map(todo => (todoStillOpen(todo) ? { ...todo, status } : todo))
+  )
 }

@@ -57,7 +57,7 @@ import {
 } from '@/store/session'
 import { broadcastSessionsChanged } from '@/store/session-sync'
 import { clearSessionSubagents, pruneDelegateFallbackSubagents, upsertSubagent } from '@/store/subagents'
-import { setSessionTodos } from '@/store/todos'
+import { setSessionTodos, settleSessionTodos } from '@/store/todos'
 import { recordToolDiff } from '@/store/tool-diffs'
 import type { RpcEvent } from '@/types/hermes'
 
@@ -664,6 +664,8 @@ export function useMessageStream({
         void hydrateFromStoredSession(3, completedState.storedSessionId, sessionId)
       }
 
+      settleSessionTodos(sessionId)
+
       dispatchNativeNotification({
         body: text.slice(0, 140) || translateNow('notifications.native.turnDoneBody'),
         kind: 'turnDone',
@@ -1208,6 +1210,7 @@ export function useMessageStream({
         if (sessionId) {
           flushQueuedDeltas(sessionId)
           failAssistantMessage(sessionId, errorMessage)
+          settleSessionTodos(sessionId, 'cancelled')
         }
 
         if (isActiveEvent) {

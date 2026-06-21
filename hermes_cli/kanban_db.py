@@ -1194,7 +1194,11 @@ CREATE TABLE IF NOT EXISTS loop_handoffs (
     run_id                         INTEGER,
     source_event_id                INTEGER,
     handoff_kind                   TEXT NOT NULL,
+    intent                         TEXT,
+    target_actor                   TEXT,
     state                          TEXT NOT NULL,
+    claimed_by                     TEXT,
+    claimed_at                     INTEGER,
     attention                      TEXT,
     verification_state             TEXT NOT NULL,
     verification_status            TEXT NOT NULL DEFAULT 'unknown',
@@ -1206,6 +1210,7 @@ CREATE TABLE IF NOT EXISTS loop_handoffs (
     summary                        TEXT,
     reason                         TEXT,
     worker_metadata_json           TEXT,
+    payload_json                   TEXT,
     artifacts_json                 TEXT,
     changed_files_json             TEXT,
     created_cards_json             TEXT,
@@ -1217,6 +1222,8 @@ CREATE TABLE IF NOT EXISTS loop_handoffs (
     review_batch_id                TEXT,
     decision_actor                 TEXT,
     decision_reason                TEXT,
+    resolution_action              TEXT,
+    resolved_by                    TEXT,
     resolution_summary             TEXT,
     auto_actions_log_json          TEXT,
     escalation_reason              TEXT,
@@ -1852,6 +1859,30 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             _add_column_if_missing(
                 conn, "kanban_notify_subs", "notifier_profile", "notifier_profile TEXT"
             )
+
+    loop_handoffs_exist = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='loop_handoffs'"
+    ).fetchone() is not None
+    if loop_handoffs_exist:
+        handoff_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(loop_handoffs)")
+        }
+        for column in (
+            "intent",
+            "target_actor",
+            "payload_json",
+            "resolution_action",
+            "resolved_by",
+        ):
+            if column not in handoff_cols:
+                _add_column_if_missing(conn, "loop_handoffs", column, f"{column} TEXT")
+        handoff_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(loop_handoffs)")
+        }
+        if "claimed_by" not in handoff_cols:
+            _add_column_if_missing(conn, "loop_handoffs", "claimed_by", "claimed_by TEXT")
+        if "claimed_at" not in handoff_cols:
+            _add_column_if_missing(conn, "loop_handoffs", "claimed_at", "claimed_at INTEGER")
 
     # One-shot backfill: any task that is 'running' before runs existed
     # had its claim_lock / claim_expires / worker_pid on the task row.
@@ -3212,6 +3243,161 @@ def _decode_json_dict(raw: Optional[str]) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _clean_handoff_token(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip().lower().replace("-", "_")
+    return text or None
+
+
+def _normalize_handoff_target_actor(value: Any) -> Optional[str]:
+    token = _clean_handoff_token(value)
+    if not token:
+        return None
+    if token in {"foreground", "live_foreground", "loop_foreground"}:
+        return "orchestrator"
+    if token in {"user", "needs_user", "human_required"}:
+        return "human"
+    if token in {"reviewer_qa", "qa_reviewer"}:
+        return "qa"
+    return token
+
+
+def _normalize_handoff_resolution_actor(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    token = _clean_handoff_token(text)
+    if token in {"foreground", "live_foreground", "loop_foreground"}:
+        return "orchestrator"
+    if token in {"user", "needs_user", "human_required"}:
+        return "human"
+    return text
+
+
+def _loop_handoff_queue_state(state: Optional[str]) -> str:
+    normalized = _clean_handoff_token(state) or ""
+    if normalized in {"recorded", "queued", "batched"}:
+        return "open"
+    if normalized in {"assigned", "reviewing"}:
+        return "claimed"
+    if normalized in {"cancelled_superseded", "ignored_duplicate", "canceled", "cancelled"}:
+        return "canceled"
+    if normalized == "escalated":
+        return "open"
+    if normalized in {
+        "approved",
+        "blocked_waiting",
+        "closed",
+        "rejected",
+        "released",
+        "resolved",
+    }:
+        return "resolved"
+    return "open" if not normalized else normalized
+
+
+def _infer_handoff_intent(
+    handoff_kind: Optional[str],
+    metadata: Optional[dict[str, Any]] = None,
+    reason: Optional[str] = None,
+) -> str:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    explicit = _clean_handoff_token(metadata.get("intent") or metadata.get("handoff_intent"))
+    if explicit:
+        return explicit
+
+    kind = _clean_handoff_token(handoff_kind) or ""
+    reason_text = str(reason or "").strip().lower()
+    metadata_kind = _clean_handoff_token(
+        metadata.get("handoff_kind") or metadata.get("escalation_kind")
+    ) or ""
+
+    if "decision" in kind or "decision" in metadata_kind or reason_text.startswith(
+        ("product-decision:", "needs-user:", "foreground-required:")
+    ):
+        return "decide"
+    if "orchestrator" in kind or metadata.get("orchestrator_handoff") is True:
+        return "restructure"
+    if kind == "worker_completed":
+        return "approve"
+    if kind == "worker_blocked" or reason_text.startswith(
+        (
+            "blocked-waiting:",
+            "human-required:",
+            "human-review:",
+            "orchestrator-required:",
+            "review-required:",
+            "safety-boundary:",
+        )
+    ):
+        return "unblock"
+    return "review"
+
+
+def _infer_handoff_target_actor(
+    handoff_kind: Optional[str],
+    intent: Optional[str],
+    metadata: Optional[dict[str, Any]] = None,
+    reason: Optional[str] = None,
+) -> str:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    explicit = _normalize_handoff_target_actor(metadata.get("target_actor") or metadata.get("target"))
+    if explicit:
+        return explicit
+
+    intent_value = _clean_handoff_token(intent) or ""
+    kind = _clean_handoff_token(handoff_kind) or ""
+    reason_text = str(reason or "").strip().lower()
+
+    if metadata.get("orchestrator_handoff") is True or "orchestrator" in kind:
+        return "orchestrator"
+    if reason_text.startswith(("needs-user:", "human-required:")):
+        return "human"
+    if reason_text.startswith(("review-required:", "human-review:")):
+        return "qa"
+    if intent_value in {"decide", "approve"}:
+        return "orchestrator"
+    if intent_value == "review":
+        return "qa"
+    if reason_text.startswith(("foreground-required:", "product-decision:")):
+        return "orchestrator"
+    if intent_value in {"restructure", "unblock"}:
+        return "orchestrator"
+    return "orchestrator"
+
+
+def _build_handoff_payload(
+    *,
+    summary: Optional[str],
+    reason: Optional[str],
+    worker_metadata: dict[str, Any],
+    artifacts: list[str],
+    changed_files: list[str],
+    created_cards: list[str],
+    parent_state_snapshot: list[dict[str, Any]],
+    child_state_snapshot: list[dict[str, Any]],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if summary is not None:
+        payload["summary"] = summary
+    if reason is not None:
+        payload["reason"] = reason
+    if worker_metadata:
+        payload["worker_metadata"] = worker_metadata
+    if artifacts:
+        payload["artifacts"] = artifacts
+    if changed_files:
+        payload["changed_files"] = changed_files
+    if created_cards:
+        payload["created_cards"] = created_cards
+    if parent_state_snapshot:
+        payload["parent_state_snapshot"] = parent_state_snapshot
+    if child_state_snapshot:
+        payload["child_state_snapshot"] = child_state_snapshot
+    return payload
+
+
 def _loop_handoff_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     out = dict(row)
     out["artifacts"] = _decode_json_list(out.pop("artifacts_json", None))
@@ -3220,8 +3406,21 @@ def _loop_handoff_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     out["parent_state_snapshot"] = _decode_json_list(out.pop("parent_state_snapshot_json", None))
     out["child_state_snapshot"] = _decode_json_list(out.pop("child_state_snapshot_json", None))
     out["worker_metadata"] = _decode_json_dict(out.pop("worker_metadata_json", None))
+    out["payload"] = _decode_json_dict(out.pop("payload_json", None))
     out["auto_actions_log"] = _decode_json_list(out.pop("auto_actions_log_json", None))
     out["escalation_options"] = _decode_json_list(out.pop("escalation_options_json", None))
+    if not out.get("intent"):
+        out["intent"] = _infer_handoff_intent(
+            out.get("handoff_kind"), out.get("worker_metadata"), out.get("reason")
+        )
+    target_actor = _normalize_handoff_target_actor(out.get("target_actor"))
+    if target_actor:
+        out["target_actor"] = target_actor
+    else:
+        out["target_actor"] = _infer_handoff_target_actor(
+            out.get("handoff_kind"), out.get("intent"), out.get("worker_metadata"), out.get("reason")
+        )
+    out["queue_state"] = _loop_handoff_queue_state(out.get("state"))
     return out
 
 
@@ -3308,6 +3507,20 @@ def _record_loop_handoff(
         originating_session_id = originating_session_id.strip()
     parent_ids_snapshot = parent_ids(conn, task_id)
     child_ids_snapshot = child_ids(conn, task_id)
+    parent_snapshot = _task_state_snapshot(conn, parent_ids_snapshot)
+    child_snapshot = _task_state_snapshot(conn, child_ids_snapshot)
+    intent = _infer_handoff_intent(handoff_kind, md, reason)
+    target_actor = _infer_handoff_target_actor(handoff_kind, intent, md, reason)
+    payload = _build_handoff_payload(
+        summary=summary,
+        reason=reason,
+        worker_metadata=md,
+        artifacts=artifacts,
+        changed_files=changed_files,
+        created_cards=cards,
+        parent_state_snapshot=parent_snapshot,
+        child_state_snapshot=child_snapshot,
+    )
     key = _loop_handoff_idempotency_key(
         root_task_id=root_task_id,
         task_id=task_id,
@@ -3319,13 +3532,13 @@ def _record_loop_handoff(
         """
         INSERT OR IGNORE INTO loop_handoffs (
             idempotency_key, root_task_id, tenant, task_id, run_id, source_event_id,
-            handoff_kind, state, attention, verification_state, verification_status,
+            handoff_kind, intent, target_actor, state, attention, verification_state, verification_status,
             worker_profile, worker_session_id, originating_session_id, task_title,
-            task_body, summary, reason, worker_metadata_json, artifacts_json,
+            task_body, summary, reason, worker_metadata_json, payload_json, artifacts_json,
             changed_files_json, created_cards_json, parent_state_snapshot_json,
             child_state_snapshot_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'needs-orchestrator',
-                  'needs-orchestrator', 'unknown', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'needs-orchestrator',
+                  'needs-orchestrator', 'unknown', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             key,
@@ -3335,6 +3548,8 @@ def _record_loop_handoff(
             run_id,
             source_event_id,
             handoff_kind,
+            intent,
+            target_actor,
             task_row["assignee"],
             worker_session_id,
             originating_session_id,
@@ -3343,11 +3558,12 @@ def _record_loop_handoff(
             summary,
             reason,
             json.dumps(md, ensure_ascii=False) if md else None,
+            json.dumps(payload, ensure_ascii=False) if payload else None,
             json.dumps(artifacts, ensure_ascii=False),
             json.dumps(changed_files, ensure_ascii=False),
             json.dumps(cards, ensure_ascii=False),
-            json.dumps(_task_state_snapshot(conn, parent_ids_snapshot), ensure_ascii=False),
-            json.dumps(_task_state_snapshot(conn, child_ids_snapshot), ensure_ascii=False),
+            json.dumps(parent_snapshot, ensure_ascii=False),
+            json.dumps(child_snapshot, ensure_ascii=False),
             now,
             now,
         ),
@@ -3402,10 +3618,10 @@ def request_loop_foreground_decision(
     metadata: Optional[dict[str, Any]] = None,
     expected_run_id: Optional[int] = None,
 ) -> dict[str, Any]:
-    """Ask the Loop foreground/orchestrator for a mid-run decision.
+    """Ask the Loop orchestrator for a mid-run decision.
 
     Unlike ``block_task`` this keeps the worker row running. The worker can do
-    reversible prep while foreground review records a durable decision, then
+    reversible prep while an orchestrator handoff records a durable decision, then
     re-read ``kanban_show``/handoff details before committing to the path.
     """
     question_text = str(question or "").strip()
@@ -3461,6 +3677,7 @@ def request_loop_foreground_decision(
         )
         if recommendation:
             md["recommendation"] = str(recommendation).strip()
+        md.setdefault("target_actor", "orchestrator")
 
         conn.execute(
             "UPDATE tasks SET last_heartbeat_at = ? WHERE id = ?",
@@ -3593,6 +3810,7 @@ def _supersede_pending_loop_handoffs(
            SET state = 'cancelled_superseded', attention = NULL,
                verification_state = 'superseded', verification_status = 'superseded',
                decision_actor = 'task-state', decision_reason = ?,
+               resolution_action = 'cancel', resolved_by = 'task-state',
                resolved_at = COALESCE(resolved_at, ?),
                completed_at = COALESCE(completed_at, ?),
                updated_at = ?
@@ -3643,6 +3861,7 @@ def _supersede_resolved_worker_block_handoffs_for_scope(
            SET state = 'cancelled_superseded', attention = NULL,
                verification_state = 'superseded', verification_status = 'superseded',
                decision_actor = 'task-state', decision_reason = ?,
+               resolution_action = 'cancel', resolved_by = 'task-state',
                resolved_at = COALESCE(resolved_at, ?),
                completed_at = COALESCE(completed_at, ?),
                updated_at = ?
@@ -3738,9 +3957,10 @@ def claim_loop_handoff_batch(
         placeholders = ",".join("?" for _ in ids)
         conn.execute(
             f"UPDATE loop_handoffs SET state = 'assigned', reviewer_session_id = ?, "
-            f"review_batch_id = ?, started_at = COALESCE(started_at, ?), updated_at = ? "
+            f"review_batch_id = ?, claimed_by = ?, claimed_at = COALESCE(claimed_at, ?), "
+            f"started_at = COALESCE(started_at, ?), updated_at = ? "
             f"WHERE id IN ({placeholders}) AND state IN ('recorded', 'queued', 'batched')",
-            (reviewer_session_id, batch_id, now, now, *ids),
+            (reviewer_session_id, batch_id, reviewer_session_id, now, now, now, *ids),
         )
         claimed = conn.execute(
             f"SELECT * FROM loop_handoffs WHERE id IN ({placeholders}) ORDER BY id ASC",
@@ -4693,6 +4913,16 @@ def build_loop_handoff_proof_packet(conn: sqlite3.Connection, handoff_id: int | 
         "handoff_id": handoff["id"],
         "root_task_id": handoff["root_task_id"],
         "tenant": handoff.get("tenant"),
+        "handoff": {
+            "id": handoff["id"],
+            "intent": handoff.get("intent"),
+            "target_actor": handoff.get("target_actor"),
+            "queue_state": handoff.get("queue_state"),
+            "legacy_state": handoff.get("state"),
+            "kind": handoff.get("handoff_kind"),
+            "resolution_action": handoff.get("resolution_action"),
+            "resolved_by": handoff.get("resolved_by"),
+        },
         "task": {
             "id": handoff["task_id"],
             "title": handoff.get("task_title") or (task.title if task else None),
@@ -4864,6 +5094,107 @@ def _escalate_loop_handoff(
         "outcome": "escalated",
         "escalation_reason": escalation_reason,
         "notification": {"level": "escalation", "state": "needs-user"},
+    }
+
+
+def resolve_handoff(
+    conn: sqlite3.Connection,
+    handoff_id: int,
+    *,
+    action: str,
+    resolution_summary: Optional[str] = None,
+    payload: Optional[dict[str, Any]] = None,
+    actor: Optional[str] = None,
+) -> dict[str, Any]:
+    """Resolve one durable handoff through the neutral handoff state path."""
+    action = str(action or "").strip()
+    if not action:
+        raise ValueError("action is required")
+    actor_value = _normalize_handoff_resolution_actor(actor) or "handoff-resolver"
+    now = int(time.time())
+    with write_txn(conn):
+        handoff = _handoff_row_by_id(conn, int(handoff_id))
+        if not handoff:
+            raise ValueError(f"handoff {handoff_id!r} not found")
+        queue_state = _loop_handoff_queue_state(handoff.get("state"))
+        if queue_state in {"resolved", "canceled"}:
+            return {
+                "ok": False,
+                "outcome": "already_resolved",
+                "handoff": handoff,
+                "queue_state": queue_state,
+            }
+
+        resolution_payload = payload if isinstance(payload, dict) else {}
+        merged_payload = dict(handoff.get("payload") or {})
+        if resolution_payload:
+            merged_payload["resolution_payload"] = resolution_payload
+        if resolution_summary:
+            merged_payload["resolution_summary"] = str(resolution_summary)
+
+        normalized_action = action.lower().replace("-", "_")
+        cancel_actions = {"cancel", "canceled", "cancelled", "supersede"}
+        terminal_state = "cancelled_superseded" if normalized_action in cancel_actions else "closed"
+        verification_state = "canceled" if terminal_state == "cancelled_superseded" else "resolved"
+        verification_status = "canceled" if terminal_state == "cancelled_superseded" else "passed"
+        cur = conn.execute(
+            """
+            UPDATE loop_handoffs
+               SET state = ?, attention = NULL,
+                   verification_state = ?, verification_status = ?,
+                   decision_actor = ?, decision_reason = ?,
+                   resolution_action = ?, resolved_by = ?,
+                   resolution_summary = ?,
+                   payload_json = ?,
+                   resolved_at = COALESCE(resolved_at, ?),
+                   completed_at = COALESCE(completed_at, ?),
+                   updated_at = ?
+             WHERE id = ?
+               AND state NOT IN ('approved', 'released', 'blocked_waiting',
+                                 'rejected', 'closed', 'ignored_duplicate',
+                                 'cancelled_superseded')
+            """,
+            (
+                terminal_state,
+                verification_state,
+                verification_status,
+                actor_value,
+                resolution_summary,
+                normalized_action,
+                actor_value,
+                resolution_summary,
+                json.dumps(merged_payload, ensure_ascii=False) if merged_payload else None,
+                now,
+                now,
+                now,
+                int(handoff_id),
+            ),
+        )
+        refreshed = _handoff_row_by_id(conn, int(handoff_id)) or handoff
+        if cur.rowcount != 1:
+            return {
+                "ok": False,
+                "outcome": "already_resolved",
+                "handoff": refreshed,
+                "queue_state": refreshed.get("queue_state"),
+            }
+        _append_event(
+            conn,
+            refreshed["task_id"],
+            "handoff_resolved",
+            {
+                "handoff_id": int(handoff_id),
+                "action": normalized_action,
+                "actor": actor_value,
+                "resolution_summary": resolution_summary,
+            },
+            run_id=refreshed.get("run_id"),
+        )
+    return {
+        "ok": True,
+        "outcome": "canceled" if terminal_state == "cancelled_superseded" else "resolved",
+        "handoff": refreshed,
+        "queue_state": refreshed.get("queue_state"),
     }
 
 
@@ -5063,6 +5394,7 @@ def review_loop_handoff_autonomous_action(
            SET state = 'closed', attention = NULL,
                verification_state = ?, verification_status = ?,
                decision_actor = ?, decision_reason = ?,
+               resolution_action = ?, resolved_by = ?,
                resolution_summary = ?, resolved_at = COALESCE(resolved_at, ?),
                completed_at = COALESCE(completed_at, ?), updated_at = ?
          WHERE id = ? AND state IN ({placeholders})
@@ -5076,6 +5408,8 @@ def review_loop_handoff_autonomous_action(
             else "failed" if action == "create_followups" and not evidence_passed else "passed",
             actor,
             reason,
+            action,
+            actor,
             reason,
             now,
             now,

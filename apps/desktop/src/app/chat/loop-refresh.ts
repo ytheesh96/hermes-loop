@@ -11,6 +11,8 @@ export const LOOP_SOURCE_IDLE_REFETCH_INTERVAL_MS = 10_000
 
 const TERMINAL_TASK_STATUSES = new Set(['archived', 'cancelled', 'complete', 'completed', 'done'])
 const ACTIVE_RUN_STATUSES = new Set(['claimed', 'in_progress', 'ready', 'running'])
+const ACTIVE_HANDOFF_QUEUE_STATES = new Set(['open', 'claimed'])
+const ACTIVE_HANDOFF_LEGACY_STATES = new Set(['assigned', 'batched', 'queued', 'recorded', 'reviewing'])
 
 function normalizedStatus(status: unknown): string {
   return typeof status === 'string' && status.trim() ? status.trim().toLowerCase() : ''
@@ -20,7 +22,23 @@ function needsActiveRefresh(task: NonNullable<TenantLoopSource['tasks']>[number]
   const taskStatus = normalizedStatus(task.status)
   const runStatus = normalizedStatus(task.latest_run?.status)
 
-  return !TERMINAL_TASK_STATUSES.has(taskStatus) || ACTIVE_RUN_STATUSES.has(runStatus) || Boolean(task.current_run_id)
+  return (
+    !TERMINAL_TASK_STATUSES.has(taskStatus) ||
+    ACTIVE_RUN_STATUSES.has(runStatus) ||
+    Boolean(task.current_run_id) ||
+    hasActiveHandoff(task)
+  )
+}
+
+function hasActiveHandoff(task: NonNullable<TenantLoopSource['tasks']>[number]): boolean {
+  return (task.loop_handoffs || []).some((handoff) => {
+    const queueState = normalizedStatus(handoff.queue_state)
+    if (queueState) {
+      return ACTIVE_HANDOFF_QUEUE_STATES.has(queueState)
+    }
+
+    return ACTIVE_HANDOFF_LEGACY_STATES.has(normalizedStatus(handoff.state))
+  })
 }
 
 export function loopSessionSourceRefetchInterval(source?: null | TenantLoopSource): false | number {

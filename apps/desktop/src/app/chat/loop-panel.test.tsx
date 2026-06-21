@@ -633,10 +633,13 @@ describe('LoopPanel', () => {
               root_task_id: 't_root',
               task_id: 't_review',
               handoff_kind: 'blocked_waiting',
+              intent: 'unblock',
+              target_actor: 'orchestrator',
+              queue_state: 'open',
               state: 'batched',
               attention: 'needs-user',
               verification_state: 'needs-user',
-              summary: 'Foreground owner must choose the recovery path.',
+              summary: 'Orchestrator owner must choose the recovery path.',
               review_task_id: 't_review',
               reviewer_session_id: 'sess-reviewer'
             }
@@ -650,7 +653,7 @@ describe('LoopPanel', () => {
     render(<LoopPanel open selectedTaskId="t_review" state={state} />)
 
     const handoffCard = screen.getByTestId('loop-foreground-handoff-card')
-    expect(within(handoffCard).getByRole('heading', { name: /Foreground \/ review handoff/i })).toBeTruthy()
+    expect(within(handoffCard).getByRole('heading', { name: /Handoff request/i })).toBeTruthy()
     expect(within(handoffCard).getByText('Orchestrator review active')).toBeTruthy()
     expect(within(handoffCard).getByText(/attached to task t_review/i)).toBeTruthy()
     expect(within(handoffCard).getByText('Review kind')).toBeTruthy()
@@ -661,8 +664,8 @@ describe('LoopPanel', () => {
     expect(within(handoffCard).getByText('sess-parent')).toBeTruthy()
     expect(within(handoffCard).getByText('Fork session')).toBeTruthy()
     expect(within(handoffCard).getByText('sess-fork')).toBeTruthy()
-    expect(within(handoffCard).getByText(/Blocked Waiting · Batched · Needs User/i)).toBeTruthy()
-    expect(within(handoffCard).getByText(/Foreground owner must choose/i)).toBeTruthy()
+    expect(within(handoffCard).getByText(/Unblock · Target Orchestrator · Open/i)).toBeTruthy()
+    expect(within(handoffCard).getByText(/Orchestrator owner must choose/i)).toBeTruthy()
     expect(within(handoffCard).getByText(/reviewer sess-reviewer/i)).toBeTruthy()
   })
 

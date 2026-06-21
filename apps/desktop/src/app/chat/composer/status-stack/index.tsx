@@ -41,6 +41,7 @@ const groupLabel = (group: StatusGroup, s: Translations['statusStack']) => {
 }
 
 interface ComposerStatusStackProps {
+  busy: boolean
   /** Session-scoped sections supplied by the chat shell (e.g. Loop rows). */
   lead?: ReactNode
   /** Open/focus the durable Loop/Kanban side panel for a task row. */
@@ -51,20 +52,36 @@ interface ComposerStatusStackProps {
   sessionId: null | string
 }
 
+function isOpenLocalTodo(item: ComposerStatusItem): boolean {
+  return (
+    item.type === 'todo' &&
+    item.id.startsWith('todo:') &&
+    (item.todoStatus === 'pending' || item.todoStatus === 'in_progress')
+  )
+}
+
+export function visibleComposerStatusItems(items: readonly ComposerStatusItem[], busy: boolean): ComposerStatusItem[] {
+  if (busy) {
+    return [...items]
+  }
+
+  return items.filter(item => !isOpenLocalTodo(item))
+}
+
 /**
  * The status "sink" above the composer: one card (the queue's chrome) holding
  * every session-scoped status — subagents, background tasks, queue — grouped by
  * type and separated by light dividers. Collapses to nothing when empty.
  */
-export function ComposerStatusStack({ lead, queue, sessionId, onOpenKanbanTask }: ComposerStatusStackProps) {
+export function ComposerStatusStack({ busy, lead, queue, sessionId, onOpenKanbanTask }: ComposerStatusStackProps) {
   const { t } = useI18n()
   const navigate = useNavigate()
   const itemsBySession = useStore($statusItemsBySession)
   const scrolledUp = useStore($threadScrolledUp)
 
   const groups = useMemo(
-    () => groupStatusItems(sessionId ? (itemsBySession[sessionId] ?? []) : []),
-    [itemsBySession, sessionId]
+    () => groupStatusItems(sessionId ? visibleComposerStatusItems(itemsBySession[sessionId] ?? [], busy) : []),
+    [busy, itemsBySession, sessionId]
   )
 
   // Seed from the registry on session open; event-driven refreshes (terminal /

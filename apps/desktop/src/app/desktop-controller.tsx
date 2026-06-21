@@ -91,6 +91,7 @@ import { isSecondaryWindow } from '../store/windows'
 import { ChatView } from './chat'
 import { requestComposerFocus, requestComposerInsert } from './chat/composer/focus'
 import { useComposerActions } from './chat/hooks/use-composer-actions'
+import { LoopTaskStack } from './chat/loop-panel'
 import {
   ChatWorkRail,
   WORK_RAIL_MAX_WIDTH,
@@ -646,8 +647,9 @@ export function DesktopController() {
           // the plan is still in flight, so reopening an old chat doesn't pin
           // its finished todo list above the composer forever.
           const todos = latestSessionTodos(messages)
+          const runtimeState = sessionStateByRuntimeIdRef.current.get(runtimeSessionId)
 
-          if (todos && todoListActive(todos)) {
+          if (todos && todoListActive(todos) && (runtimeState?.busy || runtimeState?.awaitingResponse)) {
             setSessionTodos(runtimeSessionId, todos)
           } else {
             clearSessionTodos(runtimeSessionId)
@@ -663,7 +665,7 @@ export function DesktopController() {
         }
       }
     },
-    [activeSessionIdRef, selectedStoredSessionIdRef, updateSessionState]
+    [activeSessionIdRef, selectedStoredSessionIdRef, sessionStateByRuntimeIdRef, updateSessionState]
   )
 
   const { handleGatewayEvent } = useMessageStream({
@@ -769,6 +771,14 @@ export function DesktopController() {
     loopSourceSessionId,
     onAddContextRef: composer.addContextRefAttachment
   })
+
+  const loopStatusStack = loopPanel.state ? (
+    <LoopTaskStack
+      onSelectTaskId={loopPanel.onSelectTaskId}
+      selectedTaskId={loopPanel.selectedTaskId}
+      state={loopPanel.state}
+    />
+  ) : null
 
   const branchInNewChat = useCallback(
     async (messageId?: string) => {
@@ -1152,6 +1162,7 @@ export function DesktopController() {
       onThreadMessagesChange={handleThreadMessagesChange}
       onToggleSelectedPin={toggleSelectedPin}
       onTranscribeAudio={transcribeVoiceAudio}
+      statusStackLead={loopStatusStack}
     />
   )
 

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $loopagentsBySession } from '@/store/loopagents'
+import { $todosBySession, setSessionTodos } from '@/store/todos'
 import type { RpcEvent } from '@/types/hermes'
 
 import type { ClientSessionState } from '../../types'
@@ -13,6 +14,7 @@ import { useMessageStream } from './use-message-stream'
 describe('useMessageStream loopagent events', () => {
   beforeEach(() => {
     $loopagentsBySession.set({})
+    $todosBySession.set({})
   })
 
   it('routes loopagent gateway events into the event-fed Loop activity store', () => {
@@ -128,5 +130,53 @@ describe('useMessageStream loopagent events', () => {
     })
 
     expect(hydrateFromStoredSession).not.toHaveBeenCalled()
+  })
+
+  it('settles stale local todo rows when a turn completes', () => {
+    const queryClient = new QueryClient()
+    const activeSessionIdRef = { current: 'runtime-tip' }
+    const initialState = createClientSessionState('stored-tip')
+    const sessionStateByRuntimeIdRef = { current: new Map<string, ClientSessionState>([['runtime-tip', initialState]]) }
+
+    const updateSessionState = vi.fn(
+      (sessionId: string, updater: (state: ClientSessionState) => ClientSessionState) => {
+        const previous = sessionStateByRuntimeIdRef.current.get(sessionId) ?? createClientSessionState(sessionId)
+        const next = updater(previous)
+
+        sessionStateByRuntimeIdRef.current.set(sessionId, next)
+
+        return next
+      }
+    )
+
+    setSessionTodos('runtime-tip', [
+      { content: 'Finished durable task', id: 'done', status: 'completed' },
+      { content: 'Stale local spinner', id: 'running', status: 'in_progress' }
+    ])
+
+    const { result } = renderHook(() =>
+      useMessageStream({
+        activeSessionIdRef,
+        hydrateFromStoredSession: vi.fn(async () => undefined),
+        queryClient,
+        refreshHermesConfig: vi.fn(async () => undefined),
+        refreshSessions: vi.fn(async () => undefined),
+        sessionStateByRuntimeIdRef,
+        updateSessionState
+      })
+    )
+
+    act(() => {
+      result.current.handleGatewayEvent({
+        session_id: 'runtime-tip',
+        payload: { text: 'Done.' },
+        type: 'message.complete'
+      } as RpcEvent)
+    })
+
+    expect($todosBySession.get()['runtime-tip']?.map(item => [item.id, item.status])).toEqual([
+      ['done', 'completed'],
+      ['running', 'completed']
+    ])
   })
 })

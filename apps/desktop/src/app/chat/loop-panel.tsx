@@ -173,6 +173,16 @@ function isPendingLoopHandoff(handoff: LoopTaskHandoff): boolean {
     return false
   }
 
+  const queueState = normalizedLoopValue(handoff.queue_state)
+
+  if (queueState === 'open' || queueState === 'claimed') {
+    return true
+  }
+
+  if (queueState === 'resolved' || queueState === 'canceled') {
+    return false
+  }
+
   const state = normalizedLoopValue(handoff.state)
 
   if (!state) {
@@ -204,6 +214,9 @@ function attentionText(row: LoopRow): string {
     row.foregroundForkSessionId,
     ...(row.loopHandoffs || []).flatMap(handoff => [
       handoff.handoff_kind,
+      handoff.intent,
+      handoff.target_actor,
+      handoff.queue_state,
       handoff.state,
       handoff.attention,
       handoff.verification_state,
@@ -2290,6 +2303,9 @@ function loopHandoffLinesForRow(row: LoopRow): LoopHandoffLine[] {
 
 function loopHandoffSummary(handoff: LoopTaskHandoff): string {
   return [
+    handoff.intent ? loopMetadataLabel(handoff.intent) : undefined,
+    handoff.target_actor ? `Target ${loopMetadataLabel(handoff.target_actor)}` : undefined,
+    handoff.queue_state ? loopMetadataLabel(handoff.queue_state) : undefined,
     handoff.handoff_kind ? loopMetadataLabel(handoff.handoff_kind) : undefined,
     handoff.state ? loopMetadataLabel(handoff.state) : undefined,
     handoff.verification_state ? loopMetadataLabel(handoff.verification_state) : undefined,
@@ -2312,7 +2328,7 @@ function LoopForegroundHandoffCard({ row }: { row: LoopRow }) {
   }
 
   return (
-    <DetailSection testId="loop-foreground-handoff-card" title="Foreground / review handoff">
+    <DetailSection testId="loop-foreground-handoff-card" title="Handoff request">
       <div className="grid gap-2 text-[0.72rem] text-(--ui-text-secondary)">
         {isOrchestratorReviewRow(row) ? (
           <div className="flex items-start gap-2 rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-fill-quaternary) px-2 py-1.5">
@@ -2320,7 +2336,7 @@ function LoopForegroundHandoffCard({ row }: { row: LoopRow }) {
             <div className="grid min-w-0 gap-0.5">
               <p className="m-0 font-medium text-(--ui-text-primary)">{attentionReason(row)}</p>
               <p className="m-0 text-[0.66rem] text-(--ui-text-tertiary)">
-                This review lane remains attached to task {row.taskId}.
+                This handoff remains attached to task {row.taskId}.
               </p>
             </div>
           </div>
@@ -2342,7 +2358,7 @@ function LoopForegroundHandoffCard({ row }: { row: LoopRow }) {
         {handoffs.length > 0 ? (
           <div className="grid gap-1" data-testid="loop-foreground-handoff-list">
             <p className="m-0 text-[0.62rem] font-medium uppercase tracking-wide text-(--ui-text-tertiary)">
-              Task handoffs
+              Durable handoffs
             </p>
             {handoffs.map((handoff, index) => (
               <div
@@ -2356,6 +2372,12 @@ function LoopForegroundHandoffCard({ row }: { row: LoopRow }) {
                   {handoff.review_task_id ? (
                     <span className="rounded bg-(--ui-fill-quaternary) px-1.5 py-0.5 font-mono text-[0.62rem] text-(--ui-text-tertiary)">
                       review {handoff.review_task_id}
+                    </span>
+                  ) : null}
+                  {handoff.resolution_action ? (
+                    <span className="rounded bg-(--ui-fill-quaternary) px-1.5 py-0.5 font-mono text-[0.62rem] text-(--ui-text-tertiary)">
+                      {loopMetadataLabel(handoff.resolution_action)}
+                      {handoff.resolved_by ? ` by ${handoff.resolved_by}` : ''}
                     </span>
                   ) : null}
                 </div>

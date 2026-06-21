@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { TodoItem } from '@/lib/todos'
 
-import { $todosBySession, clearSessionTodos, setSessionTodos } from './todos'
+import { $todosBySession, clearSessionTodos, setSessionTodos, settleSessionTodos } from './todos'
 
 const todo = (id: string, status: TodoItem['status']): TodoItem => ({ content: `task ${id}`, id, status })
 
@@ -32,6 +32,33 @@ describe('setSessionTodos finished-list auto-clear', () => {
     vi.advanceTimersByTime(5_000)
 
     expect($todosBySession.get().s1).toBeUndefined()
+  })
+
+  it('settles an in-flight list once the turn completes', () => {
+    setSessionTodos('s1', [todo('a', 'completed'), todo('b', 'in_progress'), todo('c', 'pending')])
+
+    settleSessionTodos('s1')
+
+    expect($todosBySession.get().s1?.map(item => [item.id, item.status])).toEqual([
+      ['a', 'completed'],
+      ['b', 'completed'],
+      ['c', 'completed']
+    ])
+
+    vi.advanceTimersByTime(5_000)
+
+    expect($todosBySession.get().s1).toBeUndefined()
+  })
+
+  it('can cancel an in-flight list when the turn fails', () => {
+    setSessionTodos('s1', [todo('a', 'completed'), todo('b', 'in_progress')])
+
+    settleSessionTodos('s1', 'cancelled')
+
+    expect($todosBySession.get().s1?.map(item => [item.id, item.status])).toEqual([
+      ['a', 'completed'],
+      ['b', 'cancelled']
+    ])
   })
 
   it('cancels the pending clear when a new active list arrives', () => {

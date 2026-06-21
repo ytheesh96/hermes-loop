@@ -2,10 +2,59 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { I18nProvider } from '@/i18n'
+import type { ComposerStatusItem } from '@/store/composer-status'
 
 import { StatusItemRow } from './status-row'
 
+import { visibleComposerStatusItems } from './index'
+
 afterEach(() => cleanup())
+
+describe('visibleComposerStatusItems', () => {
+  const localPending: ComposerStatusItem = {
+    id: 'todo:local-pending',
+    state: 'done',
+    title: 'Local pending checklist item',
+    todoStatus: 'pending',
+    type: 'todo'
+  }
+
+  const localRunning: ComposerStatusItem = {
+    id: 'todo:local-running',
+    state: 'running',
+    title: 'Local running checklist item',
+    todoStatus: 'in_progress',
+    type: 'todo'
+  }
+
+  const localCompleted: ComposerStatusItem = {
+    id: 'todo:local-completed',
+    state: 'done',
+    title: 'Local completed checklist item',
+    todoStatus: 'completed',
+    type: 'todo'
+  }
+
+  const kanbanPending: ComposerStatusItem = {
+    currentTool: 'Loop',
+    id: 'kanban-task:t_pending',
+    kanbanTaskId: 't_pending',
+    state: 'running',
+    title: 'Durable pending Loop task',
+    todoStatus: 'pending',
+    type: 'todo'
+  }
+
+  it('hides only open local checklist rows while the turn is idle', () => {
+    const items = [localPending, localRunning, localCompleted, kanbanPending]
+
+    expect(visibleComposerStatusItems(items, false).map(item => item.id)).toEqual([
+      'todo:local-completed',
+      'kanban-task:t_pending'
+    ])
+    expect(visibleComposerStatusItems(items, true).map(item => item.id)).toEqual(items.map(item => item.id))
+  })
+})
 
 describe('StatusItemRow worker visuals', () => {
   it('uses the shared Loop/Kanban status indicator grammar when provided', () => {

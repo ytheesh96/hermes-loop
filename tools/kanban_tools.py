@@ -796,7 +796,7 @@ def _handle_request_review(args: dict, **kw) -> str:
 
 
 def _handle_request_decision(args: dict, **kw) -> str:
-    """Request a live foreground/orchestrator decision without blocking the worker."""
+    """Request an orchestrator decision without blocking the worker."""
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         return tool_error("task_id is required (or set HERMES_KANBAN_TASK in the env)")
@@ -837,7 +837,7 @@ def _handle_request_decision(args: dict, **kw) -> str:
                 handoff_kind=handoff.get("handoff_kind"),
                 state=handoff.get("state"),
                 instruction=(
-                    "Foreground decision requested. Continue only with reversible prep; "
+                    "Orchestrator decision requested. Continue only with reversible prep; "
                     "call kanban_show before committing to the path so you can read "
                     "decision_actor/decision_reason on the handoff."
                 ),
@@ -1129,6 +1129,49 @@ def _handle_resolve_blocker(args: dict, **kw) -> str:
     except Exception as e:
         logger.exception("kanban_resolve_blocker failed")
         return tool_error(f"kanban_resolve_blocker: {e}")
+
+
+def _handle_resolve_handoff(args: dict, **kw) -> str:
+    """Resolve a durable handoff through the generic handoff queue."""
+    raw_handoff_id = args.get("handoff_id")
+    try:
+        handoff_id = int(raw_handoff_id)
+    except (TypeError, ValueError):
+        return tool_error("handoff_id is required and must be an integer")
+    action = str(args.get("action") or "").strip()
+    if not action:
+        return tool_error("action is required")
+    payload = args.get("payload")
+    if payload is not None and not isinstance(payload, dict):
+        return tool_error(f"payload must be an object/dict, got {type(payload).__name__}")
+    actor = (
+        args.get("actor")
+        or os.environ.get("HERMES_PROFILE")
+        or os.environ.get("HERMES_PROFILE_NAME")
+        or "kanban-worker"
+    )
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            result = kb.resolve_handoff(
+                conn,
+                handoff_id,
+                action=action,
+                actor=actor,
+                resolution_summary=args.get("resolution_summary"),
+                payload=payload,
+            )
+            if not result.get("ok"):
+                return tool_error(f"kanban_resolve_handoff failed: {result}")
+            return _ok(handoff_id=handoff_id, **result)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_resolve_handoff: {e}")
+    except Exception as e:
+        logger.exception("kanban_resolve_handoff failed")
+        return tool_error(f"kanban_resolve_handoff: {e}")
 
 
 def _handle_heartbeat(args: dict, **kw) -> str:
@@ -1806,9 +1849,9 @@ KANBAN_REQUEST_REVIEW_SCHEMA = {
 KANBAN_REQUEST_DECISION_SCHEMA = {
     "name": "kanban_request_decision",
     "description": (
-        "Ask the live Loop foreground/orchestrator for a mid-run decision "
+        "Ask the Loop orchestrator for a mid-run decision "
         "without blocking or completing the task. Use this when a worker can "
-        "continue reversible prep but needs foreground judgment before choosing "
+        "continue reversible prep but needs an orchestrator decision before choosing "
         "a product, scope, architecture, dependency, safety, or acceptance path."
     ),
     "parameters": {
@@ -1817,7 +1860,7 @@ KANBAN_REQUEST_DECISION_SCHEMA = {
             "task_id": {"type": "string", "description": _DESC_TASK_ID_DEFAULT},
             "question": {
                 "type": "string",
-                "description": "The exact decision the foreground/orchestrator must make.",
+                "description": "The exact decision the orchestrator must make.",
             },
             "options": {
                 "type": "array",
@@ -1992,6 +2035,28 @@ KANBAN_RESOLVE_BLOCKER_SCHEMA = {
             "board": _board_schema_prop(),
         },
         "required": ["action"],
+    },
+}
+
+
+KANBAN_RESOLVE_HANDOFF_SCHEMA = {
+    "name": "kanban_resolve_handoff",
+    "description": (
+        "Resolve a durable handoff by handoff_id through the neutral first-class "
+        "handoff queue. Use this for orchestrator, QA, human, or "
+        "worker continuation decisions when a handoff row already exists."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "handoff_id": {"type": "integer", "description": "Durable handoff row id."},
+            "action": {"type": "string", "description": "Resolution action, for example approve, choose_option_a, cancel, continue."},
+            "resolution_summary": {"type": "string", "description": "Concise durable answer to the handoff."},
+            "payload": {"type": "object", "description": "Optional structured resolution facts."},
+            "actor": {"type": "string", "description": "Resolving actor; defaults to the current profile."},
+            "board": _board_schema_prop(),
+        },
+        "required": ["handoff_id", "action"],
     },
 }
 
@@ -2343,6 +2408,16 @@ registry.register(
     handler=_handle_resolve_blocker,
     check_fn=_check_kanban_mode,
     emoji="🧭",
+)
+
+
+registry.register(
+    name="kanban_resolve_handoff",
+    toolset="kanban",
+    schema=KANBAN_RESOLVE_HANDOFF_SCHEMA,
+    handler=_handle_resolve_handoff,
+    check_fn=_check_kanban_mode,
+    emoji="✓",
 )
 
 

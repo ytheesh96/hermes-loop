@@ -551,13 +551,20 @@ def test_session_source_attaches_orchestrator_fork_and_handoff_metadata(client):
             "root_task_id": "t_looproot",
             "task_id": task_id,
             "handoff_kind": "blocked_waiting",
+            "intent": "review",
+            "target_actor": "qa",
             "state": "queued",
+            "queue_state": "open",
             "attention": "needs-orchestrator",
             "verification_state": "needs-orchestrator",
             "verification_status": "unknown",
             "worker_profile": "orchestrator",
             "worker_session_id": "worker-session-1",
             "summary": "foreground owner must choose recovery path",
+            "payload": {
+                "summary": "foreground owner must choose recovery path",
+                "worker_metadata": {"worker_session_id": "worker-session-1"},
+            },
         }
     ]
 

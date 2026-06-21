@@ -67,6 +67,7 @@ import { threadLoadingState } from './thread-loading'
 interface ChatViewProps extends Omit<React.ComponentProps<'div'>, 'onSubmit'> {
   gateway: HermesGateway | null
   modelMenuContent?: React.ReactNode
+  statusStackLead?: React.ReactNode
   onToggleSelectedPin: () => void
   onDeleteSelectedSession: () => void
   onCancel: () => Promise<void> | void
@@ -264,6 +265,7 @@ export function ChatView({
   className,
   gateway,
   modelMenuContent,
+  statusStackLead,
   onToggleSelectedPin,
   onDeleteSelectedSession,
   onCancel,
@@ -493,7 +495,7 @@ export function ChatView({
                     queueSessionKey={selectedSessionId || activeSessionId}
                     sessionId={activeSessionId}
                     state={chatBarState}
-                    statusStackLead={null}
+                    statusStackLead={statusStackLead}
                   />
                 </Suspense>
               )}

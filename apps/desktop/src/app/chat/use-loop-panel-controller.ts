@@ -116,6 +116,11 @@ export function useLoopPanelController({
     ],
     queryFn: () => getLoopTaskDetail(focusedLoopTaskId!, activeGatewayProfile, loopSourceBoard),
     enabled: gatewayOpen && loopPanelOpen && Boolean(focusedLoopTaskId) && Boolean(tenantLoopPanelState?.rows.length),
+    refetchInterval: query =>
+      loopSessionSourceRefetchInterval({
+        session_id: loopSourceSessionId,
+        tasks: query.state.data?.task ? [query.state.data.task] : []
+      }),
     staleTime: 2_000
   })
 

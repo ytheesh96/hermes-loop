@@ -807,6 +807,9 @@ def test_completion_records_durable_handoff_with_audit_identifiers(kanban_home):
     assert len(handoffs) == 1
     handoff = handoffs[0]
     assert handoff["handoff_kind"] == "worker_completed"
+    assert handoff["intent"] == "approve"
+    assert handoff["target_actor"] == "orchestrator"
+    assert handoff["queue_state"] == "open"
     assert handoff["state"] == "queued"
     assert handoff["tenant"] == "tenant-a"
     assert handoff["root_task_id"] == "t_looproot"
@@ -819,9 +822,28 @@ def test_completion_records_durable_handoff_with_audit_identifiers(kanban_home):
     assert handoff["summary"] == "backend contract tests are ready"
     assert handoff["artifacts"] == ["/tmp/contract.log"]
     assert handoff["changed_files"] == ["hermes_cli/kanban_db.py"]
+    assert handoff["payload"]["changed_files"] == ["hermes_cli/kanban_db.py"]
     assert handoff["verification_status"] == "unknown"
     assert handoff["parent_state_snapshot"] == []
     assert handoff["child_state_snapshot"] == []
+
+
+def test_legacy_foreground_target_actor_normalizes_to_orchestrator(kanban_home):
+    with kb.connect() as conn:
+        task_id = _loop_node(conn, tenant="tenant-a")
+        assert kb.claim_task(conn, task_id, claimer="worker-host:123") is not None
+
+        assert kb.complete_task(
+            conn,
+            task_id,
+            summary="legacy foreground spelling should not leak",
+            metadata={"target_actor": "foreground"},
+        )
+
+        handoff = kb.list_loop_handoffs(conn, root_task_id="t_looproot")[0]
+
+    assert handoff["target_actor"] == "orchestrator"
+    assert handoff["payload"]["worker_metadata"]["target_actor"] == "foreground"
 
 
 def test_block_records_durable_handoff_reason(kanban_home):
@@ -835,8 +857,39 @@ def test_block_records_durable_handoff_reason(kanban_home):
 
     assert len(handoffs) == 1
     assert handoffs[0]["handoff_kind"] == "worker_blocked"
+    assert handoffs[0]["intent"] == "unblock"
+    assert handoffs[0]["target_actor"] == "orchestrator"
+    assert handoffs[0]["queue_state"] == "open"
     assert handoffs[0]["reason"] == "needs product decision"
     assert handoffs[0]["attention"] == "needs-orchestrator"
+
+
+def test_resolve_handoff_records_neutral_resolution_fields(kanban_home):
+    with kb.connect() as conn:
+        task_id = _loop_node(conn, title="loop decision", tenant="tenant-a")
+        assert kb.claim_task(conn, task_id, claimer="worker-host:456") is not None
+        assert kb.block_task(conn, task_id, reason="product-decision: choose a path")
+        handoff = kb.list_loop_handoffs(conn, tenant="tenant-a", state="queued")[0]
+
+        result = kb.resolve_handoff(
+            conn,
+            handoff["id"],
+            action="choose-option-a",
+            actor="foreground",
+            resolution_summary="Use option A for the demo.",
+            payload={"selected": "A"},
+        )
+        resolved = kb.list_loop_handoffs(conn, task_id=task_id)[0]
+        events = [event for event in kb.list_events(conn, task_id) if event.kind == "handoff_resolved"]
+
+    assert result["ok"] is True
+    assert result["queue_state"] == "resolved"
+    assert resolved["queue_state"] == "resolved"
+    assert resolved["resolution_action"] == "choose_option_a"
+    assert resolved["resolved_by"] == "orchestrator"
+    assert resolved["resolution_summary"] == "Use option A for the demo."
+    assert resolved["payload"]["resolution_payload"] == {"selected": "A"}
+    assert len(events) == 1
 
 
 def test_duplicate_handoff_trigger_is_idempotent(kanban_home):
