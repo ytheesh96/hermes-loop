@@ -1394,10 +1394,13 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
       messaging gateway before agent dispatch. The notification poller
       already keys off these, so we just register a row.
 
-    - **TUI / CLI / cron / test / unattached**: no persistent delivery channel
-      currently consumes ``kanban_notify_subs`` for these surfaces, so this
-      deliberately returns ``False`` instead of creating a misleading
-      ``platform="tui"`` row.
+    - **TUI/Desktop**: the parent process exports ``HERMES_SESSION_KEY``.
+      We subscribe with ``platform="tui"`` and ``chat_id=<key>``; the TUI
+      notification poller claims those rows and posts terminal events back
+      into that local session.
+
+    - **CLI / cron / test / unattached**: no persistent delivery channel,
+      no-op.
 
     Failure mode: any exception inside the function is logged at WARNING
     with the offending exception + diagnostic env vars and swallowed.

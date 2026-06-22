@@ -7506,6 +7506,138 @@ def test_notification_poller_requeues_when_busy(monkeypatch):
             process_registry.completion_queue.get_nowait()
 
 
+def test_notification_poller_delivers_tui_kanban_completion(monkeypatch, tmp_path):
+    """TUI poller consumes kanban_notify_subs rows for its session key."""
+    import queue as _queue_mod
+
+    from hermes_cli import kanban_db as kb
+    from tools.process_registry import process_registry
+
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="notify tui", assignee="worker")
+        kb.add_notify_sub(conn, task_id=tid, platform="tui", chat_id="tui-session")
+        kb.complete_task(conn, tid, summary="finished from loop worker")
+    finally:
+        conn.close()
+
+    turns = []
+    emitted = []
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None):
+            turns.append(prompt)
+            return {
+                "final_response": "ok",
+                "messages": [{"role": "assistant", "content": "ok"}],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    sess = _session(agent=_Agent(), session_key="tui-session")
+    server._sessions["sid_kanban"] = sess
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *a, **kw: emitted.append(a))
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(process_registry, "completion_queue", _queue_mod.Queue())
+
+    stop = threading.Event()
+    stop.set()
+
+    try:
+        server._notification_poller_loop(stop, "sid_kanban", sess)
+
+        assert len(turns) == 1
+        assert f"Kanban {tid} done" in turns[0]
+        assert "finished from loop worker" in turns[0]
+        status_calls = [a for a in emitted if a[0] == "status.update"]
+        assert status_calls
+        assert status_calls[0][2]["kind"] == "kanban"
+
+        conn = kb.connect()
+        try:
+            assert kb.list_notify_subs(conn, tid) == []
+        finally:
+            conn.close()
+    finally:
+        server._sessions.pop("sid_kanban", None)
+
+
+def test_tui_kanban_dispatch_survives_busy_flip_after_claim(monkeypatch, tmp_path):
+    """Kanban events are not claimed unless the TUI turn is already reserved."""
+    import queue as _queue_mod
+
+    from hermes_cli import kanban_db as kb
+    from tools.process_registry import process_registry
+
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="notify race", assignee="worker")
+        kb.add_notify_sub(conn, task_id=tid, platform="tui", chat_id="tui-session")
+        kb.complete_task(conn, tid, summary="race-safe handoff")
+    finally:
+        conn.close()
+
+    turns = []
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None):
+            turns.append(prompt)
+            return {
+                "final_response": "ok",
+                "messages": [{"role": "assistant", "content": "ok"}],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            if self._target is not None:
+                self._target()
+
+    sess = _session(agent=_Agent(), session_key="tui-session")
+    server._sessions["sid_kanban_race"] = sess
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(process_registry, "completion_queue", _queue_mod.Queue())
+
+    original_collect = server._collect_tui_kanban_notifications
+
+    def collect_then_busy(session):
+        messages = original_collect(session)
+        # Simulate the reviewer-reported race: something marks the session
+        # running after DB claim but before dispatch. The fixed path has
+        # already reserved this notification turn before collection, so this
+        # cannot cause cursor loss.
+        with session["history_lock"]:
+            server._set_session_running(session, True)
+        return messages
+
+    monkeypatch.setattr(server, "_collect_tui_kanban_notifications", collect_then_busy)
+
+    try:
+        server._dispatch_tui_kanban_notifications("sid_kanban_race", sess)
+
+        assert len(turns) == 1
+        assert f"Kanban {tid} done" in turns[0]
+        assert "race-safe handoff" in turns[0]
+    finally:
+        server._sessions.pop("sid_kanban_race", None)
+
+
 def test_session_save_writes_under_hermes_home_with_system_prompt(monkeypatch, tmp_path):
     """TUI /save (session.save RPC) must snapshot under the Hermes profile
     home — not the project/workspace CWD — and include the system prompt,

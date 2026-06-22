@@ -18,6 +18,10 @@ def loop_delegate_env(monkeypatch, tmp_path):
     monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
+    from gateway.session_context import _UNSET, _VAR_MAP
+    for var in _VAR_MAP.values():
+        var.set(_UNSET)
+
     from hermes_cli import kanban_db as kb
 
     kb._INITIALIZED_PATHS.clear()
@@ -64,8 +68,8 @@ def test_delegate_task_loop_mode_creates_durable_loop_item(loop_delegate_env, mo
     assert out["count"] == 1
     assert out["assignee"] == "reviewer-qa"
     assert out["loop_item_id"].startswith("t_")
-    assert out["subscribed"] is False
-    assert out["auto_reentry"] is False
+    assert out["subscribed"] is True
+    assert out["auto_reentry"] is True
 
     conn = kb.connect()
     try:
@@ -80,7 +84,10 @@ def test_delegate_task_loop_mode_creates_durable_loop_item(loop_delegate_env, mo
     assert task.session_id == "session-123"
     assert "Repo: /tmp/hermes-agent" in (task.body or "")
     assert "delegate_task_mode_loop" in (task.body or "")
-    assert subs == []
+    assert [
+        (s["platform"], s["chat_id"], s["notifier_profile"])
+        for s in subs
+    ] == [("tui", "tui-session-123", "planner")]
 
 
 def test_delegate_task_loop_mode_uses_default_assignee(loop_delegate_env):

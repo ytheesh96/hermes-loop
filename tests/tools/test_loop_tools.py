@@ -18,6 +18,10 @@ def loop_env(monkeypatch, tmp_path):
     monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
+    from gateway.session_context import _UNSET, _VAR_MAP
+    for var in _VAR_MAP.values():
+        var.set(_UNSET)
+
     from hermes_cli import kanban_db as kb
 
     kb._INITIALIZED_PATHS.clear()
@@ -162,7 +166,7 @@ def test_loop_create_async_requires_activation_and_proof_packet(loop_env, monkey
         conn.close()
 
 
-def test_loop_create_does_not_claim_tui_subscription_without_consumer(loop_env, monkeypatch):
+def test_loop_create_auto_subscribes_tui_session(loop_env, monkeypatch):
     monkeypatch.setenv("HERMES_SESSION_KEY", "loop-create-tui-session")
 
     created = _call_loop(
@@ -178,7 +182,7 @@ def test_loop_create_does_not_claim_tui_subscription_without_consumer(loop_env, 
     )
 
     assert created["ok"] is True
-    assert created["subscribed"] is False
+    assert created["subscribed"] is True
 
     from hermes_cli import kanban_db as kb
 
@@ -188,7 +192,9 @@ def test_loop_create_does_not_claim_tui_subscription_without_consumer(loop_env, 
     finally:
         conn.close()
 
-    assert subs == []
+    assert [(s["platform"], s["chat_id"]) for s in subs] == [
+        ("tui", "loop-create-tui-session")
+    ]
 
 
 def test_loop_create_auto_subscribes_gateway_session(loop_env, monkeypatch):

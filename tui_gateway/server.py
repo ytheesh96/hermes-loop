@@ -6730,6 +6730,194 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
     return (evt_sid, evt_type)
 
 
+_TUI_KANBAN_TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out")
+
+
+def _format_tui_kanban_notification(sub: dict, task: Any, ev: Any) -> str | None:
+    """Format a Kanban terminal event as a TUI re-entry prompt."""
+    task_id = sub.get("task_id") or getattr(ev, "task_id", "")
+    title = (getattr(task, "title", None) or task_id)[:120]
+    assignee = getattr(task, "assignee", None)
+    tag = f"@{assignee} " if assignee else ""
+    payload = getattr(ev, "payload", None) or {}
+    kind = getattr(ev, "kind", "")
+    if kind == "completed":
+        handoff = ""
+        summary = payload.get("summary") or getattr(task, "result", None)
+        if summary:
+            lines = str(summary).strip().splitlines()
+            handoff = f"\n{(lines[0] if lines else str(summary))[:200]}"
+        return f"[IMPORTANT: ✔ {tag}Kanban {task_id} done — {title}{handoff}]"
+    if kind == "blocked":
+        reason = f": {str(payload.get('reason'))[:160]}" if payload.get("reason") else ""
+        return f"[IMPORTANT: ⏸ {tag}Kanban {task_id} blocked{reason}]"
+    if kind == "gave_up":
+        err = f"\n{str(payload.get('error'))[:200]}" if payload.get("error") else ""
+        return f"[IMPORTANT: ✖ {tag}Kanban {task_id} gave up after repeated spawn failures{err}]"
+    if kind == "crashed":
+        return f"[IMPORTANT: ✖ {tag}Kanban {task_id} worker crashed; dispatcher will retry]"
+    if kind == "timed_out":
+        limit = payload.get("limit_seconds") or 0
+        return f"[IMPORTANT: ⏱ {tag}Kanban {task_id} timed out (max_runtime={limit}s); will retry]"
+    return None
+
+
+def _tui_kanban_board_slugs(kb: Any) -> list[str]:
+    try:
+        boards = kb.list_boards(include_archived=False)
+    except Exception:
+        boards = [{"slug": kb.DEFAULT_BOARD}]
+    slugs: list[str] = []
+    seen: set[str] = set()
+    for board in boards:
+        slug = board.get("slug") or kb.DEFAULT_BOARD
+        if slug in seen:
+            continue
+        seen.add(slug)
+        slugs.append(slug)
+    return slugs or [kb.DEFAULT_BOARD]
+
+
+def _collect_tui_kanban_notifications(session: dict) -> list[str]:
+    """Claim terminal kanban_notify_subs events for this TUI session."""
+    session_key = str(session.get("session_key") or "")
+    if not session_key:
+        return []
+    try:
+        from hermes_cli import kanban_db as kb
+    except Exception:
+        return []
+
+    profile = os.environ.get("HERMES_PROFILE", "")
+    messages: list[str] = []
+    for board in _tui_kanban_board_slugs(kb):
+        try:
+            conn = kb.connect(board=board)
+        except Exception:
+            continue
+        try:
+            for sub in kb.list_notify_subs(conn):
+                if (sub.get("platform") or "").lower() != "tui":
+                    continue
+                if str(sub.get("chat_id") or "") != session_key:
+                    continue
+                owner_profile = sub.get("notifier_profile") or None
+                if owner_profile and owner_profile != profile:
+                    continue
+                _old, _cursor, events = kb.claim_unseen_events_for_sub(
+                    conn,
+                    task_id=sub["task_id"],
+                    platform=sub["platform"],
+                    chat_id=sub["chat_id"],
+                    thread_id=sub.get("thread_id") or "",
+                    kinds=_TUI_KANBAN_TERMINAL_KINDS,
+                )
+                if not events:
+                    continue
+                task = None
+                try:
+                    task = kb.get_task(conn, sub["task_id"])
+                except Exception as exc:
+                    print(
+                        f"[tui_gateway] TUI kanban task lookup failed: "
+                        f"{type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+                for ev in events:
+                    try:
+                        msg = _format_tui_kanban_notification(sub, task, ev)
+                    except Exception as exc:
+                        print(
+                            f"[tui_gateway] TUI kanban notification format failed: "
+                            f"{type(exc).__name__}: {exc}",
+                            file=sys.stderr,
+                        )
+                        continue
+                    if msg:
+                        messages.append(msg)
+                if task and task.status in {"done", "archived"}:
+                    try:
+                        kb.remove_notify_sub(
+                            conn,
+                            task_id=sub["task_id"],
+                            platform=sub["platform"],
+                            chat_id=sub["chat_id"],
+                            thread_id=sub.get("thread_id") or "",
+                        )
+                    except Exception as exc:
+                        print(
+                            f"[tui_gateway] TUI kanban subscription cleanup failed: "
+                            f"{type(exc).__name__}: {exc}",
+                            file=sys.stderr,
+                        )
+        finally:
+            conn.close()
+    return messages
+
+
+def _dispatch_notification_text(
+    sid: str,
+    session: dict,
+    text: str,
+    *,
+    status_kind: str = "process",
+    emit_status: bool = True,
+    preclaimed: bool = False,
+) -> bool:
+    if emit_status:
+        _emit("status.update", sid, {"kind": status_kind, "text": text})
+    if not preclaimed:
+        with session["history_lock"]:
+            if session.get("running"):
+                return False
+            _set_session_running(session, True)
+
+    rid = f"__notif__{int(time.time() * 1000)}"
+    try:
+        _emit("message.start", sid)
+        _run_prompt_submit(rid, sid, session, text)
+    except Exception as exc:
+        print(
+            f"[tui_gateway] notification poller dispatch failed: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        with session["history_lock"]:
+            _set_session_running(session, False)
+    return True
+
+
+def _dispatch_tui_kanban_notifications(sid: str, session: dict) -> None:
+    # Reserve the next agent turn before advancing kanban_notify_subs cursors.
+    # Otherwise a busy flip between claim and dispatch could acknowledge an
+    # event without ever delivering the re-entry prompt.
+    with session["history_lock"]:
+        if session.get("running"):
+            return
+        _set_session_running(session, True)
+    try:
+        messages = _collect_tui_kanban_notifications(session)
+        if not messages:
+            with session["history_lock"]:
+                _set_session_running(session, False)
+            return
+        _dispatch_notification_text(
+            sid,
+            session,
+            "\n\n".join(messages),
+            status_kind="kanban",
+            preclaimed=True,
+        )
+    except Exception as exc:
+        print(
+            f"[tui_gateway] TUI kanban notification poll failed: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        with session["history_lock"]:
+            _set_session_running(session, False)
+
+
 def _notification_poller_loop(
     stop_event: threading.Event, sid: str, session: dict
 ) -> None:
@@ -6751,6 +6939,7 @@ def _notification_poller_loop(
         try:
             evt = process_registry.completion_queue.get(timeout=0.5)
         except Exception:
+            _dispatch_tui_kanban_notifications(sid, session)
             continue
 
         # Multiple desktop sessions share this one process-wide queue. Only
@@ -6776,28 +6965,19 @@ def _notification_poller_loop(
         # while distinct watch_match events from the same process must remain
         # visible independently.
         _dedup_key = _notification_event_dedup_key(evt)
-        if _dedup_key not in _emitted:
-            _emit("status.update", sid, {"kind": "process", "text": text})
+        emit_status = _dedup_key not in _emitted
+        if emit_status:
             _emitted.add(_dedup_key)
 
-        with session["history_lock"]:
-            if session.get("running"):
-                process_registry.completion_queue.put(evt)
-                continue
-            _set_session_running(session, True)
-
-        rid = f"__notif__{int(time.time() * 1000)}"
-        try:
-            _emit("message.start", sid)
-            _run_prompt_submit(rid, sid, session, text)
-        except Exception as exc:
-            print(
-                f"[tui_gateway] notification poller dispatch failed: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            with session["history_lock"]:
-                _set_session_running(session, False)
+        if not _dispatch_notification_text(
+            sid,
+            session,
+            text,
+            status_kind="process",
+            emit_status=emit_status,
+        ):
+            process_registry.completion_queue.put(evt)
+            continue
 
     # Drain any remaining events after stop signal (process all pending
     # before exiting so nothing is lost on shutdown). Events owned by other
@@ -6819,28 +6999,21 @@ def _notification_poller_loop(
             continue
 
         _dedup_key = _notification_event_dedup_key(evt)
-        if _dedup_key not in _emitted:
-            _emit("status.update", sid, {"kind": "process", "text": text})
+        emit_status = _dedup_key not in _emitted
+        if emit_status:
             _emitted.add(_dedup_key)
 
-        with session["history_lock"]:
-            if session.get("running"):
-                process_registry.completion_queue.put(evt)
-                break
-            _set_session_running(session, True)
+        if not _dispatch_notification_text(
+            sid,
+            session,
+            text,
+            status_kind="process",
+            emit_status=emit_status,
+        ):
+            process_registry.completion_queue.put(evt)
+            break
 
-        rid = f"__notif__{int(time.time() * 1000)}"
-        try:
-            _emit("message.start", sid)
-            _run_prompt_submit(rid, sid, session, text)
-        except Exception as exc:
-            print(
-                f"[tui_gateway] notification poller dispatch failed: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            with session["history_lock"]:
-                _set_session_running(session, False)
+    _dispatch_tui_kanban_notifications(sid, session)
 
     # Hand any other sessions' events back to the shared queue.
     for evt in deferred:

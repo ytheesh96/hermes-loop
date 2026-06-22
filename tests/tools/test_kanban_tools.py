@@ -163,6 +163,10 @@ def worker_env(monkeypatch, tmp_path):
     from pathlib import Path as _Path
     monkeypatch.setattr(_Path, "home", lambda: tmp_path)
 
+    from gateway.session_context import _UNSET, _VAR_MAP
+    for var in _VAR_MAP.values():
+        var.set(_UNSET)
+
     from hermes_cli import kanban_db as kb
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
@@ -2230,10 +2234,8 @@ def test_create_subscribes_gateway_session(monkeypatch, worker_env):
     assert s["user_id"] == "user-9"
 
 
-def test_create_does_not_claim_tui_subscription_without_consumer(monkeypatch, worker_env):
-    """TUI / desktop sessions expose HERMES_SESSION_KEY, but no TUI poller
-    consumes kanban_notify_subs rows yet. Do not return a misleading
-    subscribed=True until that delivery path exists."""
+def test_create_subscribes_tui_session_via_session_key(monkeypatch, worker_env):
+    """TUI / desktop sessions consume kanban_notify_subs by session key."""
     from tools import kanban_tools as kt
     monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
     monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
@@ -2249,9 +2251,12 @@ def test_create_does_not_claim_tui_subscription_without_consumer(monkeypatch, wo
     d = json.loads(out)
     assert d["ok"] is True
     new_tid = d["task_id"]
-    assert d["subscribed"] is False, d
+    assert d["subscribed"] is True, d
 
-    assert _list_subs_for_task(new_tid) == []
+    subs = _sub_index(_list_subs_for_task(new_tid))
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "tui"
+    assert subs[0]["chat_id"] == "tui-session-abc"
 
 
 def test_create_does_not_subscribe_in_cli_session(monkeypatch, worker_env):
@@ -2301,6 +2306,37 @@ def test_create_respects_auto_subscribe_on_create_false(monkeypatch, worker_env,
     assert d["subscribed"] is False, d
 
     assert _list_subs_for_task(d["task_id"]) == []
+
+
+def test_create_ignores_stale_env_when_session_context_is_explicitly_empty(
+    monkeypatch,
+    worker_env,
+):
+    """Explicit empty ContextVars suppress stale process-env fallbacks."""
+    from gateway.session_context import _UNSET, _VAR_MAP, set_session_vars
+    from tools import kanban_tools as kt
+
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "stale-chat")
+    monkeypatch.setenv("HERMES_SESSION_THREAD_ID", "stale-thread")
+    monkeypatch.setenv("HERMES_SESSION_USER_ID", "stale-user")
+    monkeypatch.setenv("HERMES_SESSION_KEY", "stale-tui-key")
+    tokens = set_session_vars(platform="", chat_id="", session_key="")
+    try:
+        out = kt._handle_create({
+            "title": "no stale env subscribe",
+            "assignee": "peer",
+        })
+        d = json.loads(out)
+        assert d["ok"] is True
+        assert d["subscribed"] is False, d
+        assert _list_subs_for_task(d["task_id"]) == []
+    finally:
+        # clear_session_vars intentionally leaves explicit empty values; reset
+        # to the unset sentinel so later tests can exercise env fallback.
+        for var in _VAR_MAP.values():
+            var.set(_UNSET)
+        del tokens
 
 
 def test_create_partial_session_context_no_subscribe(monkeypatch, worker_env):

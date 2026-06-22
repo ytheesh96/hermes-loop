@@ -11,12 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 def maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
-    """Auto-subscribe the current gateway session to a Kanban task.
-
-    TUI/Desktop sessions expose ``HERMES_SESSION_KEY``, but they do not yet
-    consume ``kanban_notify_subs`` rows. Return ``False`` for that surface so
-    callers do not promise result re-entry that cannot be delivered.
-    """
+    """Auto-subscribe the current gateway/TUI session to a Kanban task."""
     try:
         cfg = load_config()
         if not cfg_get(cfg, "kanban", "auto_subscribe_on_create", default=True):
@@ -31,19 +26,14 @@ def maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
 
         platform = get_session_env("HERMES_SESSION_PLATFORM", "")
         chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
-        if not platform or not chat_id:
-            session_key = (
-                get_session_env("HERMES_SESSION_KEY", "")
-                or os.environ.get("HERMES_SESSION_KEY", "")
-            )
+        if bool(platform) != bool(chat_id):
+            return False
+        if not platform and not chat_id:
+            session_key = get_session_env("HERMES_SESSION_KEY", "")
             if not session_key:
                 return False
-            logger.debug(
-                "kanban auto-subscribe skipped for TUI session %s: "
-                "kanban_notify_subs has no TUI consumer yet",
-                session_key,
-            )
-            return False
+            platform = "tui"
+            chat_id = session_key
 
         from hermes_cli import kanban_db as kb
 
