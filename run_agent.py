@@ -5240,6 +5240,12 @@ class AIAgent:
             acp_command=function_args.get("acp_command"),
             acp_args=function_args.get("acp_args"),
             role=function_args.get("role"),
+            mode=function_args.get("mode"),
+            assignee=function_args.get("assignee"),
+            tenant=function_args.get("tenant"),
+            board=function_args.get("board"),
+            workspace_kind=function_args.get("workspace_kind"),
+            workspace_path=function_args.get("workspace_path"),
             background=(not _is_subagent),
             parent_agent=self,
         )

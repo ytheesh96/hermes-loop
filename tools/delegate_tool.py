@@ -2062,6 +2062,105 @@ def _recover_tasks_from_json_string(
     return parsed, None
 
 
+_LOOP_DELEGATION_MODES = {"loop", "durable"}
+
+
+def _loop_default_assignee(cfg: dict) -> str:
+    full_cfg = cfg
+    try:
+        from hermes_cli.config import load_config
+
+        full_cfg = load_config()
+    except Exception:
+        pass
+    loop_cfg = full_cfg.get("loop", {}) if isinstance(full_cfg, dict) else {}
+    kanban_cfg = full_cfg.get("kanban", {}) if isinstance(full_cfg, dict) else {}
+    return str(
+        loop_cfg.get("default_assignee")
+        or kanban_cfg.get("default_assignee")
+        or ""
+    ).strip()
+
+
+def _loop_delegation_result(
+    task_list,
+    *,
+    context,
+    assignee,
+    cfg,
+    tenant,
+    board,
+    workspace_kind,
+    workspace_path,
+) -> str:
+    """Create durable Loop rows for delegate_task(mode='loop')."""
+    from tools import loop_tools
+
+    items: list[dict[str, Any]] = []
+    default_assignee = _loop_default_assignee(cfg)
+    for task in task_list:
+        task_goal = str(task.get("goal") or "").strip()
+        task_context = (
+            task.get("context") if task.get("context") is not None else context
+        )
+        target = str(task.get("assignee") or assignee or default_assignee).strip()
+        if not target:
+            return tool_error(
+                "assignee is required for delegate_task(mode='loop') unless "
+                "loop.default_assignee or kanban.default_assignee is configured"
+            )
+        proof_packet = {
+            "source": "delegate_task_mode_loop",
+            "goal": task_goal,
+            "origin_profile": os.environ.get("HERMES_PROFILE") or "",
+            "origin_session_id": os.environ.get("HERMES_SESSION_ID") or "",
+            "session_key_present": bool(os.environ.get("HERMES_SESSION_KEY")),
+        }
+        raw = loop_tools._handle_loop_create(
+            {
+                "objective": task_goal,
+                "context": task_context,
+                "assignee": target,
+                "tenant": tenant,
+                "board": board,
+                "workspace_kind": workspace_kind or "scratch",
+                "workspace_path": workspace_path,
+                "activation": "explicit_user_request",
+                "proof_packet": proof_packet,
+                "execution": {"mode": "async"},
+            }
+        )
+        created = json.loads(raw)
+        if not created.get("ok"):
+            return raw
+        items.append(
+            {
+                "loop_item_id": created["loop_item_id"],
+                "status": created["status"],
+                "assignee": created["assignee"],
+                "foreground_reentry": created.get("foreground_reentry"),
+                "subscribed": bool(created.get("subscribed")),
+            }
+        )
+
+    payload = {
+        "status": "dispatched",
+        "mode": "loop",
+        "count": len(items),
+        "items": items,
+        "note": (
+            "Durable Loop work is queued. Do not wait or poll; its terminal "
+            "result or blocker will re-enter the originating conversation "
+            "when notifications are available."
+        ),
+    }
+    if len(items) == 1:
+        item = dict(items[0])
+        item["loop_status"] = item.pop("status")
+        payload.update(item)
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def delegate_task(
     goal: Optional[str] = None,
     context: Optional[str] = None,
@@ -2072,6 +2171,12 @@ def delegate_task(
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
     background: Optional[bool] = None,
+    mode: Optional[str] = None,
+    assignee: Optional[str] = None,
+    tenant: Optional[str] = None,
+    board: Optional[str] = None,
+    workspace_kind: Optional[str] = None,
+    workspace_path: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -2189,6 +2294,18 @@ def delegate_task(
             )
         if not task.get("goal", "").strip():
             return tool_error(f"Task {i} is missing a 'goal'.")
+
+    if str(mode or "").strip().lower() in _LOOP_DELEGATION_MODES:
+        return _loop_delegation_result(
+            task_list,
+            context=context,
+            assignee=assignee,
+            cfg=cfg,
+            tenant=tenant,
+            board=board,
+            workspace_kind=workspace_kind,
+            workspace_path=workspace_path,
+        )
 
     overall_start = time.monotonic()
     results = []
@@ -2846,7 +2963,8 @@ def _build_top_level_description() -> str:
         )
 
     return (
-        "Spawn one or more subagents to work on tasks in isolated contexts. "
+        "Spawn one or more subagents to work on tasks in isolated contexts, "
+        "or create durable Loop/Kanban work with mode='loop'. "
         "Each subagent gets its own conversation, terminal session, and toolset. "
         "Only the final summary is returned -- intermediate tool results "
         "never enter your context window.\n\n"
@@ -2870,7 +2988,8 @@ def _build_top_level_description() -> str:
         "- Single tool call -> just call the tool directly\n"
         "- Tasks needing user interaction -> subagents cannot use clarify\n"
         "- Durable long-running work that must outlive the current turn -> "
-        "use cronjob (action='create') or terminal(background=True, "
+        "use delegate_task(mode='loop') for Kanban/Loop work, cronjob "
+        "(action='create') for scheduled work, or terminal(background=True, "
         "notify_on_complete=True) instead. Background delegations are NOT "
         "durable: if the parent session is closed (/new) or the process exits "
         "before a subagent finishes, that subagent's work is discarded, and "
@@ -3023,6 +3142,26 @@ DELEGATE_TASK_SCHEMA = {
                     "['terminal', 'file', 'web'] for full-stack tasks."
                 ),
             },
+            "mode": {
+                "type": "string",
+                "enum": ["subagent", "ephemeral", "loop", "durable"],
+                "description": (
+                    "Default subagent/ephemeral uses normal background subagents. "
+                    "Use loop/durable to create Kanban-backed Loop work that can outlive this turn."
+                ),
+            },
+            "assignee": {
+                "type": "string",
+                "description": "Loop/durable mode only: profile that should execute the durable work.",
+            },
+            "tenant": {"type": "string", "description": "Loop/durable mode tenant namespace."},
+            "board": {"type": "string", "description": "Loop/durable mode Kanban board slug."},
+            "workspace_kind": {
+                "type": "string",
+                "enum": ["scratch", "dir", "worktree"],
+                "description": "Loop/durable mode workspace kind.",
+            },
+            "workspace_path": {"type": "string", "description": "Loop/durable mode workspace path."},
             "tasks": {
                 "type": "array",
                 "items": {
@@ -3032,6 +3171,10 @@ DELEGATE_TASK_SCHEMA = {
                         "context": {
                             "type": "string",
                             "description": "Task-specific context",
+                        },
+                        "assignee": {
+                            "type": "string",
+                            "description": "Per-task assignee for loop/durable mode.",
                         },
                         "toolsets": {
                             "type": "array",
@@ -3142,6 +3285,12 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        mode=args.get("mode"),
+        assignee=args.get("assignee"),
+        tenant=args.get("tenant"),
+        board=args.get("board"),
+        workspace_kind=args.get("workspace_kind"),
+        workspace_path=args.get("workspace_path"),
         background=_model_background_value(args, kw.get("parent_agent")),
         parent_agent=kw.get("parent_agent"),
     ),

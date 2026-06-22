@@ -162,6 +162,37 @@ def test_loop_create_async_requires_activation_and_proof_packet(loop_env, monkey
         conn.close()
 
 
+def test_loop_create_auto_subscribes_tui_session(loop_env, monkeypatch):
+    monkeypatch.setenv("HERMES_SESSION_KEY", "loop-create-tui-session")
+
+    created = _call_loop(
+        "loop_create",
+        {
+            "objective": "Report durable result back here",
+            "assignee": "worker-a",
+            "tenant": loop_env,
+            "activation": "explicit_user_request",
+            "proof_packet": {"summary": "user requested durable routing"},
+            "idempotency_key": "loop-create-auto-subscribe",
+        },
+    )
+
+    assert created["ok"] is True
+    assert created["subscribed"] is True
+
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, created["loop_item_id"])
+    finally:
+        conn.close()
+
+    assert [(s["platform"], s["chat_id"]) for s in subs] == [
+        ("tui", "loop-create-tui-session")
+    ]
+
+
 def test_loop_status_list_update_block_and_request_review(loop_env):
     created = _call_loop(
         "loop_create",

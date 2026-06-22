@@ -88,8 +88,16 @@ def _latest_summary(kb: Any, conn: Any, task_id: str) -> str | None:
     return task.result if task else None
 
 
-def _build_body(objective: str, acceptance_criteria: Any, proof_packet: dict[str, Any]) -> str:
-    lines = ["**Goal**", objective.strip(), "", "**Acceptance criteria**"]
+def _build_body(
+    objective: str,
+    acceptance_criteria: Any,
+    proof_packet: dict[str, Any],
+    context: Any = None,
+) -> str:
+    lines = ["**Goal**", objective.strip()]
+    if context:
+        lines.extend(["", "**Context**", str(context).strip()])
+    lines.extend(["", "**Acceptance criteria**"])
     if isinstance(acceptance_criteria, (list, tuple)) and acceptance_criteria:
         lines.extend(f"- [ ] {str(item).strip()}" for item in acceptance_criteria if str(item).strip())
     else:
@@ -226,7 +234,12 @@ def _handle_loop_create(args: dict[str, Any], **_kwargs) -> str:
             task_id = kb.create_task(
                 conn,
                 title=objective,
-                body=_build_body(objective, args.get("acceptance_criteria"), proof_packet),
+                body=_build_body(
+                    objective,
+                    args.get("acceptance_criteria"),
+                    proof_packet,
+                    args.get("body") or args.get("context"),
+                ),
                 assignee=assignee,
                 created_by=f"loop_delegation:{os.environ.get('HERMES_PROFILE') or 'agent'}",
                 workspace_kind=workspace_kind,
@@ -248,6 +261,9 @@ def _handle_loop_create(args: dict[str, Any], **_kwargs) -> str:
             task, completed = _wait_for_loop_item(kb, conn, task_id, execution)
             if task is None:
                 return tool_error(f"created task {task_id} could not be read back")
+            from tools.kanban_notify import maybe_auto_subscribe
+
+            subscribed = maybe_auto_subscribe(conn, task_id)
             warnings: list[str] = []
             if execution["mode"] == "sync" and not completed:
                 warnings.append("sync wait timed out; durable Loop work continues asynchronously")
@@ -268,6 +284,7 @@ def _handle_loop_create(args: dict[str, Any], **_kwargs) -> str:
                 execution=execution,
                 foreground_reentry=foreground_reentry,
                 approval_required=False,
+                subscribed=subscribed,
                 warnings=warnings,
                 summary=_latest_summary(kb, conn, task_id),
             )
