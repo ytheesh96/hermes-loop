@@ -22,14 +22,22 @@ def maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
     platform = ""
     chat_id = ""
     try:
-        from gateway.session_context import get_session_env
+        from gateway.session_context import get_logical_session_id, get_session_env
 
         platform = get_session_env("HERMES_SESSION_PLATFORM", "")
         chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
         if bool(platform) != bool(chat_id):
             return False
         if not platform and not chat_id:
-            session_key = get_session_env("HERMES_SESSION_KEY", "")
+            session_key = get_logical_session_id("")
+            try:
+                from hermes_cli import kanban_db as kb
+
+                task = kb.get_task(conn, task_id)
+                if task and task.session_id:
+                    session_key = task.session_id
+            except Exception:
+                pass
             if not session_key:
                 return False
             platform = "tui"

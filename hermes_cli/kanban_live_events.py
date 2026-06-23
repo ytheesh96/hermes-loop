@@ -172,11 +172,11 @@ def emit_session_message_appended(
 ) -> bool:
     """Notify live clients that a durable SessionDB message was appended externally.
 
-    Some Loop foreground handoffs append an ``observed`` user message directly to
-    the target conversation's state.db instead of flowing through the active
-    gateway turn stream. The DB write is authoritative, but the Desktop runtime
-    only repaints when it sees gateway events. This small invalidation event
-    tells the renderer to refetch the transcript for the matching active stored
+    Some background paths append an ``observed`` user message directly to the
+    target conversation's state.db instead of flowing through the active gateway
+    turn stream. The DB write is authoritative, but the Desktop runtime only
+    repaints when it sees gateway events. This small invalidation event nudges
+    live clients to refetch the session transcript.
     session.
     """
     sid = str(session_id or "").strip()

@@ -771,7 +771,7 @@ def _node_by_task(graph: dict, task_id: str) -> dict:
     raise AssertionError(f"node {task_id} not found: {graph}")
 
 
-def test_read_folds_pending_foreground_handoff_into_node_and_index(loop_env):
+def test_read_omits_foreground_handoff_after_removal(loop_env):
     root = loop_env
 
     from hermes_cli import kanban_db as kb
@@ -793,26 +793,13 @@ def test_read_folds_pending_foreground_handoff_into_node_and_index(loop_env):
 
     read = _call({"action": "read", "root_task_id": root, "include_nodes": True})
     node = _node_by_task(read, worker)
-    assert node["attention"] == "needs-orchestrator"
-    assert node["verification_state"] == "needs-orchestrator"
-    assert node["handoff"]["handoff_kind"] == "worker_completed"
-    assert node["handoff"]["summary"] == "tests define handoff contract"
-    assert node["handoff"]["handoff_id"] is not None
-    assert node["handoff"]["state"] == "queued"
-    assert read["pending_handoffs"] == [
-        {
-            "task_id": worker,
-            "node_id": "contract-tests",
-            "handoff_kind": "worker_completed",
-            "verification_state": "needs-orchestrator",
-            "handoff_id": node["handoff"]["handoff_id"],
-            "state": "queued",
-            "summary": "tests define handoff contract",
-        }
-    ]
+    assert "attention" not in node
+    assert "verification_state" not in node
+    assert "handoff" not in node
+    assert read["pending_handoffs"] == []
 
 
-def test_resolve_handoff_clears_attention_without_releasing_downstream(loop_env):
+def test_resolve_handoff_rejects_without_pending_handoff(loop_env):
     root = loop_env
 
     from hermes_cli import kanban_db as kb
@@ -836,7 +823,6 @@ def test_resolve_handoff_clears_attention_without_releasing_downstream(loop_env)
             )
         assert kb.claim_task(conn, parent, claimer="worker-host:2") is not None
         assert kb.complete_task(conn, parent, summary="done but awaiting foreground")
-        handoff = next(event for event in kb.list_events(conn, parent) if event.kind == "loop_foreground_handoff")
     finally:
         conn.close()
 
@@ -851,7 +837,6 @@ def test_resolve_handoff_clears_attention_without_releasing_downstream(loop_env)
                 {
                     "op": "resolve_handoff",
                     "task_id": parent,
-                    "handoff_run_id": handoff.run_id,
                     "handoff_kind": "worker_completed",
                     "verification_state": "approved",
                     "attention": None,
@@ -860,28 +845,9 @@ def test_resolve_handoff_clears_attention_without_releasing_downstream(loop_env)
             ],
         }
     )
-    after = _call({"action": "read", "root_task_id": root, "include_nodes": True})
-
-    conn = kb.connect()
-    try:
-        parent_task = kb.get_task(conn, parent)
-        child_task = kb.get_task(conn, child)
-        durable_handoff = kb.list_loop_handoffs(conn, task_id=parent)[0]
-    finally:
-        conn.close()
-
-    assert patched["ok"] is True
-    assert patched["resolved_handoffs"] == [parent]
-    node = _node_by_task(after, parent)
-    assert node.get("attention") is None
-    assert node["verification_state"] == "approved"
-    assert node["handoff"]["state"] == "approved"
-    assert node["handoff"]["resolution_summary"] == "foreground accepted evidence"
-    assert durable_handoff["state"] == "approved"
-    assert durable_handoff["resolved_at"] is not None
-    assert after["pending_handoffs"] == []
-    assert parent_task is not None and parent_task.status == "done"
-    assert child_task is not None and child_task.status == "todo"
+    assert patched["ok"] is False
+    assert patched["error"] == "validation_failed"
+    assert "no pending Loop handoff" in patched["message"]
 
 
 def test_resolve_handoff_rejects_non_loop_target(loop_env):

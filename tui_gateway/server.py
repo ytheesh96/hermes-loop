@@ -400,75 +400,6 @@ def _set_session_running(session: dict, running: bool) -> None:
         logger.debug("Failed to update active session running state", exc_info=True)
 
 
-def _drain_loop_handoff_review_at_idle(rid, sid: str, session: dict) -> bool:
-    """Claim and run one pending Loop foreground handoff at a true idle boundary.
-
-    Background Kanban dispatchers deliberately leave handoffs for live
-    foreground sessions unclaimed. The owning foreground runtime claims them
-    only after a turn has fully released its busy flag, then immediately
-    reacquires the same session slot before touching the queue. That ordering
-    prevents a separate reviewer subprocess from racing the live UI and keeps a
-    user prompt that arrives first ahead of the handoff.
-    """
-    if not session or session.get("_finalized"):
-        return False
-    agent = session.get("agent")
-    live_session_id = str(
-        getattr(agent, "session_id", None) or session.get("session_key") or sid or ""
-    ).strip()
-    if not live_session_id:
-        return False
-
-    with session["history_lock"]:
-        if session.get("running") or session.get("_finalized"):
-            return False
-        _set_session_running(session, True)
-
-    claimed = False
-
-    def _runner(batch):
-        nonlocal claimed
-        claimed = True
-        from hermes_cli import kanban_db as _kb
-
-        _run_prompt_submit(rid, sid, session, _kb._loop_handoff_review_runner_prompt(batch))
-        return {"ok": True, "outcome": "started", "mode": "foreground_idle_boundary"}
-
-    try:
-        from hermes_cli import kanban_db as _kb
-
-        db = _get_db()
-        if db is None:
-            return False
-        with _kb.connect() as conn:
-            batch = _kb.run_next_loop_handoff_review_batch(
-                conn,
-                session_db=db,
-                required_live_session_id=live_session_id,
-                # We already acquired this session's in-process running slot
-                # above. Treat any other live session as busy so this runtime
-                # cannot steal its foreground handoffs.
-                session_busy=lambda candidate: str(candidate or "") != live_session_id,
-                review_runner=_runner,
-            )
-        return bool(batch)
-    except Exception as exc:
-        print(
-            f"[tui_gateway] foreground handoff drain failed: "
-            f"{type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        try:
-            _emit("error", sid, {"message": f"foreground handoff drain failed: {exc}"})
-        except Exception:
-            pass
-        return False
-    finally:
-        if not claimed:
-            with session["history_lock"]:
-                _set_session_running(session, False)
-
-
 def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> None:
     """Best-effort finalize hook + memory commit for a session.
 
@@ -7448,13 +7379,6 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 )
                 with session["history_lock"]:
                     _set_session_running(session, False)
-
-        # Drain one pending Loop foreground handoff only after this session is
-        # quiescent. If a user or goal continuation already took the running
-        # slot, the handoff remains queued for the next idle boundary.
-        if not goal_followup:
-            if _drain_loop_handoff_review_at_idle(rid, sid, session):
-                return
 
         # Drain completion notifications that arrived during this turn.
         # The background poller handles between-turn delivery; this is

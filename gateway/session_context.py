@@ -215,3 +215,9 @@ def get_logical_session_id(default: Any = "") -> Any:
         or get_session_env("HERMES_SESSION_ID")
         or default
     )
+
+
+def reset_session_vars_for_tests() -> None:
+    """Reset session ContextVars so tests fall back to process env again."""
+    for var in _VAR_MAP.values():
+        var.set(_UNSET)

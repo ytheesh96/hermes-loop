@@ -205,7 +205,7 @@ def test_show_explicit_task_id(worker_env):
     assert d["task"]["id"] == other
 
 
-def test_request_decision_tool_records_loop_handoff_visible_in_show(worker_env):
+def test_request_decision_tool_records_plain_decision_event(worker_env):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
@@ -224,16 +224,14 @@ def test_request_decision_tool_records_loop_handoff_visible_in_show(worker_env):
     }))
 
     assert out["ok"] is True
-    assert out["handoff_kind"] == "worker_decision_requested"
-    assert out["handoff_id"]
+    assert out["state"] == "decision_requested"
+    assert out["source_event_id"]
 
     show = json.loads(kt._handle_show({}))
-    handoffs = show["loop_handoffs"]
-    assert len(handoffs) == 1
-    assert handoffs[0]["id"] == out["handoff_id"]
-    assert handoffs[0]["handoff_kind"] == "worker_decision_requested"
-    assert handoffs[0]["worker_metadata"]["decision_request"] is True
-    assert handoffs[0]["worker_metadata"]["question"] == "Which implementation path should this worker take?"
+    assert show["loop_handoffs"] == []
+    events = [event for event in show["events"] if event["kind"] == "loop_decision_requested"]
+    assert len(events) == 1
+    assert events[0]["payload"]["question"] == "Which implementation path should this worker take?"
 
 
 def test_worker_exit_tools_route_to_orchestrator_review(worker_env):
@@ -817,7 +815,7 @@ def test_block_accepts_summary_and_metadata(worker_env):
     out = kt._handle_block({
         "reason": "rollout window decision is unresolved",
         "summary": "rollout window decision needed",
-        "metadata": {"foreground_handoff": True, "handoff_kind": "blocked_waiting"},
+        "metadata": {"blocker_kind": "rollout_window"},
     })
     d = json.loads(out)
     assert d["ok"] is True
@@ -828,8 +826,8 @@ def test_block_accepts_summary_and_metadata(worker_env):
         assert run is not None
         assert run.outcome == "review_requested"
         assert run.summary == "rollout window decision needed"
-        assert run.metadata["foreground_handoff"] is True
-        assert run.metadata["handoff_kind"] == "blocked_waiting"
+        assert run.metadata is not None
+        assert run.metadata["blocker_kind"] == "rollout_window"
         assert run.metadata["blocker_triage"] is True
     finally:
         conn.close()
@@ -841,7 +839,7 @@ def test_block_rejects_non_dict_metadata(worker_env):
     assert "metadata must be an object/dict" in json.loads(out).get("error", "")
 
 
-def test_block_schema_exposes_structured_handoff_fields():
+def test_block_schema_exposes_structured_blocker_fields():
     from tools import kanban_tools as kt
 
     props = kt.KANBAN_BLOCK_SCHEMA["parameters"]["properties"]
@@ -1572,9 +1570,9 @@ def test_kanban_guidance_in_worker_prompt(monkeypatch, tmp_path):
     assert "kanban_block" in prompt
     assert "kanban_create" in prompt
     assert "State concrete blocker" in prompt
-    assert "do not classify it as user, foreground, or orchestrator" in prompt
+    assert "do not classify it as user or orchestrator" in prompt
     assert "orchestrator blocker triage" in prompt
-    assert "foreground review decides if user input is required" in prompt
+    assert "the orchestrator/operator decides whether user input is required" in prompt
     # Anti-shell guidance
     assert "Do not shell out" in prompt or "tools — they work" in prompt
 

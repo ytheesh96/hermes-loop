@@ -159,7 +159,7 @@ If a `kanban_create` call fails (exception, tool_error), the card was NOT create
 
 Bad: `"stuck"` — the reviewer/orchestrator has no context.
 
-Good: one sentence naming the specific unresolved blocker. Leave longer context as a comment instead. Do not pre-label a block as `needs-user`; foreground review decides whether the user is actually required.
+Good: one sentence naming the specific unresolved blocker. Leave longer context as a comment instead. Do not pre-label a block as `needs-user`; the orchestrator/operator decides whether the user is actually required.
 
 ```python
 kanban_comment(
@@ -197,7 +197,7 @@ You can configure the gateway to receive cross-profile Kanban task notifications
 ## Do NOT
 
 - Call `delegate_task` as a substitute for `kanban_create`. `delegate_task` is for short reasoning subtasks inside YOUR run; `kanban_create` is for cross-agent handoffs that outlive one API loop.
-- Call `clarify` to ask the human a question. You are running headless — there is no live user to answer. The call will time out (default ~120s) and the task will sit silently in `running` with no signal that it is blocked. Use `kanban_comment` (context) + `kanban_block(reason=...)` (concrete blocker) instead — the task surfaces on the board as blocked, and the orchestrator/foreground reviewer decides whether it can resolve, route follow-up work, or escalate to the user.
+- Call `clarify` to ask the human a question. You are running headless — there is no live user to answer. The call will time out (default ~120s) and the task will sit silently in `running` with no signal that it is blocked. Use `kanban_comment` (context) + `kanban_block(reason=...)` (concrete blocker) instead — the task surfaces on the board as blocked, and the orchestrator/operator decides whether it can resolve, route follow-up work, or escalate to the user.
 - Modify files outside `$HERMES_KANBAN_WORKSPACE` unless the task body says to.
 - Create follow-up tasks assigned to yourself — assign to the right specialist.
 - Complete a task you didn't actually finish. Block it instead.

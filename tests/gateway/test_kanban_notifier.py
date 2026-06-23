@@ -82,9 +82,7 @@ def _unseen_terminal_events(tid):
         conn.close()
 
 
-def test_gateway_dispatcher_claims_loop_handoff_review_batch(tmp_path, monkeypatch):
-    from hermes_state import SessionDB
-
+def test_gateway_dispatcher_does_not_start_removed_loop_handoff_review_batch(tmp_path, monkeypatch):
     db_path = tmp_path / "dispatcher-loop-review.db"
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
@@ -122,19 +120,13 @@ def test_gateway_dispatcher_claims_loop_handoff_review_batch(tmp_path, monkeypat
     runner = _make_runner(RecordingAdapter())
     asyncio.run(_run_one_dispatcher_tick(monkeypatch, runner))
 
-    session_db = SessionDB()
     with kb.connect() as conn:
-        handoff = kb.list_loop_handoffs(conn, task_id=task_id)[0]
+        handoffs = kb.list_loop_handoffs(conn, task_id=task_id)
         events = [event for event in kb.list_events(conn, task_id) if event.kind == "loop_handoff_review_session"]
-        messages = session_db.get_messages(handoff["reviewer_session_id"])
 
-    assert handoff["state"] == "assigned"
-    assert handoff["reviewer_session_id"] == kb.loop_handoff_reviewer_session_id("tenant-a", "t_looproot")
-    assert handoff["review_run_id"] is not None
-    assert events and events[-1].payload["source_run_id"] == handoff["run_id"]
-    assert messages and "kanban_loop_handoff_review_batch" in messages[0]["content"]
-    assert started_review_runs
-    assert started_review_runs[0]["batch"]["reviewer_session_id"] == handoff["reviewer_session_id"]
+    assert handoffs == []
+    assert events == []
+    assert started_review_runs == []
 
 
 def test_kanban_notifier_dedupes_board_slugs_pointing_to_same_db(tmp_path, monkeypatch):
@@ -154,6 +146,38 @@ def test_kanban_notifier_dedupes_board_slugs_pointing_to_same_db(tmp_path, monke
     assert len(adapter.sent) == 1
     assert "Kanban" in adapter.sent[0]["text"]
     assert tid in adapter.sent[0]["text"]
+
+
+def test_loop_blocked_task_reenters_origin_subscription(tmp_path, monkeypatch):
+    db_path = tmp_path / "loop-blocked-reentry.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="loop root", assignee="orchestrator", tenant="tenant-a")
+        tid = kb.create_task(
+            conn,
+            title="loop worker",
+            assignee="worker",
+            created_by=f"loop:{root}",
+            tenant="tenant-a",
+        )
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
+        assert kb.claim_task(conn, tid, claimer="worker:1") is not None
+        assert kb.block_task(conn, tid, reason="missing production credentials")
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    text = adapter.sent[0]["text"]
+    assert "blocked" in text.lower()
+    assert tid in text
+    assert "missing production credentials" in text
 
 
 def test_kanban_notifier_claim_prevents_second_watcher_send(tmp_path, monkeypatch):

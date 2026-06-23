@@ -16,7 +16,6 @@ from hermes_cli import kanban_db as kb
 
 LOOP_EVENT_KIND = "loop_mutation"
 LOOP_NODE_EVENT_KIND = "loop_node_state"
-LOOP_HANDOFF_EVENT_KIND = "loop_foreground_handoff"
 LOOP_HANDOFF_RESOLUTION_EVENT_KIND = "loop_foreground_handoff_resolution"
 _SAFE_MUTATION_STATUSES = {"triage"}
 _DONE_LIKE = {"done", "archived"}
@@ -327,56 +326,7 @@ def _durable_handoff_payloads_for_tasks(
     task_ids: set[str],
     root_task_id: str,
 ) -> dict[str, dict[str, Any]]:
-    if not task_ids:
-        return {}
-    placeholders = ",".join("?" for _ in task_ids)
-    try:
-        rows = conn.execute(
-            f"""
-            SELECT *
-              FROM loop_handoffs
-             WHERE root_task_id = ?
-               AND task_id IN ({placeholders})
-             ORDER BY updated_at ASC, id ASC
-            """,
-            (root_task_id, *task_ids),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return {}
-    payloads: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        handoff = kb._loop_handoff_row_to_dict(row)
-        task_id = handoff["task_id"]
-        payloads[task_id] = {
-            "handoff_id": handoff["id"],
-            "root_task_id": handoff["root_task_id"],
-            "task_id": task_id,
-            "run_id": handoff.get("run_id"),
-            "source_event_id": handoff.get("source_event_id"),
-            "handoff_kind": handoff.get("handoff_kind"),
-            "state": handoff.get("state"),
-            "attention": handoff.get("attention"),
-            "verification_state": handoff.get("verification_state"),
-            "worker_profile": handoff.get("worker_profile"),
-            "worker_session_id": handoff.get("worker_session_id"),
-            "originating_session_id": handoff.get("originating_session_id"),
-            "summary": handoff.get("summary"),
-            "reason": handoff.get("reason"),
-            "artifacts": handoff.get("artifacts", []),
-            "changed_files": handoff.get("changed_files", []),
-            "created_cards": handoff.get("created_cards", []),
-            "review_task_id": handoff.get("review_task_id"),
-            "review_run_id": handoff.get("review_run_id"),
-            "reviewer_session_id": handoff.get("reviewer_session_id"),
-            "review_batch_id": handoff.get("review_batch_id"),
-            "decision_actor": handoff.get("decision_actor"),
-            "decision_reason": handoff.get("decision_reason"),
-            "resolution_summary": handoff.get("resolution_summary"),
-            "created_at": handoff.get("created_at"),
-            "updated_at": handoff.get("updated_at"),
-            "resolved_at": handoff.get("resolved_at"),
-        }
-    return payloads
+    return {}
 
 
 def _latest_handoffs_for_tasks(
@@ -384,33 +334,7 @@ def _latest_handoffs_for_tasks(
     task_ids: set[str],
     root_task_id: str,
 ) -> dict[str, dict[str, Any]]:
-    if not task_ids:
-        return {}
-    placeholders = ",".join("?" for _ in task_ids)
-    rows = conn.execute(
-        f"""
-        SELECT task_id, kind, payload, run_id
-          FROM task_events
-         WHERE task_id IN ({placeholders})
-           AND kind IN (?, ?)
-         ORDER BY id ASC
-        """,
-        (*task_ids, LOOP_HANDOFF_EVENT_KIND, LOOP_HANDOFF_RESOLUTION_EVENT_KIND),
-    ).fetchall()
-    handoffs: dict[str, dict[str, Any]] = _durable_handoff_payloads_for_tasks(conn, task_ids, root_task_id)
-    for row in rows:
-        payload = _event_payload(row)
-        if payload.get("root_task_id") != root_task_id:
-            continue
-        task_id = row["task_id"]
-        if row["kind"] == LOOP_HANDOFF_EVENT_KIND:
-            if task_id not in handoffs:
-                handoffs[task_id] = dict(payload)
-        elif row["kind"] == LOOP_HANDOFF_RESOLUTION_EVENT_KIND:
-            current = dict(handoffs.get(task_id, {}))
-            current.update(payload)
-            handoffs[task_id] = current
-    return handoffs
+    return {}
 
 
 def latest_handoff_for_task(
@@ -418,7 +342,7 @@ def latest_handoff_for_task(
     task_id: str,
     root_task_id: str,
 ) -> Optional[dict[str, Any]]:
-    """Return compact latest Loop foreground handoff state for one task."""
+    """Compatibility shim; foreground handoff state is no longer surfaced."""
     payload = _latest_handoffs_for_tasks(conn, {task_id}, root_task_id).get(task_id)
     return _compact_handoff(task_id, payload) if payload else None
 

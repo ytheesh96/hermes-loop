@@ -666,17 +666,13 @@ function LoopCollapsedAttentionQueue({
 }
 
 interface LoopTaskStackProps {
-  onRefresh?: () => void
   onSelectTaskId: (taskId: string) => void
-  refreshing?: boolean
   selectedTaskId?: null | string
   state: LoopPanelState | null
 }
 
 export function LoopTaskStack({
-  onRefresh,
   onSelectTaskId,
-  refreshing = false,
   selectedTaskId,
   state
 }: LoopTaskStackProps) {
@@ -690,21 +686,6 @@ export function LoopTaskStack({
 
   return (
     <StatusSection
-      accessory={
-        onRefresh ? (
-          <Button
-            aria-label="Refresh Loop tasks"
-            disabled={refreshing}
-            onClick={onRefresh}
-            size="micro"
-            title="Refresh Loop tasks"
-            type="button"
-            variant="text"
-          >
-            {refreshing ? 'Refreshing…' : 'Refresh'}
-          </Button>
-        ) : null
-      }
       collapsedContent={
         <LoopCollapsedAttentionQueue groups={groups} onSelectTaskId={onSelectTaskId} rows={collapsedAttentionRows} />
       }

@@ -828,18 +828,16 @@ def _handle_request_decision(args: dict, **kw) -> str:
                 metadata=metadata,
                 expected_run_id=_worker_run_id(tid),
             )
-            handoff = result.get("handoff") or {}
             return _ok(
                 task_id=tid,
                 root_task_id=result.get("root_task_id"),
                 run_id=result.get("run_id"),
-                handoff_id=handoff.get("id"),
-                handoff_kind=handoff.get("handoff_kind"),
-                state=handoff.get("state"),
+                source_event_id=result.get("source_event_id"),
+                state="decision_requested",
                 instruction=(
                     "Orchestrator decision requested. Continue only with reversible prep; "
-                    "call kanban_show before committing to the path so you can read "
-                    "decision_actor/decision_reason on the handoff."
+                    "escalate with kanban_request_review if the decision must "
+                    "block this worker."
                 ),
             )
         finally:
@@ -876,7 +874,6 @@ def _request_orchestrator_review_exit(
     routed_metadata.update({
         "exit_kind": exit_kind,
         "handoff_kind": exit_kind,
-        "foreground_handoff": True,
         "orchestrator_handoff": True,
     })
     for key in (
@@ -1656,7 +1653,7 @@ KANBAN_BLOCK_SCHEMA = {
     "description": (
         "Transition the task to blocked because a real unresolved blocker "
         "prevents completion. ``reason`` will be shown on the board and "
-        "included in context when an orchestrator, foreground reviewer, or "
+        "included in context when an orchestrator, reviewer, or "
         "operator routes/unblocks the task. State the concrete blocker; do "
         "not decide whether it needs the user unless the task explicitly "
         "requires that label."
@@ -1674,27 +1671,22 @@ KANBAN_BLOCK_SCHEMA = {
                     "The concrete unresolved blocker in one or two sentences. "
                     "Don't paste the whole conversation; put deeper context "
                     "in a kanban_comment. Avoid labels like needs-user; "
-                    "foreground review decides if user input is required."
+                    "orchestrator review decides if user input is required."
                 ),
             },
             "summary": {
                 "type": "string",
                 "description": (
-                    "Optional structured handoff summary for durable Loop "
-                    "handoffs. For ordinary blocks, omit this and put deeper "
+                    "Optional structured blocker summary. For ordinary blocks, omit this and put deeper "
                     "context in a kanban_comment."
                 ),
             },
             "metadata": {
                 "type": "object",
                 "description": (
-                    "Optional structured facts for the blocked handoff/run. "
-                    "Does not wake the foreground agent unless paired with "
-                    "foreground_handoff=true and an allowed handoff_kind or "
-                    "escalation_kind, or unless the reason uses a legacy "
-                    "foreground boundary prefix. For neutral Loop blockers "
-                    "that should be reviewed without pre-classifying user "
-                    "need, prefer handoff_kind=blocked_waiting."
+                    "Optional structured facts for the blocked run. "
+                    "Foreground handoffs are removed; use kanban_request_review "
+                    "or orchestrator blocker triage when a reviewer must act."
                 ),
             },
             "board": _board_schema_prop(),
@@ -1761,7 +1753,7 @@ KANBAN_REQUEST_REVIEW_SCHEMA = {
                 "type": "string",
                 "description": (
                     "Optional downstream session resume mode, for example "
-                    "fork for foreground review sessions."
+                    "fork for review sessions."
                 ),
             },
             "fork": {
@@ -1954,7 +1946,7 @@ KANBAN_RESOLVE_BLOCKER_SCHEMA = {
         "Resolve an orchestrator blocker-triage review for the same task row. "
         "Use only when this task was routed with review_kind='blocker_triage'. "
         "Supported actions: approve_complete, return_to_worker, create_followups, "
-        "route_reviewer_qa, foreground_handoff."
+        "route_reviewer_qa."
     ),
     "parameters": {
         "type": "object",
@@ -1962,7 +1954,7 @@ KANBAN_RESOLVE_BLOCKER_SCHEMA = {
             "task_id": {"type": "string", "description": _DESC_TASK_ID_DEFAULT},
             "action": {
                 "type": "string",
-                "description": "One of approve_complete, return_to_worker, create_followups, route_reviewer_qa, foreground_handoff.",
+                "description": "One of approve_complete, return_to_worker, create_followups, route_reviewer_qa.",
             },
             "reason": {"type": "string", "description": "Concise reason/evidence for the triage decision."},
             "instructions": {"type": "string", "description": "Fix instructions when returning to a worker or creating a visible handoff."},

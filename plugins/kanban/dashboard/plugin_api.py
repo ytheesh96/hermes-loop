@@ -1807,15 +1807,7 @@ class HandoffResolveBody(BaseModel):
 
 @router.get("/loop-handoffs/{handoff_id}")
 def get_loop_handoff_details(handoff_id: int, board: Optional[str] = Query(None)):
-    board = _resolve_board(board)
-    conn = _conn(board=board)
-    try:
-        try:
-            return kanban_db.get_loop_handoff_details(conn, handoff_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc))
-    finally:
-        conn.close()
+    raise HTTPException(status_code=410, detail="Loop foreground handoffs were removed")
 
 
 def _resolve_handoff_response(
@@ -1857,7 +1849,7 @@ def resolve_loop_handoff(
     payload: HandoffResolveBody,
     board: Optional[str] = Query(None),
 ):
-    return _resolve_handoff_response(handoff_id, payload, board=board)
+    raise HTTPException(status_code=410, detail="Loop foreground handoffs were removed")
 
 
 @router.post("/loop-handoffs/{handoff_id}/auto-action")
@@ -1866,26 +1858,7 @@ def review_loop_handoff_auto_action(
     payload: LoopHandoffAutoActionBody,
     board: Optional[str] = Query(None),
 ):
-    board = _resolve_board(board)
-    conn = _conn(board=board)
-    try:
-        try:
-            return kanban_db.review_loop_handoff_autonomous_action(
-                conn,
-                handoff_id,
-                action=payload.action,
-                actor=payload.actor or "dashboard-reviewer",
-                reason=payload.reason,
-                evidence_passed=payload.evidence_passed,
-                prohibited_flags=payload.prohibited_flags,
-                followups=payload.followups,
-                repair_attempts=payload.repair_attempts,
-                max_repair_attempts=kanban_db._LOOP_HANDOFF_REPAIR_LIMIT,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc))
-    finally:
-        conn.close()
+    raise HTTPException(status_code=410, detail="Loop foreground handoffs were removed")
 
 
 # ---------------------------------------------------------------------------

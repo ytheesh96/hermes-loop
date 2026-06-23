@@ -1825,34 +1825,6 @@ describe('LoopPanel', () => {
     expect(screen.queryByText('Ready implementation task')).toBeNull()
   })
 
-  it('offers an explicit refresh affordance for externally-created Loop rows', () => {
-    const state = deriveLoopPanelStateFromTenantSource({
-      session_id: 'sess-refresh',
-      tenant: 'tenant-a',
-      latest_event_id: 111,
-      tasks: [
-        {
-          id: 't_done',
-          title: 'Existing Loop task',
-          status: 'done',
-          tenant: 'tenant-a',
-          included_child_ids: [],
-          included_parent_ids: []
-        }
-      ]
-    })
-
-    const onRefresh = vi.fn()
-    const onSelectTaskId = vi.fn()
-
-    render(<LoopTaskStack onRefresh={onRefresh} onSelectTaskId={onSelectTaskId} state={state} />)
-
-    fireEvent.click(screen.getByRole('button', { name: /refresh loop/i }))
-
-    expect(onRefresh).toHaveBeenCalledTimes(1)
-    expect(onSelectTaskId).not.toHaveBeenCalled()
-  })
-
   it('shows top collapsed handoffs by severity and opens the side panel without dispatching actions', () => {
     const state = collapsedAttentionState()
     const onTaskAction = vi.fn()

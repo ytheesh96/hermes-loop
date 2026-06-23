@@ -264,8 +264,8 @@ def test_decompose_loop_child_triage_children_inherit_real_root_session(kanban_h
     ]
 
 
-def test_legacy_foreground_decomposed_root_completion_records_loop_handoff(kanban_home):
-    """Legacy foreground decomposed roots still emit final Loop handoffs."""
+def test_legacy_foreground_decomposed_root_completion_skips_loop_handoff(kanban_home):
+    """Legacy foreground decomposed roots now complete without foreground handoffs."""
     with kb.connect() as conn:
         root_id = kb.create_task(
             conn,
@@ -299,19 +299,12 @@ def test_legacy_foreground_decomposed_root_completion_records_loop_handoff(kanba
             if event.kind == "loop_foreground_handoff"
         ]
 
-    assert len(handoffs) == 1
-    assert handoffs[0]["handoff_kind"] == "worker_completed"
-    assert handoffs[0]["root_task_id"] == root_id
-    assert handoffs[0]["task_id"] == root_id
-    assert handoffs[0]["state"] == "queued"
-    assert len(events) == 1
-    assert events[0].payload is not None
-    assert events[0].payload["root_task_id"] == root_id
-    assert events[0].payload["handoff_kind"] == "worker_completed"
+    assert handoffs == []
+    assert events == []
 
 
-def test_legacy_foreground_decomposed_child_explicit_block_uses_same_root(kanban_home):
-    """Explicit child review boundaries retain the decomposed foreground root."""
+def test_legacy_foreground_decomposed_child_explicit_block_stays_plain_blocker(kanban_home):
+    """Explicit child review boundaries no longer create foreground handoffs."""
     with kb.connect() as conn:
         root_id = kb.create_task(
             conn,
@@ -342,18 +335,12 @@ def test_legacy_foreground_decomposed_child_explicit_block_uses_same_root(kanban
             if event.kind == "loop_foreground_handoff"
         ]
 
-    assert len(handoffs) == 1
-    assert handoffs[0]["handoff_kind"] == "worker_blocked"
-    assert handoffs[0]["root_task_id"] == root_id
-    assert handoffs[0]["task_id"] == child_id
-    assert handoffs[0]["reason"] == "review-required: inspect implementation"
-    assert len(events) == 1
-    assert events[0].payload is not None
-    assert events[0].payload["root_task_id"] == root_id
+    assert handoffs == []
+    assert events == []
 
 
-def test_loop_handoff_source_event_id_keeps_recording_idempotent(kanban_home):
-    """Duplicate source-event retries return the existing durable handoff row."""
+def test_loop_handoff_recording_is_noop_after_removal(kanban_home):
+    """Legacy recording helper no longer persists foreground handoff rows."""
     with kb.connect() as conn:
         root_id = kb.create_task(
             conn,
@@ -393,9 +380,8 @@ def test_loop_handoff_source_event_id_keeps_recording_idempotent(kanban_home):
         )
         handoffs = kb.list_loop_handoffs(conn, task_id=root_id)
 
-    assert len(handoffs) == 1
-    assert first["id"] == second["id"] == handoffs[0]["id"]
-    assert handoffs[0]["summary"] == "first evidence wins"
+    assert first == second == {}
+    assert handoffs == []
 
 
 def test_decompose_non_loop_children_keep_author_provenance(kanban_home):

@@ -4041,7 +4041,7 @@ def test_resolve_blocker_triage_routes_to_reviewer_qa(kanban_home):
     assert run.outcome == "review_requested"
 
 
-def test_resolve_blocker_triage_foreground_handoff_attaches_to_same_task(kanban_home):
+def test_resolve_blocker_triage_rejects_removed_foreground_handoff_action(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="blocked implementation", assignee="worker-a")
         assert kb.request_review_task(
@@ -4050,28 +4050,27 @@ def test_resolve_blocker_triage_foreground_handoff_attaches_to_same_task(kanban_
             reviewer="orchestrator",
             review_kind="blocker_triage",
             review_subject_assignee="worker-a",
-            reason="needs foreground handoff",
+            reason="needs orchestrator judgment",
         )
         claimed = kb.claim_review_task(conn, t)
         assert claimed is not None
-        result = kb.resolve_blocker_triage_task(
-            conn,
-            t,
-            action="foreground_handoff",
-            actor="orchestrator",
-            reason="product priority decision required",
-            metadata={"handoff_kind": "product_decision"},
-            expected_run_id=claimed.current_run_id,
-        )
+        with pytest.raises(ValueError, match="unsupported blocker triage action 'foreground_handoff'"):
+            kb.resolve_blocker_triage_task(
+                conn,
+                t,
+                action="foreground_handoff",
+                actor="orchestrator",
+                reason="product priority decision required",
+                metadata={"handoff_kind": "product_decision"},
+                expected_run_id=claimed.current_run_id,
+            )
         task = kb.get_task(conn, t)
         run = kb.latest_run(conn, t)
 
-    assert result["ok"] is True
-    assert result["outcome"] == "foreground_handoff"
-    assert task.status == "blocked"
-    assert run.outcome == "blocked"
-    assert run.metadata["foreground_handoff"] is True
-    assert run.metadata["handoff_kind"] == "product_decision"
+    assert task is not None
+    assert run is not None
+    assert task.status == "running"
+    assert run.ended_at is None
 
 
 def test_link_tasks_rejects_review_required_parent_to_reviewer_child(kanban_home):

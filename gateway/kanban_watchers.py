@@ -921,29 +921,6 @@ class GatewayKanbanWatchersMixin:
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
                 )
-                try:
-                    review_batch = _kb.run_next_loop_handoff_review_batch(
-                        conn,
-                        session_busy=_foreground_session_busy,
-                        defer_live_foreground=True,
-                        review_runner=lambda batch: _kb.start_loop_handoff_review_process(batch, board=slug),
-                    )
-                except Exception:
-                    logger.exception(
-                        "kanban dispatcher: loop handoff review execution failed on board %s",
-                        slug,
-                    )
-                else:
-                    if review_batch:
-                        runner_result = review_batch.get("runner_result") or {}
-                        logger.info(
-                            "kanban dispatcher: claimed %d loop handoff(s) for tenant=%s root=%s into review session %s and started reviewer run pid=%s",
-                            len(review_batch.get("handoffs") or []),
-                            review_batch.get("tenant"),
-                            review_batch.get("root_task_id"),
-                            review_batch.get("reviewer_session_id"),
-                            runner_result.get("pid"),
-                        )
                 return result
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):

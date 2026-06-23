@@ -192,7 +192,6 @@ BLOCKER_TRIAGE_ACTIONS = {
     "return_to_worker",
     "create_followups",
     "route_reviewer_qa",
-    "foreground_handoff",
 }
 
 
@@ -833,8 +832,8 @@ class Task:
     # relying on tenant + time-window heuristics.
     session_id: Optional[str] = None
     # Review-lane routing metadata. Ordinary QA review leaves these NULL;
-    # orchestrator/foreground review paths use them to distinguish why the
-    # row is in status='review' and how downstream session code should resume.
+    # orchestrator/review paths use them to distinguish why the row is in
+    # status='review' and how downstream session code should resume.
     review_kind: Optional[str] = None
     resume_mode: Optional[str] = None
     review_subject_assignee: Optional[str] = None
@@ -3165,16 +3164,8 @@ def _should_emit_loop_foreground_handoff(
     reason: Optional[str] = None,
     metadata: Optional[dict[str, Any]] = None,
 ) -> bool:
-    """Central Loop foreground wakeup predicate for completion/block paths."""
-    root_task_id = str(root_task_id or _loop_root_for_task(conn, task_id) or "").strip()
-    if not root_task_id:
-        return False
-    if _is_loop_root_handoff_source(conn, task_id, root_task_id):
-        return True
-    return handoff_kind == "worker_blocked" and (
-        _is_explicit_loop_foreground_boundary_reason(reason)
-        or _is_explicit_loop_foreground_boundary_metadata(metadata)
-    )
+    """Foreground handoffs were removed; Loop completion uses notify/reentry."""
+    return False
 
 
 _LOOP_HANDOFF_ACTIVE_STATES = {"assigned", "reviewing"}
@@ -3477,102 +3468,8 @@ def _record_loop_handoff(
     metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
-    """Create the durable Loop handoff row for a worker completion/block.
-
-    The row is idempotent by source event when available and by the stable
-    ``root/task/run/kind`` tuple otherwise. Existing rows are returned without
-    overwriting reviewer or proof-packet state, so duplicate watcher triggers do
-    not duplicate reviews or erase the original evidence.
-    """
-    task_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    if task_row is None:
-        raise ValueError(f"task {task_id} not found")
-    now = int(time.time())
-    tenant = task_row["tenant"] or root_task_id
-    md = metadata if isinstance(metadata, dict) else {}
-    artifacts = [str(p).strip() for p in _json_list(md.get("artifacts")) if str(p).strip()]
-    changed_files = [str(p).strip() for p in _json_list(md.get("changed_files")) if str(p).strip()]
-    cards = [str(card).strip() for card in (created_cards or []) if str(card).strip()]
-    worker_session_id = md.get("worker_session_id")
-    if not isinstance(worker_session_id, str) or not worker_session_id.strip():
-        worker_session_id = None
-    else:
-        worker_session_id = worker_session_id.strip()
-    originating_session_id = md.get("originating_session_id")
-    if not isinstance(originating_session_id, str) or not originating_session_id.strip():
-        originating_session_id = (
-            task_row["session_id"] if "session_id" in task_row.keys() else None
-        )
-    else:
-        originating_session_id = originating_session_id.strip()
-    parent_ids_snapshot = parent_ids(conn, task_id)
-    child_ids_snapshot = child_ids(conn, task_id)
-    parent_snapshot = _task_state_snapshot(conn, parent_ids_snapshot)
-    child_snapshot = _task_state_snapshot(conn, child_ids_snapshot)
-    intent = _infer_handoff_intent(handoff_kind, md, reason)
-    target_actor = _infer_handoff_target_actor(handoff_kind, intent, md, reason)
-    payload = _build_handoff_payload(
-        summary=summary,
-        reason=reason,
-        worker_metadata=md,
-        artifacts=artifacts,
-        changed_files=changed_files,
-        created_cards=cards,
-        parent_state_snapshot=parent_snapshot,
-        child_state_snapshot=child_snapshot,
-    )
-    key = _loop_handoff_idempotency_key(
-        root_task_id=root_task_id,
-        task_id=task_id,
-        run_id=run_id,
-        source_event_id=source_event_id,
-        handoff_kind=handoff_kind,
-    )
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO loop_handoffs (
-            idempotency_key, root_task_id, tenant, task_id, run_id, source_event_id,
-            handoff_kind, intent, target_actor, state, attention, verification_state, verification_status,
-            worker_profile, worker_session_id, originating_session_id, task_title,
-            task_body, summary, reason, worker_metadata_json, payload_json, artifacts_json,
-            changed_files_json, created_cards_json, parent_state_snapshot_json,
-            child_state_snapshot_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'needs-orchestrator',
-                  'needs-orchestrator', 'unknown', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            key,
-            root_task_id,
-            tenant,
-            task_id,
-            run_id,
-            source_event_id,
-            handoff_kind,
-            intent,
-            target_actor,
-            task_row["assignee"],
-            worker_session_id,
-            originating_session_id,
-            task_row["title"],
-            task_row["body"],
-            summary,
-            reason,
-            json.dumps(md, ensure_ascii=False) if md else None,
-            json.dumps(payload, ensure_ascii=False) if payload else None,
-            json.dumps(artifacts, ensure_ascii=False),
-            json.dumps(changed_files, ensure_ascii=False),
-            json.dumps(cards, ensure_ascii=False),
-            json.dumps(parent_snapshot, ensure_ascii=False),
-            json.dumps(child_snapshot, ensure_ascii=False),
-            now,
-            now,
-        ),
-    )
-    row = conn.execute(
-        "SELECT * FROM loop_handoffs WHERE idempotency_key = ?",
-        (key,),
-    ).fetchone()
-    return _loop_handoff_row_to_dict(row)
+    """No-op compatibility shim: foreground Loop handoffs were removed."""
+    return {}
 
 
 def list_loop_handoffs(
@@ -3583,27 +3480,8 @@ def list_loop_handoffs(
     state: Optional[str] = None,
     task_id: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Return durable Loop handoffs filtered by root/tenant/state/task."""
-    clauses: list[str] = []
-    args: list[Any] = []
-    if root_task_id is not None:
-        clauses.append("root_task_id = ?")
-        args.append(root_task_id)
-    if tenant is not None:
-        clauses.append("tenant = ?")
-        args.append(tenant)
-    if state is not None:
-        clauses.append("state = ?")
-        args.append(state)
-    if task_id is not None:
-        clauses.append("task_id = ?")
-        args.append(task_id)
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
-    rows = conn.execute(
-        "SELECT * FROM loop_handoffs" + where + " ORDER BY created_at ASC, id ASC",
-        args,
-    ).fetchall()
-    return [_loop_handoff_row_to_dict(row) for row in rows]
+    """Return no foreground handoffs; the foreground handoff system is removed."""
+    return []
 
 
 def request_loop_foreground_decision(
@@ -3668,8 +3546,6 @@ def request_loop_foreground_decision(
         md = dict(metadata or {})
         md.update(
             {
-                "foreground_handoff": True,
-                "handoff_kind": "decision_request",
                 "decision_request": True,
                 "question": question_text,
                 "options": clean_options,
@@ -3917,60 +3793,8 @@ def claim_loop_handoff_batch(
     limit: int = 10,
     batch_id: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Assign a dependency-ordered handoff batch for one tenant/root.
-
-    This is the scheduler's serialization primitive: if any handoff for the
-    tenant/root is already assigned/reviewing, no new foreground reviewer is
-    activated. Different roots may claim independently.
-    """
-    limit = max(1, int(limit or 1))
-    reviewer_session_id = str(reviewer_session_id or "").strip()
-    if not reviewer_session_id:
-        raise ValueError("reviewer_session_id is required")
-    batch_id = batch_id or f"loop-review:{tenant}:{root_task_id}:{int(time.time())}"
-    with write_txn(conn):
-        now = int(time.time())
-        _supersede_resolved_worker_block_handoffs_for_scope(
-            conn,
-            tenant=tenant,
-            root_task_id=root_task_id,
-            now=now,
-        )
-        active = conn.execute(
-            "SELECT 1 FROM loop_handoffs WHERE tenant = ? AND root_task_id = ? "
-            "AND state IN ('assigned', 'reviewing') "
-            "AND COALESCE(verification_state, '') != 'followups-created' LIMIT 1",
-            (tenant, root_task_id),
-        ).fetchone()
-        if active:
-            return []
-        rows = conn.execute(
-            "SELECT * FROM loop_handoffs WHERE tenant = ? AND root_task_id = ? "
-            "AND state IN ('recorded', 'queued', 'batched') ORDER BY created_at ASC, id ASC",
-            (tenant, root_task_id),
-        ).fetchall()
-        if not rows:
-            return []
-        depths = _loop_handoff_dependency_depths(conn, {row["task_id"] for row in rows})
-        ordered = sorted(rows, key=lambda row: (depths.get(row["task_id"], 0), row["created_at"], row["id"]))[:limit]
-        ids = [int(row["id"]) for row in ordered]
-        placeholders = ",".join("?" for _ in ids)
-        conn.execute(
-            f"UPDATE loop_handoffs SET state = 'assigned', reviewer_session_id = ?, "
-            f"review_batch_id = ?, claimed_by = ?, claimed_at = COALESCE(claimed_at, ?), "
-            f"started_at = COALESCE(started_at, ?), updated_at = ? "
-            f"WHERE id IN ({placeholders}) AND state IN ('recorded', 'queued', 'batched')",
-            (reviewer_session_id, batch_id, reviewer_session_id, now, now, now, *ids),
-        )
-        claimed = conn.execute(
-            f"SELECT * FROM loop_handoffs WHERE id IN ({placeholders}) ORDER BY id ASC",
-            ids,
-        ).fetchall()
-    claimed_by_id = {int(row["id"]): _loop_handoff_row_to_dict(row) for row in claimed}
-    out = [claimed_by_id[i] for i in ids if i in claimed_by_id]
-    for handoff in out:
-        handoff["proof_packet"] = build_loop_handoff_proof_packet(conn, handoff["id"])
-    return out
+    """Disabled compatibility shim for removed Loop foreground handoff reviews."""
+    return []
 
 
 _LOOP_HANDOFF_REVIEW_SOURCE = "kanban-loop-review"
@@ -4268,160 +4092,13 @@ def claim_next_loop_handoff_review_batch(
     defer_live_foreground: bool = False,
     required_live_session_id: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
-    """Scheduler entrypoint: claim one queued Loop handoff batch into a review session.
-
-    This is the production caller for ``claim_loop_handoff_batch``. It routes
-    the compact proof-packet message back into the live originating foreground
-    session when possible; otherwise it creates/resumes a deterministic
-    tenant-review session. It audits the source task events with the reviewer
-    session id plus the injected message id (stored as ``review_run_id`` for
-    this foreground-review run).
-    """
-    for scope in _pending_loop_handoff_review_scopes(conn):
-        tenant = str(scope.get("tenant") or scope["root_task_id"])
-        root_task_id = scope["root_task_id"]
-        target = _loop_handoff_review_target(
-            conn,
-            tenant=tenant,
-            root_task_id=root_task_id,
-            session_db=session_db,
-            session_busy=session_busy,
-            defer_live_foreground=defer_live_foreground,
-            required_live_session_id=required_live_session_id,
-        )
-        if target is None:
-            continue
-        target_session_db, reviewer_session_id, reviewer_profile, review_route = target
-        batch_id = f"loop-review:{tenant or 'default'}:{root_task_id}:{int(time.time())}"
-        handoffs = claim_loop_handoff_batch(
-            conn,
-            tenant=tenant,
-            root_task_id=root_task_id,
-            reviewer_session_id=reviewer_session_id,
-            limit=limit,
-            batch_id=batch_id,
-        )
-        if not handoffs:
-            continue
-
-        message = _render_loop_handoff_review_message(
-            tenant=tenant,
-            root_task_id=root_task_id,
-            batch_id=batch_id,
-            handoffs=handoffs,
-        )
-        review_message_id = target_session_db.append_message(
-            reviewer_session_id,
-            "user",
-            message,
-            observed=True,
-        )
-        try:
-            from hermes_cli import kanban_live_events
-
-            getattr(kanban_live_events, "emit_session_message_appended")(
-                session_id=reviewer_session_id,
-                message_id=review_message_id,
-                role="user",
-                observed=True,
-                reason="loop_handoff_review_batch",
-                profile=reviewer_profile,
-                metadata={
-                    "review_batch_id": batch_id,
-                    "review_route": review_route,
-                    "root_task_id": root_task_id,
-                    "tenant": tenant,
-                },
-            )
-        except Exception:
-            # Live transcript invalidation is best-effort; the SessionDB append
-            # above is authoritative and resume/manual refresh will recover.
-            pass
-        ids = [int(handoff["id"]) for handoff in handoffs]
-        placeholders = ",".join("?" for _ in ids)
-        now = int(time.time())
-        with write_txn(conn):
-            conn.execute(
-                f"UPDATE loop_handoffs SET review_run_id = ?, updated_at = ? WHERE id IN ({placeholders})",
-                (review_message_id, now, *ids),
-            )
-            for handoff in handoffs:
-                payload = {
-                    "handoff_id": handoff["id"],
-                    "root_task_id": root_task_id,
-                    "tenant": tenant,
-                    "reviewer_session_id": reviewer_session_id,
-                    "reviewer_profile": reviewer_profile,
-                    "review_route": review_route,
-                    "review_batch_id": batch_id,
-                    "review_run_id": review_message_id,
-                    "source_run_id": handoff.get("run_id"),
-                    "source_event_id": handoff.get("source_event_id"),
-                }
-                _append_event(
-                    conn,
-                    handoff["task_id"],
-                    "loop_handoff_review_session",
-                    payload,
-                    run_id=handoff.get("run_id"),
-                )
-        refreshed = list_loop_handoffs(conn, tenant=tenant, root_task_id=root_task_id, state="assigned")
-        refreshed_by_id = {int(handoff["id"]): handoff for handoff in refreshed}
-        original_by_id = {int(handoff["id"]): handoff for handoff in handoffs}
-        ordered = []
-        for pos, i in enumerate(ids):
-            row = dict(refreshed_by_id.get(i, handoffs[pos]))
-            if i in original_by_id and "proof_packet" in original_by_id[i]:
-                row["proof_packet"] = original_by_id[i]["proof_packet"]
-            ordered.append(row)
-        return {
-            "ok": True,
-            "tenant": tenant,
-            "root_task_id": root_task_id,
-            "reviewer_session_id": reviewer_session_id,
-            "reviewer_profile": reviewer_profile,
-            "review_route": review_route,
-            "review_batch_id": batch_id,
-            "review_message_id": review_message_id,
-            "handoffs": ordered,
-        }
+    """Disabled: foreground Loop handoff review lanes were removed."""
     return None
 
 
 def _loop_handoff_review_runner_prompt(batch: dict[str, Any]) -> str:
-    """Return the explicit turn prompt used to resume a foreground reviewer.
-
-    The minimal Handoff-A transcript card is already in the resumed session
-    history as an observed user message. This prompt starts a real turn in
-    that same session without duplicating hidden handoff payloads into
-    argv/process listings.
-    """
-    return (
-        "Process the queued kanban_loop_handoff_review_batch already present "
-        "in this resumed foreground review session. Treat the transcript "
-        "cards as minimal visible artifacts only; use their payload_ref values "
-        "or the Loop/Kanban drawer/API to fetch full handoff details before "
-        "deciding. Treat worker blocks as neutral unresolved blockers; the "
-        "worker is not responsible for deciding whether the blocker needs the "
-        "user, the foreground agent, or Kanban follow-up work. First decide "
-        "whether the blocker can be resolved safely by foreground review or "
-        "by creating safe Kanban follow-ups. Escalate to the user only when "
-        "the reviewed blocker truly requires user input, a product decision, "
-        "sensitive data, external side effects, or ambiguous acceptance "
-        "criteria. Resolve each reviewed payload_ref through the durable Loop "
-        "handoff action API, such as "
-        "hermes_cli.kanban_db.review_loop_handoff_autonomous_action(...) or "
-        "the Loop/Kanban auto-action endpoint. Do not finish with prose such "
-        "as 'Accepted' unless that durable action returns ok. Take only safe "
-        "Loop handoff reviewer actions: approve_release only when evidence "
-        "passed and no prohibited flags apply; otherwise escalate or create "
-        "safe follow-ups. Escalate instead of acting on any destructive, "
-        "external, secret, privacy-sensitive, or ambiguous step.\n\n"
-        f"Review batch id: {batch.get('review_batch_id')}\n"
-        f"Tenant: {batch.get('tenant') or 'default'}\n"
-        f"Root task: {batch.get('root_task_id')}\n"
-        f"Handoffs: {len(batch.get('handoffs') or [])}"
-    )
+    """Compatibility prompt for removed Loop handoff review sessions."""
+    return "Loop foreground handoff review lanes were removed. No action is required."
 
 
 def _append_loop_handoff_review_run_events(
@@ -4473,59 +4150,17 @@ def run_next_loop_handoff_review_batch(
     required_live_session_id: Optional[str] = None,
     review_runner: Any,
 ) -> Optional[dict[str, Any]]:
-    """Claim one queued Loop handoff batch and execute its reviewer runner.
-
-    ``claim_next_loop_handoff_review_batch`` only persists/resumes the stable
-    review session and injects the proof-packet message. This helper is the
-    production bridge that proves the selected runner path was actually invoked
-    for that claimed batch.
-    """
-    if review_runner is None:
-        raise ValueError("review_runner is required")
-    batch = claim_next_loop_handoff_review_batch(
-        conn,
-        session_db=session_db,
-        limit=limit,
-        session_busy=session_busy,
-        defer_live_foreground=defer_live_foreground,
-        required_live_session_id=required_live_session_id,
-    )
-    if not batch:
-        return None
-    try:
-        runner_result = review_runner(batch)
-    except Exception as exc:
-        _append_loop_handoff_review_run_events(conn, batch, error=str(exc))
-        raise
-    if not isinstance(runner_result, dict):
-        runner_result = {"ok": True, "result": runner_result}
-    _append_loop_handoff_review_run_events(conn, batch, runner_result=runner_result)
-    out = dict(batch)
-    out["runner_result"] = runner_result
-    return out
+    """Disabled: foreground Loop handoff review lanes were removed."""
+    return None
 
 
 def _loop_handoff_reviewer_profile() -> str:
-    try:
-        from hermes_cli.config import load_config
-        cfg = load_config()
-        profile = ((cfg.get("kanban") or {}).get("loop_handoff_review_profile") or "").strip()
-        if profile:
-            return profile
-    except Exception:
-        pass
+    """Compatibility default for removed Loop handoff reviewer subprocesses."""
     return "reviewer-qa"
 
 
 def _loop_handoff_reviewer_session_db(profile: Optional[str] = None) -> Any:
-    """Return the SessionDB that the foreground reviewer subprocess will read.
-
-    ``start_loop_handoff_review_process`` launches ``hermes -p <profile>`` and
-    sets that child's ``HERMES_HOME`` to the profile home. The injected review
-    session must therefore be written to the same profile's state.db, otherwise
-    the child exits with ``Session not found`` even though the handoff row was
-    queued correctly.
-    """
+    """Return a SessionDB for legacy callers; review subprocesses are disabled."""
     from hermes_state import SessionDB
 
     profile_arg = (profile or _loop_handoff_reviewer_profile()).strip() or "reviewer-qa"
@@ -4546,68 +4181,12 @@ def start_loop_handoff_review_process(
     board: Optional[str] = None,
     profile: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Start/resume the foreground reviewer session for a claimed batch.
-
-    The gateway dispatcher calls this after claiming a batch. It launches a
-    normal Hermes foreground-reviewer turn against the stable reviewer session
-    id, with kanban board paths pinned in the child environment. The proof
-    packet itself remains in the session DB; argv carries only a compact resume
-    instruction so process listings do not expose artifact/transcript details.
-    """
-    reviewer_session_id = str(batch.get("reviewer_session_id") or "").strip()
-    if not reviewer_session_id:
-        raise ValueError("reviewer_session_id is required")
-    profile_source = profile if profile is not None else batch.get("reviewer_profile")
-    profile_arg = (str(profile_source or _loop_handoff_reviewer_profile()).strip()) or "reviewer-qa"
-    resolve_profile_env = None
-    try:
-        from hermes_cli.profiles import normalize_profile_name, resolve_profile_env as _resolve_profile_env
-        profile_arg = normalize_profile_name(profile_arg)
-        resolve_profile_env = _resolve_profile_env
-    except Exception:
-        pass
-
-    env = dict(os.environ)
-    if resolve_profile_env is not None:
-        try:
-            env["HERMES_HOME"] = resolve_profile_env(profile_arg)
-        except FileNotFoundError:
-            pass
-    env["HERMES_PROFILE"] = profile_arg
-    if batch.get("tenant"):
-        env["HERMES_TENANT"] = str(batch.get("tenant"))
-    env["HERMES_KANBAN_DB"] = str(kanban_db_path(board=board))
-    env["HERMES_KANBAN_WORKSPACES_ROOT"] = str(workspaces_root(board=board))
-    env["HERMES_KANBAN_BOARD"] = _normalize_board_slug(board) or get_current_board()
-
-    cmd = [
-        *_resolve_hermes_argv(),
-        "-p", profile_arg,
-        "--resume", reviewer_session_id,
-        "chat",
-        "-q", _loop_handoff_review_runner_prompt(batch),
-    ]
-    log_dir = worker_logs_dir(board=board)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    safe_session = re.sub(r"[^A-Za-z0-9_.-]+", "-", reviewer_session_id)[:120]
-    log_path = log_dir / f"loop-review-{safe_session}.log"
-    rotate_bytes, backup_count = worker_log_rotation_config()
-    _rotate_worker_log(log_path, rotate_bytes, backup_count)
-    log_f = open(log_path, "ab")
-    try:
-        proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list; no shell=True
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-            env=env,
-            start_new_session=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
-        )
-    except Exception:
-        log_f.close()
-        raise
-    return {"ok": True, "pid": proc.pid, "mode": "subprocess", "profile": profile_arg, "log_path": str(log_path)}
+    """Disabled compatibility shim for removed Loop foreground handoff reviews."""
+    return {
+        "ok": False,
+        "outcome": "disabled",
+        "reason": "Loop foreground handoff review lanes were removed",
+    }
 
 
 _ORCHESTRATOR_DISPATCH_SOURCE = "kanban-orchestrator-fork"
@@ -4896,7 +4475,7 @@ def _handoff_row_by_id(conn: sqlite3.Connection, handoff_id: int) -> Optional[di
 
 
 def build_loop_handoff_proof_packet(conn: sqlite3.Connection, handoff_id: int | dict[str, Any]) -> dict[str, Any]:
-    """Return the compact evidence packet injected into foreground reviews."""
+    """Return the compact evidence packet for legacy handoff rows."""
     handoff = handoff_id if isinstance(handoff_id, dict) else _handoff_row_by_id(conn, int(handoff_id))
     if not handoff:
         raise ValueError(f"loop handoff {handoff_id!r} not found")
@@ -5501,52 +5080,8 @@ def _append_loop_foreground_handoff_event(
     metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
-    """Write compact foreground handoff state for Loop-backed worker rows.
-
-    V1 stores this Loop-specific attention state in the existing task event log;
-    non-Loop tasks never reach this helper and no generic inbox table is added.
-    """
-    payload: dict[str, Any] = {
-        "root_task_id": root_task_id,
-        "handoff_kind": handoff_kind,
-        "attention": "needs-orchestrator",
-        "verification_state": "needs-orchestrator",
-    }
-    if run_id is not None:
-        payload["run_id"] = run_id
-    if summary is not None:
-        payload["summary"] = summary
-    if reason is not None:
-        payload["reason"] = reason
-    if isinstance(metadata, dict):
-        worker_session_id = metadata.get("worker_session_id")
-        if isinstance(worker_session_id, str) and worker_session_id.strip():
-            payload["worker_session_id"] = worker_session_id.strip()
-        artifacts = metadata.get("artifacts")
-        if isinstance(artifacts, (list, tuple)):
-            cleaned_artifacts = [
-                str(p).strip() for p in artifacts if isinstance(p, str) and str(p).strip()
-            ]
-            if cleaned_artifacts:
-                payload["artifacts"] = cleaned_artifacts
-    if created_cards:
-        cards = [str(card).strip() for card in created_cards if str(card).strip()]
-        if cards:
-            payload["created_cards"] = cards
-    handoff = _record_loop_handoff(
-        conn,
-        task_id,
-        root_task_id=root_task_id,
-        handoff_kind=handoff_kind,
-        run_id=run_id,
-        source_event_id=source_event_id,
-        summary=summary,
-        reason=reason,
-        metadata=metadata,
-        created_cards=created_cards,
-    )
-    _append_event(conn, task_id, "loop_foreground_handoff", payload, run_id=run_id)
-    return handoff
+    """No-op compatibility shim: foreground handoffs were removed."""
+    return {}
 
 
 def _end_run(
@@ -7256,8 +6791,7 @@ def resolve_blocker_triage_task(
     ``review_kind='blocker_triage'`` instead of parking them in ``blocked``.
     This helper is the matching explicit outcome surface for the orchestrator
     lane: complete/approve, return the same row to the original worker with
-    instructions, create upstream follow-up cards, route to QA review, or make
-    a visible foreground/user handoff attached to this task.
+    instructions, create upstream follow-up cards, or route to QA review.
     """
     action = str(action or "").strip().lower()
     actor = str(actor or "").strip() or "orchestrator"
@@ -7309,20 +6843,6 @@ def resolve_blocker_triage_task(
             expected_run_id=expected_run_id,
         )
         return {"ok": bool(ok), "outcome": "routed_reviewer_qa" if ok else "not_routed"}
-
-    if action == "foreground_handoff":
-        handoff_metadata = dict(base_metadata)
-        handoff_metadata.setdefault("foreground_handoff", True)
-        handoff_metadata.setdefault("handoff_kind", "blocked_waiting")
-        ok = block_task(
-            conn,
-            task_id,
-            reason=reason or instructions or "blocker triage requires visible foreground handoff",
-            summary=triage_summary or instructions,
-            metadata=handoff_metadata,
-            expected_run_id=expected_run_id,
-        )
-        return {"ok": bool(ok), "outcome": "foreground_handoff" if ok else "not_blocked"}
 
     created_cards: list[str] = []
     if action == "create_followups":
