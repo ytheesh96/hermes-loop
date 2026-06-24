@@ -164,6 +164,44 @@ function actionState() {
   })!
 }
 
+function quickActionGraphState() {
+  return deriveLoopPanelStateFromTenantSource({
+    session_id: 'sess-graph-actions',
+    root_task_id: 't_root',
+    tenant: 'tenant-a',
+    latest_event_id: 512,
+    tasks: [
+      {
+        id: 't_root',
+        title: 'Root Task',
+        status: 'running',
+        tenant: 'tenant-a',
+        included_child_ids: ['t_todo', 't_blocked'],
+        included_parent_ids: []
+      },
+      {
+        id: 't_todo',
+        title: 'Todo child',
+        body: 'Ready to route from the graph tray',
+        status: 'todo',
+        tenant: 'tenant-a',
+        assignee: 'peacock',
+        included_child_ids: [],
+        included_parent_ids: ['t_root']
+      },
+      {
+        id: 't_blocked',
+        title: 'Blocked child',
+        status: 'blocked',
+        tenant: 'tenant-a',
+        assignee: 'reviewer-qa',
+        included_child_ids: [],
+        included_parent_ids: ['t_root']
+      }
+    ]
+  })!
+}
+
 function collapsedAttentionState() {
   return deriveLoopPanelStateFromTenantSource({
     session_id: 'sess-attention',
@@ -605,138 +643,103 @@ describe('LoopPanel', () => {
     expect(screen.queryByText(/"nodes"/)).toBeNull()
   }, 15_000)
 
-  it('keeps graph node selection in the selected-node inspector and only routes safe actions', () => {
-    const state = deriveLoopPanelState([
-      toolMessage({
-        ok: true,
-        root_task_id: 't_root',
-        graph_revision: 3,
-        nodes: [
-          { task_id: 't_root', title: 'Root Task', status: 'running', parents: [], depth: 0 },
-          { task_id: 't_child', title: 'Build child', status: 'triage', parents: ['t_root'], depth: 1 }
-        ]
-      })
-    ])
+  it('keeps the Loop overview graph free of the selected-node inspector card', () => {
+    const state = quickActionGraphState()
 
-    const onTaskAction = vi.fn()
-
-    render(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_root" state={state!} />)
+    render(<LoopPanel onTaskAction={vi.fn()} open selectedTaskId="t_root" state={state} />)
 
     const rootAgentsCard = screen.getByTestId('loop-root-agents-card')
-    expect(within(rootAgentsCard).getByText('No node selected')).toBeTruthy()
-    expect(within(rootAgentsCard).getByText(/Click a node in the graph/i)).toBeTruthy()
+    const canvas = within(rootAgentsCard).getByTestId('loop-task-graph')
+    const todoNode = within(canvas).getByTestId('loop-task-graph-node-t_todo')
+
+    expect(within(rootAgentsCard).queryByTestId('loop-selected-node-inspector')).toBeNull()
     expect(within(rootAgentsCard).queryByTestId('loop-selected-node-actions')).toBeNull()
 
-    fireEvent.click(within(rootAgentsCard).getByTestId('loop-task-graph-node-t_child'))
+    fireEvent.click(todoNode)
 
+    expect(todoNode.getAttribute('data-selected')).toBe('true')
     expect(screen.queryByTestId('loop-task-card')).toBeNull()
-    const inspector = within(rootAgentsCard).getByTestId('loop-selected-node-inspector')
-    expect(within(inspector).getByRole('heading', { name: /Build child/i })).toBeTruthy()
-    expect(within(inspector).getByText('t_child')).toBeTruthy()
-    expect(within(inspector).getByText(/This creates a follow-up row. It does not start execution./i)).toBeTruthy()
-
-    const actions = within(inspector).getByTestId('loop-selected-node-actions')
-    const actionText = actions.textContent || ''
-
-    const actionOrder = ['Open details', 'Ask in chat', 'Add child', 'Add alternative', 'Block', 'Archive'].map(label =>
-      actionText.indexOf(label)
-    )
-
-    expect(actionOrder.every(index => index >= 0)).toBe(true)
-    expect([...actionOrder].sort((a, b) => a - b)).toEqual(actionOrder)
-    const openDetailsButton = within(actions).getByRole('button', { name: /Open details for t_child/i }) as HTMLButtonElement
-    const askButton = within(actions).getByRole('button', { name: /Ask in chat about t_child/i }) as HTMLButtonElement
-    const addChildButton = within(actions).getByRole('button', { name: /Add child/i }) as HTMLButtonElement
-    const addAlternativeButton = within(actions).getByRole('button', { name: /Add alternative/i }) as HTMLButtonElement
-    const blockButton = within(actions).getByRole('button', { name: /^Block/i }) as HTMLButtonElement
-    const archiveButton = within(actions).getByRole('button', { name: /^Archive/i }) as HTMLButtonElement
-
-    expect(openDetailsButton.disabled).toBe(false)
-    expect(askButton.disabled).toBe(false)
-    expect(addChildButton.disabled).toBe(true)
-    expect(addAlternativeButton.disabled).toBe(true)
-    expect(blockButton.disabled).toBe(true)
-    expect(archiveButton.disabled).toBe(true)
-    expect(within(actions).getAllByText('Preview')).toHaveLength(2)
-
-    for (const disabledButton of [addChildButton, addAlternativeButton, blockButton, archiveButton]) {
-      fireEvent.click(disabledButton)
-    }
-
-    expect(onTaskAction).not.toHaveBeenCalled()
-
-    fireEvent.click(askButton)
-    expect(onTaskAction).toHaveBeenCalledWith('ask-hermes', expect.objectContaining({ taskId: 't_child' }))
-
-    fireEvent.click(openDetailsButton)
-    expect(screen.getByTestId('loop-task-card')).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /Build child/i })).toBeTruthy()
+    expect(within(rootAgentsCard).queryByTestId('loop-selected-node-inspector')).toBeNull()
+    expect(within(rootAgentsCard).queryByTestId('loop-selected-node-actions')).toBeNull()
   })
 
-  it('keeps selected-node preview mutations inert when routes are missing or unsafe', () => {
-    const initialState = deriveLoopPanelState([
-      toolMessage({
-        ok: true,
-        root_task_id: 't_root',
-        graph_revision: 3,
-        nodes: [
-          { task_id: 't_root', title: 'Root Task', status: 'running', parents: [], depth: 0 },
-          { task_id: 't_blocked', title: 'Blocked child', status: 'blocked', parents: ['t_root'], depth: 1 }
-        ]
-      })
-    ])
+  it('reveals graph quick action tray on node hover and keyboard focus', () => {
+    const state = quickActionGraphState()
 
-    const missingSelectedState = deriveLoopPanelState([
-      toolMessage({
-        ok: true,
-        root_task_id: 't_root',
-        graph_revision: 4,
-        nodes: [
-          { task_id: 't_root', title: 'Root Task', status: 'running', parents: [], depth: 0 },
-          { task_id: 't_peer', title: 'Remaining peer', status: 'todo', parents: ['t_root'], depth: 1 }
-        ]
-      })
-    ])
-
-    const { rerender } = render(<LoopPanel open selectedTaskId="t_root" state={initialState!} />)
+    render(<LoopPanel onTaskAction={vi.fn()} open selectedTaskId="t_root" state={state} />)
 
     const rootAgentsCard = screen.getByTestId('loop-root-agents-card')
-    fireEvent.click(within(rootAgentsCard).getByTestId('loop-task-graph-node-t_blocked'))
+    const canvas = within(rootAgentsCard).getByTestId('loop-task-graph')
+    const todoNode = within(canvas).getByTestId('loop-task-graph-node-t_todo')
 
-    const actions = within(rootAgentsCard).getByTestId('loop-selected-node-actions')
-    expect(within(actions).getByRole('button', { name: /Open details for t_blocked/i })).toBeTruthy()
-    expect((within(actions).getByRole('button', { name: /Ask in chat about t_blocked/i }) as HTMLButtonElement).disabled).toBe(
-      true
-    )
-    expect((within(actions).getByRole('button', { name: /Add child/i }) as HTMLButtonElement).disabled).toBe(true)
-    expect((within(actions).getByRole('button', { name: /Add alternative/i }) as HTMLButtonElement).disabled).toBe(true)
-    expect((within(actions).getByRole('button', { name: /^Unblock/i }) as HTMLButtonElement).disabled).toBe(true)
-    expect((within(actions).getByRole('button', { name: /^Archive/i }) as HTMLButtonElement).disabled).toBe(true)
-    expect(within(actions).getAllByText('Preview')).toHaveLength(2)
+    expect(within(rootAgentsCard).queryByTestId('loop-task-graph-action-tray-t_todo')).toBeNull()
 
+    fireEvent.mouseEnter(todoNode)
+
+    const hoverTray = within(rootAgentsCard).getByTestId('loop-task-graph-action-tray-t_todo')
+    expect(within(hoverTray).getByRole('button', { name: /Ask in chat about t_todo/i })).toBeTruthy()
+    expect(within(hoverTray).getByRole('button', { name: /^Block t_todo$/i })).toBeTruthy()
+
+    fireEvent.mouseLeave(todoNode)
+    expect(within(rootAgentsCard).queryByTestId('loop-task-graph-action-tray-t_todo')).toBeNull()
+
+    fireEvent.focus(todoNode)
+
+    const focusTray = within(rootAgentsCard).getByTestId('loop-task-graph-action-tray-t_todo')
+    expect(within(focusTray).getByRole('button', { name: /Ask in chat about t_todo/i })).toBeTruthy()
+    expect(within(focusTray).getByRole('button', { name: /^Block t_todo$/i })).toBeTruthy()
+  })
+
+  it('routes graph quick actions with row data and status-aware block/unblock', () => {
+    const state = quickActionGraphState()
     const onTaskAction = vi.fn()
-    rerender(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_root" state={initialState!} />)
 
-    const routedActions = within(screen.getByTestId('loop-root-agents-card')).getByTestId('loop-selected-node-actions')
-    expect((within(routedActions).getByRole('button', { name: /Ask in chat about t_blocked/i }) as HTMLButtonElement).disabled).toBe(false)
+    render(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_root" state={state} />)
 
-    for (const disabledButton of [
-      within(routedActions).getByRole('button', { name: /Add child/i }),
-      within(routedActions).getByRole('button', { name: /Add alternative/i }),
-      within(routedActions).getByRole('button', { name: /^Unblock/i }),
-      within(routedActions).getByRole('button', { name: /^Archive/i })
-    ]) {
-      fireEvent.click(disabledButton)
-    }
+    const rootAgentsCard = screen.getByTestId('loop-root-agents-card')
+    const canvas = within(rootAgentsCard).getByTestId('loop-task-graph')
+    const todoNode = within(canvas).getByTestId('loop-task-graph-node-t_todo')
+    const blockedNode = within(canvas).getByTestId('loop-task-graph-node-t_blocked')
 
-    expect(onTaskAction).not.toHaveBeenCalled()
+    fireEvent.mouseEnter(todoNode)
 
-    rerender(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_root" state={missingSelectedState!} />)
+    const todoTray = within(rootAgentsCard).getByTestId('loop-task-graph-action-tray-t_todo')
+    fireEvent.click(within(todoTray).getByRole('button', { name: /Ask in chat about t_todo/i }))
+    expect(onTaskAction).toHaveBeenCalledWith(
+      'ask-hermes',
+      expect.objectContaining({
+        parents: expect.arrayContaining(['t_root']),
+        status: 'todo',
+        taskId: 't_todo',
+        title: 'Todo child'
+      })
+    )
 
-    const unavailableInspector = screen.getByTestId('loop-selected-node-inspector')
-    expect(within(unavailableInspector).getByText('Selected node unavailable')).toBeTruthy()
-    expect(unavailableInspector.textContent).toContain('Node t_blocked is missing from the latest Loop source')
-    expect(screen.queryByTestId('loop-selected-node-actions')).toBeNull()
+    fireEvent.click(within(todoTray).getByRole('button', { name: /^Block t_todo$/i }))
+    expect(onTaskAction).toHaveBeenCalledWith('block', expect.objectContaining({ taskId: 't_todo' }))
+
+    fireEvent.mouseLeave(todoNode)
+    fireEvent.mouseEnter(blockedNode)
+
+    const blockedTray = within(rootAgentsCard).getByTestId('loop-task-graph-action-tray-t_blocked')
+    fireEvent.click(within(blockedTray).getByRole('button', { name: /^Unblock t_blocked$/i }))
+    expect(onTaskAction).toHaveBeenCalledWith('unblock', expect.objectContaining({ taskId: 't_blocked' }))
+  })
+
+  it('disables graph quick action buttons when task action routing is unavailable', () => {
+    const state = quickActionGraphState()
+
+    render(<LoopPanel open selectedTaskId="t_root" state={state} />)
+
+    const rootAgentsCard = screen.getByTestId('loop-root-agents-card')
+    const canvas = within(rootAgentsCard).getByTestId('loop-task-graph')
+    const blockedNode = within(canvas).getByTestId('loop-task-graph-node-t_blocked')
+
+    fireEvent.focus(blockedNode)
+
+    const tray = within(rootAgentsCard).getByTestId('loop-task-graph-action-tray-t_blocked')
+    expect((within(tray).getByRole('button', { name: /Ask in chat about t_blocked/i }) as HTMLButtonElement).disabled).toBe(true)
+    expect((within(tray).getByRole('button', { name: /^Unblock t_blocked$/i }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('renders orchestrator fork lineage and task-attached foreground handoffs in the drawer', () => {
@@ -1370,8 +1373,8 @@ describe('LoopPanel', () => {
     expect(summary.textContent).toContain('1 review')
 
     fireEvent.click(within(canvas).getByTestId('loop-task-graph-node-t_review'))
-    const inspector = screen.getByTestId('loop-selected-node-inspector')
-    expect(within(inspector).getByRole('heading', { name: /Review child/i })).toBeTruthy()
+    expect(screen.queryByTestId('loop-selected-node-inspector')).toBeNull()
+    expect(screen.queryByTestId('loop-selected-node-actions')).toBeNull()
 
     const rootNode = within(canvas).getByTestId('loop-task-graph-node-t_root')
     const selectedNode = within(canvas).getByTestId('loop-task-graph-node-t_review')
@@ -2074,8 +2077,10 @@ describe('LoopPanel', () => {
     expect(screen.queryByText('final evidence accepted')).toBeNull()
     expect(screen.getByText('Credential blocker')).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: /Credential blocker/i }))
-    expect(screen.getByRole('heading', { name: /Credential blocker/i })).toBeTruthy()
+    const blockedGraphNode = screen.getByRole('button', { name: /Credential blocker/i })
+    fireEvent.click(blockedGraphNode)
+    expect(blockedGraphNode.getAttribute('data-selected')).toBe('true')
+    expect(screen.queryByTestId('loop-selected-node-inspector')).toBeNull()
     expect(screen.queryByText('blocked: missing private token')).toBeNull()
     expect(screen.queryByRole('button', { name: /accept review/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /reject review/i })).toBeNull()
@@ -2229,12 +2234,12 @@ describe('LoopPanel', () => {
       within(screen.getByTestId('loop-root-agents-card')).getByRole('button', { name: /Implementation child/i })
     ).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: /Implementation child/i }))
-    expect(screen.getByRole('heading', { name: /Implementation child/i })).toBeTruthy()
+    const childGraphNode = within(screen.getByTestId('loop-root-agents-card')).getByTestId('loop-task-graph-node-t_child')
+    fireEvent.click(childGraphNode)
+    expect(childGraphNode.getAttribute('data-selected')).toBe('true')
     expect(screen.queryByTestId('loop-task-card')).toBeNull()
-
-    fireEvent.click(screen.getByRole('button', { name: /Open details for t_child/i }))
-    expect(screen.getByTestId('loop-task-card')).toBeTruthy()
+    expect(screen.queryByTestId('loop-selected-node-inspector')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Open details for t_child/i })).toBeNull()
   })
 
   it('renders worker activity links, run details, and log tails in the task drawer', () => {
@@ -2928,7 +2933,8 @@ describe('LoopPanel', () => {
     expect(blockedRows.length).toBeGreaterThan(0)
 
     fireEvent.click(blockedRows.at(-1)!)
-    expect(screen.getByRole('heading', { name: /Blocked implementation/i })).toBeTruthy()
+    expect(screen.getByTestId('loop-task-graph-node-t_child').getAttribute('data-selected')).toBe('true')
+    expect(screen.queryByTestId('loop-selected-node-inspector')).toBeNull()
     expect(screen.queryByRole('heading', { name: 'Blocked by' })).toBeNull()
     expect(screen.queryByText('Parent tasks')).toBeNull()
     expect(onTaskAction).not.toHaveBeenCalled()

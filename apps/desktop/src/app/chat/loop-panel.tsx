@@ -1,4 +1,5 @@
 import {
+  Fragment,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   type PointerEvent as ReactPointerEvent,
@@ -1098,170 +1099,6 @@ function LoopRootActions({
         <span>Ask in chat</span>
       </Button>
     </div>
-  )
-}
-
-function PreviewBadge() {
-  return (
-    <span className="rounded-[0.2rem] border border-(--ui-stroke-tertiary) px-1 py-0 text-[0.55rem] uppercase tracking-wide text-(--ui-text-tertiary)">
-      Preview
-    </span>
-  )
-}
-
-function DisabledInspectorAction({
-  children,
-  icon,
-  label,
-  title
-}: {
-  children: ReactNode
-  icon: string
-  label: string
-  title: string
-}) {
-  return (
-    <Button
-      aria-label={`${label} (preview disabled)`}
-      className="h-7 gap-1.5 px-2 text-xs"
-      disabled
-      title={title}
-      type="button"
-      variant="outline"
-    >
-      <Codicon name={icon} size="0.82rem" />
-      <span>{children}</span>
-    </Button>
-  )
-}
-
-function LoopSelectedNodeInspector({
-  missingTaskId,
-  onOpenTaskTab,
-  onTaskAction,
-  row
-}: {
-  missingTaskId?: null | string
-  onOpenTaskTab?: (row: LoopRow) => void
-  onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
-  row?: null | LoopRow
-}) {
-  if (!row) {
-    const unavailable = missingTaskId?.trim()
-
-    return (
-      <DetailSection testId="loop-selected-node-inspector" title="Selected node">
-        {unavailable ? (
-          <div className="grid gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-amber-700 dark:text-amber-300">
-            <h4 className="m-0 text-xs font-semibold text-inherit">Selected node unavailable</h4>
-            <p className="m-0">
-              Node <span className="font-mono">{unavailable}</span> is missing from the latest Loop source. It may have
-              been archived, deleted, or refreshed out of this session lineage.
-            </p>
-          </div>
-        ) : (
-          <div className="grid gap-1.5 rounded-md border border-dashed border-(--ui-stroke-tertiary) p-2">
-            <h4 className="m-0 text-xs font-semibold text-(--ui-text-primary)">No node selected</h4>
-            <EmptyDetail>Click a node in the graph to inspect its details and actions.</EmptyDetail>
-            <p className="m-0 text-[0.68rem] text-(--ui-text-quaternary)">
-              You can also open a node from chat or search.
-            </p>
-          </div>
-        )}
-      </DetailSection>
-    )
-  }
-
-  const status = normalizedLoopValue(row.status)
-  const statusLabel = status === 'blocked' ? 'Unblock' : 'Block'
-  const descriptionPreview = cleanTaskMarkdown(row.body || '').split('\n').slice(0, 4).join('\n').trim()
-  const mutationTitle = 'This selected-node mutation needs a confirmation gate before it can run safely.'
-
-  return (
-    <DetailSection testId="loop-selected-node-inspector" title="Selected node">
-      <div className="grid gap-2">
-        <div className="flex min-w-0 items-start gap-2">
-          <LoopStatusIndicator row={row} />
-          <div className="min-w-0 flex-1">
-            <h4 className="m-0 truncate text-sm font-semibold text-(--ui-text-primary)">{row.title || row.taskId}</h4>
-            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.68rem] text-(--ui-text-tertiary)">
-              <span className="font-mono">{row.taskId}</span>
-              <span>{row.status}</span>
-              {row.assignee ? <span>{row.assignee}</span> : null}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap gap-1.5" data-testid="loop-selected-node-actions">
-          <Button
-            aria-label={`Open details for ${row.taskId}`}
-            className="h-7 gap-1.5 px-2 text-xs"
-            disabled={!onOpenTaskTab}
-            onClick={() => onOpenTaskTab?.(row)}
-            title="Open the full inspector for this node"
-            type="button"
-            variant="outline"
-          >
-            <Codicon name="open-preview" size="0.82rem" />
-            <span>Open details</span>
-          </Button>
-          <Button
-            aria-label={`Ask in chat about ${row.taskId}`}
-            className="h-7 gap-1.5 px-2 text-xs"
-            disabled={!onTaskAction}
-            onClick={() => onTaskAction?.('ask-hermes', row)}
-            title="Insert this node into chat with a prefilled question or prompt"
-            type="button"
-            variant="outline"
-          >
-            <Codicon name="comment-discussion" size="0.82rem" />
-            <span>Ask in chat</span>
-          </Button>
-          <DisabledInspectorAction
-            icon="add"
-            label="Add child"
-            title="Preview only: the Desktop graph-patch composer is not wired here yet."
-          >
-            Add child <PreviewBadge />
-          </DisabledInspectorAction>
-          <DisabledInspectorAction
-            icon="git-branch"
-            label="Add alternative"
-            title="Preview only: the Desktop graph-patch composer is not wired here yet."
-          >
-            Add alternative <PreviewBadge />
-          </DisabledInspectorAction>
-          <DisabledInspectorAction icon={status === 'blocked' ? 'unlock' : 'lock'} label={statusLabel} title={mutationTitle}>
-            {statusLabel}
-          </DisabledInspectorAction>
-          <DisabledInspectorAction icon="archive" label="Archive" title={mutationTitle}>
-            Archive
-          </DisabledInspectorAction>
-        </div>
-
-        <div className="grid gap-1.5 text-[0.68rem] text-(--ui-text-tertiary)">
-          <p className="m-0">
-            This creates a follow-up row. It does not start execution. This creates a proposed alternative. It does not
-            dispatch work.
-          </p>
-          <p className="m-0">Status changes are audited. Archive remains disabled here until a confirmation gate can show downstream impact.</p>
-        </div>
-
-        <div className="rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-fill-quaternary) p-2">
-          {descriptionPreview ? (
-            <p className="m-0 line-clamp-4 whitespace-pre-wrap text-xs text-(--ui-text-secondary)">{descriptionPreview}</p>
-          ) : (
-            <EmptyDetail>No description preview available.</EmptyDetail>
-          )}
-        </div>
-
-        <div className="flex flex-wrap gap-1.5 text-[0.68rem] text-(--ui-text-tertiary)">
-          <span>{row.parents.length} parent{row.parents.length === 1 ? '' : 's'}</span>
-          <span>·</span>
-          <span>{row.children.length} child{row.children.length === 1 ? '' : 'ren'}</span>
-        </div>
-      </div>
-    </DetailSection>
   )
 }
 
@@ -2368,10 +2205,79 @@ function loopTaskGraphFocusState(layout: LoopTaskGraphLayout, taskId?: null | st
   return { edgeKeys, nodeIds, taskId: selectedTaskId }
 }
 
+function loopGraphRelatedTargetBelongsToTask(taskId: string, target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) {
+    return false
+  }
+
+  return target.closest('[data-loop-task-graph-interaction]')?.getAttribute('data-loop-task-graph-interaction') === taskId
+}
+
+function LoopTaskGraphActionTray({
+  layout,
+  onActionEnd,
+  onActionStart,
+  onTaskAction
+}: {
+  layout: LoopTaskGraphNodeLayout
+  onActionEnd: (taskId: string, relatedTarget: EventTarget | null) => void
+  onActionStart: (taskId: string) => void
+  onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
+}) {
+  const { row, x, y } = layout
+  const blocked = normalizedLoopValue(row.status) === 'blocked'
+  const statusAction: LoopTaskAction = blocked ? 'unblock' : 'block'
+  const statusLabel = blocked ? 'Unblock' : 'Block'
+  const top = y > LOOP_GRAPH_NODE_HEIGHT ? y - 30 : y + LOOP_GRAPH_NODE_HEIGHT + 6
+
+  return (
+    <div
+      className="absolute z-30 flex items-center gap-1 rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-surface-background) p-1 shadow-nous"
+      data-loop-task-graph-interaction={row.taskId}
+      data-testid={`loop-task-graph-action-tray-${row.taskId}`}
+      onBlur={event => onActionEnd(row.taskId, event.relatedTarget)}
+      onFocus={() => onActionStart(row.taskId)}
+      onMouseEnter={() => onActionStart(row.taskId)}
+      onMouseLeave={event => onActionEnd(row.taskId, event.relatedTarget)}
+      style={{ left: x, top }}
+    >
+      <Button
+        aria-label={`Ask in chat about ${row.taskId}`}
+        className="h-6 gap-1 px-1.5 text-[0.68rem]"
+        disabled={!onTaskAction}
+        onClick={event => {
+          event.stopPropagation()
+          onTaskAction?.('ask-hermes', row)
+        }}
+        type="button"
+        variant="outline"
+      >
+        <Codicon name="comment-discussion" size="0.72rem" />
+        <span>Ask</span>
+      </Button>
+      <Button
+        aria-label={`${statusLabel} ${row.taskId}`}
+        className="h-6 gap-1 px-1.5 text-[0.68rem]"
+        disabled={!onTaskAction}
+        onClick={event => {
+          event.stopPropagation()
+          onTaskAction?.(statusAction, row)
+        }}
+        type="button"
+        variant="outline"
+      >
+        <Codicon name={blocked ? 'unlock' : 'lock'} size="0.72rem" />
+        <span>{statusLabel}</span>
+      </Button>
+    </div>
+  )
+}
+
 function LoopTaskGraphNode({
   dimmed,
   layout,
-  onHover,
+  onActionEnd,
+  onActionStart,
   onOpen,
   onSelect,
   pathConnected,
@@ -2379,7 +2285,8 @@ function LoopTaskGraphNode({
 }: {
   dimmed?: boolean
   layout: LoopTaskGraphNodeLayout
-  onHover?: (taskId: null | string) => void
+  onActionEnd?: (taskId: string, relatedTarget: EventTarget | null) => void
+  onActionStart?: (taskId: string) => void
   onOpen?: (row: LoopRow) => void
   onSelect?: (row: LoopRow) => void
   pathConnected?: boolean
@@ -2412,9 +2319,11 @@ function LoopTaskGraphNode({
       data-choice-state={choiceState || undefined}
       data-decision-group-id={decisionGroupId || undefined}
       data-dimmed={dimmed ? 'true' : 'false'}
+      data-loop-task-graph-interaction={row.taskId}
       data-path-connected={pathConnected ? 'true' : 'false'}
       data-selected={selected ? 'true' : 'false'}
       data-testid={`loop-task-graph-node-${row.taskId}`}
+      onBlur={event => onActionEnd?.(row.taskId, event.relatedTarget)}
       onClick={() => {
         if (onSelect) {
           onSelect(row)
@@ -2422,8 +2331,9 @@ function LoopTaskGraphNode({
           onOpen?.(row)
         }
       }}
-      onMouseEnter={() => onHover?.(row.taskId)}
-      onMouseLeave={() => onHover?.(null)}
+      onFocus={() => onActionStart?.(row.taskId)}
+      onMouseEnter={() => onActionStart?.(row.taskId)}
+      onMouseLeave={event => onActionEnd?.(row.taskId, event.relatedTarget)}
       style={{
         height: LOOP_GRAPH_NODE_HEIGHT,
         left: x,
@@ -2526,11 +2436,13 @@ function LoopGraphSummary({ rows }: { rows: LoopRow[] }) {
 function LoopTaskGraph({
   onOpenTaskTab,
   onSelectTask,
+  onTaskAction,
   rows,
   selectedTaskId
 }: {
   onOpenTaskTab?: (row: LoopRow) => void
   onSelectTask?: (row: LoopRow) => void
+  onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
   rows: LoopRow[]
   selectedTaskId?: null | string
 }) {
@@ -2602,6 +2514,18 @@ function LoopTaskGraph({
 
     event.preventDefault()
     setZoom(currentZoom => clampLoopGraphZoom(currentZoom * Math.exp(-event.deltaY * LOOP_GRAPH_ZOOM_SENSITIVITY)))
+  }, [])
+
+  const handleActionStart = useCallback((taskId: string) => {
+    setHoveredTaskId(taskId)
+  }, [])
+
+  const handleActionEnd = useCallback((taskId: string, relatedTarget: EventTarget | null) => {
+    if (loopGraphRelatedTargetBelongsToTask(taskId, relatedTarget)) {
+      return
+    }
+
+    setHoveredTaskId(currentTaskId => (currentTaskId === taskId ? null : currentTaskId))
   }, [])
 
   return (
@@ -2720,18 +2644,29 @@ function LoopTaskGraph({
           {layout.nodes.map(node => {
             const pathConnected = selectedFocus.nodeIds.has(node.row.taskId)
             const dimmed = Boolean(activeFocus.taskId && !activeFocus.nodeIds.has(node.row.taskId))
+            const showActionTray = hoveredTaskId === node.row.taskId
 
             return (
-              <LoopTaskGraphNode
-                dimmed={dimmed}
-                key={node.row.taskId}
-                layout={node}
-                onHover={setHoveredTaskId}
-                onOpen={onOpenTaskTab}
-                onSelect={onSelectTask}
-                pathConnected={pathConnected}
-                selected={node.row.taskId === selectedTaskId}
-              />
+              <Fragment key={node.row.taskId}>
+                <LoopTaskGraphNode
+                  dimmed={dimmed}
+                  layout={node}
+                  onActionEnd={handleActionEnd}
+                  onActionStart={handleActionStart}
+                  onOpen={onOpenTaskTab}
+                  onSelect={onSelectTask}
+                  pathConnected={pathConnected}
+                  selected={node.row.taskId === selectedTaskId}
+                />
+                {showActionTray ? (
+                  <LoopTaskGraphActionTray
+                    layout={node}
+                    onActionEnd={handleActionEnd}
+                    onActionStart={handleActionStart}
+                    onTaskAction={onTaskAction}
+                  />
+                ) : null}
+              </Fragment>
             )
           })}
         </div>
@@ -3065,20 +3000,13 @@ function LoopRootAgentsCard({
       {rows.length === 0 ? (
         <EmptyDetail>No agents yet.</EmptyDetail>
       ) : showCanvas ? (
-        <div className="grid gap-3">
-          <LoopTaskGraph
-            onOpenTaskTab={onOpenTaskTab}
-            onSelectTask={selectGraphTask}
-            rows={rows}
-            selectedTaskId={selectedGraphRow?.taskId || null}
-          />
-          <LoopSelectedNodeInspector
-            missingTaskId={selectedGraphTaskId && !selectedGraphRow ? selectedGraphTaskId : null}
-            onOpenTaskTab={onOpenTaskTab}
-            onTaskAction={onTaskAction}
-            row={selectedGraphRow}
-          />
-        </div>
+        <LoopTaskGraph
+          onOpenTaskTab={onOpenTaskTab}
+          onSelectTask={selectGraphTask}
+          onTaskAction={onTaskAction}
+          rows={rows}
+          selectedTaskId={selectedGraphRow?.taskId || null}
+        />
       ) : (
         <div className="flex flex-col gap-0.5" data-testid="loop-root-agents-list">
           {rows.map(row => (
