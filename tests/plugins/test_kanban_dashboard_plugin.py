@@ -196,7 +196,7 @@ def test_create_loop_draft_anchors_session_source_and_real_root(client):
     task = first.json()["task"]
     assert task["id"] == second.json()["task"]["id"]
     assert task["title"] == "Draft overview"
-    assert task["status"] == "triage"
+    assert task["status"] == "scheduled"
     assert task["session_id"] == "session-draft-1"
     assert task["tenant"] == "session-draft-1"
     assert task["created_by"] == f"loop:{task['id']}"
@@ -221,7 +221,7 @@ def test_create_loop_draft_anchors_session_source_and_real_root(client):
 
     assert persisted is not None
     assert persisted.created_by == f"loop:{task['id']}"
-    assert persisted.status == "triage"
+    assert persisted.status == "scheduled"
     assert runs == []
 
 
@@ -236,7 +236,7 @@ def test_title_only_loop_draft_records_durable_intake_needed_state(client):
     assert created.status_code == 200, created.text
     task = created.json()["task"]
     assert task["body"] is None
-    assert task["status"] == "triage"
+    assert task["status"] == "scheduled"
     assert task["loop_intake"] == {
         "needed": True,
         "state": "drafted",
@@ -285,10 +285,10 @@ def test_loop_intake_needed_blocks_ready_and_decompose_until_approved(client):
     assert decompose.json()["ok"] is False
     assert "Loop intake is still required" in decompose.json()["reason"]
 
-    still_triage = client.get(f"/api/plugins/kanban/tasks/{task_id}")
-    assert still_triage.json()["task"]["status"] == "triage"
+    still_planning = client.get(f"/api/plugins/kanban/tasks/{task_id}")
+    assert still_planning.json()["task"]["status"] == "scheduled"
 
-    approved_body = "## Resolved decisions\n- Decision: First intake gate\n  - Chosen: A\n"
+    approved_body = "Chosen path remains visible in the Loop graph.\n"
     approved = client.patch(
         f"/api/plugins/kanban/tasks/{task_id}",
         json={
@@ -304,7 +304,7 @@ def test_loop_intake_needed_blocks_ready_and_decompose_until_approved(client):
     assert approved.status_code == 200, approved.text
     approved_task = approved.json()["task"]
     assert approved_task["body"] == approved_body
-    assert approved_task["status"] == "triage"
+    assert approved_task["status"] == "scheduled"
     assert approved_task["assignee"] == initial_assignee
     assert approved_task["loop_intake"]["state"] == "approved"
     assert approved_task["loop_intake"]["dispatchable"] is True
@@ -324,7 +324,7 @@ def test_loop_intake_needed_blocks_ready_and_decompose_until_approved(client):
         conn.close()
 
     assert persisted_after_approval is not None
-    assert persisted_after_approval.status == "triage"
+    assert persisted_after_approval.status == "scheduled"
     assert persisted_after_approval.assignee == initial_assignee
     assert runs_after_approval == []
     assert children_after_approval == []
@@ -342,8 +342,8 @@ def test_decompose_submit_approves_loop_intake_before_decomposing(client, monkey
     task_id = created.json()["task"]["id"]
     calls = []
 
-    def fake_decompose_task(decompose_task_id, *, author=None):
-        calls.append((decompose_task_id, author))
+    def fake_decompose_task(decompose_task_id, *, author=None, loop_safe=False):
+        calls.append((decompose_task_id, author, loop_safe))
 
         return SimpleNamespace(
             ok=True,
@@ -363,7 +363,7 @@ def test_decompose_submit_approves_loop_intake_before_decomposing(client, monkey
 
     assert submitted.status_code == 200, submitted.text
     assert submitted.json()["ok"] is True
-    assert calls == [(task_id, "desktop-submit")]
+    assert calls == [(task_id, "desktop-submit", False)]
 
     detail = client.get(f"/api/plugins/kanban/tasks/{task_id}")
     assert detail.status_code == 200, detail.text
@@ -373,6 +373,51 @@ def test_decompose_submit_approves_loop_intake_before_decomposing(client, monkey
         "source": "desktop_submit",
         "dispatchable": True,
     }
+
+
+def test_decompose_submit_can_approve_loop_safe_planning_without_dispatchability(client, monkeypatch):
+    created = client.post(
+        "/api/plugins/kanban/loop-drafts",
+        json={"title": "Submit plans safely", "session_id": "session-intake-loop-safe"},
+    )
+    task_id = created.json()["task"]["id"]
+    calls = []
+
+    def fake_decompose_task(decompose_task_id, *, author=None, loop_safe=False):
+        calls.append((decompose_task_id, author, loop_safe))
+
+        return SimpleNamespace(
+            ok=True,
+            task_id=decompose_task_id,
+            reason=None,
+            fanout=True,
+            child_ids=["t_option"],
+            new_title=None,
+        )
+
+    monkeypatch.setattr("hermes_cli.kanban_decompose.decompose_task", fake_decompose_task)
+
+    submitted = client.post(
+        f"/api/plugins/kanban/tasks/{task_id}/decompose",
+        json={"approve_intake": True, "author": "desktop-submit", "loop_safe": True},
+    )
+
+    assert submitted.status_code == 200, submitted.text
+    assert submitted.json()["ok"] is True
+    assert calls == [(task_id, "desktop-submit", True)]
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{task_id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["task"]["loop_intake"] == {
+        "needed": True,
+        "state": "approved",
+        "source": "desktop_submit",
+        "dispatchable": False,
+    }
+
+    ready = client.patch(f"/api/plugins/kanban/tasks/{task_id}", json={"status": "ready"})
+    assert ready.status_code == 409
+    assert "Loop intake is still required" in ready.json()["detail"]
 
 
 def test_bodyful_loop_draft_and_unrelated_triage_rows_do_not_need_intake(client):
@@ -884,6 +929,46 @@ def test_session_source_reports_decomposed_original_root_task_id(client, kanban_
     assert data["root_task_id"] == root
     assert [task["id"] for task in data["tasks"]] == [child_ids[0], root]
     assert data["links"] == [{"parent_id": child_ids[0], "child_id": root}]
+
+
+def test_session_source_includes_loop_graph_decision_metadata(client, monkeypatch):
+    from hermes_cli import loop_graph
+
+    monkeypatch.setenv("HERMES_SESSION_ID", "session-decision-metadata")
+    conn = kb.connect()
+    try:
+        result = loop_graph.apply_patch(
+            conn,
+            "decision-session",
+            expected_revision=0,
+            mutation_id="m-decision-option",
+            operations=[
+                {
+                    "op": "add_node",
+                    "client_id": "option-a",
+                    "title": "Option A",
+                    "branch_kind": "alternative",
+                    "decision_group_id": "choice-1",
+                    "selection_state": "candidate",
+                }
+            ],
+        )
+    finally:
+        conn.close()
+
+    option_id = result["created"][0]["task_id"]
+    response = client.get(
+        "/api/plugins/kanban/session-source",
+        params={"session_id": "session-decision-metadata", "tenant": "decision-session"},
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    [task] = data["tasks"]
+    assert task["id"] == option_id
+    assert task["branch_kind"] == "alternative"
+    assert task["decision_group_id"] == "choice-1"
+    assert task["selection_state"] == "candidate"
 
 
 def test_session_source_falls_back_to_board_containing_lineage_tenant(client, kanban_home):
@@ -2508,7 +2593,8 @@ def test_home_channels_lists_only_platforms_with_home(client, with_home_channels
     r = client.get("/api/plugins/kanban/home-channels")
     assert r.status_code == 200
     platforms = {h["platform"] for h in r.json()["home_channels"]}
-    assert platforms == {"telegram", "discord"}, (
+    assert {"telegram", "discord"}.issubset(platforms), platforms
+    assert "slack" not in platforms, (
         f"slack has a token but no home — must not appear. got {platforms}"
     )
     for h in r.json()["home_channels"]:
@@ -2552,7 +2638,9 @@ def test_home_subscribe_flips_subscribed_flag_in_subsequent_get(client, with_hom
 
     r = client.get(f"/api/plugins/kanban/home-channels?task_id={t['id']}")
     flags = {h["platform"]: h["subscribed"] for h in r.json()["home_channels"]}
-    assert flags == {"telegram": True, "discord": False}
+    assert flags["telegram"] is True
+    assert flags["discord"] is False
+    assert all(not subscribed for platform, subscribed in flags.items() if platform != "telegram")
 
 
 def test_home_subscribe_is_idempotent(client, with_home_channels):

@@ -98,7 +98,7 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
-VALID_INITIAL_STATUSES = {"running", "blocked"}
+VALID_INITIAL_STATUSES = {"running", "blocked", "scheduled"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
@@ -2527,10 +2527,10 @@ def create_task(
         try:
             with write_txn(conn):
                 # Determine task status from parent status, unless the caller
-                # parks it directly in blocked for human-ops review or in
-                # triage for a specifier.
-                if initial_status == "blocked":
-                    task_status = "blocked"
+                # parks it directly in blocked/scheduled for human-ops or Loop
+                # planning, or in triage for a specifier.
+                if initial_status in {"blocked", "scheduled"}:
+                    task_status = initial_status
                     if parents:
                         missing = _find_missing_parents(conn, parents)
                         if missing:
@@ -7276,6 +7276,9 @@ def specify_triage_task(
     body: Optional[str] = None,
     assignee: Optional[str] = None,
     author: Optional[str] = None,
+    allowed_statuses: Optional[set[str]] = None,
+    next_status: str = "todo",
+    recompute: bool = True,
 ) -> bool:
     """Flesh out a triage task and promote it to ``todo``.
 
@@ -7295,16 +7298,21 @@ def specify_triage_task(
     """
     if title is not None and not title.strip():
         raise ValueError("title cannot be blank")
+    allowed_statuses = allowed_statuses or {"triage"}
+    bad_statuses = sorted(status for status in {*allowed_statuses, next_status} if status not in VALID_STATUSES)
+    if bad_statuses:
+        raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}: {bad_statuses[0]}")
     assignee = _canonical_assignee(assignee)
     with write_txn(conn):
+        placeholders = ",".join("?" for _ in allowed_statuses)
         existing = conn.execute(
-            "SELECT title, body, assignee FROM tasks WHERE id = ? AND status = 'triage'",
-            (task_id,),
+            f"SELECT title, body, assignee FROM tasks WHERE id = ? AND status IN ({placeholders})",
+            (task_id, *allowed_statuses),
         ).fetchone()
         if existing is None:
             return False
-        sets: list[str] = ["status = 'todo'"]
-        params: list[Any] = []
+        sets: list[str] = ["status = ?"]
+        params: list[Any] = [next_status]
         changed_fields: list[str] = []
         if title is not None and title.strip() != (existing["title"] or ""):
             sets.append("title = ?")
@@ -7319,9 +7327,10 @@ def specify_triage_task(
             params.append(assignee)
             changed_fields.append("assignee")
         params.append(task_id)
+        params.extend(allowed_statuses)
         cur = conn.execute(
             f"UPDATE tasks SET {', '.join(sets)} "
-            f"WHERE id = ? AND status = 'triage'",
+            f"WHERE id = ? AND status IN ({placeholders})",
             tuple(params),
         )
         if cur.rowcount != 1:
@@ -7340,7 +7349,7 @@ def specify_triage_task(
                     author.strip(),
                     "Specified — updated "
                     + ", ".join(changed_fields)
-                    + " and promoted to todo.",
+                    + f" and promoted to {next_status}.",
                     int(time.time()),
                 ),
             )
@@ -7355,7 +7364,8 @@ def specify_triage_task(
     # logic the dispatcher would on its next tick, so a specified task
     # with no open parents flips straight to 'ready' here instead of
     # idling in 'todo' until the next sweep.
-    recompute_ready(conn)
+    if recompute:
+        recompute_ready(conn)
     return True
 
 
@@ -7367,8 +7377,10 @@ def decompose_triage_task(
     children: list[dict],
     author: Optional[str] = None,
     auto_promote: bool = True,
+    allowed_root_statuses: Optional[set[str]] = None,
+    root_next_status: str = "todo",
 ) -> Optional[list[str]]:
-    """Fan a triage task out into child tasks and promote the root to ``todo``.
+    """Fan a planning task out into child tasks and park/promote the root.
 
     The root task stays alive and becomes the parent of every child —
     when all children reach ``done``, the root promotes to ``ready`` and
@@ -7384,18 +7396,23 @@ def decompose_triage_task(
             "parents": [0, 2],                 # indices into this same children list
         }
 
-    When ``auto_promote`` is false, child tasks are created as sticky
-    ``blocked`` rows instead of ordinary ``todo`` rows. Leaving parent-free
-    children as ``todo`` is not a durable hold because the dispatcher and
-    several read paths call ``recompute_ready()``, which promotes parent-free
-    ``todo`` tasks to ``ready``. A sticky blocked child requires explicit
-    operator unblocking and keeps planning-only decompositions from
-    accidentally dispatching.
+    By default the historical triage behavior is preserved: the root must be
+    in ``triage``, children are ordinary ``todo`` rows, and the root becomes
+    ``todo``. Loop-safe callers may pass ``allowed_root_statuses`` and
+    ``root_next_status='scheduled'`` so scheduled planning rows can expand into
+    scheduled, visible-but-non-dispatchable child options.
+
+    When ``auto_promote`` is false, child tasks are created as ``scheduled``
+    rows instead of ordinary ``todo`` rows. Leaving parent-free children as
+    ``todo`` is not a durable hold because the dispatcher and several read
+    paths call ``recompute_ready()``, which promotes parent-free ``todo`` tasks
+    to ``ready``. Scheduled children require explicit origin activation and keep
+    planning-only decompositions from accidentally dispatching.
 
     Returns the list of created child task ids (in input order) on
     success. Returns ``None`` when:
       - The root task does not exist
-      - The root task is not in ``triage``
+      - The root task is not in an allowed root status
       - A cycle would result (caller built a bad graph)
 
     Validation of titles/assignees happens inside the same write_txn as
@@ -7404,6 +7421,12 @@ def decompose_triage_task(
     """
     if not children:
         return None
+    allowed_root_statuses = allowed_root_statuses or {"triage"}
+    bad_root_statuses = sorted(status for status in allowed_root_statuses if status not in VALID_STATUSES)
+    if bad_root_statuses:
+        raise ValueError(f"allowed_root_statuses contains invalid status: {bad_root_statuses[0]}")
+    if root_next_status not in VALID_STATUSES:
+        raise ValueError(f"root_next_status must be one of {sorted(VALID_STATUSES)}")
     if root_assignee is not None:
         root_assignee = _canonical_assignee(root_assignee)
 
@@ -7466,7 +7489,7 @@ def decompose_triage_task(
         ).fetchone()
         if root_row is None:
             return None
-        if root_row["status"] != "triage":
+        if root_row["status"] not in allowed_root_statuses:
             return None
         tenant = root_row["tenant"]
         root_loop_task_id = _loop_root_for_task(conn, task_id)
@@ -7487,12 +7510,12 @@ def decompose_triage_task(
         root_ws_kind = root_row["workspace_kind"] or "scratch"
         root_ws_path = root_row["workspace_path"]
 
-        child_initial_status = "todo" if auto_promote else "blocked"
+        child_initial_status = "todo" if auto_promote else "scheduled"
         # Create children. In activation mode, status is 'todo' regardless
         # of parents — we link them under the root AFTER creation so the
         # dispatcher sees a coherent state, and recompute_ready() at the end
         # promotes parent-free children to 'ready'. In planning/hold mode,
-        # children must be sticky-blocked from the start; plain parent-free
+        # children must be scheduled from the start; plain parent-free
         # 'todo' rows are eligible for recompute_ready() in other processes.
         for idx, child in enumerate(children):
             new_id = _new_task_id()
@@ -7545,10 +7568,10 @@ def decompose_triage_task(
                 _append_event(
                     conn,
                     new_id,
-                    "blocked",
+                    "scheduled",
                     {
-                        "reason": "decomposed graph parked for manual activation",
-                        "blocked_by": author or "decomposer",
+                        "reason": "decomposed graph parked for origin activation",
+                        "scheduled_by": author or "decomposer",
                         "from_decompose_of": task_id,
                     },
                 )
@@ -7580,9 +7603,9 @@ def decompose_triage_task(
                 (cid, task_id),
             )
 
-        # Flip the root: triage -> todo, set assignee to the orchestrator.
-        sets = ["status = 'todo'"]
-        params: list[Any] = []
+        # Flip/park the root and optionally set the orchestrator assignee.
+        sets = ["status = ?"]
+        params: list[Any] = [root_next_status]
         if root_assignee is not None:
             sets.append("assignee = ?")
             params.append(root_assignee)
@@ -7600,9 +7623,15 @@ def decompose_triage_task(
                 (
                     task_id,
                     author.strip(),
-                    "Decomposed into "
-                    + ", ".join(child_ids)
-                    + ". Root will wake when all children complete.",
+                    (
+                        "Decomposed into "
+                        + ", ".join(child_ids)
+                        + (
+                            ". Root will wake when all children complete."
+                            if auto_promote
+                            else ". Children are scheduled for explicit origin activation."
+                        )
+                    ),
                     now,
                 ),
             )
@@ -7611,6 +7640,9 @@ def decompose_triage_task(
             {
                 "child_ids": child_ids,
                 "root_assignee": root_assignee,
+                "root_status": root_next_status,
+                "child_status": child_initial_status,
+                "auto_promote": auto_promote,
             },
         )
 

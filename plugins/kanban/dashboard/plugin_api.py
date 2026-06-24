@@ -155,6 +155,12 @@ BOARD_COLUMNS: list[str] = [
 
 _CARD_SUMMARY_PREVIEW_CHARS = 200
 _LOOP_INTAKE_EVENT_KIND = "loop_intake_state"
+_LOOP_NODE_EVENT_KIND = "loop_node_state"
+_LOOP_NODE_METADATA_FIELDS = (
+    "branch_kind",
+    "decision_group_id",
+    "selection_state",
+)
 _LOOP_INTAKE_DRAFT_PAYLOAD = {
     "needed": True,
     "state": "drafted",
@@ -301,6 +307,43 @@ def _loop_intake_state_for_task(conn: sqlite3.Connection, task_id: str) -> Optio
     return _loop_intake_states_for_tasks(conn, [task_id]).get(task_id)
 
 
+def _loop_node_metadata_for_tasks(
+    conn: sqlite3.Connection,
+    task_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    if not task_ids:
+        return {}
+    placeholders = ",".join("?" for _ in task_ids)
+    rows = conn.execute(
+        f"""
+        SELECT task_id, payload
+        FROM task_events
+        WHERE task_id IN ({placeholders})
+          AND kind = ?
+        ORDER BY id ASC
+        """,
+        tuple(task_ids) + (_LOOP_NODE_EVENT_KIND,),
+    ).fetchall()
+    metadata: dict[str, dict[str, Any]] = {task_id: {} for task_id in task_ids}
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        state = metadata.setdefault(str(row["task_id"]), {})
+        for key in _LOOP_NODE_METADATA_FIELDS:
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                state[key] = value.strip()
+    return {task_id: state for task_id, state in metadata.items() if state}
+
+
+def _loop_node_metadata_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]]:
+    return _loop_node_metadata_for_tasks(conn, [task_id]).get(task_id)
+
+
 def _task_dict_with_loop_intake(
     conn: sqlite3.Connection,
     task: kanban_db.Task,
@@ -311,6 +354,9 @@ def _task_dict_with_loop_intake(
     intake = _loop_intake_state_for_task(conn, task.id)
     if intake:
         item["loop_intake"] = intake
+    metadata = _loop_node_metadata_for_task(conn, task.id)
+    if metadata:
+        item.update(metadata)
     return item
 
 
@@ -321,6 +367,11 @@ def _task_has_unresolved_loop_intake(conn: sqlite3.Connection, task_id: str) -> 
     if intake.get("dispatchable") is True:
         return False
     return str(intake.get("state") or "").strip().lower() not in {"spec-ready", "spec_ready", "approved"}
+
+
+def _task_has_loop_intake_blocking_ready(conn: sqlite3.Connection, task_id: str) -> bool:
+    intake = _loop_intake_state_for_task(conn, task_id)
+    return bool(intake and intake.get("needed") is True and intake.get("dispatchable") is not True)
 
 
 def _task_has_loop_intake_pending_submit(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -335,7 +386,7 @@ def _task_has_loop_intake_pending_submit(conn: sqlite3.Connection, task_id: str)
 def _loop_intake_required_reason(task_id: str) -> str:
     return (
         f"Loop intake is still required for {task_id}; use Loop drawer Submit or an explicit "
-        "activation request to approve and dispatch it."
+        "activation request to approve Loop planning."
     )
 
 
@@ -1202,6 +1253,7 @@ def get_session_source(
         diagnostics = _compute_task_diagnostics(conn, task_ids=task_ids) if task_ids else {}
 
         intake_states = _loop_intake_states_for_tasks(conn, task_ids)
+        loop_node_metadata = _loop_node_metadata_for_tasks(conn, task_ids)
         root_task_id = _session_source_root_task_id(conn, tasks, included_links)
         loop_handoffs = _loop_handoffs_by_task(
             conn,
@@ -1215,6 +1267,8 @@ def get_session_source(
             item = _task_dict(task, latest_summary=summary_map.get(task.id))
             if task.id in intake_states:
                 item["loop_intake"] = intake_states[task.id]
+            if task.id in loop_node_metadata:
+                item.update(loop_node_metadata[task.id])
             if task.id in loop_handoffs:
                 item["loop_handoffs"] = loop_handoffs[task.id]
             item["is_container"] = False
@@ -1573,7 +1627,7 @@ def _create_loop_draft_root(
     *,
     board: Optional[str],
 ) -> str:
-    """Create/upsert the real triage row that anchors a desktop Loop draft."""
+    """Create/upsert the real scheduled row that anchors a desktop Loop draft."""
     title = _draft_title(payload.title)
     session_id = (payload.session_id or os.environ.get("HERMES_SESSION_ID") or "").strip() or None
     tenant = (payload.tenant or session_id or "").strip() or None
@@ -1622,7 +1676,7 @@ def _create_loop_draft_root(
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, 'triage', ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL, 0, NULL, ?)
+                    ) VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL, 0, NULL, ?)
                     """,
                     (
                         task_id,
@@ -1645,7 +1699,7 @@ def _create_loop_draft_root(
                     "created",
                     {
                         "assignee": payload.assignee,
-                        "status": "triage",
+                        "status": "scheduled",
                         "parents": [],
                         "tenant": tenant,
                         "loop_root": True,
@@ -2072,7 +2126,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         if payload.status is not None:
             s = payload.status
             ok = True
-            if s == "ready" and _task_has_unresolved_loop_intake(conn, task_id):
+            if s == "ready" and _task_has_loop_intake_blocking_ready(conn, task_id):
                 raise HTTPException(status_code=409, detail=_loop_intake_required_reason(task_id))
             if s == "done":
                 ok = kanban_db.complete_task(
@@ -3454,6 +3508,7 @@ def auto_describe_profile(profile_name: str, payload: DescribeAutoBody):
 class DecomposeBody(BaseModel):
     author: Optional[str] = None
     approve_intake: bool = False
+    loop_safe: bool = False
 
 
 @router.post("/tasks/{task_id}/decompose")
@@ -3486,9 +3541,14 @@ def decompose_task_endpoint(
                         "needed": True,
                         "state": "approved",
                         "source": "desktop_submit",
-                        "dispatchable": True,
+                        "dispatchable": bool(not payload.loop_safe),
                     },
                 )
+                if not payload.loop_safe:
+                    conn.execute(
+                        "UPDATE tasks SET status = 'triage' WHERE id = ? AND status = 'scheduled'",
+                        (task_id,),
+                    )
         if _task_has_unresolved_loop_intake(conn, task_id):
             return {
                 "ok": False,
@@ -3509,6 +3569,7 @@ def decompose_task_endpoint(
         outcome = kanban_decompose.decompose_task(
             task_id,
             author=(payload.author or None),
+            loop_safe=payload.loop_safe,
         )
 
     return {

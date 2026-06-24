@@ -68,9 +68,9 @@ _HERMES_CORE_TOOLS = [
     "kanban_show", "kanban_list",
     "kanban_complete", "kanban_block", "kanban_heartbeat",
     "kanban_request_decision", "kanban_request_review", "kanban_resolve_blocker", "kanban_comment",
-    "kanban_request_epistemic_workflow", "kanban_request_orchestrator_handoff",
+    "kanban_request_orchestrator_handoff",
     "kanban_create", "kanban_link", "kanban_unblock",
-    "kanban_decompose", "kanban_epistemic_decompose",
+    "kanban_decompose",
     # Loop graph editing — one compact tool, default-enabled but gated by
     # loop.enabled so users can remove the schema surface if needed.
     "loop_graph",
@@ -269,9 +269,9 @@ TOOLSETS = {
             "kanban_show", "kanban_list", "kanban_complete", "kanban_block",
             "kanban_request_decision", "kanban_request_review", "kanban_resolve_blocker",
             "kanban_heartbeat", "kanban_comment",
-            "kanban_request_epistemic_workflow", "kanban_request_orchestrator_handoff",
+            "kanban_request_orchestrator_handoff",
             "kanban_create", "kanban_link", "kanban_unblock",
-            "kanban_decompose", "kanban_epistemic_decompose",
+            "kanban_decompose",
         ],
         "includes": [],
     },

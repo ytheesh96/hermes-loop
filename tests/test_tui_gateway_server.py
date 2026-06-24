@@ -7415,6 +7415,7 @@ def test_notification_poller_delivers_completion(monkeypatch):
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: emitted.append(a))
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_session_info", lambda *args, **kwargs: {})
 
     # Isolate the completion queue for the duration of this test. The poller
     # reads process_registry.completion_queue by attribute at runtime; the
@@ -7604,6 +7605,7 @@ def test_notification_poller_delivers_tui_kanban_completion(monkeypatch, tmp_pat
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: emitted.append(a))
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_session_info", lambda *args, **kwargs: {})
     monkeypatch.setattr(process_registry, "completion_queue", _queue_mod.Queue())
 
     stop = threading.Event()
@@ -7626,6 +7628,88 @@ def test_notification_poller_delivers_tui_kanban_completion(monkeypatch, tmp_pat
             conn.close()
     finally:
         server._sessions.pop("sid_kanban", None)
+
+
+def test_tui_kanban_collect_follows_session_lineage(monkeypatch, tmp_path):
+    """A subscription on an origin session is collectible by its compression tip."""
+    from hermes_state import SessionDB
+    from hermes_cli import kanban_db as kb
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    token = set_hermes_home_override(home)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    monkeypatch.setattr(server, "_db", None)
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+
+    db = SessionDB()
+    try:
+        db.create_session("origin-session", source="tui")
+        db.end_session("origin-session", "compression")
+        db.create_session(
+            "tip-session",
+            source="tui",
+            parent_session_id="origin-session",
+        )
+    finally:
+        db.close()
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="notify lineage", assignee="worker")
+        kb.add_notify_sub(conn, task_id=tid, platform="tui", chat_id="origin-session")
+        kb.complete_task(conn, tid, summary="finished at origin tip")
+    finally:
+        conn.close()
+
+    try:
+        messages = server._collect_tui_kanban_notifications({"session_key": "tip-session"})
+
+        assert len(messages) == 1
+        assert f"Kanban {tid} done" in messages[0]
+        assert "finished at origin tip" in messages[0]
+        conn = kb.connect()
+        try:
+            assert kb.list_notify_subs(conn, tid) == []
+        finally:
+            conn.close()
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_tui_kanban_collect_uses_active_profile_when_env_unset(monkeypatch, tmp_path):
+    """Profile-launched TUI pollers must not skip owner-scoped rows when HERMES_PROFILE is unset."""
+    from hermes_cli import kanban_db as kb
+
+    profile_home = tmp_path / ".hermes" / "profiles" / "elephant"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="notify profile", assignee="worker")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="tui",
+            chat_id="profile-session",
+            notifier_profile="elephant",
+        )
+        kb.complete_task(conn, tid, summary="finished under profile")
+    finally:
+        conn.close()
+
+    messages = server._collect_tui_kanban_notifications({"session_key": "profile-session"})
+
+    assert len(messages) == 1
+    assert f"Kanban {tid} done" in messages[0]
+    assert "finished under profile" in messages[0]
 
 
 def test_tui_kanban_dispatch_survives_busy_flip_after_claim(monkeypatch, tmp_path):
@@ -7669,6 +7753,7 @@ def test_tui_kanban_dispatch_survives_busy_flip_after_claim(monkeypatch, tmp_pat
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_session_info", lambda *args, **kwargs: {})
     monkeypatch.setattr(process_registry, "completion_queue", _queue_mod.Queue())
 
     original_collect = server._collect_tui_kanban_notifications
@@ -7693,6 +7778,77 @@ def test_tui_kanban_dispatch_survives_busy_flip_after_claim(monkeypatch, tmp_pat
         assert "race-safe handoff" in turns[0]
     finally:
         server._sessions.pop("sid_kanban_race", None)
+
+
+def test_idle_tui_kanban_poll_does_not_publish_running(monkeypatch, tmp_path):
+    """Idle Kanban polls reserve privately, without flickering public busy state."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    token = set_hermes_home_override(home)
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    sess = _session(session_key="tui-session")
+    server._sessions["sid_kanban_idle"] = sess
+
+    def collect_no_messages(_session):
+        entered.set()
+        assert release.wait(5)
+        return []
+
+    monkeypatch.setattr(server, "_collect_tui_kanban_notifications", collect_no_messages)
+    monkeypatch.setattr(server, "_fallback_session_info", lambda _session: {})
+    monkeypatch.setattr(
+        server,
+        "_start_agent_build",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("private reservation should block prompt.submit")
+        ),
+    )
+
+    try:
+        server._cfg_cache = None
+        server._cfg_mtime = None
+        server._cfg_path = None
+        lease, err = server._claim_active_session_slot(
+            "tui-session", live_session_id="sid_kanban_idle"
+        )
+        assert err is None
+        sess["active_session_lease"] = lease
+
+        worker = threading.Thread(
+            target=server._dispatch_tui_kanban_notifications,
+            args=("sid_kanban_idle", sess),
+            daemon=True,
+        )
+        worker.start()
+        assert entered.wait(1)
+
+        payload = server._live_session_payload("sid_kanban_idle", sess)
+        assert payload["running"] is False
+        assert sess["running"] is False
+        assert sess.get("_notification_turn_reserved") is True
+        snapshot = active_session_registry_snapshot()
+        assert snapshot[0]["metadata"]["running"] is False
+
+        busy = server._methods["prompt.submit"](
+            "busy-check", {"session_id": "sid_kanban_idle", "text": "hi"}
+        )
+        assert busy["error"]["code"] == 4009
+
+        release.set()
+        worker.join(1)
+        assert not worker.is_alive()
+        assert sess["running"] is False
+    finally:
+        release.set()
+        server._release_active_session_slot(sess)
+        server._sessions.pop("sid_kanban_idle", None)
+        server._cfg_cache = None
+        server._cfg_mtime = None
+        server._cfg_path = None
+        reset_hermes_home_override(token)
 
 
 def test_session_save_writes_under_hermes_home_with_system_prompt(monkeypatch, tmp_path):

@@ -1022,6 +1022,25 @@ class TestClassifyApiError:
         assert result.retryable is False
         assert result.should_compress is False
 
+    def test_400_unsupported_content_type_detail_not_context_overflow(self):
+        """Codex flat-detail content-type 400s are format errors, even in large sessions."""
+        e = MockAPIError(
+            "Error code: 400 - {'detail': 'Unsupported content type'}",
+            status_code=400,
+            body={"detail": "Unsupported content type"},
+        )
+        result = classify_api_error(
+            e,
+            model="gpt-5.5",
+            provider="openai-codex",
+            approx_tokens=147_806,
+            context_length=272_000,
+            num_messages=218,
+        )
+        assert result.reason == FailoverReason.format_error
+        assert result.retryable is False
+        assert result.should_compress is False
+
     def test_400_unknown_parameter_not_context_overflow(self):
         """'Unknown parameter' 400s are deterministic request-validation
         failures, not overflows."""

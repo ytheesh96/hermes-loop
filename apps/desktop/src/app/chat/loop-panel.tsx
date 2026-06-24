@@ -967,7 +967,9 @@ function loopIntakeBlocksSubmit(row: LoopRow): boolean {
 }
 
 function loopSubmitTitle(row: LoopRow): string | undefined {
-  return loopIntakeBlocksSubmit(row) ? 'Submit approves and dispatches this Loop intake row.' : undefined
+  return loopIntakeBlocksSubmit(row)
+    ? 'Submit approves Loop planning and keeps generated option tasks scheduled until activation.'
+    : undefined
 }
 
 function LoopTaskActions({
@@ -981,7 +983,7 @@ function LoopTaskActions({
   const blocked = status === 'blocked'
   const archived = status === 'archived'
   const terminal = TERMINAL_LOOP_STATUSES.has(status)
-  const canSubmit = status === 'triage' && !terminal
+  const canSubmit = (status === 'triage' || status === 'scheduled') && !terminal && !isTentativeDecisionOptionEndpoint(row)
   const statusAction: LoopTaskAction = blocked ? 'unblock' : 'block'
   const statusLabel = blocked ? 'Unblock' : 'Block'
 
@@ -1770,6 +1772,7 @@ function loopAgentActivityLabel(row: LoopRow): string | undefined {
 
 interface LoopTaskGraphEdge {
   from: string
+  tentative?: boolean
   to: string
 }
 
@@ -1816,6 +1819,17 @@ function loopTaskGraphAgentLabel(row: LoopRow): string | undefined {
   return agent === 'Unassigned' ? undefined : agent
 }
 
+function isTentativeDecisionOptionEndpoint(row?: LoopRow): boolean {
+  if (!row) {
+    return false
+  }
+
+  const branchKind = normalizedLoopValue(row.branchKind)
+  const selectionState = normalizedLoopValue(row.selectionState)
+
+  return branchKind === 'alternative' && selectionState !== 'chosen'
+}
+
 function loopTaskGraphEdges(rows: LoopRow[], fallbackRootTaskId?: string): LoopTaskGraphEdge[] {
   const rowById = new Map(rows.map(row => [row.taskId, row]))
   const edgeKeys = new Set<string>()
@@ -1833,9 +1847,16 @@ function loopTaskGraphEdges(rows: LoopRow[], fallbackRootTaskId?: string): LoopT
       return
     }
 
+    const fromRow = rowById.get(from)
+    const toRow = rowById.get(to)
+
     edgeKeys.add(key)
     incomingTaskIds.add(to)
-    edges.push({ from, to })
+    edges.push({
+      from,
+      tentative: isTentativeDecisionOptionEndpoint(fromRow) || isTentativeDecisionOptionEndpoint(toRow),
+      to
+    })
   }
 
   for (const row of rows) {
@@ -1851,7 +1872,9 @@ function loopTaskGraphEdges(rows: LoopRow[], fallbackRootTaskId?: string): LoopT
 
   if (fallbackRootTaskId && rowById.has(fallbackRootTaskId)) {
     for (const row of rows) {
-      if (row.taskId !== fallbackRootTaskId && !incomingTaskIds.has(row.taskId)) {
+      const hasDependencyLinks = row.parents.length > 0 || row.children.length > 0 || row.parentCount > 0 || row.childCount > 0
+
+      if (row.taskId !== fallbackRootTaskId && !incomingTaskIds.has(row.taskId) && !hasDependencyLinks) {
         addEdge(fallbackRootTaskId, row.taskId)
       }
     }
@@ -1926,8 +1949,8 @@ function loopTaskGraphLayout(rows: LoopRow[]): LoopTaskGraphLayout {
   const outgoing = new Map<string, string[]>()
   const depthById = new Map<string, number>()
 
-  if (root) {
-    depthById.set(root.taskId, 0)
+  for (const row of graphRows) {
+    depthById.set(row.taskId, Math.max(0, row.depth || 0))
   }
 
   for (const edge of dagEdges) {
@@ -2021,11 +2044,15 @@ function loopTaskGraphLayout(rows: LoopRow[]): LoopTaskGraphLayout {
 function LoopTaskGraphNode({
   layout,
   onHover,
-  onOpen
+  onOpen,
+  onSelect,
+  selected
 }: {
   layout: LoopTaskGraphNodeLayout
   onHover?: (taskId: null | string) => void
   onOpen?: (row: LoopRow) => void
+  onSelect?: (row: LoopRow) => void
+  selected?: boolean
 }) {
   const { row, x, y } = layout
   const currentTool = loopWorkerCurrentTool(row)
@@ -2033,14 +2060,23 @@ function LoopTaskGraphNode({
 
   return (
     <button
-      aria-label={`Open ${row.title}`}
+      aria-label={`${selected ? 'Selected' : 'Select'} ${row.title} (${row.taskId})`}
+      aria-pressed={selected}
       className={cn(
         'absolute flex flex-col gap-1.5 rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-surface-background) p-2 text-left shadow-none transition-colors hover:border-(--ui-stroke-primary) hover:bg-(--ui-row-hover-background) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
-        onOpen ? 'cursor-pointer' : 'cursor-default',
-        isDoneLoopRow(row) && 'bg-(--ui-bg-secondary)/45'
+        onSelect || onOpen ? 'cursor-pointer' : 'cursor-default',
+        isDoneLoopRow(row) && 'bg-(--ui-bg-secondary)/45',
+        selected && 'border-(--ui-stroke-primary) bg-(--ui-row-hover-background) shadow-nous ring-1 ring-(--ui-stroke-primary)/30'
       )}
+      data-selected={selected ? 'true' : 'false'}
       data-testid={`loop-task-graph-node-${row.taskId}`}
-      onClick={() => onOpen?.(row)}
+      onClick={() => {
+        if (onSelect) {
+          onSelect(row)
+        } else {
+          onOpen?.(row)
+        }
+      }}
       onMouseEnter={() => onHover?.(row.taskId)}
       onMouseLeave={() => onHover?.(null)}
       style={{
@@ -2075,9 +2111,20 @@ function LoopTaskGraphNode({
   )
 }
 
-function LoopTaskGraph({ rows, onOpenTaskTab }: { rows: LoopRow[]; onOpenTaskTab?: (row: LoopRow) => void }) {
+function LoopTaskGraph({
+  onOpenTaskTab,
+  onSelectTask,
+  rows,
+  selectedTaskId
+}: {
+  onOpenTaskTab?: (row: LoopRow) => void
+  onSelectTask?: (row: LoopRow) => void
+  rows: LoopRow[]
+  selectedTaskId?: null | string
+}) {
   const [zoom, setZoom] = useState(1)
   const [hoveredTaskId, setHoveredTaskId] = useState<null | string>(null)
+
   const layout = useMemo(() => loopTaskGraphLayout(rows), [rows])
   const nodeById = useMemo(() => new Map(layout.nodes.map(node => [node.row.taskId, node])), [layout.nodes])
 
@@ -2189,11 +2236,17 @@ function LoopTaskGraph({ rows, onOpenTaskTab }: { rows: LoopRow[]; onOpenTaskTab
               </marker>
             </defs>
             {edgesWithPaths.map(({ d, edge }) => {
+              const edgeKey = `${edge.from}:${edge.to}`
+
               const isConnectedToHovered =
                 hoveredTaskId != null && (edge.from === hoveredTaskId || edge.to === hoveredTaskId)
 
-              const highlighted = hoveredTaskId != null && isConnectedToHovered
-              const dimmed = hoveredTaskId != null && !isConnectedToHovered
+              const isConnectedToSelected =
+                selectedTaskId != null && (edge.from === selectedTaskId || edge.to === selectedTaskId)
+
+              const highlighted = hoveredTaskId != null ? isConnectedToHovered : isConnectedToSelected
+              const hoverHighlighted = hoveredTaskId != null && isConnectedToHovered
+              const dimmed = hoveredTaskId != null ? !isConnectedToHovered : selectedTaskId != null && !isConnectedToSelected
 
               let opacity: number
 
@@ -2201,29 +2254,47 @@ function LoopTaskGraph({ rows, onOpenTaskTab }: { rows: LoopRow[]; onOpenTaskTab
                 opacity = 1
               } else if (dimmed) {
                 opacity = 0.08
+              } else if (edge.tentative) {
+                opacity = 1
               } else {
                 opacity = 0.85
               }
 
+              const strokeWidth = edge.tentative ? (hoverHighlighted ? 2.4 : 2) : highlighted ? 1.8 : 1.35
+
               return (
                 <path
+                  className="pointer-events-none"
                   d={d}
+                  data-selected-connected={isConnectedToSelected ? 'true' : 'false'}
                   data-testid={`loop-task-graph-edge-${edge.from}-${edge.to}`}
                   fill="none"
-                  key={`${edge.from}:${edge.to}`}
-                  markerEnd={highlighted || !hoveredTaskId ? 'url(#loop-graph-arrow)' : 'url(#loop-graph-arrow-dim)'}
+                  key={edgeKey}
+                  markerEnd={
+                    highlighted || (!hoveredTaskId && !selectedTaskId)
+                      ? 'url(#loop-graph-arrow)'
+                      : 'url(#loop-graph-arrow-dim)'
+                  }
                   opacity={opacity}
                   stroke="currentColor"
+                  strokeDasharray={edge.tentative ? '0.5 8' : undefined}
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  strokeWidth={highlighted ? 1.8 : 1.35}
+                  strokeWidth={strokeWidth}
                   style={{ transition: 'opacity 150ms ease, stroke-width 150ms ease' }}
                 />
               )
             })}
           </svg>
           {layout.nodes.map(node => (
-            <LoopTaskGraphNode key={node.row.taskId} layout={node} onHover={setHoveredTaskId} onOpen={onOpenTaskTab} />
+            <LoopTaskGraphNode
+              key={node.row.taskId}
+              layout={node}
+              onHover={setHoveredTaskId}
+              onOpen={onOpenTaskTab}
+              onSelect={onSelectTask}
+              selected={node.row.taskId === selectedTaskId}
+            />
           ))}
         </div>
       </div>
@@ -2511,12 +2582,23 @@ function LoopRootAgentsCard({
   root: LoopRow
 }) {
   const [view, setView] = useState<'canvas' | 'list'>('canvas')
+  const [selectedGraphTaskId, setSelectedGraphTaskId] = useState(root.taskId)
   const rows = [root, ...groups.active, ...groups.attention, ...groups.queued, ...groups.other, ...groups.completed]
   const showCanvas = view === 'canvas'
+  const selectedGraphRow = rows.find(row => row.taskId === selectedGraphTaskId) || root
 
   useEffect(() => {
     setView('canvas')
+    setSelectedGraphTaskId(root.taskId)
   }, [root.taskId])
+
+  const selectGraphTask = useCallback(
+    (targetRow: LoopRow) => {
+      setSelectedGraphTaskId(targetRow.taskId)
+      onOpenTaskTab?.(targetRow)
+    },
+    [onOpenTaskTab]
+  )
 
   return (
     <DetailSection
@@ -2547,7 +2629,12 @@ function LoopRootAgentsCard({
       {rows.length === 0 ? (
         <EmptyDetail>No agents yet.</EmptyDetail>
       ) : showCanvas ? (
-        <LoopTaskGraph onOpenTaskTab={onOpenTaskTab} rows={rows} />
+        <LoopTaskGraph
+          onOpenTaskTab={onOpenTaskTab}
+          onSelectTask={selectGraphTask}
+          rows={rows}
+          selectedTaskId={selectedGraphRow.taskId}
+        />
       ) : (
         <div className="flex flex-col gap-0.5" data-testid="loop-root-agents-list">
           {rows.map(row => (
@@ -2651,7 +2738,7 @@ function LoopTaskAgentsCard({
       title={showCanvas ? 'Loop graph' : 'Agents'}
     >
       {showCanvas ? (
-        <LoopTaskGraph onOpenTaskTab={targetRow => onSelectTaskId?.(targetRow.taskId)} rows={subgraphRows} />
+        <LoopTaskGraph onOpenTaskTab={targetRow => onSelectTaskId?.(targetRow.taskId)} rows={subgraphRows} selectedTaskId={row.taskId} />
       ) : (
         <div className="flex flex-col gap-0.5" data-testid="loop-task-agents-list">
           {items.map(({ item, taskId }) => (
@@ -2712,7 +2799,9 @@ function LoopRootOverview({
         </div>
       </section>
 
-      {decomposed ? <LoopRootAgentsCard groups={groups} onOpenTaskTab={onOpenTaskTab} root={root} /> : null}
+      {decomposed ? (
+        <LoopRootAgentsCard groups={groups} onOpenTaskTab={onOpenTaskTab} root={root} />
+      ) : null}
 
       <LoopRootSpec root={root} />
     </div>

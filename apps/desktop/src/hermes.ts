@@ -493,13 +493,18 @@ export interface LoopTaskDecomposeResult {
 export function decomposeLoopTask(
   taskId: string,
   profile?: string | null,
-  options: { approveIntake?: boolean; board?: null | string } = {}
+  options: { approveIntake?: boolean; board?: null | string; loopSafe?: boolean } = {}
 ): Promise<LoopTaskDecomposeResult> {
+  const body = {
+    ...(options.approveIntake ? { approve_intake: true } : {}),
+    ...(options.loopSafe ? { loop_safe: true } : {})
+  }
+
   return window.hermesDesktop.api<LoopTaskDecomposeResult>({
     ...(profile ? { profile } : profileScoped()),
     path: `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/decompose${kanbanBoardQuery(options.board)}`,
     method: 'POST',
-    body: options.approveIntake ? { approve_intake: true } : {},
+    body,
     timeoutMs: 10 * 60_000
   })
 }

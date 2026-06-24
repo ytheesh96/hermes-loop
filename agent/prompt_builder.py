@@ -202,9 +202,11 @@ KANBAN_GUIDANCE = (
     "7. If follow-up work appears, create a child with `kanban_create(..., "
     "parents=[your-task-id])`; do not scope-creep.\n\n"
     "## Orchestrator mode\n"
-    "Routing tasks should use `kanban_decompose(...)` or "
-    "`kanban_epistemic_decompose(...)`; use create/link only for small surgical "
-    "follow-ups. Do not execute implementation work yourself.\n\n"
+    "Use `kanban_decompose(...)` for ordinary routing. For dynamic consequential "
+    "uncertainty, delegate durable Loop subtasks from the origin/orchestrator "
+    "with `delegate_task(mode=\"loop\", ...)` so completion re-enters the origin "
+    "conversation. Use create/link only for small surgical follow-ups; do not "
+    "execute implementation work yourself.\n\n"
     "## Details\n"
     "- Worktree workspace with no `.git`: create it from the main repo using "
     "`${HERMES_KANBAN_BRANCH:-wt/$HERMES_KANBAN_TASK}`.\n"
@@ -220,7 +222,8 @@ KANBAN_GUIDANCE = (
     "- Do not complete unfinished work; block it.\n"
     "- Do not call `clarify`; headless workers get no live answer. Comment/block "
     "instead; the orchestrator/operator decides whether user input is required.\n"
-    "- Do not assign follow-up work to yourself or use `delegate_task` as a board substitute."
+    "- Do not assign follow-up work to yourself. Do not call plain `delegate_task` "
+    "as a board substitute; use loop mode only for durable Loop/Kanban-backed work."
 )
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (

@@ -143,6 +143,7 @@ export interface LoopIntakeState {
 export interface TenantLoopTask {
   age?: Record<string, null | number>
   assignee?: null | string
+  branch_kind?: null | string
   body?: null | string
   child_count?: number
   children_count?: number
@@ -152,6 +153,7 @@ export interface TenantLoopTask {
   created_by?: null | string
   current_run_id?: null | number
   current_step_key?: null | string
+  decision_group_id?: null | string
   diagnostics?: unknown[]
   external_child_tasks?: CompactLoopTask[]
   external_parent_tasks?: CompactLoopTask[]
@@ -174,6 +176,7 @@ export interface TenantLoopTask {
   review_kind?: null | string
   resume_mode?: null | string
   review_subject_assignee?: null | string
+  selection_state?: null | string
   foreground_parent_session_id?: null | string
   foreground_fork_session_id?: null | string
   started_at?: null | number
@@ -253,6 +256,7 @@ export interface LoopTaskDetail {
 export interface LoopRow {
   active: boolean
   assignee?: null | string
+  branchKind?: null | string
   body?: null | string
   childCount: number
   children: string[]
@@ -260,6 +264,7 @@ export interface LoopRow {
   depth: number
   externalChildTasks?: CompactLoopTask[]
   externalParentTasks?: CompactLoopTask[]
+  decisionGroupId?: null | string
   frontier: boolean
   latestRun?: null | LoopLatestRun
   latestSummary?: null | string
@@ -272,6 +277,7 @@ export interface LoopRow {
   reviewKind?: null | string
   resumeMode?: null | string
   reviewSubjectAssignee?: null | string
+  selectionState?: null | string
   result?: null | string
   sourceSessionId?: null | string
   foregroundParentSessionId?: null | string
@@ -358,6 +364,7 @@ const ACTIVE_STATUSES = new Set(['ready', 'running', 'claimed', 'in_progress'])
 const RUNNABLE_STATUSES = new Set(['ready', 'running', 'claimed', 'in_progress', 'todo'])
 const WAITING_WORKER_STATUSES = new Set(['queued', 'ready', 'todo'])
 const SUCCESS_RUN_OUTCOMES = new Set(['success', 'succeeded', 'ok'])
+
 const FAILED_RUN_STATES = new Set([
   'error',
   'failed',
@@ -368,6 +375,7 @@ const FAILED_RUN_STATES = new Set([
   'spawn_failed',
   'gave_up'
 ])
+
 const DEFAULT_STALE_HEARTBEAT_SECONDS = 10 * 60
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -829,6 +837,7 @@ function tenantRowFromTask(
   return {
     active: ACTIVE_STATUSES.has(status) || latestRunActive || latestWorkerActive || Boolean(task.current_run_id),
     assignee: task.assignee,
+    branchKind: task.branch_kind,
     body: task.body,
     childCount: children.length || task.child_count || task.children_count || 0,
     children,
@@ -836,6 +845,7 @@ function tenantRowFromTask(
     depth: depths.get(task.id) || 0,
     externalChildTasks: task.external_child_tasks || [],
     externalParentTasks: task.external_parent_tasks || [],
+    decisionGroupId: task.decision_group_id,
     frontier: unfinishedRunnable,
     latestRun,
     latestSummary:
@@ -849,6 +859,7 @@ function tenantRowFromTask(
     reviewKind: task.review_kind,
     resumeMode: task.resume_mode,
     reviewSubjectAssignee: task.review_subject_assignee,
+    selectionState: task.selection_state,
     result: task.result,
     sourceSessionId: task.session_id,
     foregroundParentSessionId: task.foreground_parent_session_id,
@@ -911,14 +922,17 @@ function rowFromNode(value: unknown): LoopRow | null {
 
   return {
     active: booleanField(node, 'active'),
+    branchKind: stringField(node, 'branch_kind') || undefined,
     childCount: numberField(node, 'child_count'),
     children: stringArrayField(node, 'children'),
     commentCount: numberField(node, 'comment_count'),
     depth: numberField(node, 'depth'),
+    decisionGroupId: stringField(node, 'decision_group_id') || undefined,
     frontier: booleanField(node, 'frontier'),
     parentCount: parents.length || numberField(node, 'parent_count'),
     parents,
     priority: numberField(node, 'priority') || undefined,
+    selectionState: stringField(node, 'selection_state') || undefined,
     status: stringField(node, 'status') || 'triage',
     taskId,
     title: title || taskId

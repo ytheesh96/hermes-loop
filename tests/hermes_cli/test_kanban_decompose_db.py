@@ -410,13 +410,14 @@ def test_decompose_non_loop_children_keep_author_provenance(kanban_home):
     assert created_payloads == [{"by": "alice", "from_decompose_of": tid, "status": "todo"}]
 
 
-def test_decompose_auto_promote_false_sticky_blocks_children(kanban_home):
+def test_decompose_auto_promote_false_schedules_children(kanban_home):
     """Planning-only fan-out must not leak parent-free children to dispatcher.
 
     ``auto_promote=False`` used to leave children as ordinary ``todo`` rows.
     Any later ``recompute_ready()`` call (dispatcher tick, list path, tool read)
     promoted parent-free children to ``ready`` and could spawn them despite the
-    caller asking for a manual-review-first graph.
+    caller asking for a manual-review-first graph. Scheduled children stay
+    visible in the graph/board but require explicit activation.
     """
     with kb.connect() as conn:
         tid = _create_triage(conn, title="parked graph", tenant="loop-tenant")
@@ -437,15 +438,15 @@ def test_decompose_auto_promote_false_sticky_blocks_children(kanban_home):
         # Simulate an arbitrary dispatcher/read-path recompute after the hold.
         promoted = kb.recompute_ready(conn)
         children = [kb.get_task(conn, cid) for cid in child_ids]
-        block_events = {
-            cid: [ev for ev in kb.list_events(conn, cid) if ev.kind == "blocked"]
+        schedule_events = {
+            cid: [ev for ev in kb.list_events(conn, cid) if ev.kind == "scheduled"]
             for cid in child_ids
         }
 
     assert promoted == 0
     assert all(child is not None for child in children)
-    assert [child.status for child in children] == ["blocked", "blocked", "blocked"]
-    assert all(block_events[cid] for cid in child_ids)
+    assert [child.status for child in children if child is not None] == ["scheduled", "scheduled", "scheduled"]
+    assert all(schedule_events[cid] for cid in child_ids)
 
 
 def test_decompose_children_inherit_dir_workspace(kanban_home):

@@ -167,6 +167,20 @@ describe('Hermes REST session helpers', () => {
     })
   })
 
+  it('can request Loop-safe decomposition without making planning rows dispatchable', async () => {
+    api.mockResolvedValue({ child_ids: [], fanout: false, ok: true, task_id: 't_root' })
+
+    await decomposeLoopTask('t_root', 'peacock', { approveIntake: true, board: 'developer', loopSafe: true })
+
+    expect(api).toHaveBeenCalledWith({
+      body: { approve_intake: true, loop_safe: true },
+      method: 'POST',
+      path: '/api/plugins/kanban/tasks/t_root/decompose?board=developer',
+      profile: 'peacock',
+      timeoutMs: 600_000
+    })
+  })
+
   it('submits Loop handoff accept decisions through the profile-scoped kanban API', async () => {
     api
       .mockResolvedValueOnce({

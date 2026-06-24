@@ -12,7 +12,7 @@ const titleOnlyIntakeSource: TenantLoopSource = {
       body: null,
       created_by: 'loop:t_intake',
       id: 't_intake',
-      status: 'triage',
+      status: 'scheduled',
       tenant: 'session-intake',
       title: 'Launch a Peacock workflow',
       loop_intake: {
@@ -37,19 +37,20 @@ describe('Loop intake foreground trigger', () => {
     })
   })
 
-  it('turns intake-needed rows into a grill-me assistant prompt', () => {
+  it('turns intake-needed rows into a graph-first planning prompt', () => {
     const row = deriveLoopPanelStateFromTenantSource(titleOnlyIntakeSource)!.rows[0]!
     const draft = buildLoopChatDraft(row)
 
     expect(draft).toContain('For Loop row t_intake (Launch a Peacock workflow)')
-    expect(draft).toContain('start the grill-me Loop intake path')
-    expect(draft).toContain('Interview me relentlessly')
-    expect(draft).toContain('Ask exactly one unresolved decision')
-    expect(draft).toContain('Asking multiple questions at once is bewildering')
-    expect(draft).toContain('mark the recommended option inline')
-    expect(draft).toContain('write each locked decision into the canonical task body')
-    expect(draft).not.toContain('triage/non-dispatchable')
-    expect(draft).not.toContain('Decompose or activation')
+    expect(draft).toContain('start the graph-first Loop intake path')
+    expect(draft).toContain('Treat this row as the real Loop/Kanban root')
+    expect(draft).toContain('Use the Loop graph as the exploration surface')
+    expect(draft).toContain('scheduled option tasks')
+    expect(draft).toContain('The clarify choices must match those option tasks')
+    expect(draft).toContain('delete/archive unchosen sibling option tasks')
+    expect(draft).toContain('origin activation')
+    expect(draft).not.toContain('Interview me relentlessly')
+    expect(draft).not.toContain('Resolved decisions')
   })
 
   it('keeps ordinary Loop chat drafts for rows without durable intake state', () => {
@@ -62,7 +63,7 @@ describe('Loop intake foreground trigger', () => {
           body: 'Already specified',
           created_by: 'loop:t_ready',
           id: 't_ready',
-          status: 'triage',
+          status: 'scheduled',
           tenant: 'session-ready',
           title: 'Ready spec'
         }

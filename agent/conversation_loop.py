@@ -3174,7 +3174,11 @@ def run_conversation(
                     agent._buffer_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
 
                     original_len = len(messages)
-                    original_tokens = estimate_messages_tokens_rough(messages)
+                    original_request_tokens = estimate_request_tokens_rough(
+                        messages,
+                        system_prompt=active_system_prompt,
+                        tools=agent.tools or None,
+                    )
                     messages, active_system_prompt = agent._compress_context(
                         messages, system_message, approx_tokens=approx_tokens,
                         task_id=effective_task_id,
@@ -3184,19 +3188,33 @@ def run_conversation(
                     # messages to the new session, not skipping them.
                     conversation_history = None
                     agent._set_active_turn_persistence_history(conversation_history)
+                    compressed_request_tokens = estimate_request_tokens_rough(
+                        messages,
+                        system_prompt=active_system_prompt,
+                        tools=agent.tools or None,
+                    )
 
-                    # Re-estimate tokens after compression.  Same-message-count
-                    # compression (tool-result pruning, in-place summarization)
-                    # can materially reduce request size without reducing the
-                    # message array.  (#39550)
-                    new_tokens = estimate_messages_tokens_rough(messages)
-                    approx_tokens = new_tokens  # update for downstream logging
-
-                    if len(messages) < original_len or (new_tokens > 0 and new_tokens < original_tokens * 0.95) or (new_ctx and new_ctx < old_ctx):
+                    # Same-message-count compression (tool-result pruning,
+                    # in-place summarization) can materially reduce request
+                    # size without reducing the message array.  Compare full
+                    # request tokens (messages + active system prompt + tools)
+                    # so tool-schema changes are reflected in retry decisions.
+                    approx_tokens = compressed_request_tokens
+                    if (
+                        len(messages) < original_len
+                        or (
+                            compressed_request_tokens > 0
+                            and compressed_request_tokens < original_request_tokens * 0.95
+                        )
+                        or new_ctx and new_ctx < old_ctx
+                    ):
                         if len(messages) < original_len:
                             agent._buffer_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
-                        elif new_tokens > 0 and new_tokens < original_tokens * 0.95:
-                            agent._buffer_status(f"🗜️ Compressed ~{original_tokens:,} → ~{new_tokens:,} tokens, retrying...")
+                        elif compressed_request_tokens < original_request_tokens * 0.95:
+                            agent._buffer_status(
+                                f"🗜️ Compressed ~{original_request_tokens:,} → "
+                                f"~{compressed_request_tokens:,} tokens, retrying..."
+                            )
                         time.sleep(2)  # Brief pause between compression retries
                         _retry.restart_with_compressed_messages = True
                         break

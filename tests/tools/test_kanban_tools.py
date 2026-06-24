@@ -57,7 +57,7 @@ def test_kanban_tools_visible_with_env_var(monkeypatch, tmp_path):
     expected = {
         "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
         "kanban_request_decision", "kanban_request_review", "kanban_resolve_blocker", "kanban_comment",
-        "kanban_request_epistemic_workflow", "kanban_request_orchestrator_handoff",
+        "kanban_request_orchestrator_handoff",
         "kanban_create", "kanban_link",
     }
     assert kanban == expected, f"expected {expected}, got {kanban}"
@@ -139,8 +139,8 @@ def test_kanban_tools_visible_with_toolset_config(monkeypatch, tmp_path):
         "kanban_list",
         "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
         "kanban_request_decision", "kanban_request_review", "kanban_resolve_blocker", "kanban_comment", "kanban_create",
-        "kanban_request_epistemic_workflow", "kanban_request_orchestrator_handoff",
-        "kanban_decompose", "kanban_epistemic_decompose",
+        "kanban_request_orchestrator_handoff",
+        "kanban_decompose",
         "kanban_link",
         "kanban_unblock",
     }
@@ -234,37 +234,6 @@ def test_request_decision_tool_records_plain_decision_event(worker_env):
     assert events[0]["payload"]["question"] == "Which implementation path should this worker take?"
 
 
-def test_worker_exit_tools_route_to_orchestrator_review(worker_env):
-    from hermes_cli import kanban_db as kb
-    from tools import kanban_tools as kt
-
-    epistemic = json.loads(kt._handle_request_epistemic_workflow({
-        "question": "Which persistence contract should this implementation follow?",
-        "facts": ["current card lacks the contract"],
-        "alternatives": ["append-only", "replace-in-place"],
-        "criteria": ["auditability", "reversibility"],
-        "consequence_of_guessing_wrong": "Workers may corrupt durable workflow history.",
-        "summary": "Need epistemic resolution before irreversible storage work.",
-    }))
-    assert epistemic["ok"] is True
-    assert epistemic["status"] == "review"
-    assert epistemic["review_kind"] == "epistemic_workflow"
-
-    conn = kb.connect()
-    try:
-        task = kb.get_task(conn, worker_env)
-        run = kb.latest_run(conn, worker_env)
-    finally:
-        conn.close()
-    assert task.status == "review"
-    assert task.assignee == "orchestrator"
-    assert task.review_kind == "epistemic_workflow"
-    assert run.outcome == "review_requested"
-    assert run.metadata["exit_kind"] == "epistemic_request"
-    assert run.metadata["question"] == "Which persistence contract should this implementation follow?"
-    assert run.metadata["consequence_of_guessing_wrong"] == "Workers may corrupt durable workflow history."
-
-
 def test_worker_orchestrator_handoff_exit_routes_same_task(worker_env):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
@@ -290,48 +259,6 @@ def test_worker_orchestrator_handoff_exit_routes_same_task(worker_env):
     assert task.review_kind == "orchestrator_handoff"
     assert run.metadata["exit_kind"] == "orchestrator_handoff"
     assert run.metadata["why_worker_cannot_finish"] == "The work spans backend, UI, and review gates."
-
-
-def test_orchestrator_epistemic_decompose_creates_parked_subgraph(monkeypatch, worker_env):
-    from hermes_cli import kanban_db as kb
-    from tools import kanban_tools as kt
-
-    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
-    monkeypatch.setenv("HERMES_PROFILE", "orchestrator")
-    home = os.environ["HERMES_HOME"]
-    with open(os.path.join(home, "config.yaml"), "w", encoding="utf-8") as fh:
-        fh.write("toolsets:\n  - kanban\n")
-    conn = kb.connect()
-    try:
-        conn.execute("UPDATE tasks SET created_by = ? WHERE id = ?", (f"loop:{worker_env}", worker_env))
-        conn.commit()
-    finally:
-        conn.close()
-
-    out = json.loads(kt._handle_epistemic_decompose({
-        "source_task_id": worker_env,
-        "question": "Should the worker use append-only or replacement writes?",
-        "alternatives": ["append-only", "replacement"],
-        "criteria": ["auditability", "simplicity"],
-        "activation": "test",
-        "proof_packet": {"test": "foreground epistemic decompose smoke"},
-        "idempotency_key": "epistemic-decompose-test",
-    }))
-    assert out["ok"] is True
-    assert len(out["created_tasks"]) == 4
-    assert out["auto_promote"] is False
-
-    conn = kb.connect()
-    try:
-        ep_root = kb.get_task(conn, out["epistemic_root_id"])
-        children = [kb.get_task(conn, task_id) for task_id in out["created_tasks"]]
-        source_parents = kb.parent_ids(conn, worker_env)
-    finally:
-        conn.close()
-    assert ep_root.status == "todo"
-    assert ep_root.created_by == f"loop:{worker_env}"
-    assert all(child.status == "blocked" for child in children)
-    assert out["epistemic_root_id"] in source_parents
 
 
 def test_orchestrator_decompose_requires_activation_and_delegates(monkeypatch, worker_env):

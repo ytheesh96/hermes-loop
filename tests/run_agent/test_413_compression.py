@@ -418,6 +418,59 @@ class TestHTTP413Compression:
             "content": "compressed summary",
         }
 
+    def test_context_length_retry_accepts_same_message_count_token_reduction(self, agent):
+        """Compaction can help by shrinking content even when message count is unchanged."""
+        class _ContextError(Exception):
+            status_code: int
+            body: dict
+
+        err_400 = _ContextError(
+            "Error code: 400 - {'error': {'message': \"context length exceeded\"}}"
+        )
+        err_400.status_code = 400
+        err_400.body = {"error": {"message": "context length exceeded"}}
+        ok_resp = _mock_response(content="Recovered after same-count compression", finish_reason="stop")
+
+        request_payloads = []
+
+        def _side_effect(**kwargs):
+            request_payloads.append({"messages": [dict(m) for m in kwargs["messages"]]})
+            if len(request_payloads) == 1:
+                raise err_400
+            return ok_resp
+
+        def _rough_estimate(messages, *args, **kwargs):
+            text = "\n".join(str(m.get("content", "")) for m in messages)
+            return 147_806 if "previous question" in text else 60_000
+
+        agent.client.chat.completions.create.side_effect = _side_effect
+        prefill = [
+            {"role": "user", "content": "previous question"},
+            {"role": "assistant", "content": "previous answer"},
+        ]
+        compressed_same_count = [
+            {"role": "user", "content": "compressed summary"},
+            {"role": "assistant", "content": "compressed answer"},
+            {"role": "user", "content": "hello"},
+        ]
+        expected_retry_messages = [dict(m) for m in compressed_same_count]
+
+        with (
+            patch("agent.conversation_loop.estimate_request_tokens_rough", side_effect=_rough_estimate),
+            patch.object(agent, "_compress_context") as mock_compress,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            mock_compress.return_value = (compressed_same_count, "compressed prompt")
+            result = agent.run_conversation("hello", conversation_history=prefill)
+
+        mock_compress.assert_called_once()
+        assert result["completed"] is True
+        assert result["final_response"] == "Recovered after same-count compression"
+        assert len(request_payloads) == 2
+        assert request_payloads[1]["messages"][1:] == expected_retry_messages
+
     def test_413_cannot_compress_further(self, agent):
         """When compression can't reduce messages, return partial result."""
         err_413 = _make_413_error()

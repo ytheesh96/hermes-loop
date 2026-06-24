@@ -445,8 +445,8 @@ def _handle_loop_request_review(args: dict[str, Any], **_kwargs) -> str:
 LOOP_GRAPH_SCHEMA = {
     "name": "loop_graph",
     "description": (
-        "Read or patch the triage-backed Loop graph. Patch operations create/update/archive "
-        "real Kanban triage tasks and dependency links with expected_revision + mutation_id guards. "
+        "Read or patch the scheduled-task-backed Loop graph. Patch operations create/update/archive "
+        "real Kanban planning tasks and dependency links with expected_revision + mutation_id guards. "
         "Responses are compact: success/error plus graph revision data."
     ),
     "parameters": {
@@ -460,11 +460,15 @@ LOOP_GRAPH_SCHEMA = {
             "operations": {
                 "type": "array",
                 "description": (
-                    "Patch ops: add_node, update_node, archive_node, set_parents, mark_node, "
-                    "resolve_handoff, validate. add_node supports client_id/title/body/parents/"
-                    "suggested_owner/active/frontier; set_parents uses task_id plus parent task ids "
-                    "or earlier client_ids; resolve_handoff records foreground approval/rejection "
-                    "without promoting downstream rows."
+                    "Patch ops: add_node, update_node, archive_node/delete_node, "
+                    "set_parents, mark_node, resolve_handoff, validate. add_node/update_node/mark_node support "
+                    "client_id/title/body/parents/suggested_owner/status/active/frontier plus graph metadata "
+                    "branch_kind ('alternative' or 'required'), decision_group_id, and selection_state; "
+                    "status defaults to scheduled so planning options are visible but "
+                    "non-dispatchable. "
+                    "Parent option nodes to the root/current frontier so they stay connected "
+                    "in Loop overview/detail graphs. resolve_handoff records foreground "
+                    "approval/rejection without promoting downstream rows."
                 ),
                 "items": {"type": "object"},
             },

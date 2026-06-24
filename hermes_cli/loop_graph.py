@@ -1,6 +1,6 @@
-"""Triage-backed Loop graph API.
+"""Scheduled-task-backed Loop graph API.
 
-This module stores the Loop graph as real Kanban ``triage`` tasks plus
+This module stores the Loop graph as real Kanban planning tasks plus
 ``task_links`` dependency edges.  The model/tool surface intentionally stays
 compact: one mutation/read entry point with revision and mutation-id guards.
 """
@@ -17,10 +17,13 @@ from hermes_cli import kanban_db as kb
 LOOP_EVENT_KIND = "loop_mutation"
 LOOP_NODE_EVENT_KIND = "loop_node_state"
 LOOP_HANDOFF_RESOLUTION_EVENT_KIND = "loop_foreground_handoff_resolution"
-_SAFE_MUTATION_STATUSES = {"triage"}
+_SAFE_MUTATION_STATUSES = {"triage", "scheduled"}
 _DONE_LIKE = {"done", "archived"}
 _ALLOWED_HANDOFF_VERIFICATION_STATES = {"approved", "rejected", "needs-user", "done"}
 _ALLOWED_HANDOFF_ATTENTION = {None, "needs-orchestrator", "needs-user"}
+_NODE_BRANCH_KINDS = {"alternative", "required"}
+_NODE_SELECTION_STATES = {"candidate", "chosen", "rejected"}
+_NODE_METADATA_KEYS = ("branch_kind", "decision_group_id", "selection_state")
 
 
 class LoopError(Exception):
@@ -86,6 +89,9 @@ def _append_node_event(
     active: Optional[bool] = None,
     frontier: Optional[bool] = None,
     client_id: Optional[str] = None,
+    branch_kind: Optional[str] = None,
+    decision_group_id: Optional[str] = None,
+    selection_state: Optional[str] = None,
 ) -> None:
     payload: dict[str, Any] = {"root_task_id": root_task_id}
     if active is not None:
@@ -94,7 +100,43 @@ def _append_node_event(
         payload["frontier"] = bool(frontier)
     if client_id:
         payload["client_id"] = client_id
+    if branch_kind:
+        payload["branch_kind"] = branch_kind
+    if decision_group_id:
+        payload["decision_group_id"] = decision_group_id
+    if selection_state:
+        payload["selection_state"] = selection_state
     kb._append_event(conn, task_id, LOOP_NODE_EVENT_KIND, payload)
+
+
+def _clean_optional_str(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _node_metadata_from_op(op: dict[str, Any], *, prefix: str) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    if "branch_kind" in op:
+        branch_kind = (_clean_optional_str(op.get("branch_kind")) or "").lower()
+        if branch_kind and branch_kind not in _NODE_BRANCH_KINDS:
+            allowed = ", ".join(sorted(_NODE_BRANCH_KINDS))
+            raise LoopError("validation_failed", f"{prefix}.branch_kind must be one of: {allowed}")
+        if branch_kind:
+            metadata["branch_kind"] = branch_kind
+    if "decision_group_id" in op:
+        decision_group_id = _clean_optional_str(op.get("decision_group_id"))
+        if decision_group_id:
+            metadata["decision_group_id"] = decision_group_id
+    if "selection_state" in op:
+        selection_state = (_clean_optional_str(op.get("selection_state")) or "").lower()
+        if selection_state and selection_state not in _NODE_SELECTION_STATES:
+            allowed = ", ".join(sorted(_NODE_SELECTION_STATES))
+            raise LoopError("validation_failed", f"{prefix}.selection_state must be one of: {allowed}")
+        if selection_state:
+            metadata["selection_state"] = selection_state
+    return metadata
 
 
 def _task_or_error(conn: sqlite3.Connection, task_id: str):
@@ -115,7 +157,7 @@ def _assert_safe_node(task) -> None:
     if task.status not in _SAFE_MUTATION_STATUSES:
         raise LoopError(
             "unsafe_status",
-            f"refusing to mutate {task.id}: status {task.status!r} is not triage",
+            f"refusing to mutate {task.id}: status {task.status!r} is not triage/scheduled",
         )
 
 
@@ -180,8 +222,12 @@ def _create_triage_task_in_txn(
     tenant: Optional[str],
     parents: list[str],
     idempotency_key: Optional[str],
+    status: str = "scheduled",
 ) -> str:
-    """Create a Loop triage row inside the caller's write transaction."""
+    """Create a Loop planning row inside the caller's write transaction."""
+    if status not in _SAFE_MUTATION_STATUSES:
+        allowed = ", ".join(sorted(_SAFE_MUTATION_STATUSES))
+        raise LoopError("validation_failed", f"add_node.status must be one of: {allowed}")
     if idempotency_key:
         existing = conn.execute(
             "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' "
@@ -202,12 +248,13 @@ def _create_triage_task_in_txn(
             created_by, created_at, workspace_kind, workspace_path,
             branch_name, tenant, idempotency_key, max_runtime_seconds,
             skills, max_retries, goal_mode, goal_max_turns, session_id
-        ) VALUES (?, ?, ?, NULL, 'triage', 0, ?, ?, 'scratch', NULL, NULL, ?, ?, NULL, NULL, NULL, 0, NULL, ?)
+        ) VALUES (?, ?, ?, NULL, ?, 0, ?, ?, 'scratch', NULL, NULL, ?, ?, NULL, NULL, NULL, 0, NULL, ?)
         """,
         (
             task_id,
             title,
             body,
+            status,
             f"loop:{root_task_id}",
             now,
             tenant,
@@ -226,7 +273,7 @@ def _create_triage_task_in_txn(
         "created",
         {
             "assignee": None,
-            "status": "triage",
+            "status": status,
             "parents": list(parents),
             "tenant": tenant,
             "source": "loop",
@@ -239,7 +286,7 @@ def _create_triage_task_in_txn(
 def _graph_task_rows(conn: sqlite3.Connection, root_task_id: str) -> list[sqlite3.Row]:
     created_by = f"loop:{root_task_id}"
     rows = conn.execute(
-        "SELECT * FROM tasks WHERE created_by = ? ORDER BY created_at ASC, id ASC",
+        "SELECT * FROM tasks WHERE created_by = ? AND status != 'archived' ORDER BY created_at ASC, id ASC",
         (created_by,),
     ).fetchall()
     return list(rows)
@@ -273,6 +320,10 @@ def _latest_node_flags(conn: sqlite3.Connection, task_ids: set[str], root_task_i
             state["frontier"] = bool(payload["frontier"])
         if payload.get("client_id"):
             state["client_id"] = payload["client_id"]
+        for key in _NODE_METADATA_KEYS:
+            value = payload.get(key)
+            if value:
+                state[key] = value
     return flags
 
 
@@ -466,6 +517,9 @@ def read_graph(
         }
         if state.get("client_id"):
             node["node_id"] = state["client_id"]
+        for key in _NODE_METADATA_KEYS:
+            if state.get(key):
+                node[key] = state[key]
         handoff_payload = handoff_payloads.get(tid)
         if handoff_payload:
             handoff = _compact_handoff(tid, handoff_payload)
@@ -648,7 +702,12 @@ def apply_patch(
                 title = str(op.get("title") or "").strip()
                 if not title:
                     raise LoopError("validation_failed", "add_node.title is required")
+                status = str(op.get("status") or "scheduled").strip().lower()
+                if status not in _SAFE_MUTATION_STATUSES:
+                    allowed = ", ".join(sorted(_SAFE_MUTATION_STATUSES))
+                    raise LoopError("validation_failed", f"add_node.status must be one of: {allowed}")
                 client_id = str(op.get("client_id") or "").strip() or None
+                metadata = _node_metadata_from_op(op, prefix="add_node")
                 parents = _canonical_parent_ids(client_to_task, op.get("parents"))
                 _assert_loop_parent_ids(conn, parents, root_task_id)
                 body = _provenance_body(
@@ -665,6 +724,7 @@ def apply_patch(
                     tenant=root_task_id,
                     parents=parents,
                     idempotency_key=(f"loop:{root_task_id}:{client_id}" if client_id else None),
+                    status=status,
                 )
                 if client_id:
                     client_to_task[client_id] = task_id
@@ -675,6 +735,7 @@ def apply_patch(
                     active=op.get("active") if "active" in op else None,
                     frontier=op.get("frontier") if "frontier" in op else None,
                     client_id=client_id,
+                    **metadata,
                 )
                 created.append({"client_id": client_id or "", "task_id": task_id})
             elif kind == "update_node":
@@ -701,22 +762,28 @@ def apply_patch(
                 if assignments:
                     params.append(task_id)
                     conn.execute(f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?", params)
-                if "active" in op or "frontier" in op:
+                metadata = _node_metadata_from_op(op, prefix="update_node")
+                if "active" in op or "frontier" in op or metadata:
                     _append_node_event(
                         conn,
                         task_id,
                         root_task_id=root_task_id,
                         active=op.get("active") if "active" in op else None,
                         frontier=op.get("frontier") if "frontier" in op else None,
+                        **metadata,
                     )
                 updated.append(task_id)
-            elif kind == "archive_node":
+            elif kind in {"archive_node", "delete_node"}:
                 task_id = str(op.get("task_id") or "").strip()
                 _assert_loop_node(conn, task_id, root_task_id)
                 conn.execute(
                     "UPDATE tasks SET status = 'archived', claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
                     "WHERE id = ?",
                     (task_id,),
+                )
+                conn.execute(
+                    "DELETE FROM task_links WHERE parent_id = ? OR child_id = ?",
+                    (task_id, task_id),
                 )
                 kb._append_event(conn, task_id, "archived", {"source": "loop"})
                 archived.append(task_id)
@@ -728,12 +795,14 @@ def apply_patch(
             elif kind == "mark_node":
                 task_id = str(op.get("task_id") or "").strip()
                 _assert_loop_node(conn, task_id, root_task_id)
+                metadata = _node_metadata_from_op(op, prefix="mark_node")
                 _append_node_event(
                     conn,
                     task_id,
                     root_task_id=root_task_id,
                     active=op.get("active") if "active" in op else None,
                     frontier=op.get("frontier") if "frontier" in op else None,
+                    **metadata,
                 )
                 updated.append(task_id)
             elif kind == "resolve_handoff":

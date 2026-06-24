@@ -355,7 +355,7 @@ def test_loop_create_sync_timeout_and_completion_wait(loop_env):
     assert completed["summary"] == "completed during sync wait"
 
 
-def test_patch_creates_real_triage_tasks_with_dependencies_and_compact_response(loop_env):
+def test_patch_creates_real_scheduled_tasks_with_dependencies_and_compact_response(loop_env):
     root = loop_env
     out = _call(
         {
@@ -405,14 +405,14 @@ def test_patch_creates_real_triage_tasks_with_dependencies_and_compact_response(
     try:
         first = kb.get_task(conn, created_by_client["a"])
         second = kb.get_task(conn, created_by_client["b"])
-        assert first is not None and first.status == "triage" and first.assignee is None
-        assert second is not None and second.status == "triage" and second.assignee is None
+        assert first is not None and first.status == "scheduled" and first.assignee is None
+        assert second is not None and second.status == "scheduled" and second.assignee is None
         assert second.tenant == "tenant-a"
         assert first.created_by == "loop:tenant-a"
         assert second.created_by == "loop:tenant-a"
         assert kb.parent_ids(conn, first.id) == []
         assert kb.parent_ids(conn, second.id) == [first.id]
-        loop_rows = [t for t in kb.list_tasks(conn, status="triage") if t.tenant == "tenant-a"]
+        loop_rows = [t for t in kb.list_tasks(conn, status="scheduled") if t.tenant == "tenant-a"]
         assert {t.id for t in loop_rows} == {first.id, second.id}
         assert not any(t.title in {"Loop root", "Loop root container"} for t in loop_rows)
         assert "Loop provenance" in (first.body or "")
@@ -462,7 +462,7 @@ def test_patch_rejects_stale_revision_and_replays_duplicate_mutation(loop_env):
 
     conn = kb.connect()
     try:
-        rows = [t for t in kb.list_tasks(conn, status="triage") if t.title == "Only once"]
+        rows = [t for t in kb.list_tasks(conn, status="scheduled") if t.title == "Only once"]
         assert len(rows) == 1
     finally:
         conn.close()
@@ -582,7 +582,7 @@ def test_add_node_rejects_parents_outside_requested_root(loop_env, parent_kind):
 
     conn = kb.connect()
     try:
-        rows = [t for t in kb.list_tasks(conn, status="triage") if t.title == "Child"]
+        rows = [t for t in kb.list_tasks(conn, status="scheduled") if t.title == "Child"]
         assert rows == []
     finally:
         conn.close()
@@ -685,7 +685,7 @@ def test_patch_replays_duplicate_mutation_that_started_before_first_commit(loop_
 
     conn = kb.connect()
     try:
-        rows = [t for t in kb.list_tasks(conn, status="triage") if t.title == "Only once concurrently"]
+        rows = [t for t in kb.list_tasks(conn, status="scheduled") if t.title == "Only once concurrently"]
         assert len(rows) == 1
     finally:
         conn.close()

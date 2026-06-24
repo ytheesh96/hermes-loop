@@ -85,11 +85,11 @@ Rules:
   - Use 2-6 tasks for normal work. Don't create 20 tiny tasks. Don't
     cram everything into 1 task.
   - Preserve dynamic Loop workflows: do NOT pre-materialize every possible
-    epistemic decision subgraph up front. If the task body names unresolved
-    decisions or epistemic packets, create a minimal execution scaffold and
-    include on-demand expansion instructions in the relevant child body. A
-    worker/orchestrator should create an epistemic_subgraph only when that
-    uncertainty actually blocks safe progress.
+    decision subgraph up front. If the task body names unresolved decisions,
+    create a minimal execution scaffold and include on-demand expansion
+    instructions in the relevant child body. The origin/orchestrator can
+    delegate durable Loop subtasks when uncertainty actually blocks safe
+    progress.
   - Pick assignees from the roster by matching the task to the profile's
     DESCRIPTION (not just the name). When nothing matches well, use null
     and the system will route to the default_assignee.
@@ -316,24 +316,36 @@ def _normalize_assignee_choice(
     return chosen
 
 
+_LOOP_SAFE_STATUSES = {"triage", "scheduled"}
+
+
 def decompose_task(
     task_id: str,
     *,
     author: Optional[str] = None,
     timeout: Optional[int] = None,
+    loop_safe: bool = False,
 ) -> DecomposeOutcome:
-    """Decompose a triage task into a graph of child tasks.
+    """Decompose a planning task into a graph of child tasks.
 
     Returns an outcome describing what happened. Never raises for
-    expected failure modes (task not in triage, no aux client
-    configured, API error, malformed response, decomposer returned
+    expected failure modes (task not in an accepted planning status, no aux
+    client configured, API error, malformed response, decomposer returned
     fanout=true with empty task list) — those surface via ``ok=False``.
     """
     with kb.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
+        loop_root_id = kb._loop_root_for_task(conn, task_id) if task is not None else None
     if task is None:
         return DecomposeOutcome(task_id, False, "unknown task id")
-    if task.status != "triage":
+    if loop_safe:
+        if task.status not in _LOOP_SAFE_STATUSES:
+            return DecomposeOutcome(
+                task_id, False, f"task is not in Loop planning status (status={task.status!r})"
+            )
+        if not loop_root_id:
+            return DecomposeOutcome(task_id, False, "loop_safe decomposition requires a Loop task")
+    elif task.status != "triage":
         return DecomposeOutcome(
             task_id, False, f"task is not in triage (status={task.status!r})"
         )
@@ -342,7 +354,7 @@ def decompose_task(
     orchestrator = _resolve_orchestrator_profile(cfg)
     default_assignee = _resolve_default_assignee(cfg)
     kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
-    auto_promote = bool(kanban_cfg.get("auto_promote_children", True))
+    auto_promote = False if loop_safe else bool(kanban_cfg.get("auto_promote_children", True))
     roster, valid_names = _build_roster()
 
     try:
@@ -444,11 +456,13 @@ def decompose_task(
                 body=body_val,
                 assignee=assignee_val,
                 author=audit_author,
+                allowed_statuses=_LOOP_SAFE_STATUSES if loop_safe else None,
+                next_status="scheduled" if loop_safe else "todo",
+                recompute=not loop_safe,
             )
         if not ok:
-            return DecomposeOutcome(
-                task_id, False, "task moved out of triage before promotion",
-            )
+            reason = "task moved out of Loop planning before promotion" if loop_safe else "task moved out of triage before promotion"
+            return DecomposeOutcome(task_id, False, reason)
         return DecomposeOutcome(
             task_id, True, "single task (no fanout)",
             fanout=False, new_title=title_val,
@@ -513,6 +527,8 @@ def decompose_task(
                 children=children,
                 author=audit_author,
                 auto_promote=auto_promote,
+                allowed_root_statuses=_LOOP_SAFE_STATUSES if loop_safe else None,
+                root_next_status="scheduled" if loop_safe else "todo",
             )
     except ValueError as exc:
         return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")
@@ -521,9 +537,8 @@ def decompose_task(
         return DecomposeOutcome(task_id, False, f"DB error: {type(exc).__name__}")
 
     if child_ids is None:
-        return DecomposeOutcome(
-            task_id, False, "task moved out of triage before decomposition",
-        )
+        reason = "task moved out of Loop planning before decomposition" if loop_safe else "task moved out of triage before decomposition"
+        return DecomposeOutcome(task_id, False, reason)
 
     return DecomposeOutcome(
         task_id, True, f"decomposed into {len(child_ids)} children",

@@ -458,6 +458,23 @@ def _set_session_running(session: dict, running: bool) -> None:
         logger.debug("Failed to update active session running state", exc_info=True)
 
 
+def _session_turn_busy(session: dict | None) -> bool:
+    if not session:
+        return False
+    return bool(session.get("running") or session.get("_notification_turn_reserved"))
+
+
+def _reserve_notification_turn(session: dict) -> bool:
+    if _session_turn_busy(session):
+        return False
+    session["_notification_turn_reserved"] = True
+    return True
+
+
+def _clear_notification_turn_reservation(session: dict) -> None:
+    session.pop("_notification_turn_reserved", None)
+
+
 def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> None:
     """Best-effort finalize hook + memory commit for a session.
 
@@ -632,7 +649,7 @@ def _ws_session_is_orphaned(session: dict | None) -> bool:
     """
     if not session or session.get("_finalized"):
         return False
-    if session.get("running"):
+    if _session_turn_busy(session):
         return False
     return session.get("transport") is _detached_ws_transport
 
@@ -733,7 +750,7 @@ def _transport_is_dead(transport) -> bool:
 
 
 def _session_is_evictable(sid: str, session: dict, now: float) -> bool:
-    if session.get("running") or _session_pending_kind(sid):
+    if _session_turn_busy(session) or _session_pending_kind(sid):
         return False
     ready = session.get("agent_ready")
     # Lazy watch sessions (subagent spectator windows) never start a build,
@@ -5227,7 +5244,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
-    if session.get("running"):
+    if _session_turn_busy(session):
         return _err(rid, 4009, "session busy")
     raw = str(params.get("cwd", "") or "").strip()
     if not raw:
@@ -5659,7 +5676,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
-    if session.get("running"):
+    if _session_turn_busy(session):
         return _err(
             rid,
             4009,
@@ -6539,7 +6556,7 @@ def _(rid, params: dict) -> dict:
     # write would either clobber the undo (version matches) or
     # silently drop the agent's output (version mismatch, see below).
     # Neither is what the user wants — make them /interrupt first.
-    if session.get("running"):
+    if _session_turn_busy(session):
         return _err(
             rid, 4009, "session busy — /interrupt the current turn before /undo"
         )
@@ -6562,7 +6579,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
-    if session.get("running"):
+    if _session_turn_busy(session):
         return _err(
             rid, 4009, "session busy — /interrupt the current turn before /compress"
         )
@@ -7141,7 +7158,7 @@ def _(rid, params: dict) -> dict:
     if (t := current_transport()) is not None:
         session["transport"] = t
     with session["history_lock"]:
-        if session.get("running"):
+        if _session_turn_busy(session):
             return _err(rid, 4009, "session busy")
         # A watch session's run lives in the PARENT turn, so its own running
         # flag is False — without this, typing mid-run builds a second agent
@@ -7323,6 +7340,62 @@ def _tui_kanban_board_slugs(kb: Any) -> list[str]:
     return slugs or [kb.DEFAULT_BOARD]
 
 
+def _active_profile_name() -> str:
+    if profile := os.environ.get("HERMES_PROFILE"):
+        return profile
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        return str(get_active_profile_name() or "")
+    except Exception:
+        return ""
+
+
+def _tui_resume_tip(session_key: str) -> str:
+    key = str(session_key or "").strip()
+    if not key:
+        return ""
+    try:
+        db = _get_db()
+        if db is not None and hasattr(db, "resolve_resume_session_id"):
+            return str(db.resolve_resume_session_id(key) or key)
+    except Exception:
+        pass
+    return key
+
+
+def _tui_kanban_sub_matches_session(
+    sub: dict,
+    session_key: str,
+    session_tip: str,
+) -> bool:
+    chat_id = str(sub.get("chat_id") or "")
+    if not chat_id:
+        return False
+    if chat_id == session_key or chat_id == session_tip:
+        return True
+    return bool(session_tip and _tui_resume_tip(chat_id) == session_tip)
+
+
+def _tui_kanban_sub_key(sub: dict) -> tuple[str, str, str, str]:
+    return (
+        str(sub.get("task_id") or ""),
+        str(sub.get("platform") or ""),
+        str(sub.get("chat_id") or ""),
+        str(sub.get("thread_id") or ""),
+    )
+
+
+def _remove_tui_kanban_sub(kb: Any, conn: Any, sub: dict) -> None:
+    kb.remove_notify_sub(
+        conn,
+        task_id=sub["task_id"],
+        platform=sub["platform"],
+        chat_id=sub["chat_id"],
+        thread_id=sub.get("thread_id") or "",
+    )
+
+
 def _collect_tui_kanban_notifications(session: dict) -> list[str]:
     """Claim terminal kanban_notify_subs events for this TUI session."""
     session_key = str(session.get("session_key") or "")
@@ -7333,7 +7406,8 @@ def _collect_tui_kanban_notifications(session: dict) -> list[str]:
     except Exception:
         return []
 
-    profile = os.environ.get("HERMES_PROFILE", "")
+    profile = _active_profile_name()
+    session_tip = _tui_resume_tip(session_key)
     messages: list[str] = []
     for board in _tui_kanban_board_slugs(kb):
         try:
@@ -7341,17 +7415,32 @@ def _collect_tui_kanban_notifications(session: dict) -> list[str]:
         except Exception:
             continue
         try:
+            matching_subs = []
             for sub in kb.list_notify_subs(conn):
                 if (sub.get("platform") or "").lower() != "tui":
                     continue
-                if str(sub.get("chat_id") or "") != session_key:
+                if not _tui_kanban_sub_matches_session(sub, session_key, session_tip):
                     continue
                 owner_profile = sub.get("notifier_profile") or None
                 if owner_profile and owner_profile != profile:
                     continue
+                matching_subs.append(sub)
+            matching_subs.sort(
+                key=lambda sub: (
+                    str(sub.get("chat_id") or "") == session_key,
+                    str(sub.get("chat_id") or "") == session_tip,
+                    int(sub.get("created_at") or 0),
+                ),
+                reverse=True,
+            )
+            delivered_tasks: set[str] = set()
+            for sub in matching_subs:
+                task_id = str(sub.get("task_id") or "")
+                if not task_id or task_id in delivered_tasks:
+                    continue
                 _old, _cursor, events = kb.claim_unseen_events_for_sub(
                     conn,
-                    task_id=sub["task_id"],
+                    task_id=task_id,
                     platform=sub["platform"],
                     chat_id=sub["chat_id"],
                     thread_id=sub.get("thread_id") or "",
@@ -7359,9 +7448,10 @@ def _collect_tui_kanban_notifications(session: dict) -> list[str]:
                 )
                 if not events:
                     continue
+                delivered_tasks.add(task_id)
                 task = None
                 try:
-                    task = kb.get_task(conn, sub["task_id"])
+                    task = kb.get_task(conn, task_id)
                 except Exception as exc:
                     print(
                         f"[tui_gateway] TUI kanban task lookup failed: "
@@ -7381,14 +7471,21 @@ def _collect_tui_kanban_notifications(session: dict) -> list[str]:
                     if msg:
                         messages.append(msg)
                 if task and task.status in {"done", "archived"}:
+                    cleanup = [
+                        candidate
+                        for candidate in matching_subs
+                        if str(candidate.get("task_id") or "") == task_id
+                    ]
+                else:
+                    cleanup = [
+                        candidate
+                        for candidate in matching_subs
+                        if str(candidate.get("task_id") or "") == task_id
+                        and _tui_kanban_sub_key(candidate) != _tui_kanban_sub_key(sub)
+                    ]
+                for candidate in cleanup:
                     try:
-                        kb.remove_notify_sub(
-                            conn,
-                            task_id=sub["task_id"],
-                            platform=sub["platform"],
-                            chat_id=sub["chat_id"],
-                            thread_id=sub.get("thread_id") or "",
-                        )
+                        _remove_tui_kanban_sub(kb, conn, candidate)
                     except Exception as exc:
                         print(
                             f"[tui_gateway] TUI kanban subscription cleanup failed: "
@@ -7413,7 +7510,7 @@ def _dispatch_notification_text(
         _emit("status.update", sid, {"kind": status_kind, "text": text})
     if not preclaimed:
         with session["history_lock"]:
-            if session.get("running"):
+            if _session_turn_busy(session):
                 return False
             _set_session_running(session, True)
 
@@ -7433,19 +7530,22 @@ def _dispatch_notification_text(
 
 
 def _dispatch_tui_kanban_notifications(sid: str, session: dict) -> None:
-    # Reserve the next agent turn before advancing kanban_notify_subs cursors.
-    # Otherwise a busy flip between claim and dispatch could acknowledge an
-    # event without ever delivering the re-entry prompt.
+    # Reserve the next agent turn before advancing kanban_notify_subs cursors,
+    # but keep that reservation private until there is an actual notification
+    # turn. Publishing session["running"] here makes idle pollers flicker as
+    # busy in active_sessions/session.resume every 0.5s.
     with session["history_lock"]:
-        if session.get("running"):
+        if not _reserve_notification_turn(session):
             return
-        _set_session_running(session, True)
     try:
         messages = _collect_tui_kanban_notifications(session)
         if not messages:
             with session["history_lock"]:
-                _set_session_running(session, False)
+                _clear_notification_turn_reservation(session)
             return
+        with session["history_lock"]:
+            _set_session_running(session, True)
+            _clear_notification_turn_reservation(session)
         _dispatch_notification_text(
             sid,
             session,
@@ -7460,7 +7560,7 @@ def _dispatch_tui_kanban_notifications(sid: str, session: dict) -> None:
             file=sys.stderr,
         )
         with session["history_lock"]:
-            _set_session_running(session, False)
+            _clear_notification_turn_reservation(session)
 
 
 def _notification_poller_loop(
@@ -7983,7 +8083,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         # we check that guard before re-firing.
         if goal_followup:
             with session["history_lock"]:
-                if session.get("running"):
+                if _session_turn_busy(session):
                     # User already sent something — their turn wins,
                     # the judge will re-run on the next turn anyway.
                     return
@@ -8008,7 +8108,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
 
             for _evt, synth in process_registry.drain_notifications():
                 with session["history_lock"]:
-                    if session.get("running"):
+                    if _session_turn_busy(session):
                         process_registry.completion_queue.put(_evt)
                         break
                     _set_session_running(session, True)
@@ -8880,7 +8980,7 @@ def _(rid, params: dict) -> dict:
                 # with the new base_url but old model (or vice versa),
                 # producing 400/404s the user never asked for.  Parity
                 # with the gateway's running-agent /model guard.
-                if session.get("running"):
+                if _session_turn_busy(session):
                     return _err(
                         rid,
                         4009,
@@ -10079,7 +10179,7 @@ def _(rid, params: dict) -> dict:
     if name == "retry":
         if not session:
             return _err(rid, 4001, "no active session to retry")
-        if session.get("running"):
+        if _session_turn_busy(session):
             return _err(
                 rid, 4009, "session busy — /interrupt the current turn before /retry"
             )
@@ -10209,7 +10309,7 @@ def _(rid, params: dict) -> dict:
         # /undo 3 backs up three user turns at once. See issue #21910.
         if not session:
             return _err(rid, 4001, "no active session to undo")
-        if session.get("running"):
+        if _session_turn_busy(session):
             return _err(
                 rid, 4009, "session busy — /interrupt the current turn before /undo"
             )
@@ -11014,7 +11114,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     # with the session.compress / session.undo guards and the gateway
     # runner's running-agent /model guard.
     _MUTATES_WHILE_RUNNING = {"model", "personality", "prompt", "compress"}
-    if name in _MUTATES_WHILE_RUNNING and session.get("running"):
+    if name in _MUTATES_WHILE_RUNNING and _session_turn_busy(session):
         return f"session busy — /interrupt the current turn before running /{name}"
 
     try:
@@ -11515,7 +11615,7 @@ def _(rid, params: dict) -> dict:
     # the agent's output (version mismatch path) or clobbering the
     # rollback (version-matches path).  A file-scoped rollback only
     # touches disk, so we allow it.
-    if not file_path and session.get("running"):
+    if not file_path and _session_turn_busy(session):
         return _err(
             rid,
             4009,

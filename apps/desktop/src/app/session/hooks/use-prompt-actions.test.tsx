@@ -245,7 +245,7 @@ describe('usePromptActions /loop', () => {
             included_child_ids: [],
             included_parent_ids: [],
             session_id: RUNTIME_SESSION_ID,
-            status: 'triage',
+            status: 'scheduled',
             tenant: RUNTIME_SESSION_ID,
             title: 'Draft product loop',
             loop_intake: {
@@ -264,7 +264,7 @@ describe('usePromptActions /loop', () => {
         created_by: 'loop:t_loop',
         id: 't_loop',
         session_id: RUNTIME_SESSION_ID,
-        status: 'triage',
+        status: 'scheduled',
         tenant: RUNTIME_SESSION_ID,
         title: 'Draft product loop',
         loop_intake: {
@@ -301,7 +301,7 @@ describe('usePromptActions /loop', () => {
     expect(requestGateway).not.toHaveBeenCalledWith('slash.exec', expect.anything())
     expect(requestGateway).toHaveBeenCalledWith('prompt.submit', {
       session_id: RUNTIME_SESSION_ID,
-      text: expect.stringContaining('start the grill-me Loop intake path')
+      text: expect.stringContaining('start the graph-first Loop intake path')
     })
     expect(requestGateway).toHaveBeenCalledWith('prompt.submit', {
       session_id: RUNTIME_SESSION_ID,
@@ -344,7 +344,7 @@ describe('usePromptActions /loop', () => {
     expect(createBackendSessionForSend).not.toHaveBeenCalled()
     expect(requestGateway).toHaveBeenCalledWith('prompt.submit', {
       session_id: RUNTIME_SESSION_ID,
-      text: expect.stringContaining('start the grill-me Loop intake path')
+      text: expect.stringContaining('start the graph-first Loop intake path')
     })
     expect(requestGateway).not.toHaveBeenCalledWith(
       'prompt.submit',
@@ -371,7 +371,7 @@ describe('usePromptActions /loop', () => {
 
     expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything())
     expect(getQueuedPrompts(RUNTIME_SESSION_ID)).toHaveLength(1)
-    expect(getQueuedPrompts(RUNTIME_SESSION_ID)[0]?.text).toContain('start the grill-me Loop intake path')
+    expect(getQueuedPrompts(RUNTIME_SESSION_ID)[0]?.text).toContain('start the graph-first Loop intake path')
     expect(getQueuedPrompts(RUNTIME_SESSION_ID)[0]?.text).toContain('For Loop row t_loop (Draft product loop)')
   })
 
@@ -391,7 +391,7 @@ describe('usePromptActions /loop', () => {
             included_child_ids: [],
             included_parent_ids: [],
             session_id: STORED_SESSION_ID,
-            status: 'triage',
+            status: 'scheduled',
             tenant: STORED_SESSION_ID,
             title: 'Stored draft loop'
           }
@@ -404,7 +404,7 @@ describe('usePromptActions /loop', () => {
         created_by: 'loop:t_stored_loop',
         id: 't_stored_loop',
         session_id: STORED_SESSION_ID,
-        status: 'triage',
+        status: 'scheduled',
         tenant: STORED_SESSION_ID,
         title: 'Stored draft loop'
       }
@@ -457,7 +457,7 @@ describe('usePromptActions /loop', () => {
             included_child_ids: [],
             included_parent_ids: [],
             session_id: STORED_SESSION_ID,
-            status: 'triage',
+            status: 'scheduled',
             tenant: STORED_SESSION_ID,
             title: 'Original session follow-up'
           }
@@ -470,7 +470,7 @@ describe('usePromptActions /loop', () => {
         created_by: 'loop:t_original_loop',
         id: 't_original_loop',
         session_id: STORED_SESSION_ID,
-        status: 'triage',
+        status: 'scheduled',
         tenant: STORED_SESSION_ID,
         title: 'Original session follow-up'
       }

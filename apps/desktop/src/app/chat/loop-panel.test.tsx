@@ -1179,6 +1179,220 @@ describe('LoopPanel', () => {
     expect(within(canvas).getByTestId('loop-task-graph-node-t_child')).toBeTruthy()
   })
 
+  it('keeps parallel upstream Loop options as siblings in selected-task graph view', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-graph-options',
+      root_task_id: 't_root',
+      tenant: 'tenant-a',
+      latest_event_id: 407,
+      tasks: [
+        {
+          id: 't_minimal',
+          title: 'RECOMMENDED: Minimal live worker activation/re-entry leaf',
+          status: 'scheduled',
+          tenant: 'tenant-a',
+          included_child_ids: ['t_selected'],
+          included_parent_ids: []
+        },
+        {
+          id: 't_two_stage',
+          title: 'Option: Two-stage worker plus reviewer-qa smoke leaf chain',
+          status: 'scheduled',
+          tenant: 'tenant-a',
+          included_child_ids: ['t_selected'],
+          included_parent_ids: []
+        },
+        {
+          id: 't_ui_dry_run',
+          title: 'Option: UI dry-run branch before any worker activation',
+          status: 'scheduled',
+          tenant: 'tenant-a',
+          included_child_ids: ['t_selected'],
+          included_parent_ids: []
+        },
+        {
+          id: 't_selected',
+          title: 'RECOMMENDED: End-to-end graph-first Loop smoke test',
+          status: 'scheduled',
+          tenant: 'tenant-a',
+          included_child_ids: ['t_root'],
+          included_parent_ids: ['t_minimal', 't_two_stage', 't_ui_dry_run']
+        },
+        {
+          id: 't_root',
+          title: 'graph test',
+          status: 'scheduled',
+          tenant: 'tenant-a',
+          assignee: 'default',
+          included_child_ids: [],
+          included_parent_ids: ['t_selected']
+        }
+      ]
+    })
+
+    render(<LoopPanel open selectedTaskId="t_selected" state={state} />)
+
+    const agentsCard = screen.getByTestId('loop-task-agents-card')
+    const canvas = within(agentsCard).getByTestId('loop-task-graph')
+    const minimalNode = within(canvas).getByTestId('loop-task-graph-node-t_minimal')
+    const twoStageNode = within(canvas).getByTestId('loop-task-graph-node-t_two_stage')
+    const uiDryRunNode = within(canvas).getByTestId('loop-task-graph-node-t_ui_dry_run')
+    const selectedNode = within(canvas).getByTestId('loop-task-graph-node-t_selected')
+    const rootNode = within(canvas).getByTestId('loop-task-graph-node-t_root')
+
+    expect(Number.parseFloat(minimalNode.style.top)).toBe(Number.parseFloat(twoStageNode.style.top))
+    expect(Number.parseFloat(minimalNode.style.top)).toBe(Number.parseFloat(uiDryRunNode.style.top))
+    expect(Number.parseFloat(selectedNode.style.top)).toBeGreaterThan(Number.parseFloat(minimalNode.style.top))
+    expect(Number.parseFloat(rootNode.style.top)).toBeGreaterThan(Number.parseFloat(selectedNode.style.top))
+    expect(within(canvas).getByTestId('loop-task-graph-edge-t_minimal-t_selected')).toBeTruthy()
+    expect(within(canvas).getByTestId('loop-task-graph-edge-t_two_stage-t_selected')).toBeTruthy()
+    expect(within(canvas).getByTestId('loop-task-graph-edge-t_ui_dry_run-t_selected')).toBeTruthy()
+    expect(within(canvas).getByTestId('loop-task-graph-edge-t_selected-t_root')).toBeTruthy()
+    expect(within(canvas).queryByTestId('loop-task-graph-edge-t_minimal-t_two_stage')).toBeNull()
+    expect(within(canvas).queryByTestId('loop-task-graph-edge-t_minimal-t_ui_dry_run')).toBeNull()
+  })
+
+  it('renders unconfirmed decision-option edges as dotted and confirmed choices as solid', () => {
+    const candidateState = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-graph-decision-options',
+      root_task_id: 't_root',
+      tenant: 'tenant-a',
+      latest_event_id: 408,
+      tasks: [
+        {
+          id: 't_option_a',
+          title: 'Option A',
+          status: 'scheduled',
+          tenant: 'tenant-a',
+          branch_kind: 'alternative',
+          decision_group_id: 'choice-1',
+          selection_state: 'candidate',
+          included_child_ids: ['t_anchor'],
+          included_parent_ids: []
+        },
+        {
+          id: 't_option_b',
+          title: 'Option B',
+          status: 'scheduled',
+          tenant: 'tenant-a',
+          branch_kind: 'alternative',
+          decision_group_id: 'choice-1',
+          selection_state: 'candidate',
+          included_child_ids: ['t_anchor'],
+          included_parent_ids: []
+        },
+        {
+          id: 't_anchor',
+          title: 'Decision anchor',
+          status: 'scheduled',
+          tenant: 'tenant-a',
+          included_child_ids: ['t_root'],
+          included_parent_ids: ['t_option_a', 't_option_b']
+        },
+        {
+          id: 't_root',
+          title: 'Root task',
+          status: 'scheduled',
+          tenant: 'tenant-a',
+          included_child_ids: [],
+          included_parent_ids: ['t_anchor']
+        }
+      ]
+    })
+
+    const { rerender } = render(<LoopPanel open selectedTaskId="t_anchor" state={candidateState} />)
+
+    let agentsCard = screen.getByTestId('loop-task-agents-card')
+    let canvas = within(agentsCard).getByTestId('loop-task-graph')
+    expect(within(canvas).getByTestId('loop-task-graph-edge-t_option_a-t_anchor').getAttribute('stroke-dasharray')).toBe(
+      '0.5 8'
+    )
+    expect(within(canvas).getByTestId('loop-task-graph-edge-t_option_b-t_anchor').getAttribute('stroke-dasharray')).toBe(
+      '0.5 8'
+    )
+    expect(within(canvas).getByTestId('loop-task-graph-edge-t_option_a-t_anchor').getAttribute('stroke-width')).toBe('2')
+    expect(within(canvas).getByTestId('loop-task-graph-edge-t_anchor-t_root').getAttribute('stroke-dasharray')).toBeNull()
+
+    const confirmedState = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-graph-decision-options',
+      root_task_id: 't_root',
+      tenant: 'tenant-a',
+      latest_event_id: 409,
+      tasks: [
+        {
+          id: 't_option_a',
+          title: 'Option A',
+          status: 'scheduled',
+          tenant: 'tenant-a',
+          branch_kind: 'alternative',
+          decision_group_id: 'choice-1',
+          selection_state: 'chosen',
+          included_child_ids: ['t_anchor'],
+          included_parent_ids: []
+        },
+        {
+          id: 't_anchor',
+          title: 'Decision anchor',
+          status: 'scheduled',
+          tenant: 'tenant-a',
+          included_child_ids: ['t_root'],
+          included_parent_ids: ['t_option_a']
+        },
+        {
+          id: 't_root',
+          title: 'Root task',
+          status: 'scheduled',
+          tenant: 'tenant-a',
+          included_child_ids: [],
+          included_parent_ids: ['t_anchor']
+        }
+      ]
+    })
+
+    rerender(<LoopPanel open selectedTaskId="t_anchor" state={confirmedState} />)
+
+    agentsCard = screen.getByTestId('loop-task-agents-card')
+    canvas = within(agentsCard).getByTestId('loop-task-graph')
+    expect(within(canvas).getByTestId('loop-task-graph-edge-t_option_a-t_anchor').getAttribute('stroke-dasharray')).toBeNull()
+    expect(within(canvas).queryByTestId('loop-task-graph-edge-t_option_b-t_anchor')).toBeNull()
+  })
+
+  it('does not expose Submit for scheduled unconfirmed decision-option rows', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-option-submit-suppressed',
+      root_task_id: 't_root',
+      tenant: 'tenant-a',
+      latest_event_id: 412,
+      tasks: [
+        {
+          id: 't_root',
+          title: 'Root task',
+          status: 'running',
+          tenant: 'tenant-a',
+          included_child_ids: ['t_option'],
+          included_parent_ids: []
+        },
+        {
+          id: 't_option',
+          title: 'Option A',
+          status: 'scheduled',
+          tenant: 'tenant-a',
+          branch_kind: 'alternative',
+          decision_group_id: 'choice-1',
+          selection_state: 'candidate',
+          included_child_ids: [],
+          included_parent_ids: ['t_root']
+        }
+      ]
+    })
+
+    render(<LoopPanel onTaskAction={vi.fn()} open selectedTaskId="t_option" state={state} />)
+
+    expect(screen.getByRole('heading', { name: /Option A/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Submit t_option/i })).toBeNull()
+    expect(screen.getByRole('button', { name: /Ask in chat about t_option/i })).toBeTruthy()
+  })
+
   it('shows nested sub-loop blockers in the root overview agents card', () => {
     const state = deriveLoopPanelStateFromTenantSource({
       session_id: 'sess-nested-agents',
@@ -1387,7 +1601,7 @@ describe('LoopPanel', () => {
           id: 't_draft_root',
           title: 'Draft root with no children',
           body: 'Spec waiting for submit',
-          status: 'triage',
+          status: 'scheduled',
           tenant: 'tenant-a',
           included_child_ids: [],
           included_parent_ids: []
@@ -1411,7 +1625,7 @@ describe('LoopPanel', () => {
     expect(onTaskAction).toHaveBeenCalledWith('decompose', expect.objectContaining({ taskId: 't_draft_root' }))
   })
 
-  it('keeps submit clickable for slash Loop intake rows so the handler can approve and dispatch', () => {
+  it('keeps submit clickable for slash Loop intake rows so the handler can approve planning', () => {
     const state = deriveLoopPanelStateFromTenantSource({
       session_id: 'sess-intake-root',
       root_task_id: 't_intake_root',
@@ -1422,7 +1636,7 @@ describe('LoopPanel', () => {
           id: 't_intake_root',
           title: 'Title-only intake root',
           body: 'Needs explicit activation approval',
-          status: 'triage',
+          status: 'scheduled',
           tenant: 'tenant-a',
           loop_intake: {
             dispatchable: false,
@@ -1442,7 +1656,7 @@ describe('LoopPanel', () => {
 
     const submit = screen.getByRole('button', { name: /Submit t_intake_root/i }) as HTMLButtonElement
     expect(submit.disabled).toBe(false)
-    expect(submit.title).toMatch(/Submit approves and dispatches/i)
+    expect(submit.title).toMatch(/Submit approves Loop planning/i)
 
     fireEvent.click(submit)
     expect(onTaskAction).toHaveBeenCalledWith('decompose', expect.objectContaining({ taskId: 't_intake_root' }))

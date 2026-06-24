@@ -264,6 +264,7 @@ _MODEL_NOT_FOUND_PATTERNS = [
 _REQUEST_VALIDATION_PATTERNS = [
     "unknown parameter",
     "unsupported parameter",
+    "unsupported content type",
     "unrecognized request argument",
     "invalid_request_error",
     "unknown_parameter",
@@ -511,7 +512,7 @@ def classify_api_error(
                     except (json.JSONDecodeError, TypeError):
                         pass
         if not _body_msg:
-            _body_msg = str(body.get("message") or "").lower()
+            _body_msg = str(body.get("message") or body.get("detail") or "").lower()
     # Combine all message sources for pattern matching
     parts = [_raw_msg]
     if _body_msg and _body_msg not in _raw_msg:
@@ -1060,7 +1061,7 @@ def _classify_400(
             err_body_msg = str(err_obj.get("message") or "").strip().lower()
         # Responses API (and some providers) use flat body: {"message": "..."}
         if not err_body_msg:
-            err_body_msg = str(body.get("message") or "").strip().lower()
+            err_body_msg = str(body.get("message") or body.get("detail") or "").strip().lower()
     is_generic = len(err_body_msg) < 30 or err_body_msg in {"error", ""}
     # Absolute token/message-count thresholds are only a proxy for smaller
     # context windows.  Large-context sessions can have many messages while
@@ -1359,6 +1360,9 @@ def _extract_message(error: Exception, body: dict) -> str:
             if isinstance(msg, str) and msg.strip():
                 return msg.strip()[:500]
         msg = body.get("message", "")
+        if isinstance(msg, str) and msg.strip():
+            return msg.strip()[:500]
+        msg = body.get("detail", "")
         if isinstance(msg, str) and msg.strip():
             return msg.strip()[:500]
     # Fallback to str(error)

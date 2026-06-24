@@ -126,6 +126,59 @@ def test_decompose_with_fanout_creates_children(kanban_home):
     assert c1.assignee == "engineer"
 
 
+def test_loop_safe_decompose_keeps_root_and_options_scheduled(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="choose implementation strategy",
+            created_by="loop:pending",
+            session_id="origin-session",
+            tenant="origin-session",
+            triage=True,
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET created_by = ?, status = 'scheduled' WHERE id = ?",
+                (f"loop:{tid}", tid),
+            )
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "rationale": "offer options",
+        "tasks": [
+            {"title": "Recommended: minimal path", "body": "Tradeoffs and recommendation", "assignee": "planner", "parents": []},
+            {"title": "Alternative: broader path", "body": "Tradeoffs", "assignee": "planner", "parents": []},
+        ],
+    })
+
+    patches = _patch_list_profiles(["orchestrator", "planner"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload), _patch_extra_body():
+            outcome = decomp.decompose_task(tid, author="desktop-submit", loop_safe=True)
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok, outcome.reason
+    assert outcome.fanout is True
+    assert outcome.child_ids and len(outcome.child_ids) == 2
+
+    with kb.connect() as conn:
+        root = kb.get_task(conn, tid)
+        children = [kb.get_task(conn, cid) for cid in outcome.child_ids]
+        promoted = kb.recompute_ready(conn)
+        after_recompute = [kb.get_task(conn, cid) for cid in outcome.child_ids]
+
+    assert promoted == 0
+    assert root is not None
+    assert root.status == "scheduled"
+    assert [child.status for child in children if child is not None] == ["scheduled", "scheduled"]
+    assert [child.status for child in after_recompute if child is not None] == ["scheduled", "scheduled"]
+    assert [child.session_id for child in children if child is not None] == ["origin-session", "origin-session"]
+
+
 def test_decompose_fanout_false_assigns_default_when_unassigned(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="just one thing", triage=True)
@@ -334,7 +387,7 @@ def test_decompose_retries_empty_length_output(kanban_home):
         "tasks": [
             {
                 "title": "Implement dynamic scaffold",
-                "body": "Preserve epistemic packets as on-demand expansion points.",
+                "body": "Preserve decision packets as on-demand expansion points.",
                 "assignee": "engineer",
                 "parents": [],
             },
@@ -392,9 +445,9 @@ def test_decompose_reports_empty_truncated_output(kanban_home):
     assert "empty/truncated" in outcome.reason
 
 
-def test_decomposer_prompt_preserves_dynamic_epistemic_expansion():
+def test_decomposer_prompt_preserves_dynamic_loop_expansion():
     assert "do NOT pre-materialize" in decomp._SYSTEM_PROMPT
-    assert "epistemic_subgraph only when" in decomp._SYSTEM_PROMPT
+    assert "delegate durable Loop subtasks" in decomp._SYSTEM_PROMPT
 
 
 def test_decompose_returns_false_when_task_not_triage(kanban_home):

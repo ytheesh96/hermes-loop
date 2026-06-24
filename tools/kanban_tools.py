@@ -939,22 +939,6 @@ def _request_orchestrator_review_exit(
         return tool_error(f"kanban_{review_kind}: {e}")
 
 
-def _handle_request_epistemic_workflow(args: dict, **kw) -> str:
-    """Typed worker exit for consequential uncertainty."""
-    alternatives = args.get("alternatives")
-    if not isinstance(alternatives, list) or len(alternatives) < 2:
-        return tool_error("alternatives must be a list with at least two choices")
-    criteria = args.get("criteria")
-    if criteria is not None and not isinstance(criteria, list):
-        return tool_error("criteria must be a list when provided")
-    return _request_orchestrator_review_exit(
-        args,
-        review_kind="epistemic_workflow",
-        exit_kind="epistemic_request",
-        required_fields=("question", "consequence_of_guessing_wrong"),
-    )
-
-
 def _handle_request_orchestrator_handoff(args: dict, **kw) -> str:
     """Typed worker exit for graph/scope/routing control-plane handoff."""
     return _request_orchestrator_review_exit(
@@ -1003,95 +987,6 @@ def _handle_decompose(args: dict, **kw) -> str:
     except Exception as e:
         logger.exception("kanban_decompose failed")
         return tool_error(f"kanban_decompose: {e}")
-
-
-def _handle_epistemic_decompose(args: dict, **kw) -> str:
-    """Create a canonical parked epistemic subgraph for a source task."""
-    guard = _require_graph_control_contract(args)
-    if guard:
-        return guard
-    source_task_id = str(args.get("source_task_id") or args.get("task_id") or "").strip()
-    question = str(args.get("question") or "").strip()
-    if not source_task_id:
-        return tool_error("source_task_id is required")
-    if not question:
-        return tool_error("question is required")
-    alternatives = args.get("alternatives")
-    if not isinstance(alternatives, list) or len(alternatives) < 2:
-        return tool_error("alternatives must be a list with at least two choices")
-    dispatch_policy = str(args.get("dispatch_policy") or "hold").strip()
-    auto_promote = dispatch_policy in {"dispatch_when_ready", "auto", "activate"}
-    author = str(args.get("author") or os.environ.get("HERMES_PROFILE") or "orchestrator").strip()
-    board = args.get("board")
-    try:
-        kb, conn = _connect(board=board)
-        try:
-            source = kb.get_task(conn, source_task_id)
-            if source is None:
-                return tool_error(f"unknown source task: {source_task_id}")
-            root_task_id = kb._loop_root_for_task(conn, source_task_id) if hasattr(kb, "_loop_root_for_task") else None
-            payload = {
-                "question": question,
-                "facts": args.get("facts") or [],
-                "alternatives": alternatives,
-                "criteria": args.get("criteria") or [],
-                "consequence_of_guessing_wrong": args.get("consequence_of_guessing_wrong"),
-                "affected_task_ids": args.get("affected_task_ids") or [source_task_id],
-                "resume_contract": args.get("resume_contract") or {},
-                "proof_packet": args.get("proof_packet"),
-            }
-            body = json.dumps(payload, ensure_ascii=False, indent=2)
-            epistemic_root_id = kb.create_task(
-                conn,
-                title=f"Epistemic workflow: {question[:160]}",
-                body=body,
-                assignee=str(args.get("orchestrator") or "orchestrator"),
-                tenant=source.tenant,
-                triage=True,
-                created_by=(f"loop:{root_task_id}" if root_task_id else "epistemic_decompose"),
-                session_id=source.session_id,
-                idempotency_key=args.get("idempotency_key"),
-                board=board,
-            )
-            children = [
-                {"title": "Epistemic evidence discovery", "assignee": args.get("research_assignee") or "research-worker", "body": body, "parents": []},
-                {"title": "Epistemic alternatives and tradeoffs", "assignee": args.get("research_assignee") or "research-worker", "body": body, "parents": []},
-                {"title": "Epistemic critique and risk review", "assignee": args.get("reviewer") or "reviewer-qa", "body": body, "parents": []},
-                {"title": "Epistemic adjudication and resume payload", "assignee": args.get("orchestrator") or "orchestrator", "body": body, "parents": [0, 1, 2]},
-            ]
-            child_ids = kb.decompose_triage_task(
-                conn,
-                epistemic_root_id,
-                root_assignee=args.get("orchestrator") or "orchestrator",
-                children=children,
-                author=author,
-                auto_promote=auto_promote,
-            )
-            if not child_ids:
-                return tool_error("epistemic root could not be decomposed")
-            kb.link_tasks(conn, epistemic_root_id, source_task_id)
-            kb.add_comment(
-                conn,
-                source_task_id,
-                author,
-                f"Epistemic workflow requested: {question}\n\nEpistemic root: {epistemic_root_id}",
-            )
-            return _ok(
-                source_task_id=source_task_id,
-                epistemic_root_id=epistemic_root_id,
-                created_tasks=child_ids,
-                resume_gate_id=child_ids[-1],
-                dispatch_policy=dispatch_policy,
-                auto_promote=auto_promote,
-                proof_packet=args.get("proof_packet"),
-            )
-        finally:
-            conn.close()
-    except ValueError as e:
-        return tool_error(f"kanban_epistemic_decompose: {e}")
-    except Exception as e:
-        logger.exception("kanban_epistemic_decompose failed")
-        return tool_error(f"kanban_epistemic_decompose: {e}")
 
 
 def _handle_resolve_blocker(args: dict, **kw) -> str:
@@ -1844,35 +1739,6 @@ KANBAN_REQUEST_DECISION_SCHEMA = {
 }
 
 
-KANBAN_REQUEST_EPISTEMIC_WORKFLOW_SCHEMA = {
-    "name": "kanban_request_epistemic_workflow",
-    "description": (
-        "Typed worker exit for consequential uncertainty. Routes the same task "
-        "to orchestrator review_kind='epistemic_workflow' with a structured "
-        "decision packet instead of using a vague generic block."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "string", "description": _DESC_TASK_ID_DEFAULT},
-            "question": {"type": "string", "description": "The exact uncertainty to resolve."},
-            "facts": {"type": "array", "items": {}, "description": "Facts discovered so far."},
-            "alternatives": {"type": "array", "items": {}, "description": "At least two options/alternatives."},
-            "criteria": {"type": "array", "items": {}, "description": "Decision criteria."},
-            "consequence_of_guessing_wrong": {"type": "string"},
-            "affected_task_ids": {"type": "array", "items": {"type": "string"}},
-            "requested_output_schema": {"type": "object"},
-            "resume_contract": {"type": "object"},
-            "summary": {"type": "string"},
-            "reason": {"type": "string"},
-            "metadata": {"type": "object"},
-            "board": _board_schema_prop(),
-        },
-        "required": ["question", "alternatives", "consequence_of_guessing_wrong"],
-    },
-}
-
-
 KANBAN_REQUEST_ORCHESTRATOR_HANDOFF_SCHEMA = {
     "name": "kanban_request_orchestrator_handoff",
     "description": (
@@ -1916,39 +1782,6 @@ KANBAN_DECOMPOSE_SCHEMA = {
             "board": _board_schema_prop(),
         },
         "required": ["task_id", "activation", "proof_packet"],
-    },
-}
-
-
-KANBAN_EPISTEMIC_DECOMPOSE_SCHEMA = {
-    "name": "kanban_epistemic_decompose",
-    "description": (
-        "Orchestrator-only canonical epistemic subgraph creation. Creates a "
-        "parked discovery/alternatives/critique/adjudication graph and links "
-        "it as upstream context for the source task. Requires activation + proof_packet."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "source_task_id": {"type": "string"},
-            "question": {"type": "string"},
-            "facts": {"type": "array", "items": {}},
-            "alternatives": {"type": "array", "items": {}},
-            "criteria": {"type": "array", "items": {}},
-            "consequence_of_guessing_wrong": {"type": "string"},
-            "affected_task_ids": {"type": "array", "items": {"type": "string"}},
-            "resume_contract": {"type": "object"},
-            "dispatch_policy": {"type": "string", "enum": ["hold", "dispatch_when_ready", "auto", "activate"]},
-            "activation": {"type": ["string", "boolean"]},
-            "proof_packet": {"type": "object"},
-            "idempotency_key": {"type": "string"},
-            "orchestrator": {"type": "string"},
-            "research_assignee": {"type": "string"},
-            "reviewer": {"type": "string"},
-            "author": {"type": "string"},
-            "board": _board_schema_prop(),
-        },
-        "required": ["source_task_id", "question", "alternatives", "activation", "proof_packet"],
     },
 }
 
@@ -2314,15 +2147,6 @@ registry.register(
 )
 
 registry.register(
-    name="kanban_request_epistemic_workflow",
-    toolset="kanban",
-    schema=KANBAN_REQUEST_EPISTEMIC_WORKFLOW_SCHEMA,
-    handler=_handle_request_epistemic_workflow,
-    check_fn=_check_kanban_mode,
-    emoji="🧠",
-)
-
-registry.register(
     name="kanban_request_orchestrator_handoff",
     toolset="kanban",
     schema=KANBAN_REQUEST_ORCHESTRATOR_HANDOFF_SCHEMA,
@@ -2338,15 +2162,6 @@ registry.register(
     handler=_handle_decompose,
     check_fn=_check_kanban_graph_control_mode,
     emoji="⚗",
-)
-
-registry.register(
-    name="kanban_epistemic_decompose",
-    toolset="kanban",
-    schema=KANBAN_EPISTEMIC_DECOMPOSE_SCHEMA,
-    handler=_handle_epistemic_decompose,
-    check_fn=_check_kanban_graph_control_mode,
-    emoji="🧠",
 )
 
 registry.register(

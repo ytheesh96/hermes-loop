@@ -156,8 +156,8 @@ export function useLoopPanelController({
   })
 
   const loopTaskDecomposeMutation = useMutation({
-    mutationFn: ({ approveIntake, taskId }: { approveIntake?: boolean; taskId: string }) =>
-      decomposeLoopTask(taskId, activeGatewayProfile, { approveIntake, board: loopSourceBoard }),
+    mutationFn: ({ approveIntake, loopSafe, taskId }: { approveIntake?: boolean; loopSafe?: boolean; taskId: string }) =>
+      decomposeLoopTask(taskId, activeGatewayProfile, { approveIntake, board: loopSourceBoard, loopSafe }),
     onSuccess: async result => {
       if (!result.ok) {
         notify({
@@ -258,7 +258,11 @@ export function useLoopPanelController({
       }
 
       if (action === 'decompose') {
-        loopTaskDecomposeMutation.mutate({ approveIntake: shouldApproveLoopIntakeOnSubmit(row), taskId: row.taskId })
+        loopTaskDecomposeMutation.mutate({
+          approveIntake: shouldApproveLoopIntakeOnSubmit(row),
+          loopSafe: true,
+          taskId: row.taskId
+        })
 
         return
       }
