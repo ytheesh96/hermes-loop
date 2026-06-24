@@ -625,6 +625,7 @@ describe('LoopPanel', () => {
     const rootAgentsCard = screen.getByTestId('loop-root-agents-card')
     expect(within(rootAgentsCard).getByText('No node selected')).toBeTruthy()
     expect(within(rootAgentsCard).getByText(/Click a node in the graph/i)).toBeTruthy()
+    expect(within(rootAgentsCard).queryByTestId('loop-selected-node-actions')).toBeNull()
 
     fireEvent.click(within(rootAgentsCard).getByTestId('loop-task-graph-node-t_child'))
 
@@ -643,17 +644,99 @@ describe('LoopPanel', () => {
 
     expect(actionOrder.every(index => index >= 0)).toBe(true)
     expect([...actionOrder].sort((a, b) => a - b)).toEqual(actionOrder)
-    expect((within(actions).getByRole('button', { name: /Add child/i }) as HTMLButtonElement).disabled).toBe(true)
-    expect((within(actions).getByRole('button', { name: /Add alternative/i }) as HTMLButtonElement).disabled).toBe(true)
-    expect((within(actions).getByRole('button', { name: /^Block/i }) as HTMLButtonElement).disabled).toBe(true)
-    expect((within(actions).getByRole('button', { name: /^Archive/i }) as HTMLButtonElement).disabled).toBe(true)
+    const openDetailsButton = within(actions).getByRole('button', { name: /Open details for t_child/i }) as HTMLButtonElement
+    const askButton = within(actions).getByRole('button', { name: /Ask in chat about t_child/i }) as HTMLButtonElement
+    const addChildButton = within(actions).getByRole('button', { name: /Add child/i }) as HTMLButtonElement
+    const addAlternativeButton = within(actions).getByRole('button', { name: /Add alternative/i }) as HTMLButtonElement
+    const blockButton = within(actions).getByRole('button', { name: /^Block/i }) as HTMLButtonElement
+    const archiveButton = within(actions).getByRole('button', { name: /^Archive/i }) as HTMLButtonElement
 
-    fireEvent.click(within(actions).getByRole('button', { name: /Ask in chat about t_child/i }))
+    expect(openDetailsButton.disabled).toBe(false)
+    expect(askButton.disabled).toBe(false)
+    expect(addChildButton.disabled).toBe(true)
+    expect(addAlternativeButton.disabled).toBe(true)
+    expect(blockButton.disabled).toBe(true)
+    expect(archiveButton.disabled).toBe(true)
+    expect(within(actions).getAllByText('Preview')).toHaveLength(2)
+
+    for (const disabledButton of [addChildButton, addAlternativeButton, blockButton, archiveButton]) {
+      fireEvent.click(disabledButton)
+    }
+
+    expect(onTaskAction).not.toHaveBeenCalled()
+
+    fireEvent.click(askButton)
     expect(onTaskAction).toHaveBeenCalledWith('ask-hermes', expect.objectContaining({ taskId: 't_child' }))
 
-    fireEvent.click(within(actions).getByRole('button', { name: /Open details for t_child/i }))
+    fireEvent.click(openDetailsButton)
     expect(screen.getByTestId('loop-task-card')).toBeTruthy()
     expect(screen.getByRole('heading', { name: /Build child/i })).toBeTruthy()
+  })
+
+  it('keeps selected-node preview mutations inert when routes are missing or unsafe', () => {
+    const initialState = deriveLoopPanelState([
+      toolMessage({
+        ok: true,
+        root_task_id: 't_root',
+        graph_revision: 3,
+        nodes: [
+          { task_id: 't_root', title: 'Root Task', status: 'running', parents: [], depth: 0 },
+          { task_id: 't_blocked', title: 'Blocked child', status: 'blocked', parents: ['t_root'], depth: 1 }
+        ]
+      })
+    ])
+
+    const missingSelectedState = deriveLoopPanelState([
+      toolMessage({
+        ok: true,
+        root_task_id: 't_root',
+        graph_revision: 4,
+        nodes: [
+          { task_id: 't_root', title: 'Root Task', status: 'running', parents: [], depth: 0 },
+          { task_id: 't_peer', title: 'Remaining peer', status: 'todo', parents: ['t_root'], depth: 1 }
+        ]
+      })
+    ])
+
+    const { rerender } = render(<LoopPanel open selectedTaskId="t_root" state={initialState!} />)
+
+    const rootAgentsCard = screen.getByTestId('loop-root-agents-card')
+    fireEvent.click(within(rootAgentsCard).getByTestId('loop-task-graph-node-t_blocked'))
+
+    const actions = within(rootAgentsCard).getByTestId('loop-selected-node-actions')
+    expect(within(actions).getByRole('button', { name: /Open details for t_blocked/i })).toBeTruthy()
+    expect((within(actions).getByRole('button', { name: /Ask in chat about t_blocked/i }) as HTMLButtonElement).disabled).toBe(
+      true
+    )
+    expect((within(actions).getByRole('button', { name: /Add child/i }) as HTMLButtonElement).disabled).toBe(true)
+    expect((within(actions).getByRole('button', { name: /Add alternative/i }) as HTMLButtonElement).disabled).toBe(true)
+    expect((within(actions).getByRole('button', { name: /^Unblock/i }) as HTMLButtonElement).disabled).toBe(true)
+    expect((within(actions).getByRole('button', { name: /^Archive/i }) as HTMLButtonElement).disabled).toBe(true)
+    expect(within(actions).getAllByText('Preview')).toHaveLength(2)
+
+    const onTaskAction = vi.fn()
+    rerender(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_root" state={initialState!} />)
+
+    const routedActions = within(screen.getByTestId('loop-root-agents-card')).getByTestId('loop-selected-node-actions')
+    expect((within(routedActions).getByRole('button', { name: /Ask in chat about t_blocked/i }) as HTMLButtonElement).disabled).toBe(false)
+
+    for (const disabledButton of [
+      within(routedActions).getByRole('button', { name: /Add child/i }),
+      within(routedActions).getByRole('button', { name: /Add alternative/i }),
+      within(routedActions).getByRole('button', { name: /^Unblock/i }),
+      within(routedActions).getByRole('button', { name: /^Archive/i })
+    ]) {
+      fireEvent.click(disabledButton)
+    }
+
+    expect(onTaskAction).not.toHaveBeenCalled()
+
+    rerender(<LoopPanel onTaskAction={onTaskAction} open selectedTaskId="t_root" state={missingSelectedState!} />)
+
+    const unavailableInspector = screen.getByTestId('loop-selected-node-inspector')
+    expect(within(unavailableInspector).getByText('Selected node unavailable')).toBeTruthy()
+    expect(unavailableInspector.textContent).toContain('Node t_blocked is missing from the latest Loop source')
+    expect(screen.queryByTestId('loop-selected-node-actions')).toBeNull()
   })
 
   it('renders orchestrator fork lineage and task-attached foreground handoffs in the drawer', () => {
