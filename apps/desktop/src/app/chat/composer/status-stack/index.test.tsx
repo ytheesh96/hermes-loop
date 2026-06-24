@@ -52,8 +52,14 @@ function rootClickSource(): TenantLoopSource {
   }
 }
 
-function RootRowOverviewHarness({ state }: { state: LoopPanelState }) {
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>('t_root')
+function RootRowOverviewHarness({
+  initialSelectedTaskId = 't_root',
+  state
+}: {
+  initialSelectedTaskId?: string
+  state: LoopPanelState
+}) {
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(initialSelectedTaskId)
   const [focusRequestKey, setFocusRequestKey] = useState(0)
 
   const openKanbanTask = (taskId: string) => {
@@ -71,6 +77,48 @@ function RootRowOverviewHarness({ state }: { state: LoopPanelState }) {
       </I18nProvider>
     </MemoryRouter>
   )
+}
+
+function dependencyGatedRootClickSource(): TenantLoopSource {
+  return {
+    latest_event_id: 11,
+    root_task_id: 't_current_root',
+    session_id: 'logical-origin',
+    tasks: [
+      {
+        created_by: 'loop:t_current_root',
+        id: 't_current_root',
+        included_child_ids: [],
+        included_parent_ids: [],
+        status: 'running',
+        title: 'Current Loop row'
+      },
+      {
+        created_by: 'loop:t_dependency_root',
+        id: 't_plan_a',
+        included_child_ids: ['t_dependency_root'],
+        included_parent_ids: [],
+        status: 'done',
+        title: 'Parentless prerequisite A'
+      },
+      {
+        created_by: 'loop:t_dependency_root',
+        id: 't_plan_b',
+        included_child_ids: ['t_dependency_root'],
+        included_parent_ids: [],
+        status: 'done',
+        title: 'Parentless prerequisite B'
+      },
+      {
+        created_by: 'loop:t_dependency_root',
+        id: 't_dependency_root',
+        included_child_ids: [],
+        included_parent_ids: ['t_plan_a', 't_plan_b'],
+        status: 'running',
+        title: 'Dependency-gated Loop root'
+      }
+    ]
+  }
 }
 
 describe('ComposerStatusStack Loop/Kanban rows', () => {
@@ -166,5 +214,35 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
     expect(screen.queryByRole('heading', { name: /Focused child/i })).toBeNull()
     expect(screen.getByTestId('loop-root-agents-card')).toBeTruthy()
     expect(screen.getByTestId('loop-panel-body').className).not.toContain('p-3')
+  })
+
+  it('opens dependency-gated self-anchored Loop root rows to the overview canvas', () => {
+    const source = dependencyGatedRootClickSource()
+    const state = deriveLoopPanelStateFromTenantSource(source)!
+
+    reconcileKanbanSessionSourceForComposer({
+      activeSessionId: null,
+      source,
+      sourceSessionId: 'logical-origin'
+    })
+
+    render(<RootRowOverviewHarness initialSelectedTaskId="t_current_root" state={state} />)
+
+    fireEvent.click(
+      within(screen.getByTestId('composer-status-host')).getByRole('button', { name: /Dependency-gated Loop root/i })
+    )
+
+    const rootAgentsCard = screen.getByTestId('loop-root-agents-card')
+    const canvas = within(rootAgentsCard).getByTestId('loop-task-graph')
+
+    expect(screen.queryByTestId('loop-task-card')).toBeNull()
+    expect(screen.getByTestId('loop-panel-body').className).not.toContain('p-3')
+    expect(within(canvas).getByTestId('loop-task-graph-node-t_dependency_root')).toBeTruthy()
+
+    fireEvent.click(within(rootAgentsCard).getByRole('button', { name: 'Show agents list' }))
+
+    const agentsList = within(rootAgentsCard).getByTestId('loop-root-agents-list')
+    const [firstOverviewRow] = within(agentsList).getAllByRole('button')
+    expect(firstOverviewRow?.textContent).toContain('Dependency-gated Loop root')
   })
 })

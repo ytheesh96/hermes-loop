@@ -350,9 +350,24 @@ interface LoopDependencyGroup {
   rows: LoopRow[]
 }
 
+const LOOP_DELEGATION_CREATED_BY_PREFIX = 'loop_delegation:'
+
+function isSelfAnchoredLoopRootRow(row: LoopRow): boolean {
+  const createdBy = row.rawTask?.created_by?.trim()
+
+  if (createdBy === `loop:${row.taskId}`) {
+    return true
+  }
+
+  return Boolean(
+    createdBy?.startsWith(LOOP_DELEGATION_CREATED_BY_PREFIX) && row.parents.length === 0 && row.parentCount === 0
+  )
+}
+
 function dependencyGroupAnchor(rows: LoopRow[], preferredTaskId?: null | string): LoopRow {
   return (
     (preferredTaskId ? rows.find(row => row.taskId === preferredTaskId) : null) ||
+    rows.find(isSelfAnchoredLoopRootRow) ||
     rows.find(row => row.parents.length === 0 && row.parentCount === 0) ||
     rows[0]!
   )
