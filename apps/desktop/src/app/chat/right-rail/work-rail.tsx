@@ -54,6 +54,7 @@ export function ChatWorkRail({
   const loopOpen = Boolean(loop.state && loop.open && !loop.hidden)
   const [activeTabId, setActiveTabId] = useState<WorkRailTabId>('loop')
   const lastLoopKeyRef = useRef('')
+  const lastLoopFocusRequestKeyRef = useRef(loop.focusRequestKey)
   const lastPreviewKeyRef = useRef('')
   const previewWasOpenRef = useRef(false)
 
@@ -77,13 +78,17 @@ export function ChatWorkRail({
 
   useEffect(() => {
     const key = loop.tabKey || ''
+    const focusRequestKey = loop.focusRequestKey
+    const keyChanged = key && key !== lastLoopKeyRef.current
+    const focusRequestChanged = focusRequestKey !== lastLoopFocusRequestKeyRef.current
 
-    if (loopOpen && key && key !== lastLoopKeyRef.current) {
+    if (loopOpen && (keyChanged || focusRequestChanged)) {
       setActiveTabId('loop')
     }
 
     lastLoopKeyRef.current = key
-  }, [loop.tabKey, loopOpen])
+    lastLoopFocusRequestKeyRef.current = focusRequestKey
+  }, [loop.focusRequestKey, loop.tabKey, loopOpen])
 
   useEffect(() => {
     const openedNow = previewOpen && !previewWasOpenRef.current
@@ -183,6 +188,7 @@ export function ChatWorkRail({
           <LoopPanel
             artifactSourceBaseDir={artifactSourceBaseDir}
             embedded
+            focusRequestKey={loop.focusRequestKey}
             hidden={loop.hidden}
             onAddTaskComment={loop.onAddTaskComment}
             onFocusTaskId={loop.onFocusTaskId}

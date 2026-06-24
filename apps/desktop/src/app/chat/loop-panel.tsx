@@ -715,6 +715,8 @@ interface LoopPanelProps {
   embedded?: boolean
   enableDebugJson?: boolean
   hidden?: boolean
+  /** Monotonic signal for explicit drawer-open requests, even when the selected task id is unchanged. */
+  focusRequestKey?: number
   onFocusTaskId?: (taskId: string) => void
   onHide?: () => void
   onSelectTaskId?: (taskId: string) => void
@@ -2484,8 +2486,14 @@ function LoopTaskGraph({
     >
       {fullPanel ? null : <LoopGraphSummary rows={rows} />}
       <div
-        className="relative mx-auto"
-        style={{ height: layout.height * zoom, minHeight: fullPanel ? '100%' : undefined, width: layout.width * zoom }}
+        className={cn('relative', fullPanel ? 'grid min-h-full min-w-full place-items-center' : 'mx-auto')}
+        data-testid="loop-task-graph-frame"
+        style={{
+          height: layout.height * zoom,
+          minHeight: fullPanel ? '100%' : undefined,
+          minWidth: fullPanel ? '100%' : undefined,
+          width: layout.width * zoom
+        }}
       >
         <div
           className="relative origin-top-left"
@@ -3390,6 +3398,7 @@ export function LoopPanel({
   artifactSourceBaseDir,
   embedded = false,
   enableDebugJson = false,
+  focusRequestKey = 0,
   hidden = false,
   onFocusTaskId,
   onHide,
@@ -3412,6 +3421,7 @@ export function LoopPanel({
   const [artifactTabs, setArtifactTabs] = useState<LoopPanelArtifactTab[]>([])
   const [activeArtifactTabId, setActiveArtifactTabId] = useState<null | string>(null)
   const internalFocusTaskIdRef = useRef<null | string>(null)
+  const lastFocusRequestKeyRef = useRef(focusRequestKey)
   const [panelWidth, setPanelWidth] = useState(LOOP_PANEL_DEFAULT_WIDTH)
   const stateRootTaskId = state?.rootTaskId || ''
 
@@ -3424,18 +3434,21 @@ export function LoopPanel({
 
   useEffect(() => {
     const nextSelectedTaskId = selectedTaskId || null
+    const focusRequestChanged = focusRequestKey !== lastFocusRequestKeyRef.current
+    lastFocusRequestKeyRef.current = focusRequestKey
 
-    if (internalFocusTaskIdRef.current === nextSelectedTaskId) {
+    if (!focusRequestChanged && internalFocusTaskIdRef.current === nextSelectedTaskId) {
       internalFocusTaskIdRef.current = null
 
       return
     }
 
+    internalFocusTaskIdRef.current = null
     setFocusedTaskId(nextSelectedTaskId)
     setNavigationStack([])
     setActiveTaskTabId(null)
     setActiveArtifactTabId(null)
-  }, [selectedTaskId])
+  }, [focusRequestKey, selectedTaskId])
 
   const renderedTaskId = activeTaskTabId || focusedTaskId
 

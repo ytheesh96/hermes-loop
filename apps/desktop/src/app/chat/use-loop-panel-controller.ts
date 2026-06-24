@@ -100,6 +100,7 @@ export function useLoopPanelController({
   const loopPanelState = tenantLoopPanelState
   const [selectedLoopTaskId, setSelectedLoopTaskId] = useState<string | null>(null)
   const [focusedLoopTaskId, setFocusedLoopTaskId] = useState<string | null>(null)
+  const [loopFocusRequestKey, setLoopFocusRequestKey] = useState(0)
   const [loopPanelOpen, setLoopPanelOpen] = useState(false)
   const [loopPanelHidden, setLoopPanelHidden] = useState(false)
 
@@ -220,6 +221,7 @@ export function useLoopPanelController({
   const handleSelectLoopTaskId = useCallback((taskId: string) => {
     setSelectedLoopTaskId(taskId)
     setFocusedLoopTaskId(taskId)
+    setLoopFocusRequestKey(key => key + 1)
     setLoopPanelOpen(true)
     setLoopPanelHidden(false)
   }, [])
@@ -312,6 +314,7 @@ export function useLoopPanelController({
 
   return {
     focusedTaskId: focusedLoopTaskId,
+    focusRequestKey: loopFocusRequestKey,
     hidden: loopPanelHidden,
     onAddTaskComment: handleAddLoopTaskComment,
     onFocusTaskId: setFocusedLoopTaskId,

@@ -49,6 +49,7 @@ function loopController(): LoopPanelController {
 
   return {
     focusedTaskId: 't_root',
+    focusRequestKey: 0,
     hidden: false,
     onAddTaskComment: vi.fn(),
     onFocusTaskId: vi.fn(),
@@ -92,5 +93,36 @@ describe('ChatWorkRail', () => {
     expect(loopPanel.style.width).toBe('')
     expect(screen.queryByTestId('loop-panel-tabbar')).toBeNull()
     expect(screen.queryByRole('separator', { name: /resize loop-panel/i })).toBeNull()
+  })
+
+  it('reactivates the Loop tab when the same root row is explicitly opened again', async () => {
+    const target = previewTarget()
+    setPreviewTarget(target)
+
+    const loop = loopController()
+
+    const { rerender } = render(
+      <ChatWorkRail
+        loop={{ ...loop, focusRequestKey: 0 }}
+        previewKey={target.url}
+        previewLabel={target.label}
+        previewOpen
+      />
+    )
+
+    expect((await screen.findByTestId('preview-pane')).textContent).toBe('Preview artifact')
+    expect(screen.getByRole('tab', { name: 'Preview' }).getAttribute('aria-selected')).toBe('true')
+
+    rerender(
+      <ChatWorkRail
+        loop={{ ...loop, focusRequestKey: 1 }}
+        previewKey={target.url}
+        previewLabel={target.label}
+        previewOpen
+      />
+    )
+
+    expect(screen.getByRole('tab', { name: 'Loop' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByTestId('loop-panel')).toBeTruthy()
   })
 })
