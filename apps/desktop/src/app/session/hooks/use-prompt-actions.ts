@@ -45,6 +45,7 @@ import { reconcileKanbanSessionSourceForComposer, resetSessionBackground } from 
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
 import { setPetScale } from '@/store/pet-gallery'
+import { clearPreviewArtifacts } from '@/store/preview-status'
 import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import {
   $busy,
