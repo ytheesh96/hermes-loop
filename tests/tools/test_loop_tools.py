@@ -197,6 +197,41 @@ def test_loop_create_auto_subscribes_tui_session(loop_env, monkeypatch):
     ]
 
 
+def test_loop_create_keeps_source_session_and_tenant_independent(loop_env, monkeypatch):
+    monkeypatch.setenv("HERMES_SESSION_ID", "source-runtime-session")
+    monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
+    monkeypatch.setenv("HERMES_TENANT", "legacy-env-tenant")
+
+    created = _call_loop(
+        "loop_create",
+        {
+            "objective": "Keep routing identity separate from metadata",
+            "assignee": "worker-a",
+            "activation": "explicit_user_request",
+            "proof_packet": {"summary": "user requested durable routing"},
+            "idempotency_key": "loop-create-independent-source-tenant",
+        },
+    )
+
+    assert created["ok"] is True
+
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, created["loop_item_id"])
+        subs = kb.list_notify_subs(conn, created["loop_item_id"])
+    finally:
+        conn.close()
+
+    assert task is not None
+    assert task.session_id == "source-runtime-session"
+    assert task.tenant is None
+    assert [(s["platform"], s["chat_id"]) for s in subs] == [
+        ("tui", "source-runtime-session")
+    ]
+
+
 def test_loop_create_auto_subscribes_gateway_session(loop_env, monkeypatch):
     monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
     monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "chat-1")

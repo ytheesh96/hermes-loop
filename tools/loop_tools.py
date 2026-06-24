@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from tools.registry import registry, tool_error
-from gateway.session_context import get_logical_session_id, get_session_env
+from gateway.session_context import get_session_env, get_source_session_id
 
 
 def _check_loop_enabled() -> bool:
@@ -221,8 +221,15 @@ def _handle_loop_create(args: dict[str, Any], **_kwargs) -> str:
     proof_packet = dict(args.get("proof_packet") or {})
     execution = _parse_execution(args)
     board = args.get("board")
-    tenant = args.get("tenant") or get_session_env("HERMES_TENANT", "") or get_logical_session_id()
-    session_id = args.get("session_id") or get_logical_session_id()
+    tenant = str(args.get("tenant") or "").strip() or None
+    session_id = str(args.get("session_id") or get_source_session_id() or "").strip() or None
+    if not session_id:
+        # Legacy CLI/TUI paths once exposed only HERMES_TENANT as the session
+        # key. Use it only when no explicit source session exists.
+        legacy_tenant_session = str(get_session_env("HERMES_TENANT", "") or "").strip()
+        if legacy_tenant_session:
+            session_id = legacy_tenant_session
+            tenant = tenant or legacy_tenant_session
     parents = args.get("parents") or []
     if isinstance(parents, str):
         parents = [parents]

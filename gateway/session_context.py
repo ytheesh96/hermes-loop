@@ -250,6 +250,21 @@ def get_logical_session_id(default: Any = "") -> Any:
     )
 
 
+def get_source_session_id(default: Any = "") -> Any:
+    """Return the explicit source session identity for Loop re-entry.
+
+    Unlike ``get_logical_session_id()``, this deliberately ignores
+    ``HERMES_TENANT``. Tenant may be custom metadata, while Loop discovery and
+    notification re-entry should key off the user-facing session key or runtime
+    session id.
+    """
+    return (
+        get_session_env("HERMES_SESSION_KEY")
+        or get_session_env("HERMES_SESSION_ID")
+        or default
+    )
+
+
 def reset_session_vars_for_tests() -> None:
     """Reset session ContextVars so tests fall back to process env again."""
     for var in _VAR_MAP.values():

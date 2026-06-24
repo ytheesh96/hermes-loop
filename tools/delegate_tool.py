@@ -39,7 +39,7 @@ _RUNTIME_PROVIDER_CUSTOM = "custom"
 from tools import file_state
 from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb
 from utils import base_url_hostname, is_truthy_value
-from gateway.session_context import get_logical_session_id, get_session_env
+from gateway.session_context import get_session_env, get_source_session_id
 
 
 # Tools that children must never have access to
@@ -2269,11 +2269,12 @@ def _loop_delegation_result(
         ]
         task_decompose = spec["decompose"]
         task_goal_mode = spec["goal_mode"]
+        origin_session_id = get_source_session_id()
         proof_packet = {
             "source": "delegate_task_mode_loop",
             "goal": spec["goal"],
             "origin_profile": os.environ.get("HERMES_PROFILE") or "",
-            "origin_session_id": get_logical_session_id(),
+            "origin_session_id": origin_session_id,
             "session_key_present": bool(get_session_env("HERMES_SESSION_KEY")),
             "decompose": is_truthy_value(task_decompose, default=False),
             "goal_mode": is_truthy_value(task_goal_mode, default=False),
@@ -2286,6 +2287,7 @@ def _loop_delegation_result(
                 "context": spec["context"],
                 "assignee": spec["target"],
                 "tenant": tenant,
+                "session_id": origin_session_id,
                 "board": board,
                 "workspace_kind": workspace_kind or "scratch",
                 "workspace_path": workspace_path,

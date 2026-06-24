@@ -95,11 +95,34 @@ describe('Hermes REST session helpers', () => {
         assignee: 'orchestrator',
         body: undefined,
         session_id: 'session-1',
-        tenant: 'session-1',
         title: 'Draft Loop root'
       },
       method: 'POST',
       path: '/api/plugins/kanban/loop-drafts?board=developer',
+      profile: 'peacock'
+    })
+  })
+
+  it('passes explicit Loop draft tenant metadata when provided', async () => {
+    api.mockResolvedValue({ task: { id: 't_loop', title: 'Draft Loop root' } })
+
+    await createLoopDraftTask({
+      profile: 'peacock',
+      sessionId: 'session-1',
+      tenant: 'custom-origin-metadata',
+      title: 'Draft Loop root'
+    })
+
+    expect(api).toHaveBeenCalledWith({
+      body: {
+        assignee: 'orchestrator',
+        body: undefined,
+        session_id: 'session-1',
+        tenant: 'custom-origin-metadata',
+        title: 'Draft Loop root'
+      },
+      method: 'POST',
+      path: '/api/plugins/kanban/loop-drafts',
       profile: 'peacock'
     })
   })

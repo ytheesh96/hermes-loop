@@ -700,9 +700,15 @@ def _loop_tool_task_ids_for_sessions(session_ids: list[str]) -> list[str]:
 def _infer_session_source_tenants(
     conn: sqlite3.Connection,
     lineage_session_ids: list[str],
-) -> tuple[list[str], bool]:
+) -> list[str]:
+    """Return tenant labels for compatibility/display, not discovery mode.
+
+    Legacy rows that stored the session key in ``tenant`` win so old Loop roots
+    keep their familiar label. If none exist, report non-null tenants already
+    attached to explicit source-session rows without using them to filter.
+    """
     if not lineage_session_ids:
-        return [], False
+        return []
     placeholders = ",".join("?" for _ in lineage_session_ids)
     lineage_tenants = [
         r["tenant"]
@@ -718,9 +724,8 @@ def _infer_session_source_tenants(
         )
     ]
     if lineage_tenants:
-        return lineage_tenants, True
-
-    session_tenants = [
+        return lineage_tenants
+    return [
         r["tenant"]
         for r in conn.execute(
             f"""
@@ -734,7 +739,6 @@ def _infer_session_source_tenants(
             tuple(lineage_session_ids),
         )
     ]
-    return session_tenants, False
 
 
 def _session_source_board_candidates(explicit_board: Optional[str]) -> list[str]:
@@ -763,13 +767,8 @@ def _query_session_source_rows(
     include_archived: bool,
     referenced_task_ids: Optional[list[str]] = None,
 ) -> tuple[list[sqlite3.Row], list[str], list[str]]:
-    inferred_tenants: list[str] = []
-    tenant_scope_only = False
-    if explicit_tenant:
-        tenant_filters = [explicit_tenant]
-    else:
-        inferred_tenants, tenant_scope_only = _infer_session_source_tenants(conn, lineage_session_ids)
-        tenant_filters = inferred_tenants
+    inferred_tenants = _infer_session_source_tenants(conn, lineage_session_ids)
+    tenant_filters = [explicit_tenant] if explicit_tenant else inferred_tenants
 
     referenced_task_ids = [
         task_id
@@ -777,30 +776,27 @@ def _query_session_source_rows(
         if task_id and task_id not in (referenced_task_ids or [])[:index]
     ]
 
-    primary_where: list[str]
-    primary_params: list[Any] = []
-    if tenant_filters and tenant_scope_only:
-        primary_where = [f"tenant IN ({','.join('?' for _ in tenant_filters)})"]
-        primary_params.extend(tenant_filters)
-    else:
-        primary_where = [f"session_id IN ({','.join('?' for _ in lineage_session_ids)})"]
-        primary_params.extend(lineage_session_ids)
-        if tenant_filters:
-            primary_where.append(f"tenant IN ({','.join('?' for _ in tenant_filters)})")
-            primary_params.extend(tenant_filters)
-
-    disjuncts = [f"({' AND '.join(primary_where)})"]
-    params: list[Any] = list(primary_params)
-
+    disjuncts: list[str] = []
+    params: list[Any] = []
     if lineage_session_ids:
-        disjuncts.append(f"foreground_parent_session_id IN ({','.join('?' for _ in lineage_session_ids)})")
+        placeholders = ",".join("?" for _ in lineage_session_ids)
+        disjuncts.append(f"session_id IN ({placeholders})")
+        params.extend(lineage_session_ids)
+        disjuncts.append(f"foreground_parent_session_id IN ({placeholders})")
+        params.extend(lineage_session_ids)
+        # Legacy fallback for rows created before tasks.session_id became the
+        # primary source identity.
+        disjuncts.append(f"tenant IN ({placeholders})")
         params.extend(lineage_session_ids)
 
     if referenced_task_ids:
         disjuncts.append(f"id IN ({','.join('?' for _ in referenced_task_ids)})")
         params.extend(referenced_task_ids)
 
-    where = [f"({' OR '.join(disjuncts)})"]
+    where = [f"({' OR '.join(disjuncts)})"] if disjuncts else ["0"]
+    if explicit_tenant:
+        where.append("tenant = ?")
+        params.append(explicit_tenant)
     if not include_archived:
         where.append("status != 'archived'")
 
@@ -1630,7 +1626,7 @@ def _create_loop_draft_root(
     """Create/upsert the real scheduled row that anchors a desktop Loop draft."""
     title = _draft_title(payload.title)
     session_id = (payload.session_id or os.environ.get("HERMES_SESSION_ID") or "").strip() or None
-    tenant = (payload.tenant or session_id or "").strip() or None
+    tenant = (payload.tenant or "").strip() or None
     idempotency_key = (payload.idempotency_key or (f"loop-draft:{session_id}" if session_id else "")).strip() or None
     needs_intake = not (payload.body or "").strip()
 

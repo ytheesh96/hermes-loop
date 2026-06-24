@@ -198,7 +198,7 @@ def test_create_loop_draft_anchors_session_source_and_real_root(client):
     assert task["title"] == "Draft overview"
     assert task["status"] == "scheduled"
     assert task["session_id"] == "session-draft-1"
-    assert task["tenant"] == "session-draft-1"
+    assert task["tenant"] is None
     assert task["created_by"] == f"loop:{task['id']}"
 
     source = first.json()["source"]
@@ -222,7 +222,32 @@ def test_create_loop_draft_anchors_session_source_and_real_root(client):
     assert persisted is not None
     assert persisted.created_by == f"loop:{task['id']}"
     assert persisted.status == "scheduled"
+    assert persisted.tenant is None
     assert runs == []
+
+
+def test_create_loop_draft_preserves_explicit_tenant_metadata(client):
+    first = client.post(
+        "/api/plugins/kanban/loop-drafts",
+        json={
+            "title": "Draft with tenant metadata",
+            "body": "Visible draft spec",
+            "session_id": "session-draft-tenant",
+            "tenant": "custom-origin-metadata",
+        },
+    )
+
+    assert first.status_code == 200, first.text
+    task = first.json()["task"]
+    assert task["session_id"] == "session-draft-tenant"
+    assert task["tenant"] == "custom-origin-metadata"
+
+    session_source = client.get(
+        "/api/plugins/kanban/session-source",
+        params={"session_id": "session-draft-tenant"},
+    )
+    assert session_source.status_code == 200, session_source.text
+    assert [item["id"] for item in session_source.json()["tasks"]] == [task["id"]]
 
 
 def test_title_only_loop_draft_records_durable_intake_needed_state(client):
@@ -748,6 +773,83 @@ def test_session_source_includes_loop_tool_referenced_worker_rows(client, kanban
     assert referenced_payload["tenant"] == "custom-loop-tenant"
 
 
+def test_session_source_includes_explicit_session_rows_when_legacy_tenant_row_exists(client, kanban_home):
+    from hermes_state import SessionDB
+
+    session_db = SessionDB()
+    try:
+        session_db.create_session("source-session", "tui")
+    finally:
+        session_db.close()
+
+    conn = kb.connect()
+    try:
+        legacy = kb.create_task(
+            conn,
+            title="legacy tenant-only row",
+            assignee="reviewer-qa",
+            created_by="loop:legacy",
+            tenant="source-session",
+            session_id=None,
+        )
+        delegated = kb.create_task(
+            conn,
+            title="explicit source row with custom tenant",
+            assignee="peacock",
+            created_by="loop_delegation:planner",
+            tenant="custom-origin-metadata",
+            session_id="source-session",
+        )
+        foreground_parent = kb.create_task(
+            conn,
+            title="foreground parent row",
+            assignee="reviewer-qa",
+            created_by="loop_delegation:planner",
+            tenant="other-metadata",
+            session_id="worker-session",
+        )
+        wrong_session = kb.create_task(
+            conn,
+            title="wrong session control",
+            assignee="peacock",
+            created_by="loop_delegation:planner",
+            tenant="custom-origin-metadata",
+            session_id="other-session",
+        )
+        archived = kb.create_task(
+            conn,
+            title="archived source row",
+            assignee="peacock",
+            tenant="custom-origin-metadata",
+            session_id="source-session",
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET foreground_parent_session_id = ? WHERE id = ?",
+                ("source-session", foreground_parent),
+            )
+            conn.execute("UPDATE tasks SET status = 'archived' WHERE id = ?", (archived,))
+    finally:
+        conn.close()
+
+    r = client.get(
+        "/api/plugins/kanban/session-source",
+        params={"session_id": "source-session", "board": "default"},
+    )
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    task_ids = [task["id"] for task in data["tasks"]]
+    assert legacy in task_ids
+    assert delegated in task_ids
+    assert foreground_parent in task_ids
+    assert wrong_session not in task_ids
+    assert archived not in task_ids
+    delegated_payload = next(task for task in data["tasks"] if task["id"] == delegated)
+    assert delegated_payload["session_id"] == "source-session"
+    assert delegated_payload["tenant"] == "custom-origin-metadata"
+
+
 def test_session_source_recovers_overwritten_compression_parent(client, kanban_home):
     """Loop composer follows a compaction child even after parent shutdown.
 
@@ -808,8 +910,8 @@ def test_session_source_recovers_tasks_when_lineage_id_is_tenant_key(client, kan
     """Compressed Loop continuations can point at tenant-keyed Kanban work."""
     from hermes_state import SessionDB
 
-    tenant_root = "tenant-root-session-key"
-    tip_session = "tenant-tip-session"
+    tenant_root = "pass3-tenant-root-session-key"
+    tip_session = "pass3-tenant-tip-session"
     session_db = SessionDB()
     try:
         session_db.create_session(tenant_root, "cli")
@@ -866,10 +968,12 @@ def test_session_source_recovers_tasks_when_lineage_id_is_tenant_key(client, kan
     assert data["lineage_session_ids"] == [tenant_root, tip_session]
     assert data["tenant"] == tenant_root
     assert data["tenants"] == [tenant_root]
-    assert [task["id"] for task in data["tasks"]] == [parent, child]
-    assert {task["id"] for task in data["tasks"]}.isdisjoint(
-        {scratch, wrong_tenant, archived},
-    )
+    assert {task["id"] for task in data["tasks"]} == {parent, child, scratch, wrong_tenant}
+    assert {task["id"] for task in data["tasks"]}.isdisjoint({archived})
+    assert {task["id"] for task in data["tasks"] if task["session_id"] == tip_session} == {
+        scratch,
+        wrong_tenant,
+    }
     assert data["links"] == [{"parent_id": parent, "child_id": child}]
 
 
@@ -1140,8 +1244,7 @@ def test_session_source_can_infer_tenant_from_lineage_tasks(client):
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["tenant"] == "20260612_145622_dc77fb"
-    assert [task["id"] for task in data["tasks"]] == [keep]
-    assert drop not in {task["id"] for task in data["tasks"]}
+    assert {task["id"] for task in data["tasks"]} == {keep, drop}
 
 
 def test_board_query_param_default_overrides_current_board_pointer(client):

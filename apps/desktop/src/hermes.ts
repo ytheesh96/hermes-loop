@@ -299,13 +299,15 @@ export function createLoopDraftTask({
   tenant,
   title
 }: CreateLoopDraftTaskPayload): Promise<CreateLoopDraftTaskResponse> {
+  const normalizedTenant = tenant?.trim()
+
   return window.hermesDesktop.api<CreateLoopDraftTaskResponse>({
     ...(profile ? { profile } : profileScoped()),
     body: {
       assignee: 'orchestrator',
       body: body?.trim() || undefined,
       session_id: sessionId,
-      tenant: tenant?.trim() || sessionId,
+      ...(normalizedTenant ? { tenant: normalizedTenant } : {}),
       title: title?.trim() || 'Loop draft'
     },
     method: 'POST',

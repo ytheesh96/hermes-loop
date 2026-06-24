@@ -82,6 +82,7 @@ def test_delegate_task_loop_mode_creates_durable_loop_item(loop_delegate_env, mo
     assert task.title == "Review the Loop adapter"
     assert task.assignee == "reviewer-qa"
     assert task.session_id == "tui-session-123"
+    assert task.tenant is None
     assert "Repo: /tmp/hermes-agent" in (task.body or "")
     assert "delegate_task_mode_loop" in (task.body or "")
     assert [
@@ -125,12 +126,61 @@ def test_delegate_task_loop_mode_uses_session_context_over_stale_env(
 
     assert task is not None
     assert task.session_id == "fresh-context-session"
-    assert task.tenant == "fresh-context-session"
+    assert task.tenant is None
     assert '"origin_session_id": "fresh-context-session"' in (task.body or "")
     assert '"origin_session_id": "fresh-runtime-session"' not in (task.body or "")
     assert '"origin_session_id": "stale-env-session"' not in (task.body or "")
     assert [(s["platform"], s["chat_id"]) for s in subs] == [
         ("tui", "fresh-context-session")
+    ]
+
+
+def test_delegate_task_loop_mode_keeps_custom_tenant_metadata_separate_from_source_session(
+    loop_delegate_env,
+    monkeypatch,
+):
+    from gateway.session_context import reset_session_vars_for_tests, set_session_vars
+    from hermes_cli import kanban_db as kb
+    from tools import delegate_tool
+
+    monkeypatch.setenv("HERMES_SESSION_ID", "stale-runtime-session")
+    monkeypatch.setenv("HERMES_SESSION_KEY", "stale-key-session")
+    monkeypatch.setenv("HERMES_TENANT", "legacy-env-tenant")
+    tokens = set_session_vars(
+        session_id="runtime-tip-session",
+        session_key="source-root-session",
+        tenant="legacy-context-tenant",
+    )
+    try:
+        out = json.loads(
+            delegate_tool.delegate_task(
+                goal="Verify custom tenant routing",
+                mode="loop",
+                assignee="reviewer-qa",
+                tenant="custom-origin-metadata",
+                parent_agent=DummyParent(),
+            )
+        )
+    finally:
+        del tokens
+        reset_session_vars_for_tests()
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, out["loop_item_id"])
+        subs = kb.list_notify_subs(conn, out["loop_item_id"])
+    finally:
+        conn.close()
+
+    assert task is not None
+    assert task.session_id == "source-root-session"
+    assert task.tenant == "custom-origin-metadata"
+    body = task.body or ""
+    assert '"origin_session_id": "source-root-session"' in body
+    assert '"origin_session_id": "runtime-tip-session"' not in body
+    assert '"origin_session_id": "legacy-context-tenant"' not in body
+    assert [(s["platform"], s["chat_id"]) for s in subs] == [
+        ("tui", "source-root-session")
     ]
 
 
