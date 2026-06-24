@@ -1048,60 +1048,6 @@ function LoopTaskActions({
   )
 }
 
-function LoopRootActions({
-  archiveableTaskCount,
-  decomposed,
-  onTaskAction,
-  root
-}: {
-  archiveableTaskCount: number
-  decomposed: boolean
-  onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
-  root: LoopRow
-}) {
-  const status = normalizedLoopValue(root.status)
-  const canSubmit = !decomposed && !TERMINAL_LOOP_STATUSES.has(status)
-
-  return (
-    <div className="flex flex-wrap gap-1.5" data-testid="loop-root-actions">
-      <Button
-        aria-label={`Submit ${root.taskId}`}
-        className="h-7 gap-1.5 px-2 text-xs"
-        disabled={!onTaskAction || !canSubmit}
-        onClick={() => onTaskAction?.('decompose', root)}
-        title={loopSubmitTitle(root)}
-        type="button"
-        variant="default"
-      >
-        <Codicon name="send" size="0.82rem" />
-        <span>Submit</span>
-      </Button>
-      <Button
-        aria-label={`Archive Loop tasks for ${root.taskId}`}
-        className="h-7 gap-1.5 px-2 text-xs"
-        disabled={!onTaskAction || archiveableTaskCount === 0}
-        onClick={() => onTaskAction?.('archive-loop', root)}
-        type="button"
-        variant="outline"
-      >
-        <Codicon name="archive" size="0.82rem" />
-        <span>Archive</span>
-      </Button>
-      <Button
-        aria-label={`Ask in chat about ${root.taskId}`}
-        className="h-7 gap-1.5 px-2 text-xs"
-        disabled={!onTaskAction}
-        onClick={() => onTaskAction?.('ask-hermes', root)}
-        type="button"
-        variant="outline"
-      >
-        <Codicon name="comment-discussion" size="0.82rem" />
-        <span>Ask in chat</span>
-      </Button>
-    </div>
-  )
-}
-
 function descriptionHasMarkdown(text: string): boolean {
   return (
     /(^|\n)\s{0,3}(#{1,6}\s|[-*+]\s|\d+\.\s|```|>\s|\[[^\]]+\]\([^)]+\)|- \[[ xX]\])/m.test(text) ||
@@ -1120,14 +1066,6 @@ function TaskDescription({ text }: { text: string }) {
     <CompactMarkdown text={cleanedText} />
   ) : (
     <p className="m-0 whitespace-pre-wrap text-(--ui-text-secondary)">{cleanedText}</p>
-  )
-}
-
-function LoopRootSpec({ root }: { root: LoopRow }) {
-  return (
-    <DetailSection testId="loop-root-spec" title="Description">
-      <TaskDescription text={root.body || ''} />
-    </DetailSection>
   )
 }
 
@@ -3129,13 +3067,11 @@ function LoopTaskAgentsCard({
 function LoopRootOverview({
   group,
   onOpenTaskTab,
-  onTaskAction,
-  state
+  onTaskAction
 }: {
   group: LoopDependencyGroup
   onOpenTaskTab?: (row: LoopRow) => void
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
-  state: LoopPanelState
 }) {
   const root = group.anchor
   const groups = rootOverviewGroups(group)
@@ -3149,33 +3085,12 @@ function LoopRootOverview({
 
   const childCount = Math.max(root.childCount, root.children.length, groupedCount)
   const decomposed = childCount > 0
-  const archiveableTaskCount = state.rows.filter(row => normalizedLoopValue(row.status) !== 'archived').length
 
   return (
     <div className="grid min-w-0 max-w-full gap-3">
-      <section
-        className="min-w-0 max-w-full overflow-hidden rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-surface-background) p-3 text-xs"
-        data-testid="loop-root-card"
-      >
-        <div className="grid gap-2">
-          <div className="flex items-center gap-2 font-medium text-(--ui-text-primary)">
-            <LoopStatusIndicator row={root} />
-            <h3 className="m-0 min-w-0 truncate text-sm font-semibold text-(--ui-text-primary)">{root.title}</h3>
-          </div>
-          <LoopRootActions
-            archiveableTaskCount={archiveableTaskCount}
-            decomposed={decomposed}
-            onTaskAction={onTaskAction}
-            root={root}
-          />
-        </div>
-      </section>
-
       {decomposed ? (
         <LoopRootAgentsCard groups={groups} onOpenTaskTab={onOpenTaskTab} onTaskAction={onTaskAction} root={root} />
       ) : null}
-
-      <LoopRootSpec root={root} />
     </div>
   )
 }
@@ -4058,7 +3973,6 @@ export function LoopPanel({
                   group={selectedOverviewGroup}
                   onOpenTaskTab={openLoopOverviewTask}
                   onTaskAction={onTaskAction}
-                  state={state}
                 />
               </div>
             ) : selected ? (
