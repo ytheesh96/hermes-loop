@@ -422,6 +422,10 @@ function loopDependencyGroupForTask(
   return groups.find(group => group.hasDependencyLink) || groups[0] || null
 }
 
+function loopDependencyGroupShowsOverview(group?: LoopDependencyGroup | null): boolean {
+  return Boolean(group && (group.hasDependencyLink || isSelfAnchoredLoopRootRow(group.anchor)))
+}
+
 function loopDependencyGroupMembers(group: LoopDependencyGroup): LoopRow[] {
   return group.rows.filter(row => row.taskId !== group.anchor.taskId)
 }
@@ -3198,21 +3202,9 @@ function LoopRootOverview({
   const root = group.anchor
   const groups = rootOverviewGroups(group)
 
-  const groupedCount =
-    groups.active.length +
-    groups.attention.length +
-    groups.queued.length +
-    groups.other.length +
-    groups.completed.length
-
-  const childCount = Math.max(root.childCount, root.children.length, groupedCount)
-  const decomposed = childCount > 0
-
   return (
     <div className="flex h-full min-h-0 min-w-0 max-w-full flex-col">
-      {decomposed ? (
-        <LoopRootAgentsCard groups={groups} onOpenTaskTab={onOpenTaskTab} onTaskAction={onTaskAction} root={root} />
-      ) : null}
+      <LoopRootAgentsCard groups={groups} onOpenTaskTab={onOpenTaskTab} onTaskAction={onTaskAction} root={root} />
     </div>
   )
 }
@@ -3600,7 +3592,7 @@ export function LoopPanel({
   )
 
   const overviewAnchor = selectedOverviewGroup?.anchor || null
-  const loopOverviewEligible = Boolean(selectedOverviewGroup?.hasDependencyLink)
+  const loopOverviewEligible = loopDependencyGroupShowsOverview(selectedOverviewGroup)
 
   const showingLoopOverview = Boolean(
     loopOverviewEligible && overviewAnchor && (!focusedTaskId || focusedTaskId === overviewAnchor.taskId)

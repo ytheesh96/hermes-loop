@@ -121,6 +121,27 @@ function dependencyGatedRootClickSource(): TenantLoopSource {
   }
 }
 
+function standaloneDelegatedRootClickSource(): TenantLoopSource {
+  return {
+    latest_event_id: 12,
+    root_task_id: 't_14fe5ade',
+    session_id: 'logical-origin',
+    tasks: [
+      {
+        created_by: 'loop_delegation:agent',
+        id: 't_f2298d7d',
+        included_child_ids: [],
+        included_parent_ids: [],
+        links: { children: [], parents: [] },
+        session_id: '20260624_140203_f3e3b1',
+        status: 'done',
+        title:
+          'Remove the root summary/actions card (`data-testid="loop-root-card"`/`loop-root-actions`) and the root Description/spec section (`data-testid="loop-root-spec"`) from the Hermes Desktop Loop overview drawer, update tests, verify, and commit locally without pushing.'
+      }
+    ]
+  }
+}
+
 describe('ComposerStatusStack Loop/Kanban rows', () => {
   beforeEach(() => {
     cleanup()
@@ -244,5 +265,32 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
     const agentsList = within(rootAgentsCard).getByTestId('loop-root-agents-list')
     const [firstOverviewRow] = within(agentsList).getAllByRole('button')
     expect(firstOverviewRow?.textContent).toContain('Dependency-gated Loop root')
+  })
+
+  it('opens standalone delegated Loop root rows to a single-node overview canvas', () => {
+    const source = standaloneDelegatedRootClickSource()
+    const state = deriveLoopPanelStateFromTenantSource(source)!
+
+    reconcileKanbanSessionSourceForComposer({
+      activeSessionId: null,
+      source,
+      sourceSessionId: 'logical-origin'
+    })
+
+    render(<RootRowOverviewHarness initialSelectedTaskId="t_current_root" state={state} />)
+
+    fireEvent.click(
+      within(screen.getByTestId('composer-status-host')).getByRole('button', {
+        name: /Remove the root summary\/actions card/i
+      })
+    )
+
+    const rootAgentsCard = screen.getByTestId('loop-root-agents-card')
+    const canvas = within(rootAgentsCard).getByTestId('loop-task-graph')
+
+    expect(screen.queryByTestId('loop-task-card')).toBeNull()
+    expect(screen.getByTestId('loop-panel-body').className).not.toContain('p-3')
+    expect(within(canvas).getByTestId('loop-task-graph-node-t_f2298d7d')).toBeTruthy()
+    expect(canvas.querySelectorAll('[data-testid^="loop-task-graph-edge-"]')).toHaveLength(0)
   })
 })
