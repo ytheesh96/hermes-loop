@@ -200,6 +200,10 @@ DEFAULT_CRASH_GRACE_SECONDS = 30
 # 0/1/2 codes the worker uses for success / generic failure / usage error.
 KANBAN_RATE_LIMIT_EXIT_CODE = 75
 
+# ``blocker_triage`` stays here only so existing legacy review rows still
+# dispatch through the orchestrator compatibility resolver. New worker blockers
+# should use ``block_task`` directly; the worker tool rejects new blocker-triage
+# review requests.
 ORCHESTRATOR_REVIEW_KINDS = {"blocker_triage", "foreground_judgment"}
 
 BLOCKER_TRIAGE_REVIEW_KIND = "blocker_triage"
@@ -6193,11 +6197,11 @@ def resolve_blocker_triage_task(
 ) -> dict[str, Any]:
     """Resolve an orchestrator blocker-triage review on the same task row.
 
-    Workers route ordinary blockers into ``status='review'`` with
-    ``review_kind='blocker_triage'`` instead of parking them in ``blocked``.
-    This helper is the matching explicit outcome surface for the orchestrator
-    lane: complete/approve, return the same row to the original worker with
-    instructions, create upstream follow-up cards, or route to QA review.
+    Legacy workers used ``status='review'`` with
+    ``review_kind='blocker_triage'`` for blockers. New worker blockers call
+    ``block_task`` directly; this compatibility resolver only lets existing
+    rows complete/approve, return to the original worker with instructions,
+    create upstream follow-up cards, or route to QA review.
     """
     action = str(action or "").strip().lower()
     actor = str(actor or "").strip() or "orchestrator"

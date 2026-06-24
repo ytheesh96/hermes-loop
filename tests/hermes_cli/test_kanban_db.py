@@ -3902,8 +3902,8 @@ def test_request_review_task_moves_same_row_to_review(kanban_home):
     assert events[-1].kind == "review_requested"
 
 
-def test_request_review_task_persists_orchestrator_review_metadata(kanban_home):
-    """Foreground/orchestrator review requests survive as task state."""
+def test_request_review_task_preserves_legacy_blocker_triage_metadata(kanban_home):
+    """DB backcompat preserves existing blocker-triage review rows."""
     with kb.connect() as conn:
         t = kb.create_task(conn, title="triage blocker", assignee="worker-a")
         claimed = kb.claim_task(conn, t)

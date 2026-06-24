@@ -52,7 +52,7 @@ kanban_complete(
 
 For most code-changing tasks, the work isn't truly *done* until a reviewer has eyes on it. When the implementation/artifact is ready for ordinary QA, move the same task into the review lane with `kanban_request_review(...)` instead of creating a dependent reviewer child or blocking with `review-required:`. The dispatcher will claim that same row, assign/run the reviewer profile, and force-load `sdlc-review`.
 
-Use `kanban_block(reason="...")` for true unresolved blockers, but keep the reason neutral: the tool routes ordinary worker blockers into orchestrator `blocker_triage` on the same task row instead of leaving a passive blocked card. Only explicitly terminal/system cases should remain non-runnable; mark those narrowly with `metadata={"terminal_blocker": True, "terminal_blocker_kind": "system|credentials|external_access|policy|not_routable"}`. Do not create a reviewer card as a child of a blocked task; that can deadlock because the reviewer waits for the reviewed task to finish while the reviewed task waits for review.
+Use `kanban_block(reason="...")` for true unresolved blockers, but keep the reason neutral: the tool directly transitions the same task to `blocked` and emits the terminal `blocked` event that origin subscriptions already receive. Do not create a reviewer card as a child of a blocked task; that can deadlock because the reviewer waits for the reviewed task to finish while the reviewed task waits for review.
 
 ```python
 import json

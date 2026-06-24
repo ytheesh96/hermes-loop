@@ -73,6 +73,20 @@ def test_parse_branch_flag_rejects_empty_and_option_like():
         kc._parse_branch_flag("bad branch")
 
 
+def test_request_review_help_does_not_advertise_blocker_triage(capsys):
+    parser = argparse.ArgumentParser(prog="hermes")
+    subparsers = parser.add_subparsers(dest="command")
+    kc.build_parser(subparsers)
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["kanban", "request-review", "--help"])
+
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "foreground_judgment" in help_text
+    assert "blocker_triage" not in help_text
+
+
 # ---------------------------------------------------------------------------
 # run_slash smoke tests (end-to-end via the same entry both CLI and gateway use)
 # ---------------------------------------------------------------------------

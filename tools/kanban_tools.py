@@ -635,18 +635,8 @@ def _handle_complete(args: dict, **kw) -> str:
         return tool_error(f"kanban_complete: {e}")
 
 
-def _metadata_requests_terminal_block(metadata: Optional[dict]) -> bool:
-    if not isinstance(metadata, dict):
-        return False
-    if metadata.get("terminal_blocker") is not True:
-        return False
-    kind = str(metadata.get("terminal_blocker_kind") or "").strip().lower().replace("-", "_")
-    allowed = {"system", "credentials", "external_access", "policy", "not_routable"}
-    return kind in allowed
-
-
 def _handle_block(args: dict, **kw) -> str:
-    """Record a blocker and route ordinary worker blockers to orchestrator triage."""
+    """Record a terminal blocker on the current task."""
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         return tool_error(
@@ -669,62 +659,25 @@ def _handle_block(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
-            task = kb.get_task(conn, tid)
-            terminal_block = _metadata_requests_terminal_block(metadata)
-            already_triaging = bool(
-                task
-                and (task.assignee or "").strip() == "orchestrator"
-                and (task.review_kind or "").strip() == "blocker_triage"
-            )
-            if terminal_block or already_triaging:
-                ok = kb.block_task(
-                    conn, tid,
-                    reason=reason,
-                    summary=summary,
-                    metadata=metadata,
-                    expected_run_id=_worker_run_id(tid),
-                )
-                if not ok:
-                    return tool_error(
-                        f"could not block {tid} (unknown id or not in "
-                        f"running/ready)"
-                    )
-                run = kb.latest_run(conn, tid)
-                return _ok(
-                    task_id=tid,
-                    run_id=run.id if run else None,
-                    status="blocked",
-                    routed_to="blocked_terminal" if terminal_block else "blocked_from_triage",
-                )
-
-            triage_metadata = dict(metadata or {})
-            triage_metadata.setdefault("blocker_triage", True)
-            triage_metadata.setdefault("blocker_reason", str(reason).strip())
-            if summary:
-                triage_metadata.setdefault("blocker_summary", str(summary).strip())
-            ok = kb.request_review_task(
-                conn,
-                tid,
-                reviewer="orchestrator",
-                review_kind="blocker_triage",
-                review_subject_assignee=(task.assignee if task else None),
-                reason=str(reason).strip(),
-                summary=summary or str(reason).strip(),
-                metadata=triage_metadata,
+            reason_text = str(reason).strip()
+            ok = kb.block_task(
+                conn, tid,
+                reason=reason_text,
+                summary=summary,
+                metadata=metadata,
                 expected_run_id=_worker_run_id(tid),
             )
             if not ok:
                 return tool_error(
-                    f"could not route blocker for {tid} to orchestrator triage "
-                    f"(unknown id, terminal state, or stale run)"
+                    f"could not block {tid} (unknown id, terminal state, "
+                    f"or stale run)"
                 )
             run = kb.latest_run(conn, tid)
             return _ok(
                 task_id=tid,
                 run_id=run.id if run else None,
-                status="review",
-                routed_to="orchestrator",
-                review_kind="blocker_triage",
+                status="blocked",
+                routed_to="blocked",
             )
         finally:
             conn.close()
@@ -752,7 +705,13 @@ def _handle_request_review(args: dict, **kw) -> str:
             "provide a reason or summary so the reviewer knows what to verify"
         )
     reviewer = args.get("reviewer") or "reviewer-qa"
-    review_kind = args.get("review_kind")
+    review_kind = str(args.get("review_kind") or "").strip() or None
+    if review_kind == "blocker_triage":
+        return tool_error(
+            "kanban_request_review: blocker_triage is legacy-only; use "
+            "kanban_block for true blockers, kanban_complete for approvals, "
+            "or kanban_request_orchestrator_handoff for graph/scope issues"
+        )
     resume_mode = args.get("resume_mode")
     if args.get("fork") is True and not str(resume_mode or "").strip():
         resume_mode = "fork"
@@ -1579,7 +1538,7 @@ KANBAN_BLOCK_SCHEMA = {
                     "The concrete unresolved blocker in one or two sentences. "
                     "Don't paste the whole conversation; put deeper context "
                     "in a kanban_comment. Avoid labels like needs-user; "
-                    "orchestrator review decides if user input is required."
+                    "operators can decide routing from the blocked task."
                 ),
             },
             "summary": {
@@ -1594,7 +1553,9 @@ KANBAN_BLOCK_SCHEMA = {
                 "description": (
                     "Optional structured facts for the blocked run. "
                     "Foreground handoffs are removed; use kanban_request_review "
-                    "or orchestrator blocker triage when a reviewer must act."
+                    "for ordinary QA, or kanban_request_decision / "
+                    "kanban_request_orchestrator_handoff for active "
+                    "orchestrator judgment."
                 ),
             },
             "board": _board_schema_prop(),
@@ -1651,10 +1612,11 @@ KANBAN_REQUEST_REVIEW_SCHEMA = {
             "review_kind": {
                 "type": "string",
                 "description": (
-                    "Optional review routing kind. Use values like "
-                    "blocker_triage or foreground_judgment with "
-                    "reviewer='orchestrator' to route through the "
-                    "orchestrator lane instead of ordinary QA."
+                    "Optional review routing kind for narrow non-QA review "
+                    "lanes such as foreground_judgment with "
+                    "reviewer='orchestrator'. Leave unset for ordinary QA; "
+                    "use the typed decision/orchestrator handoff tools for "
+                    "scope or product decisions."
                 ),
             },
             "resume_mode": {

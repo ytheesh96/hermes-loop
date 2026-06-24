@@ -688,35 +688,38 @@ def test_complete_retry_with_corrected_created_cards_succeeds(worker_env):
         conn.close()
 
 
-def test_block_routes_to_orchestrator_triage(worker_env):
+def test_block_emits_terminal_blocked_event(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_block({"reason": "need repository access evidence"})
     d = json.loads(out)
     assert d["ok"] is True
-    assert d["status"] == "review"
-    assert d["routed_to"] == "orchestrator"
+    assert d["status"] == "blocked"
+    assert d["routed_to"] == "blocked"
     from hermes_cli import kanban_db as kb
     conn = kb.connect()
     try:
         task = kb.get_task(conn, worker_env)
         run = kb.latest_run(conn, worker_env)
+        event = kb.list_events(conn, worker_env)[-1]
         assert task is not None
         assert run is not None
-        assert task.status == "review"
-        assert task.assignee == "orchestrator"
-        assert task.review_kind == "blocker_triage"
-        assert task.review_subject_assignee == "test-worker"
+        assert task.status == "blocked"
+        assert task.assignee == "test-worker"
+        assert task.review_kind is None
+        assert task.review_subject_assignee is None
         assert task.claim_lock is None
         assert task.current_run_id is None
-        assert run.outcome == "review_requested"
-        assert run.metadata["blocker_triage"] is True
-        assert run.metadata["blocker_reason"] == "need repository access evidence"
+        assert run.outcome == "blocked"
+        assert run.summary == "need repository access evidence"
+        assert event.kind == "blocked"
+        assert event.payload is not None
+        assert event.payload["reason"] == "need repository access evidence"
         assert kb.list_loop_handoffs(conn) == []
     finally:
         conn.close()
 
 
-def test_terminal_block_can_remain_blocked(worker_env):
+def test_terminal_block_metadata_is_backcompat_noop(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_block({
         "reason": "worker profile cannot spawn because its executable is missing",
@@ -725,12 +728,18 @@ def test_terminal_block_can_remain_blocked(worker_env):
     d = json.loads(out)
     assert d["ok"] is True
     assert d["status"] == "blocked"
-    assert d["routed_to"] == "blocked_terminal"
+    assert d["routed_to"] == "blocked"
     from hermes_cli import kanban_db as kb
     conn = kb.connect()
     try:
-        assert kb.get_task(conn, worker_env).status == "blocked"
-        assert kb.latest_run(conn, worker_env).outcome == "blocked"
+        task = kb.get_task(conn, worker_env)
+        assert task is not None
+        assert task.status == "blocked"
+        run = kb.latest_run(conn, worker_env)
+        assert run is not None
+        assert run.metadata is not None
+        assert run.outcome == "blocked"
+        assert run.metadata["terminal_blocker"] is True
     finally:
         conn.close()
 
@@ -750,12 +759,16 @@ def test_block_accepts_summary_and_metadata(worker_env):
     conn = kb.connect()
     try:
         run = kb.latest_run(conn, worker_env)
+        event = kb.list_events(conn, worker_env)[-1]
         assert run is not None
-        assert run.outcome == "review_requested"
+        assert run.outcome == "blocked"
         assert run.summary == "rollout window decision needed"
         assert run.metadata is not None
         assert run.metadata["blocker_kind"] == "rollout_window"
-        assert run.metadata["blocker_triage"] is True
+        assert "blocker_triage" not in run.metadata
+        assert event.kind == "blocked"
+        assert event.payload is not None
+        assert event.payload["summary"] == "rollout window decision needed"
     finally:
         conn.close()
 
@@ -772,6 +785,7 @@ def test_block_schema_exposes_structured_blocker_fields():
     props = kt.KANBAN_BLOCK_SCHEMA["parameters"]["properties"]
     assert "summary" in props
     assert "metadata" in props
+    assert "blocker triage" not in props["metadata"]["description"].lower()
 
 
 def test_block_rejects_empty_reason(worker_env):
@@ -813,12 +827,12 @@ def test_request_review_accepts_orchestrator_metadata(worker_env):
 
     out = kt._handle_request_review({
         "reviewer": "orchestrator",
-        "review_kind": "blocker_triage",
+        "review_kind": "foreground_judgment",
         "resume_mode": "fork",
         "review_subject_assignee": "test-worker",
         "foreground_parent_session_id": "parent-sess",
         "foreground_fork_session_id": "fork-sess",
-        "summary": "orchestrator should triage blocker",
+        "summary": "orchestrator should make a foreground judgment",
     })
     assert json.loads(out)["ok"] is True
 
@@ -826,14 +840,41 @@ def test_request_review_accepts_orchestrator_metadata(worker_env):
     try:
         task = kb.get_task(conn, worker_env)
         run = kb.latest_run(conn, worker_env)
+        assert task is not None
+        assert run is not None
+        assert run.metadata is not None
         assert task.assignee == "orchestrator"
-        assert task.review_kind == "blocker_triage"
+        assert task.review_kind == "foreground_judgment"
         assert task.resume_mode == "fork"
         assert task.review_subject_assignee == "test-worker"
         assert task.foreground_parent_session_id == "parent-sess"
         assert task.foreground_fork_session_id == "fork-sess"
-        assert run.metadata["review_kind"] == "blocker_triage"
+        assert run.metadata["review_kind"] == "foreground_judgment"
         assert run.metadata["resume_mode"] == "fork"
+    finally:
+        conn.close()
+
+
+def test_request_review_rejects_blocker_triage_kind(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    out = kt._handle_request_review({
+        "reviewer": "orchestrator",
+        "review_kind": "blocker_triage",
+        "summary": "orchestrator should triage blocker",
+    })
+    assert "blocker_triage is legacy-only" in json.loads(out).get("error", "")
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, worker_env)
+        run = kb.latest_run(conn, worker_env)
+        assert task is not None
+        assert run is not None
+        assert task.status == "running"
+        assert task.assignee == "test-worker"
+        assert run.outcome is None
     finally:
         conn.close()
 
@@ -850,6 +891,7 @@ def test_request_review_schema_exposes_review_routing_fields():
         "foreground_fork_session_id",
     ):
         assert key in props
+    assert "blocker_triage" not in props["review_kind"]["description"]
 
 
 def test_request_review_rejects_empty_handoff(worker_env):
@@ -1995,9 +2037,10 @@ def test_board_param_routes_block_to_alt_board(multi_board_env):
 
     with kb.connect(board="alt") as conn:
         task = kb.get_task(conn, alt_seed)
-        assert task.status == "review"
-        assert task.assignee == "orchestrator"
-        assert task.review_kind == "blocker_triage"
+        assert task is not None
+        assert task.status == "blocked"
+        assert task.assignee == "worker-a"
+        assert task.review_kind is None
 
 
 def test_board_param_routes_unblock_to_alt_board(multi_board_env):

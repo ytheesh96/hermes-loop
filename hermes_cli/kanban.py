@@ -593,7 +593,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_request_review.add_argument(
         "--review-kind",
         default=None,
-        help="Optional routing kind such as blocker_triage or foreground_judgment.",
+        help=(
+            "Optional non-QA routing kind such as foreground_judgment. "
+            "Leave unset for ordinary QA; true blockers should use `kanban block`."
+        ),
     )
     p_request_review.add_argument(
         "--resume-mode",
