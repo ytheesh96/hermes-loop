@@ -2092,6 +2092,141 @@ def _loop_default_assignee(cfg: dict) -> str:
     ).strip()
 
 
+def _loop_task_alias(task: dict[str, Any], index: int) -> tuple[Optional[str], Optional[str]]:
+    raw_id = task.get("id")
+    raw_client_id = task.get("client_id")
+    task_id_alias = str(raw_id).strip() if raw_id is not None else ""
+    client_id_alias = str(raw_client_id).strip() if raw_client_id is not None else ""
+    if task_id_alias and client_id_alias and task_id_alias != client_id_alias:
+        return None, f"Task {index} has conflicting id and client_id aliases."
+    return task_id_alias or client_id_alias or None, None
+
+
+def _loop_depends_on(task: dict[str, Any], index: int) -> tuple[list[str], Optional[str]]:
+    raw = task.get("depends_on") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple, set)):
+        return [], f"Task {index} depends_on must be a list of aliases or task ids."
+    deps: list[str] = []
+    seen: set[str] = set()
+    for dep in raw:
+        dep_id = str(dep).strip()
+        if not dep_id or dep_id in seen:
+            continue
+        seen.add(dep_id)
+        deps.append(dep_id)
+    return deps, None
+
+
+def _loop_batch_specs(
+    task_list,
+    *,
+    context,
+    assignee,
+    cfg,
+    board,
+    decompose=False,
+    goal_mode=False,
+    goal_max_turns=None,
+) -> tuple[Optional[list[dict[str, Any]]], Optional[list[int]], Optional[str]]:
+    default_assignee = _loop_default_assignee(cfg)
+    specs: list[dict[str, Any]] = []
+    alias_to_index: dict[str, int] = {}
+    for index, task in enumerate(task_list):
+        alias, alias_error = _loop_task_alias(task, index)
+        if alias_error:
+            return None, None, alias_error
+        if alias:
+            if alias in alias_to_index:
+                return None, None, f"duplicate loop task alias: {alias}"
+            alias_to_index[alias] = index
+        deps, deps_error = _loop_depends_on(task, index)
+        if deps_error:
+            return None, None, deps_error
+        target = str(task.get("assignee") or assignee or default_assignee).strip()
+        if not target:
+            return None, None, (
+                "assignee is required for delegate_task(mode='loop') unless "
+                "loop.default_assignee or kanban.default_assignee is configured"
+            )
+        specs.append(
+            {
+                "index": index,
+                "task": task,
+                "client_id": alias,
+                "goal": str(task.get("goal") or "").strip(),
+                "context": task.get("context") if task.get("context") is not None else context,
+                "target": target,
+                "decompose": task.get("decompose") if task.get("decompose") is not None else decompose,
+                "goal_mode": task.get("goal_mode") if task.get("goal_mode") is not None else goal_mode,
+                "goal_max_turns": task.get("goal_max_turns") if task.get("goal_max_turns") is not None else goal_max_turns,
+                "depends_on": deps,
+                "alias_dep_indices": [],
+                "external_parents": [],
+            }
+        )
+
+    external_deps: set[str] = set()
+    for spec in specs:
+        for dep in spec["depends_on"]:
+            if dep == spec["client_id"]:
+                return None, None, f"Task {spec['index']} cannot depend on itself: {dep}"
+            if dep in alias_to_index:
+                dep_index = alias_to_index[dep]
+                if dep_index == spec["index"]:
+                    return None, None, f"Task {spec['index']} cannot depend on itself: {dep}"
+                spec["alias_dep_indices"].append(dep_index)
+            else:
+                spec["external_parents"].append(dep)
+                external_deps.add(dep)
+
+    if external_deps:
+        from hermes_cli import kanban_db as kb
+
+        conn = kb.connect(board=board)
+        try:
+            missing = [dep for dep in sorted(external_deps) if kb.get_task(conn, dep) is None]
+        finally:
+            conn.close()
+        if missing:
+            return None, None, (
+                "unknown dependency alias or task id: " + ", ".join(missing)
+            )
+
+    visiting: set[int] = set()
+    visited: set[int] = set()
+    order: list[int] = []
+
+    def label(i: int) -> str:
+        return specs[i].get("client_id") or f"task {i}"
+
+    def visit(i: int, stack: list[int]) -> Optional[str]:
+        if i in visited:
+            return None
+        if i in visiting:
+            cycle = stack[stack.index(i):] + [i] if i in stack else stack + [i]
+            return "dependency cycle detected: " + " -> ".join(label(j) for j in cycle)
+        visiting.add(i)
+        stack.append(i)
+        for dep_index in specs[i]["alias_dep_indices"]:
+            err = visit(dep_index, stack)
+            if err:
+                return err
+        stack.pop()
+        visiting.remove(i)
+        visited.add(i)
+        order.append(i)
+        return None
+
+    for i in range(len(specs)):
+        cycle_error = visit(i, [])
+        if cycle_error:
+            return None, None, cycle_error
+
+    return specs, order, None
+
+
 def _loop_delegation_result(
     task_list,
     *,
@@ -2109,48 +2244,47 @@ def _loop_delegation_result(
     """Create durable Loop rows for delegate_task(mode='loop')."""
     from tools import loop_tools
 
-    items: list[dict[str, Any]] = []
-    default_assignee = _loop_default_assignee(cfg)
-    for task in task_list:
-        task_goal = str(task.get("goal") or "").strip()
-        task_context = (
-            task.get("context") if task.get("context") is not None else context
-        )
-        target = str(task.get("assignee") or assignee or default_assignee).strip()
-        if not target:
-            return tool_error(
-                "assignee is required for delegate_task(mode='loop') unless "
-                "loop.default_assignee or kanban.default_assignee is configured"
-            )
-        task_decompose = (
-            task.get("decompose")
-            if task.get("decompose") is not None
-            else decompose
-        )
-        task_goal_mode = (
-            task.get("goal_mode")
-            if task.get("goal_mode") is not None
-            else goal_mode
-        )
-        task_goal_max_turns = (
-            task.get("goal_max_turns")
-            if task.get("goal_max_turns") is not None
-            else goal_max_turns
-        )
+    specs, create_order, specs_error = _loop_batch_specs(
+        task_list,
+        context=context,
+        assignee=assignee,
+        cfg=cfg,
+        board=board,
+        decompose=decompose,
+        goal_mode=goal_mode,
+        goal_max_turns=goal_max_turns,
+    )
+    if specs_error:
+        return tool_error(specs_error)
+    assert specs is not None and create_order is not None
+
+    item_by_index: dict[int, dict[str, Any]] = {}
+    alias_to_task_id: dict[str, str] = {}
+    edges: list[list[str]] = []
+    for index in create_order:
+        spec = specs[index]
+        parent_ids = [
+            alias_to_task_id[dep] if dep in alias_to_task_id else dep
+            for dep in spec["depends_on"]
+        ]
+        task_decompose = spec["decompose"]
+        task_goal_mode = spec["goal_mode"]
         proof_packet = {
             "source": "delegate_task_mode_loop",
-            "goal": task_goal,
+            "goal": spec["goal"],
             "origin_profile": os.environ.get("HERMES_PROFILE") or "",
             "origin_session_id": get_logical_session_id(),
             "session_key_present": bool(get_session_env("HERMES_SESSION_KEY")),
             "decompose": is_truthy_value(task_decompose, default=False),
             "goal_mode": is_truthy_value(task_goal_mode, default=False),
         }
+        if spec["client_id"]:
+            proof_packet["client_id"] = spec["client_id"]
         raw = loop_tools._handle_loop_create(
             {
-                "objective": task_goal,
-                "context": task_context,
-                "assignee": target,
+                "objective": spec["goal"],
+                "context": spec["context"],
+                "assignee": spec["target"],
                 "tenant": tenant,
                 "board": board,
                 "workspace_kind": workspace_kind or "scratch",
@@ -2160,30 +2294,39 @@ def _loop_delegation_result(
                 "execution": {"mode": "async"},
                 "triage": is_truthy_value(task_decompose, default=False),
                 "goal_mode": is_truthy_value(task_goal_mode, default=False),
-                "goal_max_turns": task_goal_max_turns,
+                "goal_max_turns": spec["goal_max_turns"],
+                "parents": parent_ids,
             }
         )
         created = json.loads(raw)
         if not created.get("ok"):
             return raw
-        items.append(
-            {
-                "loop_item_id": created["loop_item_id"],
-                "status": created["status"],
-                "assignee": created["assignee"],
-                "foreground_reentry": created.get("foreground_reentry"),
-                "subscribed": bool(created.get("subscribed")),
-                "decompose": is_truthy_value(task_decompose, default=False),
-                "goal_mode": is_truthy_value(task_goal_mode, default=False),
-            }
-        )
+        loop_item_id = created["loop_item_id"]
+        if spec["client_id"]:
+            alias_to_task_id[spec["client_id"]] = loop_item_id
+        created_parents = list(created.get("parents") or parent_ids)
+        for parent_id in created_parents:
+            edges.append([parent_id, loop_item_id])
+        item_by_index[index] = {
+            "client_id": spec["client_id"],
+            "loop_item_id": loop_item_id,
+            "parents": created_parents,
+            "status": created["status"],
+            "assignee": created["assignee"],
+            "foreground_reentry": created.get("foreground_reentry"),
+            "subscribed": bool(created.get("subscribed")),
+            "decompose": is_truthy_value(task_decompose, default=False),
+            "goal_mode": is_truthy_value(task_goal_mode, default=False),
+        }
 
+    items = [item_by_index[i] for i in range(len(specs))]
     any_subscribed = any(item["subscribed"] for item in items)
     payload = {
         "status": "dispatched",
         "mode": "loop",
         "count": len(items),
         "items": items,
+        "edges": edges,
         "note": (
             "Durable Loop work is queued. Its terminal result or blocker will "
             "re-enter the originating conversation when subscribed=True. "
@@ -2194,6 +2337,8 @@ def _loop_delegation_result(
     if len(items) == 1:
         item = dict(items[0])
         item["loop_status"] = item.pop("status")
+        if item.get("client_id") is None:
+            item.pop("client_id", None)
         payload.update(item)
     return json.dumps(payload, ensure_ascii=False)
 
@@ -3104,7 +3249,10 @@ def _build_tasks_param_description() -> str:
         f"Batch mode: tasks to run in parallel (up to {max_children} for this "
         f"user, set via delegation.max_concurrent_children). Each gets "
         "its own subagent with isolated context and terminal session. "
-        "When provided, top-level goal/context/toolsets are ignored."
+        "When provided, top-level goal/context/toolsets are ignored. "
+        "For mode='loop'/'durable', each item may include id/client_id as a "
+        "batch-local alias and depends_on as a list of aliases or existing "
+        "Kanban task ids; dependencies become parent->child task_links."
     )
 
 
@@ -3258,6 +3406,19 @@ DELEGATE_TASK_SCHEMA = {
                     "type": "object",
                     "properties": {
                         "goal": {"type": "string", "description": "Task goal"},
+                        "id": {
+                            "type": "string",
+                            "description": "Loop/durable batch-local alias for depends_on references. Same as client_id.",
+                        },
+                        "client_id": {
+                            "type": "string",
+                            "description": "Loop/durable batch-local alias for depends_on references. Same as id.",
+                        },
+                        "depends_on": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Loop/durable dependency parents: batch aliases or existing Kanban task ids.",
+                        },
                         "context": {
                             "type": "string",
                             "description": "Task-specific context",

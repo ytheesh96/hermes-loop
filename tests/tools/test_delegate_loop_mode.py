@@ -235,11 +235,14 @@ def test_delegate_task_loop_mode_supports_per_task_goal_and_decompose(loop_deleg
 
     assert out["status"] == "dispatched"
     assert out["count"] == 2
+    assert out["edges"] == []
     first, second = out["items"]
     assert first["decompose"] is True
     assert first["goal_mode"] is True
+    assert first["parents"] == []
     assert second["decompose"] is False
     assert second["goal_mode"] is False
+    assert second["parents"] == []
 
     conn = kb.connect()
     try:
@@ -255,6 +258,191 @@ def test_delegate_task_loop_mode_supports_per_task_goal_and_decompose(loop_deleg
     assert second_task is not None
     assert second_task.status == "ready"
     assert second_task.goal_mode is False
+
+
+def test_delegate_task_loop_mode_batch_dependencies_create_links(loop_delegate_env):
+    from hermes_cli import kanban_db as kb
+    from tools import delegate_tool
+
+    out = json.loads(
+        delegate_tool.delegate_task(
+            tasks=[
+                {"id": "research", "goal": "Research constraints", "assignee": "researcher-a"},
+                {
+                    "client_id": "write",
+                    "goal": "Write plan",
+                    "assignee": "writer-a",
+                    "depends_on": ["research"],
+                },
+                {
+                    "client_id": "review",
+                    "goal": "Review plan",
+                    "assignee": "reviewer-qa",
+                    "depends_on": ["write"],
+                },
+            ],
+            mode="loop",
+            parent_agent=DummyParent(),
+        )
+    )
+
+    assert out["status"] == "dispatched"
+    assert out["count"] == 3
+    research, write, review = out["items"]
+    assert [item["client_id"] for item in out["items"]] == [
+        "research",
+        "write",
+        "review",
+    ]
+    assert research["parents"] == []
+    assert write["parents"] == [research["loop_item_id"]]
+    assert review["parents"] == [write["loop_item_id"]]
+    assert out["edges"] == [
+        [research["loop_item_id"], write["loop_item_id"]],
+        [write["loop_item_id"], review["loop_item_id"]],
+    ]
+
+    conn = kb.connect()
+    try:
+        research_task = kb.get_task(conn, research["loop_item_id"])
+        write_task = kb.get_task(conn, write["loop_item_id"])
+        review_task = kb.get_task(conn, review["loop_item_id"])
+        assert kb.parent_ids(conn, write["loop_item_id"]) == [research["loop_item_id"]]
+        assert kb.parent_ids(conn, review["loop_item_id"]) == [write["loop_item_id"]]
+    finally:
+        conn.close()
+
+    assert research_task is not None
+    assert research_task.status == "ready"
+    assert write_task is not None
+    assert write_task.status == "todo"
+    assert review_task is not None
+    assert review_task.status == "todo"
+
+
+def test_delegate_task_loop_mode_depends_on_existing_task_id(loop_delegate_env):
+    from hermes_cli import kanban_db as kb
+    from tools import delegate_tool
+
+    conn = kb.connect()
+    try:
+        parent_id = kb.create_task(conn, title="External gate", assignee="gate-worker")
+    finally:
+        conn.close()
+
+    out = json.loads(
+        delegate_tool.delegate_task(
+            tasks=[
+                {
+                    "client_id": "child",
+                    "goal": "Run after external gate",
+                    "assignee": "worker-a",
+                    "depends_on": [parent_id],
+                }
+            ],
+            mode="loop",
+            parent_agent=DummyParent(),
+        )
+    )
+
+    assert out["status"] == "dispatched"
+    assert out["edges"] == [[parent_id, out["loop_item_id"]]]
+    assert out["parents"] == [parent_id]
+    conn = kb.connect()
+    try:
+        child = kb.get_task(conn, out["loop_item_id"])
+        assert kb.parent_ids(conn, out["loop_item_id"]) == [parent_id]
+    finally:
+        conn.close()
+
+    assert child is not None
+    assert child.status == "todo"
+
+
+def test_delegate_task_loop_mode_unknown_dependency_creates_no_tasks(loop_delegate_env):
+    from hermes_cli import kanban_db as kb
+    from tools import delegate_tool
+
+    out = json.loads(
+        delegate_tool.delegate_task(
+            tasks=[
+                {
+                    "client_id": "child",
+                    "goal": "Blocked child",
+                    "assignee": "worker-a",
+                    "depends_on": ["missing-parent"],
+                }
+            ],
+            mode="loop",
+            parent_agent=DummyParent(),
+        )
+    )
+
+    assert "error" in out
+    assert "unknown dependency" in out["error"]
+    conn = kb.connect()
+    try:
+        assert kb.list_tasks(conn) == []
+    finally:
+        conn.close()
+
+
+def test_delegate_task_loop_mode_cycle_creates_no_tasks(loop_delegate_env):
+    from hermes_cli import kanban_db as kb
+    from tools import delegate_tool
+
+    out = json.loads(
+        delegate_tool.delegate_task(
+            tasks=[
+                {
+                    "client_id": "a",
+                    "goal": "A",
+                    "assignee": "worker-a",
+                    "depends_on": ["b"],
+                },
+                {
+                    "client_id": "b",
+                    "goal": "B",
+                    "assignee": "worker-b",
+                    "depends_on": ["a"],
+                },
+            ],
+            mode="loop",
+            parent_agent=DummyParent(),
+        )
+    )
+
+    assert "error" in out
+    assert "cycle" in out["error"]
+    conn = kb.connect()
+    try:
+        assert kb.list_tasks(conn) == []
+    finally:
+        conn.close()
+
+
+def test_delegate_task_loop_mode_duplicate_alias_creates_no_tasks(loop_delegate_env):
+    from hermes_cli import kanban_db as kb
+    from tools import delegate_tool
+
+    out = json.loads(
+        delegate_tool.delegate_task(
+            tasks=[
+                {"id": "same", "goal": "First", "assignee": "worker-a"},
+                {"client_id": "same", "goal": "Second", "assignee": "worker-b"},
+            ],
+            mode="loop",
+            parent_agent=DummyParent(),
+        )
+    )
+
+    assert "error" in out
+    assert "duplicate" in out["error"]
+    conn = kb.connect()
+    try:
+        assert kb.list_tasks(conn) == []
+    finally:
+        conn.close()
 
 
 def test_delegate_task_loop_mode_uses_default_assignee(loop_delegate_env):
