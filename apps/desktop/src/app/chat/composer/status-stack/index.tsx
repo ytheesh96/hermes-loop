@@ -110,14 +110,14 @@ export function ComposerStatusStack({ busy, queue, sessionId, onOpenKanbanTask }
   const openAgents = () => navigate(AGENTS_ROUTE)
 
   const openStatusItem = (item: ComposerStatusItem) => {
-    if (item.type === 'subagent' && item.sessionId) {
-      void openSessionInNewWindow(item.sessionId, { watch: true })
+    if (item.kanbanTaskId && onOpenKanbanTask) {
+      onOpenKanbanTask(item.kanbanTaskId)
 
       return
     }
 
-    if (item.kanbanTaskId && onOpenKanbanTask) {
-      onOpenKanbanTask(item.kanbanTaskId)
+    if (item.type === 'subagent' && item.sessionId) {
+      void openSessionInNewWindow(item.sessionId, { watch: true })
 
       return
     }

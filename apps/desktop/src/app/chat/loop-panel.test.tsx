@@ -33,6 +33,7 @@ const toolMessage = (
 
 afterEach(() => {
   cleanup()
+  vi.unstubAllGlobals()
   delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
 })
 
@@ -1295,6 +1296,75 @@ describe('LoopPanel', () => {
     expect(screen.queryByRole('tab', { name: /Review child/i })).toBeNull()
     expect(screen.getByTestId('loop-root-agents-card')).toBeTruthy()
     expect(screen.queryByRole('heading', { name: /Root Task/i })).toBeNull()
+  })
+
+  it('centers and fits the graph surface inside the measured full canvas viewport', async () => {
+    class MeasuredResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+
+      disconnect() {}
+      observe(target: Element) {
+        this.callback(
+          [
+            {
+              contentRect: { height: 360, width: 640 } as DOMRectReadOnly,
+              target
+            } as ResizeObserverEntry
+          ],
+          this as unknown as ResizeObserver
+        )
+      }
+      unobserve() {}
+    }
+
+    vi.stubGlobal('ResizeObserver', MeasuredResizeObserver)
+
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-fit-graph-canvas',
+      root_task_id: 't_root',
+      tenant: 'tenant-a',
+      latest_event_id: 420,
+      tasks: [
+        {
+          id: 't_root',
+          title: 'Root Task',
+          status: 'running',
+          tenant: 'tenant-a',
+          included_child_ids: ['t_step_1'],
+          included_parent_ids: []
+        },
+        ...Array.from({ length: 6 }, (_, index) => {
+          const step = index + 1
+
+          return {
+            id: `t_step_${step}`,
+            title: `Implementation step ${step}`,
+            status: 'done',
+            tenant: 'tenant-a',
+            included_child_ids: step < 6 ? [`t_step_${step + 1}`] : [],
+            included_parent_ids: [step === 1 ? 't_root' : `t_step_${step - 1}`]
+          }
+        })
+      ]
+    })!
+
+    render(<LoopPanel open selectedTaskId="t_root" state={state} />)
+
+    const canvas = within(screen.getByTestId('loop-root-agents-card')).getByTestId('loop-task-graph')
+
+    expect(screen.getByTestId('loop-root-agents-card').className).toContain('w-full')
+    expect(canvas.className).toContain('w-full')
+
+    await waitFor(() => expect(Number(canvas.getAttribute('data-zoom'))).toBeLessThan(1))
+
+    const frame = within(canvas).getByTestId('loop-task-graph-frame')
+    const surface = within(canvas).getByTestId('loop-task-graph-surface')
+
+    expect(frame.style.width).toBe('640px')
+    expect(frame.style.height).toBe('360px')
+    expect(Number.parseFloat(surface.style.left)).toBeGreaterThan(200)
+    expect(Number.parseFloat(surface.style.top)).toBeGreaterThanOrEqual(32)
+    expect(surface.style.transform).toMatch(/scale\(0\./)
   })
 
   it('does not count approved durable handoffs as pending root orchestration work', () => {

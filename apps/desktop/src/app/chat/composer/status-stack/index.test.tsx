@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { useState } from 'react'
 import { MemoryRouter } from 'react-router-dom'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { LoopPanel } from '@/app/chat/loop-panel'
 import { deriveLoopPanelStateFromTenantSource, type LoopPanelState, type TenantLoopSource } from '@/app/chat/loop-state'
@@ -120,6 +120,29 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
     expect(screen.getByText('Loop')).toBeTruthy()
     expect(screen.getByText('reviewer-qa')).toBeTruthy()
     expect(screen.getByText('Search Files')).toBeTruthy()
+  })
+
+  it('prefers opening durable Loop task rows over worker-session windows when both ids are present', () => {
+    const onOpenKanbanTask = vi.fn()
+
+    $kanbanStatusBySession.set({
+      'logical-origin': [
+        {
+          id: 'kanban-agent:t_root:77',
+          kanbanTaskId: 't_root',
+          sessionId: 'worker-session-77',
+          state: 'running',
+          title: 'Root Loop worker',
+          type: 'subagent'
+        }
+      ]
+    })
+
+    renderStack('logical-origin', onOpenKanbanTask)
+
+    fireEvent.click(screen.getByRole('button', { name: /Root Loop worker/i }))
+
+    expect(onOpenKanbanTask).toHaveBeenCalledWith('t_root')
   })
 
   it('returns an already-selected Loop root row click to the overview drawer', () => {

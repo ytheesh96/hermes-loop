@@ -21,6 +21,7 @@ import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { LogView } from '@/components/ui/log-view'
 import { Tip } from '@/components/ui/tooltip'
+import { useResizeObserver } from '@/hooks/use-resize-observer'
 import { desktopGitDiff } from '@/lib/desktop-fs'
 import { GitBranch } from '@/lib/icons'
 import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
@@ -1758,12 +1759,58 @@ const LOOP_GRAPH_ROW_GAP = 34
 const LOOP_GRAPH_PADDING = 12
 const LOOP_GRAPH_CHOICE_GROUP_PADDING = 8
 const LOOP_GRAPH_CHOICE_GROUP_LABEL_HEIGHT = 20
+const LOOP_GRAPH_CANVAS_PADDING = 32
 const LOOP_GRAPH_MIN_ZOOM = 0.6
 const LOOP_GRAPH_MAX_ZOOM = 2
 const LOOP_GRAPH_ZOOM_SENSITIVITY = 0.0015
 
+interface LoopGraphViewportSize {
+  height: number
+  width: number
+}
+
+interface LoopGraphViewportMetrics {
+  effectiveZoom: number
+  frameHeight: number
+  frameWidth: number
+  offsetX: number
+  offsetY: number
+}
+
+const EMPTY_LOOP_GRAPH_VIEWPORT: LoopGraphViewportSize = { height: 0, width: 0 }
+
 function clampLoopGraphZoom(zoom: number): number {
   return Math.min(LOOP_GRAPH_MAX_ZOOM, Math.max(LOOP_GRAPH_MIN_ZOOM, zoom))
+}
+
+function loopGraphViewportMetrics(
+  layout: LoopTaskGraphLayout,
+  zoom: number,
+  fullPanel: boolean,
+  viewport: LoopGraphViewportSize
+): LoopGraphViewportMetrics {
+  const measured = fullPanel && viewport.width > 0 && viewport.height > 0
+  const availableWidth = measured ? Math.max(1, viewport.width - LOOP_GRAPH_CANVAS_PADDING * 2) : layout.width
+  const availableHeight = measured ? Math.max(1, viewport.height - LOOP_GRAPH_CANVAS_PADDING * 2) : layout.height
+  const fitZoom = measured ? Math.min(1, availableWidth / layout.width, availableHeight / layout.height) : 1
+  const effectiveZoom = fullPanel ? zoom * fitZoom : zoom
+  const contentWidth = layout.width * effectiveZoom
+  const contentHeight = layout.height * effectiveZoom
+
+  if (!measured) {
+    return { effectiveZoom, frameHeight: contentHeight, frameWidth: contentWidth, offsetX: 0, offsetY: 0 }
+  }
+
+  const frameWidth = Math.max(viewport.width, contentWidth + LOOP_GRAPH_CANVAS_PADDING * 2)
+  const frameHeight = Math.max(viewport.height, contentHeight + LOOP_GRAPH_CANVAS_PADDING * 2)
+
+  return {
+    effectiveZoom,
+    frameHeight,
+    frameWidth,
+    offsetX: Math.max(LOOP_GRAPH_CANVAS_PADDING, (frameWidth - contentWidth) / 2),
+    offsetY: Math.max(LOOP_GRAPH_CANVAS_PADDING, (frameHeight - contentHeight) / 2)
+  }
 }
 
 function loopTaskGraphAgent(row: LoopRow): string {
@@ -2390,8 +2437,48 @@ function LoopTaskGraph({
 }) {
   const [zoom, setZoom] = useState(1)
   const [hoveredTaskId, setHoveredTaskId] = useState<null | string>(null)
+  const canvasRef = useRef<HTMLDivElement | null>(null)
+  const [canvasViewport, setCanvasViewport] = useState<LoopGraphViewportSize>(EMPTY_LOOP_GRAPH_VIEWPORT)
+
+  const measureCanvasViewport = useCallback(
+    (entries: readonly ResizeObserverEntry[]) => {
+      if (!fullPanel) {
+        return
+      }
+
+      const entry = entries.find(candidate => candidate.target === canvasRef.current) || entries[0]
+      const rect = entry?.contentRect
+      let width = rect?.width || 0
+      let height = rect?.height || 0
+
+      if ((!width || !height) && canvasRef.current) {
+        const bounds = canvasRef.current.getBoundingClientRect()
+        width = bounds.width
+        height = bounds.height
+      }
+
+      if (width <= 0 || height <= 0) {
+        return
+      }
+
+      setCanvasViewport(current =>
+        Math.round(current.width) === Math.round(width) && Math.round(current.height) === Math.round(height)
+          ? current
+          : { height, width }
+      )
+    },
+    [fullPanel]
+  )
+
+  useResizeObserver(measureCanvasViewport, canvasRef)
 
   const layout = useMemo(() => loopTaskGraphLayout(rows), [rows])
+
+  const viewportMetrics = useMemo(
+    () => loopGraphViewportMetrics(layout, zoom, fullPanel, canvasViewport),
+    [canvasViewport, fullPanel, layout, zoom]
+  )
+
   const nodeById = useMemo(() => new Map(layout.nodes.map(node => [node.row.taskId, node])), [layout.nodes])
 
   const edgesWithPaths = useMemo(() => {
@@ -2476,12 +2563,13 @@ function LoopTaskGraph({
       className={cn(
         'overflow-auto',
         fullPanel
-          ? 'h-full min-h-0 bg-(--ui-editor-surface-background) p-0'
+          ? 'h-full w-full min-h-0 bg-(--ui-editor-surface-background) p-0'
           : 'max-h-80 min-h-48 rounded-md border border-(--ui-stroke-tertiary) p-3'
       )}
       data-testid="loop-task-graph"
-      data-zoom={zoom.toFixed(2)}
+      data-zoom={viewportMetrics.effectiveZoom.toFixed(2)}
       onWheel={handleWheel}
+      ref={canvasRef}
       role={fullPanel ? 'region' : undefined}
     >
       {fullPanel ? null : <LoopGraphSummary rows={rows} />}
@@ -2489,18 +2577,20 @@ function LoopTaskGraph({
         className={cn('relative', fullPanel ? 'grid min-h-full min-w-full place-items-center' : 'mx-auto')}
         data-testid="loop-task-graph-frame"
         style={{
-          height: layout.height * zoom,
+          height: viewportMetrics.frameHeight,
           minHeight: fullPanel ? '100%' : undefined,
           minWidth: fullPanel ? '100%' : undefined,
-          width: layout.width * zoom
+          width: viewportMetrics.frameWidth
         }}
       >
         <div
-          className="relative origin-top-left"
+          className={cn('relative origin-top-left', fullPanel && 'absolute')}
           data-testid="loop-task-graph-surface"
           style={{
             height: layout.height,
-            transform: `scale(${zoom})`,
+            left: fullPanel ? viewportMetrics.offsetX : undefined,
+            top: fullPanel ? viewportMetrics.offsetY : undefined,
+            transform: `scale(${viewportMetrics.effectiveZoom})`,
             transformOrigin: '0 0',
             width: layout.width
           }}
@@ -2932,7 +3022,7 @@ function LoopRootAgentsCard({
   return (
     <section
       aria-label={showCanvas ? 'Loop graph canvas' : 'Loop agents list'}
-      className="relative flex h-full min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-hidden bg-(--ui-editor-surface-background) text-xs"
+      className="relative flex h-full min-h-0 w-full min-w-0 max-w-full flex-1 flex-col overflow-hidden bg-(--ui-editor-surface-background) text-xs"
       data-root-overview-canvas="true"
       data-testid="loop-root-agents-card"
     >
@@ -3927,7 +4017,7 @@ export function LoopPanel({
         </div>
       )}
 
-      <div className="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-(--ui-editor-surface-background)">
+      <div className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-(--ui-editor-surface-background)">
         {!embedded && (
           <LoopPanelTabBar
             activeArtifactTabId={activeArtifactTabId}
