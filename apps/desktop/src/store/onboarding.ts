@@ -181,11 +181,25 @@ function clearPoll() {
   }
 }
 
-async function checkRuntime(ctx: OnboardingContext): Promise<RuntimeReadinessResult> {
+async function checkRuntime(
+  ctx: OnboardingContext,
+  requestedProvider?: string
+): Promise<RuntimeReadinessResult> {
   return evaluateRuntimeReadiness(ctx.requestGateway, {
     defaultReason: DEFAULT_ONBOARDING_REASON,
+    requestedProvider,
     unknownReady: false
   })
+}
+
+function shouldPreserveConfiguredOnFallback(
+  runtime: RuntimeReadinessResult,
+  state: DesktopOnboardingState
+): boolean {
+  // A fallback result means both runtime probes were non-authoritative
+  // (transport timeout/disconnect). Keep a previously verified configured
+  // state instead of forcing the blocking onboarding overlay.
+  return runtime.source === 'fallback' && state.configured === true && !state.requested
 }
 
 function notifyReady(provider: string) {
@@ -308,6 +322,7 @@ async function completeWithModelConfirm(
   ignoreRuntimeGate = false
 ) {
   await ctx.requestGateway('reload.env').catch(() => undefined)
+
   const defaults = await fetchProviderDefaultModel(preferredSlugs)
 
   if (!defaults) {
@@ -334,6 +349,9 @@ async function completeWithModelConfirm(
   //     no extra write is needed.
   // (3) If they bail out (e.g., refresh the page), they still end up
   //     with a working config, not an empty-model fallback.
+  // Also persist before the runtime gate so a stale config provider (e.g.
+  // anthropic from a prior failed setup) cannot make setup.runtime_check
+  // validate the wrong backend after a fresh OAuth login.
   try {
     const res = await setModelAssignment({
       scope: 'main',
@@ -347,7 +365,7 @@ async function completeWithModelConfirm(
     // already usable, the confirm card can still let the user pick explicitly.
   }
 
-  const runtime = await checkRuntime(ctx)
+  const runtime = await checkRuntime(ctx, defaults.providerSlug)
 
   if (!runtime.ready && !ignoreRuntimeGate) {
     onFail(runtime.reason)
@@ -554,6 +572,21 @@ export async function refreshOnboarding(ctx: OnboardingContext) {
   }
 
   const state = $desktopOnboarding.get()
+  if (shouldPreserveConfiguredOnFallback(runtime, state)) {
+    // Gateway probes timed out but the user was already configured — don't
+    // downgrade to the blocking onboarding overlay. Surface a non-blocking
+    // notification with a stable id so repeated calls during an outage dedup
+    // instead of stacking toasts.
+    notify({
+      id: 'runtime-not-ready',
+      kind: 'error',
+      title: 'Runtime not ready',
+      message: 'Hermes Desktop could not verify the running backend on startup. Some features may be unavailable until the gateway is reachable.'
+    })
+
+    return false
+  }
+
   const reason = runtime.reason || state.reason || DEFAULT_ONBOARDING_REASON
 
   writeCachedConfigured(false)
