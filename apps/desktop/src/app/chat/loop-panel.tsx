@@ -3990,7 +3990,7 @@ export function LoopPanel({
     }
   }, [])
 
-  if (!state || hidden) {
+  if (hidden) {
     return null
   }
 
@@ -4047,11 +4047,11 @@ export function LoopPanel({
           className={cn('flex min-h-0 min-w-0 flex-1 flex-col', showingRootCanvas ? 'p-0' : 'p-3')}
           data-testid="loop-panel-body"
         >
-          {state.message && (
+          {state?.message && (
             <div
               className={cn(
                 'mb-3 rounded-lg border px-2 py-1.5 text-xs',
-                state.status === 'stale'
+                state?.status === 'stale'
                   ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300'
                   : 'border-destructive/30 bg-destructive/10 text-destructive'
               )}
@@ -4061,7 +4061,20 @@ export function LoopPanel({
           )}
 
           <div className={cn('min-h-0 flex-1', showingRootCanvas ? 'overflow-hidden' : 'overflow-auto')}>
-            {activeArtifactTab ? (
+            {!state ? (
+              <section
+                className="grid min-w-0 gap-2 rounded-lg border border-dashed border-(--ui-stroke-tertiary) bg-(--ui-fill-quaternary) p-3 text-xs text-(--ui-text-tertiary)"
+                data-testid="loop-panel-loading"
+              >
+                <h3 className="m-0 text-xs font-semibold uppercase tracking-wide text-(--ui-text-secondary)">
+                  Loading Loop canvas…
+                </h3>
+                <p className="m-0">
+                  Fetching the Loop graph for{' '}
+                  <span className="font-mono text-(--ui-text-secondary)">{missingTaskId || 'this task'}</span>.
+                </p>
+              </section>
+            ) : activeArtifactTab ? (
               <LoopArtifactSourceTab onSelectView={selectArtifactView} tab={activeArtifactTab} />
             ) : activeTaskTabId ? (
               activeTaskTabRow ? (
@@ -4135,7 +4148,7 @@ export function LoopPanel({
             )}
           </div>
 
-          {enableDebugJson && (
+          {enableDebugJson && state && (
             <div className="mt-3 border-t border-(--ui-stroke-tertiary) pt-3">
               <Button
                 className="h-7 px-2 text-xs"

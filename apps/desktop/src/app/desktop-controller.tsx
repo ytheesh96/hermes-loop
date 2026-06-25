@@ -33,7 +33,6 @@ import {
   FILE_BROWSER_MAX_WIDTH,
   FILE_BROWSER_MIN_WIDTH,
   pinSession,
-  PREVIEW_PANE_ID,
   setSidebarOverlayMounted,
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH,
@@ -1212,7 +1211,11 @@ export function DesktopController() {
   const railSide = panesFlipped ? 'left' : 'right'
 
   const previewOpen = Boolean(previewTarget || filePreviewTarget)
-  const loopRailOpen = Boolean(loopPanel.state && loopPanel.open && !loopPanel.hidden)
+
+  const loopRailOpen = Boolean(
+    loopPanel.open && !loopPanel.hidden && (loopPanel.state || loopPanel.selectedTaskId || loopPanel.focusedTaskId)
+  )
+
   const workRailOpen = previewOpen || loopRailOpen
   const previewRailTarget = filePreviewTarget || previewTarget
 

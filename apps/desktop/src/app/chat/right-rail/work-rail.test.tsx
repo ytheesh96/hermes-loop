@@ -95,6 +95,22 @@ describe('ChatWorkRail', () => {
     expect(screen.queryByRole('separator', { name: /resize loop-panel/i })).toBeNull()
   })
 
+  it('opens the Loop rail immediately for a selected task while the graph source is still loading', () => {
+    const loop = {
+      ...loopController(),
+      focusedTaskId: 't_pending',
+      selectedTaskId: 't_pending',
+      state: null,
+      tabKey: 't_pending'
+    } as LoopPanelController
+
+    render(<ChatWorkRail loop={loop} previewOpen={false} />)
+
+    expect(screen.getByTestId('work-rail-tab-loop')).toBeTruthy()
+    expect(screen.getByTestId('loop-panel')).toBeTruthy()
+    expect(screen.getByTestId('loop-panel-loading').textContent).toContain('t_pending')
+  })
+
   it('reactivates the Loop tab when the same root row is explicitly opened again', async () => {
     const target = previewTarget()
     setPreviewTarget(target)

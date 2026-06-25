@@ -51,7 +51,8 @@ export function ChatWorkRail({
   previewOpen,
   setTitlebarToolGroup
 }: ChatWorkRailProps) {
-  const loopOpen = Boolean(loop.state && loop.open && !loop.hidden)
+  const loopHasRequestedTask = Boolean(loop.selectedTaskId || loop.focusedTaskId)
+  const loopOpen = Boolean(loop.open && !loop.hidden && (loop.state || loopHasRequestedTask))
   const [activeTabId, setActiveTabId] = useState<WorkRailTabId>('loop')
   const lastLoopKeyRef = useRef('')
   const lastLoopFocusRequestKeyRef = useRef(loop.focusRequestKey)
