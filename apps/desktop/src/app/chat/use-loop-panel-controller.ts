@@ -11,7 +11,9 @@ import {
   updateLoopTaskStatus
 } from '@/hermes'
 import { reconcileKanbanSessionSourceForComposer } from '@/store/composer-status'
+import { PREVIEW_PANE_ID } from '@/store/layout'
 import { notify, notifyError } from '@/store/notifications'
+import { setPaneOpen } from '@/store/panes'
 import { $activeGatewayProfile } from '@/store/profile'
 import { openSessionInNewWindow } from '@/store/windows'
 
@@ -219,6 +221,7 @@ export function useLoopPanelController({
   }, [loopPanelRootKey])
 
   const handleSelectLoopTaskId = useCallback((taskId: string) => {
+    setPaneOpen(PREVIEW_PANE_ID, true)
     setSelectedLoopTaskId(taskId)
     setFocusedLoopTaskId(taskId)
     setLoopFocusRequestKey(key => key + 1)
