@@ -83,7 +83,10 @@ describe('ChatWorkRail', () => {
     expect(screen.getByTestId('work-rail-tab-preview')).toBeTruthy()
     expect(within(screen.getByTestId('work-rail-tab-loop')).getByRole('tab', { name: 'Loop' })).toBeTruthy()
     expect(within(screen.getByTestId('work-rail-tab-preview')).getByRole('tab', { name: 'Preview' })).toBeTruthy()
-    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Loop', 'Preview'])
+    expect(within(screen.getByTestId('work-rail-tabbar')).getAllByRole('tab').map(tab => tab.textContent)).toEqual([
+      'Loop',
+      'Preview'
+    ])
     expect((await screen.findByTestId('preview-pane')).textContent).toBe('Preview artifact')
 
     fireEvent.click(screen.getByRole('tab', { name: 'Loop' }))
@@ -127,7 +130,9 @@ describe('ChatWorkRail', () => {
     )
 
     expect((await screen.findByTestId('preview-pane')).textContent).toBe('Preview artifact')
-    expect(screen.getByRole('tab', { name: 'Preview' }).getAttribute('aria-selected')).toBe('true')
+    expect(
+      within(screen.getByTestId('work-rail-tabbar')).getByRole('tab', { name: 'Preview' }).getAttribute('aria-selected')
+    ).toBe('true')
 
     rerender(
       <ChatWorkRail
@@ -138,7 +143,9 @@ describe('ChatWorkRail', () => {
       />
     )
 
-    expect(screen.getByRole('tab', { name: 'Loop' }).getAttribute('aria-selected')).toBe('true')
+    expect(
+      within(screen.getByTestId('work-rail-tabbar')).getByRole('tab', { name: 'Loop' }).getAttribute('aria-selected')
+    ).toBe('true')
     expect(screen.getByTestId('loop-panel')).toBeTruthy()
   })
 })

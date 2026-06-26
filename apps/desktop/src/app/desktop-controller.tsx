@@ -108,12 +108,13 @@ import { ChatView } from './chat'
 import { requestComposerFocus, requestComposerInsert } from './chat/composer/focus'
 import { useComposerActions } from './chat/hooks/use-composer-actions'
 import {
-  ChatPreviewRail,
-  PREVIEW_RAIL_MAX_WIDTH,
-  PREVIEW_RAIL_MIN_WIDTH,
-  PREVIEW_RAIL_PANE_WIDTH
+  ChatWorkRail,
+  WORK_RAIL_MAX_WIDTH,
+  WORK_RAIL_MIN_WIDTH,
+  WORK_RAIL_PANE_WIDTH
 } from './chat/right-rail'
 import { ChatSidebar } from './chat/sidebar'
+import { useLoopPanelController } from './chat/use-loop-panel-controller'
 import { CommandPalette } from './command-palette'
 import { useGatewayBoot } from './gateway/hooks/use-gateway-boot'
 import { useGatewayRequest } from './gateway/hooks/use-gateway-request'
@@ -235,6 +236,7 @@ export function DesktopController() {
   const previewPaneOpen = useStore($paneOpen(PREVIEW_PANE_ID))
   const panesFlipped = useStore($panesFlipped)
   const profileScope = useStore($profileScope)
+  const gatewayOpen = gatewayState === 'open'
   // Below SIDEBAR_COLLAPSE_BREAKPOINT_PX there's no room for a docked rail —
   // collapse both sidebars (without touching their stored open state) so the
   // hover-reveal overlay becomes the way in. Restores once it's wide again.
@@ -788,6 +790,15 @@ export function DesktopController() {
     requestGateway
   })
 
+  const loopSourceSessionId = routedSessionId || selectedStoredSessionId || activeSessionId || ''
+
+  const loopController = useLoopPanelController({
+    activeSessionId,
+    gatewayOpen: chatOpen && gatewayOpen,
+    loopSourceSessionId,
+    onAddContextRef: composer.addContextRefAttachment
+  })
+
   const branchInNewChat = useCallback(
     async (messageId?: string) => {
       const branched = await branchCurrentSession(messageId)
@@ -1202,6 +1213,7 @@ export function DesktopController() {
       }}
       onDismissError={dismissError}
       onEdit={editMessage}
+      onOpenKanbanTask={loopController.onSelectTaskId}
       onPasteClipboardImage={opts => composer.pasteClipboardImage(opts)}
       onPickFiles={() => void composer.pickContextPaths('file')}
       onPickFolders={() => void composer.pickContextPaths('folder')}
@@ -1223,10 +1235,21 @@ export function DesktopController() {
   const sidebarSide = panesFlipped ? 'right' : 'left'
   const railSide = panesFlipped ? 'left' : 'right'
 
+  const loopRailOpen = Boolean(
+    loopController.open &&
+      !loopController.hidden &&
+      (loopController.state || loopController.selectedTaskId || loopController.focusedTaskId)
+  )
+
+  const activePreviewTarget = filePreviewTarget || previewTarget
+  const previewRailOpen = Boolean(activePreviewTarget)
+
+  const workRailOpen = loopRailOpen || previewRailOpen
+
   // Other sidebars docked as real columns on the terminal's rail. Force-collapsed
   // hover-reveal overlays (narrow window) don't take a column, so they don't count.
   const railColumnOpen =
-    (chatOpen && Boolean(previewTarget || filePreviewTarget) && previewPaneOpen) ||
+    (chatOpen && workRailOpen && previewPaneOpen) ||
     (chatOpen && !narrowViewport && fileBrowserOpen) ||
     (chatOpen && Boolean(currentCwd.trim()) && !narrowViewport && reviewOpen)
 
@@ -1236,17 +1259,24 @@ export function DesktopController() {
 
   const previewPane = (
     <Pane
-      disabled={!chatOpen || (!previewTarget && !filePreviewTarget)}
+      disabled={!chatOpen || !workRailOpen}
       id={PREVIEW_PANE_ID}
       key="preview"
-      maxWidth={PREVIEW_RAIL_MAX_WIDTH}
-      minWidth={PREVIEW_RAIL_MIN_WIDTH}
+      maxWidth={WORK_RAIL_MAX_WIDTH}
+      minWidth={WORK_RAIL_MIN_WIDTH}
       resizable
       side={railSide}
-      width={PREVIEW_RAIL_PANE_WIDTH}
+      width={WORK_RAIL_PANE_WIDTH}
     >
       {chatOpen ? (
-        <ChatPreviewRail onRestartServer={restartPreviewServer} setTitlebarToolGroup={setTitlebarToolGroup} />
+        <ChatWorkRail
+          loop={loopController}
+          onRestartServer={restartPreviewServer}
+          previewKey={activePreviewTarget?.url || ''}
+          previewLabel={activePreviewTarget?.label || undefined}
+          previewOpen={previewRailOpen}
+          setTitlebarToolGroup={setTitlebarToolGroup}
+        />
       ) : null}
     </Pane>
   )
@@ -1341,7 +1371,7 @@ export function DesktopController() {
       mainOverlays={mainOverlays}
       onOpenSettings={openSettings}
       overlays={overlays}
-      previewPaneOpen={chatOpen && Boolean(previewTarget || filePreviewTarget)}
+      previewPaneOpen={chatOpen && workRailOpen}
       statusbarItems={statusbarItems}
       terminalPaneOpen={terminalSidebarOpen}
       titlebarTools={titlebarToolGroups.flat.right}

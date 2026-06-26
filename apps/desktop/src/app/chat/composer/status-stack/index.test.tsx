@@ -138,6 +138,20 @@ function standaloneDelegatedRootClickSource(): TenantLoopSource {
         title:
           'Remove the root summary/actions card (`data-testid="loop-root-card"`/`loop-root-actions`) and the root Description/spec section (`data-testid="loop-root-spec"`) from the Hermes Desktop Loop overview drawer, update tests, verify, and commit locally without pushing.'
       }
+    ],
+    workers: [
+      {
+        outcome: 'done',
+        profile: 'reviewer-qa',
+        run_id: 81,
+        status: 'done',
+        summary: 'accepted',
+        task_id: 't_f2298d7d',
+        task_status: 'done',
+        task_title:
+          'Remove the root summary/actions card (`data-testid="loop-root-card"`/`loop-root-actions`) and the root Description/spec section (`data-testid="loop-root-spec"`) from the Hermes Desktop Loop overview drawer, update tests, verify, and commit locally without pushing.',
+        worker_session_id: 'worker-session-81'
+      }
     ]
   }
 }
@@ -185,6 +199,8 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
 
     renderStack('logical-origin')
 
+    fireEvent.click(screen.getByRole('button', { name: '1 Subagent' }))
+
     expect(screen.getAllByText('Subscribed Loop root')).toHaveLength(2)
     expect(screen.getByText('Loop')).toBeTruthy()
     expect(screen.getByText('reviewer-qa')).toBeTruthy()
@@ -209,6 +225,7 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
 
     renderStack('logical-origin', onOpenKanbanTask)
 
+    fireEvent.click(screen.getByRole('button', { name: '1 Subagent' }))
     fireEvent.click(screen.getByRole('button', { name: /Root Loop worker/i }))
 
     expect(onOpenKanbanTask).toHaveBeenCalledWith('t_root')
@@ -292,5 +309,20 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
     expect(screen.getByTestId('loop-panel-body').className).not.toContain('p-3')
     expect(within(canvas).getByTestId('loop-task-graph-node-t_f2298d7d')).toBeTruthy()
     expect(canvas.querySelectorAll('[data-testid^="loop-task-graph-edge-"]')).toHaveLength(0)
+  })
+
+  it('renders standalone delegated Loop source rows under the active runtime session', () => {
+    const source = standaloneDelegatedRootClickSource()
+
+    reconcileKanbanSessionSourceForComposer({
+      activeSessionId: 'runtime-tip',
+      source,
+      sourceSessionId: 'logical-origin'
+    })
+
+    renderStack('runtime-tip')
+
+    expect(screen.getByText(/Remove the root summary\/actions card/i)).toBeTruthy()
+    expect(screen.getByText('Loop')).toBeTruthy()
   })
 })
