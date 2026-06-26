@@ -49,6 +49,7 @@ describe('Loop intake foreground trigger', () => {
     expect(draft).toContain('without creating scheduled Kanban tasks')
     expect(draft).toContain('The clarify choices must match those planning nodes')
     expect(draft).toContain('delete/archive unchosen sibling planning nodes')
+    expect(draft).toContain('The dispatched task packet will carry the locked choices')
     expect(draft).toContain('delegate_task(mode="loop")')
     expect(draft).toContain('Do not promote planning nodes to ready')
     expect(draft).toContain('origin activation')
@@ -95,6 +96,82 @@ describe('Loop intake foreground trigger', () => {
     expect(draft).toContain('lightweight planning node, not a dispatchable Kanban task')
     expect(draft).toContain('delegate_task(mode="loop"')
     expect(draft).toContain('execution_task_id')
+  })
+
+  it('hides locked planning options while keeping the current branch connected', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      latest_event_id: 3,
+      planning_links: [
+        { parent_id: 't_intake', child_id: 'plan:chosen' },
+        { parent_id: 'plan:chosen', child_id: 'plan:next-choice' },
+        { parent_id: 'plan:chosen', child_id: 'plan:rejected' }
+      ],
+      planning_nodes: [
+        {
+          active: false,
+          branch_kind: 'alternative',
+          decision_group_id: 'locked-choice',
+          frontier: false,
+          id: 'plan:chosen',
+          included_child_ids: ['plan:next-choice', 'plan:rejected', 't_exec'],
+          included_parent_ids: ['t_intake'],
+          is_planning_node: true,
+          selection_state: 'chosen',
+          status: 'scheduled',
+          title: 'Chosen historical option'
+        },
+        {
+          active: true,
+          branch_kind: 'alternative',
+          decision_group_id: 'next-choice',
+          frontier: true,
+          id: 'plan:next-choice',
+          included_child_ids: [],
+          included_parent_ids: ['plan:chosen'],
+          is_planning_node: true,
+          selection_state: 'candidate',
+          status: 'scheduled',
+          title: 'Visible current option'
+        },
+        {
+          branch_kind: 'alternative',
+          decision_group_id: 'locked-choice',
+          id: 'plan:rejected',
+          included_child_ids: [],
+          included_parent_ids: ['plan:chosen'],
+          is_planning_node: true,
+          selection_state: 'rejected',
+          status: 'scheduled',
+          title: 'Rejected historical option'
+        }
+      ],
+      root_task_id: 't_intake',
+      session_id: 'session-intake',
+      tasks: [
+        ...(titleOnlyIntakeSource.tasks || []),
+        {
+          id: 't_exec',
+          included_child_ids: [],
+          included_parent_ids: ['plan:chosen'],
+          status: 'running',
+          tenant: 'session-intake',
+          title: 'Dispatched execution task'
+        }
+      ]
+    })!
+
+    expect(state.rows.map(row => row.taskId)).toEqual(['t_intake', 't_exec', 'plan:next-choice'])
+    expect(state.rows.find(row => row.taskId === 'plan:chosen')).toBeUndefined()
+    expect(state.rows.find(row => row.taskId === 'plan:rejected')).toBeUndefined()
+    expect(state.rows.find(row => row.taskId === 'plan:next-choice')).toMatchObject({
+      parents: ['t_intake'],
+      planningNode: true,
+      selectionState: 'candidate'
+    })
+    expect(state.rows.find(row => row.taskId === 't_exec')).toMatchObject({ parents: ['t_intake'] })
+    expect(state.rows.find(row => row.taskId === 't_intake')?.children).toEqual(
+      expect.arrayContaining(['plan:next-choice', 't_exec'])
+    )
   })
 
   it('keeps ordinary Loop chat drafts for rows without durable intake state', () => {

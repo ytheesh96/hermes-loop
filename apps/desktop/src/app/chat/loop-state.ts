@@ -587,6 +587,108 @@ function taskChildren(task: TenantLoopTask): string[] {
   return Array.from(new Set([...explicit, ...external]))
 }
 
+function isHiddenLockedPlanningOption(task: TenantLoopTask): boolean {
+  if (task.is_planning_node !== true || normalizedStatus(task.branch_kind) !== 'alternative') {
+    return false
+  }
+
+  const selectionState = normalizedStatus(task.selection_state)
+
+  return selectionState === 'chosen' || selectionState === 'rejected'
+}
+
+function loopTaskRelationMaps(
+  source: Omit<TenantLoopSource, 'tasks'> & { tasks?: readonly TenantLoopTask[] },
+  tasks: readonly TenantLoopTask[]
+): { childrenById: Map<string, Set<string>>; parentsById: Map<string, Set<string>> } {
+  const taskIds = new Set(tasks.map(task => task.id))
+  const childrenById = new Map(tasks.map(task => [task.id, new Set<string>()]))
+  const parentsById = new Map(tasks.map(task => [task.id, new Set<string>()]))
+
+  const link = (parentId?: null | string, childId?: null | string) => {
+    if (!parentId || !childId || !taskIds.has(parentId) || !taskIds.has(childId)) {
+      return
+    }
+
+    childrenById.get(parentId)?.add(childId)
+    parentsById.get(childId)?.add(parentId)
+  }
+
+  for (const task of tasks) {
+    for (const parentId of taskParents(task)) {
+      link(parentId, task.id)
+    }
+
+    for (const childId of taskChildren(task)) {
+      link(task.id, childId)
+    }
+  }
+
+  for (const sourceLink of [...(source.links || []), ...(source.external_links || []), ...(source.planning_links || [])]) {
+    link(sourceLink.parent_id, sourceLink.child_id)
+  }
+
+  return { childrenById, parentsById }
+}
+
+function resolveVisibleRelatedTaskIds(
+  taskId: string,
+  relationMap: Map<string, Set<string>>,
+  visibleTaskIds: Set<string>,
+  hiddenTaskIds: Set<string>,
+  seen = new Set<string>()
+): string[] {
+  if (seen.has(taskId)) {
+    return []
+  }
+
+  seen.add(taskId)
+
+  const relatedIds: string[] = []
+
+  for (const relatedId of relationMap.get(taskId) || []) {
+    if (visibleTaskIds.has(relatedId)) {
+      relatedIds.push(relatedId)
+    } else if (hiddenTaskIds.has(relatedId)) {
+      relatedIds.push(...resolveVisibleRelatedTaskIds(relatedId, relationMap, visibleTaskIds, hiddenTaskIds, seen))
+    }
+  }
+
+  return Array.from(new Set(relatedIds.filter(relatedId => relatedId !== taskId)))
+}
+
+function compactLockedPlanningOptions(
+  source: Omit<TenantLoopSource, 'tasks'> & { tasks?: readonly TenantLoopTask[] },
+  tasks: readonly TenantLoopTask[]
+): TenantLoopTask[] {
+  const hiddenTaskIds = new Set(tasks.filter(isHiddenLockedPlanningOption).map(task => task.id))
+
+  if (hiddenTaskIds.size === 0) {
+    return [...tasks]
+  }
+
+  const visibleTaskIds = new Set(tasks.filter(task => !hiddenTaskIds.has(task.id)).map(task => task.id))
+  const { childrenById, parentsById } = loopTaskRelationMaps(source, tasks)
+
+  return tasks
+    .filter(task => !hiddenTaskIds.has(task.id))
+    .map(task => {
+      const parents = resolveVisibleRelatedTaskIds(task.id, parentsById, visibleTaskIds, hiddenTaskIds)
+      const children = resolveVisibleRelatedTaskIds(task.id, childrenById, visibleTaskIds, hiddenTaskIds)
+
+      return {
+        ...task,
+        included_child_ids: children,
+        included_parent_ids: parents,
+        links: {
+          ...task.links,
+          children,
+          parents
+        }
+      }
+    })
+}
+
 const LOOP_DELEGATION_CREATED_BY_PREFIX = 'loop_delegation:'
 
 const isDelegatedLoopRootTask = (task: TenantLoopTask): boolean =>
@@ -897,9 +999,11 @@ export function deriveLoopPanelStateFromTenantSource(
     return null
   }
 
-  const tasks = [...(source.tasks || []), ...(source.planning_nodes || [])].filter(
+  const sourceTasks = [...(source.tasks || []), ...(source.planning_nodes || [])].filter(
     task => task.id && (source.include_archived || !ARCHIVED_STATUSES.has(normalizedStatus(task.status)))
   )
+
+  const tasks = compactLockedPlanningOptions(source, sourceTasks)
 
   const depths = depthByTaskId(tasks)
   const rows = tasks.map(task => tenantRowFromTask(task, depths, source.workers || []))
