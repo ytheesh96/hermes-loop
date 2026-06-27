@@ -10,6 +10,7 @@ import { type Translations, useI18n } from '@/i18n'
 import { AlertCircle, CheckCircle2 } from '@/lib/icons'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
+import { $kanbanStatusBySession, type ComposerStatusItem } from '@/store/composer-status'
 import { $loopagentsBySession, type LoopagentActivity } from '@/store/loopagents'
 import {
   $subagentsBySession,
@@ -144,6 +145,70 @@ const allLoopagentWorkers = (bySession: Record<string, LoopagentActivity[]>): Su
     .flatMap(list => list.filter(loopagentVisibleInSpawnTree).map(loopagentToSubagent))
     .sort((a, b) => a.startedAt - b.startedAt || a.goal.localeCompare(b.goal))
 
+function statusItemToSubagent(item: ComposerStatusItem): SubagentProgress {
+  const at = Date.now()
+  const label = [item.profile, item.currentTool, item.sessionId].filter(Boolean).join(' · ') || undefined
+  const status: SubagentStatus = item.state === 'failed' ? 'failed' : item.state === 'done' ? 'completed' : 'running'
+
+  const stream: SubagentStreamEntry[] = item.output
+    ? [{ at, isError: item.state === 'failed', kind: 'progress', text: item.output }]
+    : item.currentTool
+      ? [{ at, kind: 'tool', text: item.currentTool }]
+      : []
+
+  return {
+    currentTool: item.currentTool,
+    filesRead: [],
+    filesWritten: [],
+    goal: item.title,
+    id: item.id,
+    model: label,
+    parentId: null,
+    sessionId: item.sessionId,
+    startedAt: at,
+    status,
+    stream,
+    summary: item.output,
+    taskCount: 1,
+    taskIndex: 0,
+    updatedAt: at
+  }
+}
+
+const allKanbanWorkerRows = (bySession: Record<string, ComposerStatusItem[]>): SubagentProgress[] =>
+  Object.values(bySession).flatMap(list =>
+    list
+      .filter(item => item.id.startsWith('kanban-agent:') && (item.type === 'subagent' || item.type === 'kanban-agent'))
+      .filter(item => item.state === 'running' || item.state === 'failed')
+      .map(statusItemToSubagent)
+  )
+
+function mergeSpawnTreeAgents(...groups: SubagentProgress[][]): SubagentProgress[] {
+  const byId = new Map<string, SubagentProgress>()
+
+  for (const group of groups) {
+    for (const item of group) {
+      byId.set(spawnTreeMergeKey(item), item)
+    }
+  }
+
+  return [...byId.values()].sort((a, b) => a.startedAt - b.startedAt || a.goal.localeCompare(b.goal))
+}
+
+function spawnTreeMergeKey(item: SubagentProgress): string {
+  const durableWorker = /^(?:kanban-agent|loopagent:worker):([^:]+):(.+)$/.exec(item.id)
+
+  if (durableWorker) {
+    const [, taskId, runOrSessionId] = durableWorker
+
+    if (taskId && runOrSessionId) {
+      return `loopagent-worker:${taskId}:${runOrSessionId}`
+    }
+  }
+
+  return item.id
+}
+
 // Mirrors statusGlyph() in tool-fallback.tsx so subagent rows speak the
 // same visual vocabulary as the chat tool blocks.
 function statusGlyph(status: SubagentStatus, a: Translations['agents']): ReactNode {
@@ -201,15 +266,24 @@ interface AgentsViewProps {
 
 export function AgentsView({ onClose }: AgentsViewProps) {
   const { t } = useI18n()
+  const kanbanStatusBySession = useStore($kanbanStatusBySession)
   const subagentsBySession = useStore($subagentsBySession)
   const loopagentsBySession = useStore($loopagentsBySession)
 
-  // Aggregate every session's ordinary subagents plus live durable Loop workers;
-  // a Loopagent worker running in the background must not leave the Spawn tree
-  // empty just because it arrived through the Kanban/Loop event feed.
+  // Aggregate every session's ordinary subagents plus live durable Loop workers.
+  // Some Desktop sessions only have the session-source Kanban snapshot (not a
+  // loopagent live event), so fall back to the same worker rows the composer is
+  // already showing before overlaying fresher Loopagent event rows.
   const tree = useMemo(
-    () => buildSubagentTree([...allSubagents(subagentsBySession), ...allLoopagentWorkers(loopagentsBySession)]),
-    [loopagentsBySession, subagentsBySession]
+    () =>
+      buildSubagentTree(
+        mergeSpawnTreeAgents(
+          allSubagents(subagentsBySession),
+          allKanbanWorkerRows(kanbanStatusBySession),
+          allLoopagentWorkers(loopagentsBySession)
+        )
+      ),
+    [kanbanStatusBySession, loopagentsBySession, subagentsBySession]
   )
 
   return (

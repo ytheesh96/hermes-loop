@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -2751,6 +2752,42 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
     env = captured["env"]
     assert env.get("HERMES_KANBAN_TASK") == tid
     assert env.get("HERMES_PROFILE") == "some-profile"
+
+
+def test_default_spawn_external_harness_uses_native_wrapper(kanban_home, monkeypatch):
+    captured = {}
+
+    class FakeProc:
+        pid = 99998
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env", {})
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    monkeypatch.setattr(kb, "_external_harness_command", lambda kind: f"/bin/{kind}")
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="native harness", assignee="codex")
+        task = kb.get_task(conn, tid)
+        task.model_override = "gpt-test"
+        workspace = kb.resolve_workspace(task)
+        pid = kb._default_spawn(task, str(workspace), board="native")
+        assert pid == 99998
+    finally:
+        conn.close()
+
+    cmd = captured["cmd"]
+    assert cmd[:3] == [sys.executable, "-m", "hermes_cli.kanban_external_worker"]
+    assert cmd[cmd.index("--harness") + 1] == "codex"
+    assert cmd[cmd.index("--command") + 1] == "/bin/codex"
+    assert cmd[cmd.index("--task-id") + 1] == tid
+    assert cmd[cmd.index("--board") + 1] == "native"
+    assert cmd[cmd.index("--model") + 1] == "gpt-test"
+    assert "-p" not in cmd
+    assert captured["env"].get("HERMES_PROFILE") == "codex"
 
 
 def test_default_spawn_raises_terminal_timeout_to_task_runtime(kanban_home, monkeypatch):

@@ -127,8 +127,10 @@ export function ComposerStatusStack({ busy, queue, sessionId, onOpenKanbanTask }
   const openAgents = () => navigate(AGENTS_ROUTE)
 
   const openStatusItem = (item: ComposerStatusItem) => {
+    const watchOptions = item.profile ? { profile: item.profile, watch: true } : { watch: true }
+
     if (isWorkerSessionRow(item) && item.sessionId) {
-      void openSessionInNewWindow(item.sessionId, { watch: true })
+      void openSessionInNewWindow(item.sessionId, watchOptions)
 
       return
     }
@@ -140,7 +142,7 @@ export function ComposerStatusStack({ busy, queue, sessionId, onOpenKanbanTask }
     }
 
     if (item.sessionId) {
-      void openSessionInNewWindow(item.sessionId, { watch: true })
+      void openSessionInNewWindow(item.sessionId, watchOptions)
 
       return
     }

@@ -7,6 +7,7 @@ import { notifyError } from './notifications'
 // global session sidebar or the install / onboarding overlays.
 const SECONDARY_WINDOW_FLAG = 'secondary'
 const NEW_SESSION_WINDOW_FLAG = '1'
+const PROFILE_WINDOW_PARAM = 'profile'
 
 let secondaryWindowCache: boolean | null = null
 
@@ -72,6 +73,14 @@ export function isWatchWindow(): boolean {
   return result
 }
 
+export function sessionWindowProfile(): string | null {
+  try {
+    return new URLSearchParams(window.location.search).get(PROFILE_WINDOW_PARAM)?.trim() || null
+  } catch {
+    return null
+  }
+}
+
 // True when running inside the Electron desktop shell (the preload bridge is
 // present). The "open in new window" affordance is desktop-only.
 export function canOpenSessionWindow(): boolean {
@@ -97,7 +106,10 @@ async function openWindow(call: () => Promise<WindowOpenResult>, failMessage: st
 // Open (or focus) a standalone OS window for a single chat session. No-ops
 // gracefully outside Electron so callers can wire it unconditionally.
 // `watch: true` opens a spectator window (lazy resume, live-mirror stream).
-export async function openSessionInNewWindow(sessionId: string, opts?: { watch?: boolean }): Promise<void> {
+export async function openSessionInNewWindow(
+  sessionId: string,
+  opts?: { profile?: null | string; watch?: boolean }
+): Promise<void> {
   if (!sessionId || !canOpenSessionWindow()) {
     return
   }

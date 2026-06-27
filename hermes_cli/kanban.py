@@ -1346,6 +1346,7 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
             args.task_id,
             note=getattr(args, "note", None),
             expected_run_id=_worker_run_id_for(args.task_id),
+            worker_session_id=os.environ.get("HERMES_SESSION_ID"),
         )
     if not ok:
         print(f"cannot heartbeat {args.task_id} (not running?)", file=sys.stderr)

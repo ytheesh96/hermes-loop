@@ -162,6 +162,68 @@ def _wait_for_loop_item(kb: Any, conn: Any, task_id: str, execution: dict[str, A
         time.sleep(0.05)
 
 
+def _positive_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 1 else None
+
+
+def _dispatch_config(kb: Any) -> dict[str, Any]:
+    """Resolve the dispatcher knobs used by CLI/gateway dispatch paths."""
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+    except Exception:
+        kanban_cfg = {}
+    default_failure_limit = getattr(
+        kb,
+        "DEFAULT_FAILURE_LIMIT",
+        getattr(kb, "DEFAULT_SPAWN_FAILURE_LIMIT", 2),
+    )
+    return {
+        "default_assignee": (kanban_cfg.get("default_assignee") or "").strip() or None,
+        # Keep the inline poke narrow: creating one Loop item should not fan
+        # out an entire stale ready queue when no gateway dispatcher is
+        # running. Operators can still raise the one-shot cap explicitly with
+        # kanban.max_spawn.
+        "max_spawn": _positive_int(kanban_cfg.get("max_spawn")) or 1,
+        "max_in_progress": _positive_int(kanban_cfg.get("max_in_progress")),
+        "max_in_progress_per_profile": _positive_int(
+            kanban_cfg.get("max_in_progress_per_profile")
+        ),
+        "failure_limit": _positive_int(kanban_cfg.get("failure_limit")) or default_failure_limit,
+    }
+
+
+def _poke_dispatcher_once(kb: Any, conn: Any, board: Any, warnings: list[str]) -> dict[str, Any]:
+    """Run one dispatcher tick so newly-created Loop work can start promptly."""
+    try:
+        result = kb.dispatch_once(conn, board=board, **_dispatch_config(kb))
+    except Exception as exc:
+        message = f"inline dispatch failed: {type(exc).__name__}: {exc}"
+        warnings.append(message)
+        return {"spawned": [], "error": message}
+    return {
+        "spawned": [task_id for task_id, _assignee, _workspace in result.spawned],
+        "skipped_locked": bool(getattr(result, "skipped_locked", False)),
+        "skipped_nonspawnable": list(getattr(result, "skipped_nonspawnable", []) or []),
+        "skipped_unassigned": list(getattr(result, "skipped_unassigned", []) or []),
+        "skipped_per_profile_capped": [
+            task_id
+            for task_id, _assignee, _current in (
+                getattr(result, "skipped_per_profile_capped", []) or []
+            )
+        ],
+        "auto_blocked": list(getattr(result, "auto_blocked", []) or []),
+    }
+
+
 def _loop_item_id(args: dict[str, Any]) -> str:
     return str(args.get("loop_item_id") or args.get("task_id") or args.get("loop_handle") or "").strip()
 
@@ -275,13 +337,14 @@ def _handle_loop_create(args: dict[str, Any], **_kwargs) -> str:
                         "AND created_by LIKE 'loop_delegation:%'",
                         (f"loop:{task_id}", task_id),
                     )
-            task, completed = _wait_for_loop_item(kb, conn, task_id, execution)
-            if task is None:
-                return tool_error(f"created task {task_id} could not be read back")
             from tools.kanban_notify import maybe_auto_subscribe
 
             subscribed = maybe_auto_subscribe(conn, task_id)
             warnings: list[str] = []
+            dispatch = _poke_dispatcher_once(kb, conn, board, warnings)
+            task, completed = _wait_for_loop_item(kb, conn, task_id, execution)
+            if task is None:
+                return tool_error(f"created task {task_id} could not be read back")
             if execution["mode"] == "sync" and not completed:
                 warnings.append("sync wait timed out; durable Loop work continues asynchronously")
             if execution["mode"] == "sync" and completed and task.status in {"done", "blocked", "review"}:
@@ -299,6 +362,7 @@ def _handle_loop_create(args: dict[str, Any], **_kwargs) -> str:
                 proof_packet=proof_packet,
                 resume_payload=args.get("resume_payload"),
                 execution=execution,
+                dispatch=dispatch,
                 foreground_reentry=foreground_reentry,
                 approval_required=False,
                 subscribed=subscribed,

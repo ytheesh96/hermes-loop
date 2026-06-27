@@ -5,7 +5,7 @@ import type { TenantLoopSource } from './loop-state'
 // is intentionally cheap and updates the composer/drawer through latest_event_id.
 export const LOOP_SOURCE_ACTIVE_REFETCH_INTERVAL_MS = 2_000
 
-// Also poll empty session-source results slowly so externally-created Loop rows
+// Also poll idle session-source results slowly so externally-created Loop rows
 // appear without requiring the user to press the manual refresh button.
 export const LOOP_SOURCE_IDLE_REFETCH_INTERVAL_MS = 10_000
 
@@ -33,6 +33,7 @@ function needsActiveRefresh(task: NonNullable<TenantLoopSource['tasks']>[number]
 function hasActiveHandoff(task: NonNullable<TenantLoopSource['tasks']>[number]): boolean {
   return (task.loop_handoffs || []).some((handoff) => {
     const queueState = normalizedStatus(handoff.queue_state)
+
     if (queueState) {
       return ACTIVE_HANDOFF_QUEUE_STATES.has(queueState)
     }
@@ -48,5 +49,5 @@ export function loopSessionSourceRefetchInterval(source?: null | TenantLoopSourc
     return LOOP_SOURCE_IDLE_REFETCH_INTERVAL_MS
   }
 
-  return tasks.some(needsActiveRefresh) ? LOOP_SOURCE_ACTIVE_REFETCH_INTERVAL_MS : false
+  return tasks.some(needsActiveRefresh) ? LOOP_SOURCE_ACTIVE_REFETCH_INTERVAL_MS : LOOP_SOURCE_IDLE_REFETCH_INTERVAL_MS
 }

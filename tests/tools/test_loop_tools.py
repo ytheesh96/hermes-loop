@@ -166,6 +166,44 @@ def test_loop_create_async_requires_activation_and_proof_packet(loop_env, monkey
         conn.close()
 
 
+def test_loop_create_pokes_dispatcher_for_ready_work(loop_env, monkeypatch):
+    """Loop delegation should not require a separate manual dispatch command."""
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name == "worker-a")
+    monkeypatch.setattr(kb, "_default_spawn", lambda task, workspace, *, board=None: 4242)
+
+    created = _call_loop(
+        "loop_create",
+        {
+            "objective": "Start promptly without manual dispatch",
+            "assignee": "worker-a",
+            "tenant": loop_env,
+            "activation": "explicit_user_request",
+            "proof_packet": {"summary": "user requested durable routing"},
+            "idempotency_key": "loop-create-auto-dispatch",
+            "execution": {"mode": "async"},
+        },
+    )
+
+    assert created["ok"] is True
+    assert created["status"] == "running"
+    assert created["dispatch"]["spawned"] == [created["loop_item_id"]]
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, created["loop_item_id"])
+        events = [event.kind for event in kb.list_events(conn, created["loop_item_id"])]
+    finally:
+        conn.close()
+
+    assert task is not None
+    assert task.status == "running"
+    assert task.worker_pid == 4242
+    assert "claimed" in events
+    assert "spawned" in events
+
+
 def test_loop_create_auto_subscribes_tui_session(loop_env, monkeypatch):
     monkeypatch.setenv("HERMES_SESSION_KEY", "loop-create-tui-session")
 

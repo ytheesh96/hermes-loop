@@ -221,6 +221,7 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
         {
           id: 'kanban-agent:t_root:77',
           kanbanTaskId: 't_root',
+          profile: 'reviewer-qa',
           sessionId: 'worker-session-77',
           state: 'running',
           title: 'Root Loop worker',
@@ -234,7 +235,7 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
     fireEvent.click(screen.getByRole('button', { name: '1 Subagent' }))
     fireEvent.click(screen.getByRole('button', { name: /Root Loop worker/i }))
 
-    expect(openSessionInNewWindow).toHaveBeenCalledWith('worker-session-77', { watch: true })
+    expect(openSessionInNewWindow).toHaveBeenCalledWith('worker-session-77', { profile: 'reviewer-qa', watch: true })
     expect(onOpenKanbanTask).not.toHaveBeenCalled()
   })
 

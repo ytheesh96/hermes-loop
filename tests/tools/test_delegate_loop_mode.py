@@ -91,6 +91,43 @@ def test_delegate_task_loop_mode_creates_durable_loop_item(loop_delegate_env, mo
     ] == [("tui", "tui-session-123", "planner")]
 
 
+def test_delegate_task_loop_mode_pokes_dispatcher(loop_delegate_env, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from tools import delegate_tool
+
+    def fail_child_build(*_args, **_kwargs):
+        raise AssertionError("loop mode should not build ephemeral child agents")
+
+    monkeypatch.setattr(delegate_tool, "_build_child_agent", fail_child_build)
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name == "worker-a")
+    monkeypatch.setattr(kb, "_default_spawn", lambda task, workspace, *, board=None: 5150)
+
+    out = json.loads(
+        delegate_tool.delegate_task(
+            goal="Start this durable Loop task now",
+            mode="loop",
+            assignee="worker-a",
+            parent_agent=DummyParent(),
+        )
+    )
+
+    assert out["status"] == "dispatched"
+    assert out["loop_status"] == "running"
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, out["loop_item_id"])
+        events = [event.kind for event in kb.list_events(conn, out["loop_item_id"])]
+    finally:
+        conn.close()
+
+    assert task is not None
+    assert task.status == "running"
+    assert task.worker_pid == 5150
+    assert "claimed" in events
+    assert "spawned" in events
+
+
 def test_delegate_task_loop_mode_uses_session_context_over_stale_env(
     loop_delegate_env, monkeypatch
 ):

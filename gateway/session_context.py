@@ -240,6 +240,14 @@ def get_session_env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
+def async_delivery_supported() -> bool:
+    """Return whether this session can receive async completion delivery."""
+    value = _SESSION_ASYNC_DELIVERY.get()
+    if value is _UNSET:
+        return True
+    return bool(value)
+
+
 def get_logical_session_id(default: Any = "") -> Any:
     """Return the user-facing session key before the internal runtime id."""
     return (
@@ -269,3 +277,4 @@ def reset_session_vars_for_tests() -> None:
     """Reset session ContextVars so tests fall back to process env again."""
     for var in _VAR_MAP.values():
         var.set(_UNSET)
+    _SESSION_ASYNC_DELIVERY.set(_UNSET)

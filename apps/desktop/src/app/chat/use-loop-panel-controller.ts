@@ -169,8 +169,15 @@ export function useLoopPanelController({
   })
 
   const loopTaskDecomposeMutation = useMutation({
-    mutationFn: ({ approveIntake, loopSafe, taskId }: { approveIntake?: boolean; loopSafe?: boolean; taskId: string }) =>
-      decomposeLoopTask(taskId, activeGatewayProfile, { approveIntake, board: loopSourceBoard, loopSafe }),
+    mutationFn: ({
+      approveIntake,
+      loopSafe,
+      taskId
+    }: {
+      approveIntake?: boolean
+      loopSafe?: boolean
+      taskId: string
+    }) => decomposeLoopTask(taskId, activeGatewayProfile, { approveIntake, board: loopSourceBoard, loopSafe }),
     onSuccess: async result => {
       if (!result.ok) {
         notify({
@@ -193,7 +200,9 @@ export function useLoopPanelController({
   const loopTaskArchiveMutation = useMutation({
     mutationFn: async ({ taskIds }: { taskIds: string[] }) => {
       await Promise.all(
-        taskIds.map(taskId => updateLoopTaskStatus(taskId, 'archived', activeGatewayProfile, { board: loopSourceBoard }))
+        taskIds.map(taskId =>
+          updateLoopTaskStatus(taskId, 'archived', activeGatewayProfile, { board: loopSourceBoard })
+        )
       )
     },
     onSuccess: async () => {
@@ -253,8 +262,14 @@ export function useLoopPanelController({
 
   const handleLoopTaskAction = useCallback(
     (action: LoopTaskAction, row: LoopRow) => {
-      if (action === 'worker-session' && row.workerActivity?.worker_session_id) {
-        void openSessionInNewWindow(row.workerActivity.worker_session_id, { watch: true })
+      const workerSessionId = row.workerActivity?.worker_session_id || row.latestRun?.worker_session_id
+      const workerProfile = row.workerActivity?.profile || row.latestRun?.profile || row.assignee || undefined
+
+      if (action === 'worker-session' && workerSessionId) {
+        void openSessionInNewWindow(
+          workerSessionId,
+          workerProfile ? { profile: workerProfile, watch: true } : { watch: true }
+        )
 
         return
       }
@@ -279,7 +294,8 @@ export function useLoopPanelController({
         notify({
           kind: 'warning',
           title: 'Planning node only',
-          message: 'Planning nodes are visual decision records. Ask in chat to activate one with delegate_task(mode="loop").'
+          message:
+            'Planning nodes are visual decision records. Ask in chat to activate one with delegate_task(mode="loop").'
         })
 
         return

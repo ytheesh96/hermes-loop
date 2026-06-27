@@ -2921,6 +2921,24 @@ function loopOverviewStatusItem(row: LoopRow, options: { preferAssigneeForQueued
   }
 }
 
+function loopWorkerSessionId(row: LoopRow): string | undefined {
+  return row.workerActivity?.worker_session_id || row.latestRun?.worker_session_id || undefined
+}
+
+function openLoopAgentRow(
+  row: LoopRow,
+  onTaskAction: ((action: LoopTaskAction, row: LoopRow) => void) | undefined,
+  fallback: () => void
+) {
+  if (loopWorkerSessionId(row) && onTaskAction) {
+    onTaskAction('worker-session', row)
+
+    return
+  }
+
+  fallback()
+}
+
 function loopTaskAgentState(status?: null | string): StatusItemState {
   const value = normalizedLoopValue(status)
 
@@ -3084,7 +3102,11 @@ function LoopRootAgentsCard({
             <StatusItemRow
               item={loopOverviewStatusItem(row, { preferAssigneeForQueued: row.taskId === root.taskId })}
               key={row.taskId}
-              onOpen={onOpenTaskTab ? () => onOpenTaskTab(row) : undefined}
+              onOpen={
+                onOpenTaskTab || onTaskAction
+                  ? () => openLoopAgentRow(row, onTaskAction, () => onOpenTaskTab?.(row))
+                  : undefined
+              }
             />
           ))}
         </div>
@@ -3095,10 +3117,12 @@ function LoopRootAgentsCard({
 
 function LoopTaskAgentsCard({
   onSelectTaskId,
+  onTaskAction,
   row,
   rowById
 }: {
   onSelectTaskId?: (taskId: string) => void
+  onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
   row: LoopRow
   rowById: Map<string, LoopRow>
 }) {
@@ -3134,7 +3158,8 @@ function LoopTaskAgentsCard({
               relation,
               rowById
             ),
-        taskId
+        taskId,
+        row: relatedRow
       }
     ]
   })
@@ -3184,11 +3209,17 @@ function LoopTaskAgentsCard({
         <LoopTaskGraph onOpenTaskTab={targetRow => onSelectTaskId?.(targetRow.taskId)} rows={subgraphRows} selectedTaskId={row.taskId} />
       ) : (
         <div className="flex flex-col gap-0.5" data-testid="loop-task-agents-list">
-          {items.map(({ item, taskId }) => (
+          {items.map(({ item, row: relatedRow, taskId }) => (
             <StatusItemRow
               item={item}
               key={taskId}
-              onOpen={onSelectTaskId ? () => onSelectTaskId(taskId) : undefined}
+              onOpen={
+                relatedRow
+                  ? () => openLoopAgentRow(relatedRow, onTaskAction, () => onSelectTaskId?.(taskId))
+                  : onSelectTaskId
+                    ? () => onSelectTaskId(taskId)
+                    : undefined
+              }
             />
           ))}
         </div>
@@ -3268,7 +3299,7 @@ function LoopTaskDetails({
       <LoopForegroundHandoffCard row={row} />
 
       {/* Child/parent agent rows for navigating the task execution graph. */}
-      <LoopTaskAgentsCard onSelectTaskId={onSelectTaskId} row={row} rowById={rowById} />
+      <LoopTaskAgentsCard onSelectTaskId={onSelectTaskId} onTaskAction={onTaskAction} row={row} rowById={rowById} />
 
       {/* Markdown task description/spec with a graceful empty state. */}
       <DetailSection title="Description">

@@ -3707,6 +3707,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
             short_uuid = uuid.uuid4().hex[:6]
             self.session_id = f"{timestamp_str}_{short_uuid}"
+        # Single-query CLI mode never calls new_session(), but kanban workers
+        # still need their freshly-created transcript id in HERMES_SESSION_ID so
+        # heartbeats can expose a clickable worker session to Desktop.
+        _sync_process_session_id(self.session_id)
         
         # History file for persistent input recall across sessions
         self._history_file = _hermes_home / ".hermes_history"

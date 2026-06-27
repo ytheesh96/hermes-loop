@@ -1677,6 +1677,223 @@ def test_dispatch_skips_nonspawnable_into_separate_bucket(kanban_home, monkeypat
     assert not res.spawned
 
 
+def test_dispatch_spawns_external_harness_lanes_without_profiles(kanban_home, monkeypatch):
+    from hermes_cli import profiles
+
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="for-codex", assignee="codex")
+        res = kb.dispatch_once(conn, dry_run=True)
+        assert kb.has_spawnable_ready(conn) is True
+    assert res.spawned == [(t, "codex", "")]
+    assert t not in res.skipped_nonspawnable
+
+
+def test_dispatch_review_spawns_external_harness_without_profile(kanban_home, monkeypatch):
+    from hermes_cli import profiles
+
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="for-aside-review", assignee="aside")
+        _set_task_status(conn, t, "review")
+        res = kb.dispatch_once(conn, dry_run=True)
+    assert res.spawned == [(t, "aside", "")]
+    assert t not in res.skipped_nonspawnable
+
+
+def test_external_worker_codex_command_uses_config_approval_for_current_cli(monkeypatch):
+    from hermes_cli import kanban_external_worker as external
+
+    class Completed:
+        stdout = "\n".join([
+            "Usage: codex exec [OPTIONS] [PROMPT]",
+            "  -c, --config <key=value>",
+            "      --color <COLOR>",
+            "  -o, --output-last-message <FILE>",
+        ])
+
+    monkeypatch.setattr(external.subprocess, "run", lambda *args, **kwargs: Completed())
+
+    args = types.SimpleNamespace(
+        harness="codex",
+        command="/bin/codex",
+        workspace="/tmp/workspace",
+        model=None,
+    )
+    cmd = external._command(args, "hello", codex_output_path="/tmp/final.txt")
+
+    assert "--ask-for-approval" not in cmd
+    assert cmd[cmd.index("-c") + 1] == 'approval_policy="never"'
+    assert cmd[cmd.index("--color") + 1] == "never"
+    assert cmd[cmd.index("--output-last-message") + 1] == "/tmp/final.txt"
+    assert cmd[-1] == "hello"
+
+
+def test_external_worker_codex_command_keeps_legacy_approval_flag(monkeypatch):
+    from hermes_cli import kanban_external_worker as external
+
+    class Completed:
+        stdout = "Usage: codex exec [OPTIONS] [PROMPT]\n      --ask-for-approval <POLICY>\n"
+
+    monkeypatch.setattr(external.subprocess, "run", lambda *args, **kwargs: Completed())
+
+    args = types.SimpleNamespace(
+        harness="codex",
+        command="/bin/codex",
+        workspace="/tmp/workspace",
+        model="gpt-test",
+    )
+    cmd = external._command(args, "hello")
+
+    assert cmd[cmd.index("--ask-for-approval") + 1] == "never"
+    assert cmd[cmd.index("-m") + 1] == "gpt-test"
+
+
+def test_external_worker_main_removes_codex_final_output_file(kanban_home, tmp_path, monkeypatch):
+    from hermes_cli import kanban_external_worker as external
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="external", assignee="codex")
+        assert kb.claim_task(conn, t) is not None
+
+    captured = {}
+
+    def fake_command(args, prompt, *, codex_output_path=None):
+        captured["codex_output_path"] = codex_output_path
+        return ["codex", "exec"]
+
+    def fake_run(cmd, *, cwd):
+        Path(captured["codex_output_path"]).write_text("final from codex\n", encoding="utf-8")
+        return 0, "tail output"
+
+    monkeypatch.setattr(external, "_command", fake_command)
+    monkeypatch.setattr(external, "_run_and_capture", fake_run)
+
+    code = external.main([
+        "--harness", "codex",
+        "--command", "codex",
+        "--task-id", t,
+        "--workspace", str(tmp_path),
+        "--board", "default",
+    ])
+
+    assert code == 0
+    assert captured["codex_output_path"]
+    assert not Path(captured["codex_output_path"]).exists()
+    with kb.connect() as conn:
+        task = kb.get_task(conn, t)
+        run = kb.latest_run(conn, t)
+    assert task.status == "done"
+    assert run.summary == "final from codex"
+
+
+def test_external_worker_main_ignores_stale_reclaimed_run_exit(kanban_home, tmp_path, monkeypatch):
+    from hermes_cli import kanban_db as _kb
+    from hermes_cli import kanban_external_worker as external
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="external", assignee="codex")
+        assert kb.claim_task(conn, t) is not None
+        run1 = kb.latest_run(conn, t)
+        kb._set_worker_pid(conn, t, 12345)
+        conn.execute(
+            "UPDATE tasks SET claim_expires = ? WHERE id = ?",
+            (int(time.time()) - 3600, t),
+        )
+        monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+        assert kb.release_stale_claims(conn, signal_fn=lambda _pid, _sig: None) == 1
+        assert kb.claim_task(conn, t) is not None
+        run2 = kb.latest_run(conn, t)
+
+    assert run1.id != run2.id
+
+    def fake_command(args, prompt, *, codex_output_path=None):
+        return ["codex", "exec"]
+
+    def fake_run(cmd, *, cwd):
+        return 0, "stale worker finished late"
+
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run1.id))
+    monkeypatch.setattr(external, "_command", fake_command)
+    monkeypatch.setattr(external, "_run_and_capture", fake_run)
+
+    code = external.main([
+        "--harness", "codex",
+        "--command", "codex",
+        "--task-id", t,
+        "--workspace", str(tmp_path),
+        "--board", "default",
+    ])
+
+    assert code == 0
+    with kb.connect() as conn:
+        task = kb.get_task(conn, t)
+    assert task.status == "running"
+    assert task.current_run_id == run2.id
+
+
+def test_external_worker_finalize_completes_running_task(kanban_home):
+    from hermes_cli import kanban_external_worker as external
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="external", assignee="codex")
+        assert kb.claim_task(conn, t) is not None
+
+    external._finalize(t, board="default", harness="codex", code=0, output="finished cleanly")
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, t)
+        run = kb.latest_run(conn, t)
+    assert task.status == "done"
+    assert run.metadata["external_harness"] == "codex"
+    assert run.metadata["exit_code"] == 0
+
+
+def test_external_worker_finalize_blocks_on_blocked_final_line(kanban_home):
+    from hermes_cli import kanban_external_worker as external
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="external", assignee="aside")
+        assert kb.claim_task(conn, t) is not None
+
+    external._finalize(
+        t,
+        board="default",
+        harness="aside",
+        code=0,
+        output="looked around\nBLOCKED: browser login required",
+    )
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, t)
+        run = kb.latest_run(conn, t)
+    assert task.status == "blocked"
+    assert run.metadata["external_harness"] == "aside"
+    assert run.metadata["exit_code"] == 0
+
+
+def test_external_worker_ignores_prompt_placeholder_blocked_line(kanban_home):
+    from hermes_cli import kanban_external_worker as external
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="external", assignee="codex")
+        assert kb.claim_task(conn, t) is not None
+
+    external._finalize(
+        t,
+        board="default",
+        harness="codex",
+        code=0,
+        output="If blocked, write:\nBLOCKED: <reason>\nHARNESS_SMOKE_OK codex",
+    )
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, t)
+        run = kb.latest_run(conn, t)
+    assert task.status == "done"
+    assert run.metadata["external_harness"] == "codex"
+
+
 def test_has_spawnable_ready_false_when_only_terminal_lanes(kanban_home, monkeypatch):
     """``has_spawnable_ready`` returns False when every ready task is
     assigned to a control-plane lane — used by gateway/CLI dispatchers

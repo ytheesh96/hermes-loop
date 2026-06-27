@@ -5603,7 +5603,7 @@ function focusWindow(win) {
   win.focus()
 }
 
-function spawnSecondaryWindow({ sessionId, watch, newSession } = {}) {
+function spawnSecondaryWindow({ sessionId, watch, newSession, profile } = {}) {
   const icon = getAppIconPath()
   const win = new BrowserWindow({
     width: SESSION_WINDOW_MIN_WIDTH,
@@ -5648,7 +5648,8 @@ function spawnSecondaryWindow({ sessionId, watch, newSession } = {}) {
       devServer: DEV_SERVER,
       rendererIndexPath: DEV_SERVER ? undefined : resolveRendererIndex(),
       watch,
-      newSession
+      newSession,
+      profile
     })
   )
 
@@ -5656,8 +5657,8 @@ function spawnSecondaryWindow({ sessionId, watch, newSession } = {}) {
 }
 
 // Open (or focus) a standalone window for a single chat session.
-function createSessionWindow(sessionId, { watch = false } = {}) {
-  return sessionWindows.openOrFocus(sessionId, () => spawnSecondaryWindow({ sessionId, watch }))
+function createSessionWindow(sessionId, { watch = false, profile } = {}) {
+  return sessionWindows.openOrFocus(sessionId, () => spawnSecondaryWindow({ sessionId, watch, profile }))
 }
 
 // Open a fresh compact window on the new-session draft (#/). Not registry-keyed:
@@ -5986,7 +5987,10 @@ ipcMain.handle('hermes:window:openSession', async (_event, sessionId, opts) => {
     return { ok: false, error: 'invalid-session-id' }
   }
 
-  createSessionWindow(sessionId.trim(), { watch: opts?.watch === true })
+  createSessionWindow(sessionId.trim(), {
+    watch: opts?.watch === true,
+    profile: typeof opts?.profile === 'string' ? opts.profile : undefined
+  })
 
   return { ok: true }
 })

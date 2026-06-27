@@ -31,7 +31,7 @@ describe('loopSessionSourceRefetchInterval', () => {
     expect(loopSessionSourceRefetchInterval(null)).toBe(LOOP_SOURCE_IDLE_REFETCH_INTERVAL_MS)
   })
 
-  it('stops automatic polling once a non-empty Loop source is fully terminal', () => {
+  it('keeps a slower idle poll once a Loop source is fully terminal so later rows can appear', () => {
     const source: TenantLoopSource = {
       session_id: 'session-1',
       latest_event_id: 20,
@@ -49,7 +49,7 @@ describe('loopSessionSourceRefetchInterval', () => {
       ]
     }
 
-    expect(loopSessionSourceRefetchInterval(source)).toBe(false)
+    expect(loopSessionSourceRefetchInterval(source)).toBe(LOOP_SOURCE_IDLE_REFETCH_INTERVAL_MS)
   })
 
   it('keeps polling a terminal task while a first-class handoff is open', () => {

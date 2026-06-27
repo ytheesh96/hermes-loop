@@ -2148,6 +2148,105 @@ describe('LoopPanel', () => {
     expect(screen.queryByRole('heading', { name: /Root Task/i })).toBeNull()
   })
 
+  it('opens worker sessions from root overview agent list rows before selecting the task', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-root-agent-worker',
+      tenant: 'tenant-a',
+      tasks: [
+        {
+          id: 't_root',
+          title: 'Root Task',
+          status: 'running',
+          included_child_ids: ['t_child'],
+          included_parent_ids: []
+        },
+        {
+          id: 't_child',
+          title: 'Child Worker',
+          status: 'running',
+          included_child_ids: [],
+          included_parent_ids: ['t_root']
+        }
+      ],
+      workers: [
+        {
+          run_id: 9,
+          task_id: 't_child',
+          task_title: 'Child Worker',
+          status: 'running',
+          task_status: 'running',
+          worker_session_id: 'worker-session-child'
+        }
+      ]
+    })
+
+    const onSelectTaskId = vi.fn()
+    const onTaskAction = vi.fn()
+
+    render(
+      <LoopPanel
+        embedded
+        onSelectTaskId={onSelectTaskId}
+        onTaskAction={onTaskAction}
+        open
+        selectedTaskId="t_root"
+        state={state}
+      />
+    )
+
+    const rootAgentsCard = screen.getByTestId('loop-root-agents-card')
+    fireEvent.click(within(rootAgentsCard).getByRole('button', { name: /Show agents list/i }))
+    fireEvent.click(within(rootAgentsCard).getByRole('button', { name: /Child Worker/i }))
+
+    expect(onTaskAction).toHaveBeenCalledWith('worker-session', expect.objectContaining({ taskId: 't_child' }))
+    expect(onSelectTaskId).not.toHaveBeenCalled()
+  })
+
+  it('opens worker sessions from related agent list rows before selecting the task', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      session_id: 'sess-related-agent-worker',
+      tenant: 'tenant-a',
+      tasks: [
+        {
+          id: 't_root',
+          title: 'Root Worker',
+          status: 'running',
+          included_child_ids: ['t_child'],
+          included_parent_ids: []
+        },
+        {
+          id: 't_child',
+          title: 'Child Task',
+          status: 'running',
+          included_child_ids: [],
+          included_parent_ids: ['t_root']
+        }
+      ],
+      workers: [
+        {
+          run_id: 10,
+          task_id: 't_root',
+          task_title: 'Root Worker',
+          status: 'running',
+          task_status: 'running',
+          worker_session_id: 'worker-session-root'
+        }
+      ]
+    })
+
+    const onSelectTaskId = vi.fn()
+    const onTaskAction = vi.fn()
+
+    render(<LoopPanel onSelectTaskId={onSelectTaskId} onTaskAction={onTaskAction} open selectedTaskId="t_child" state={state} />)
+
+    const agentsCard = screen.getByTestId('loop-task-agents-card')
+    fireEvent.click(within(agentsCard).getByRole('button', { name: /Show agents list/i }))
+    fireEvent.click(within(agentsCard).getByRole('button', { name: /Root Worker/i }))
+
+    expect(onTaskAction).toHaveBeenCalledWith('worker-session', expect.objectContaining({ taskId: 't_root' }))
+    expect(onSelectTaskId).not.toHaveBeenCalled()
+  })
+
   it('keeps a decomposed draft root anchored as the root overview even when children block the root', () => {
     const state = deriveLoopPanelStateFromTenantSource({
       session_id: 'sess-decomposed-root',
@@ -2301,7 +2400,7 @@ describe('LoopPanel', () => {
 
     const submit = screen.getByRole('button', { name: /Submit t_intake_root/i }) as HTMLButtonElement
     expect(submit.disabled).toBe(false)
-    expect(submit.title).toMatch(/Submit approves Loop planning/i)
+    expect(submit.title).toMatch(/Submit approves Loop intake/i)
 
     fireEvent.click(submit)
     expect(onTaskAction).toHaveBeenCalledWith('decompose', expect.objectContaining({ taskId: 't_intake_root' }))

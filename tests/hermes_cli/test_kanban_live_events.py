@@ -287,7 +287,7 @@ def test_worker_callback_bridge_emits_structured_tool_events(kanban_home, monkey
     assert loopagent_payload["summary_preview"] == "terminal exited 0"
 
 
-def test_worker_heartbeat_current_tool_reaches_loopagent_payload_and_run_metadata(
+def test_worker_heartbeat_current_tool_and_session_reach_loopagent_payload_and_run_metadata(
     kanban_home,
     monkeypatch,
     all_assignees_spawnable,
@@ -301,19 +301,29 @@ def test_worker_heartbeat_current_tool_reaches_loopagent_payload_and_run_metadat
         run_id = task.current_run_id
         frames.clear()
 
-        assert kb.heartbeat_worker(conn, tid, expected_run_id=run_id, current_tool="search_files")
+        assert kb.heartbeat_worker(
+            conn,
+            tid,
+            expected_run_id=run_id,
+            current_tool="search_files",
+            worker_session_id="worker-sess-1",
+        )
         run = kb.latest_run(conn, tid)
         assert run.metadata["current_tool"] == "search_files"
         assert run.metadata["last_tool"] == "search_files"
+        assert run.metadata["worker_session_id"] == "worker-sess-1"
     finally:
         conn.close()
 
     worker_payload = _event_payload([f for f in frames if f["params"]["type"] == "kanban.worker.heartbeat"][-1])
     assert worker_payload["current_tool"] == "search_files"
+    assert worker_payload["worker_session_id"] == "worker-sess-1"
 
     loopagent_payload = _event_payload([f for f in frames if f["params"]["type"] == "loopagent.worker.upsert"][-1])
     assert loopagent_payload["event"] == "loopagent.worker.upsert"
     assert loopagent_payload["task_id"] == tid
     assert loopagent_payload["run_id"] == run_id
+    assert loopagent_payload["worker_session_id"] == "worker-sess-1"
     assert loopagent_payload["current_tool"] == "search_files"
+    assert loopagent_payload["worker"]["worker_session_id"] == "worker-sess-1"
     assert loopagent_payload["worker"]["current_tool"] == "search_files"

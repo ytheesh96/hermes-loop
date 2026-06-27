@@ -63,6 +63,40 @@ describe('useMessageStream loopagent events', () => {
     expect($loopagentsBySession.get()['source-root']?.[0]?.id).toBe('loopagent:worker:t_loop:7')
   })
 
+  it('refreshes Loop session-source snapshots when a live task row changes', () => {
+    const queryClient = new QueryClient()
+    const invalidateQueries = vi.spyOn(queryClient, 'invalidateQueries')
+    const activeSessionIdRef = { current: 'runtime-tip' }
+    const sessionStateByRuntimeIdRef = { current: new Map<string, ClientSessionState>() }
+
+    const { result } = renderHook(() =>
+      useMessageStream({
+        activeSessionIdRef,
+        hydrateFromStoredSession: vi.fn(async () => undefined),
+        queryClient,
+        refreshHermesConfig: vi.fn(async () => undefined),
+        refreshSessions: vi.fn(async () => undefined),
+        sessionStateByRuntimeIdRef,
+        updateSessionState: vi.fn()
+      })
+    )
+
+    act(() => {
+      result.current.handleGatewayEvent({
+        payload: {
+          current_session_id: 'runtime-tip',
+          task_id: 't_loop',
+          task_title: 'New Loop row',
+          event: 'loopagent.task.upsert',
+          task_status: 'ready'
+        },
+        type: 'loopagent.task.upsert'
+      } as RpcEvent)
+    })
+
+    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ['loop-session-source'] })
+  })
+
   it('hydrates the active stored session when an external message append event arrives', () => {
     const queryClient = new QueryClient()
     const activeSessionIdRef = { current: 'runtime-active' }

@@ -7932,6 +7932,7 @@ def heartbeat_worker(
     note: Optional[str] = None,
     expected_run_id: Optional[int] = None,
     current_tool: Optional[str] = None,
+    worker_session_id: Optional[str] = None,
 ) -> bool:
     """Record a ``heartbeat`` event + touch ``last_heartbeat_at``.
 
@@ -7945,6 +7946,7 @@ def heartbeat_worker(
     """
     now = int(time.time())
     current_tool_text = str(current_tool).strip() if current_tool else None
+    worker_session_text = str(worker_session_id).strip() if worker_session_id else None
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
@@ -7966,7 +7968,7 @@ def heartbeat_worker(
             else _current_run_id(conn, task_id)
         )
         if run_id is not None:
-            if current_tool_text:
+            if current_tool_text or worker_session_text:
                 row = conn.execute(
                     "SELECT metadata FROM task_runs WHERE id = ?",
                     (run_id,),
@@ -7979,8 +7981,11 @@ def heartbeat_worker(
                             metadata.update(parsed)
                     except Exception:
                         metadata = {}
-                metadata["current_tool"] = current_tool_text
-                metadata["last_tool"] = current_tool_text
+                if current_tool_text:
+                    metadata["current_tool"] = current_tool_text
+                    metadata["last_tool"] = current_tool_text
+                if worker_session_text:
+                    metadata["worker_session_id"] = worker_session_text
                 conn.execute(
                     "UPDATE task_runs SET last_heartbeat_at = ?, metadata = ? WHERE id = ?",
                     (now, json.dumps(metadata, ensure_ascii=False), run_id),
@@ -7996,6 +8001,8 @@ def heartbeat_worker(
         if current_tool_text:
             heartbeat_payload["current_tool"] = current_tool_text
             heartbeat_payload["tool_name"] = current_tool_text
+        if worker_session_text:
+            heartbeat_payload["worker_session_id"] = worker_session_text
         _append_event(
             conn, task_id, "heartbeat",
             heartbeat_payload or None,
@@ -8828,7 +8835,7 @@ def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
         # Can't introspect — assume spawnable, preserve legacy behavior.
         return True
     for row in rows:
-        if profile_exists(row["assignee"]):
+        if profile_exists(row["assignee"]) or _external_harness_kind(row["assignee"]):
             return True
     return False
 
@@ -8853,7 +8860,7 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     except Exception:
         return True
     for row in rows:
-        if profile_exists(row["assignee"]):
+        if profile_exists(row["assignee"]) or _external_harness_kind(row["assignee"]):
             return True
     return False
 
@@ -9058,7 +9065,9 @@ def _dispatch_once_locked(
     if _default_assignee:
         try:
             from hermes_cli.profiles import profile_exists as _pe
-            _default_assignee_resolved = bool(_pe(_default_assignee))
+            _default_assignee_resolved = bool(
+                _pe(_default_assignee) or _external_harness_kind(_default_assignee)
+            )
         except Exception:
             # Profiles module not importable (test stubs, exotic envs).
             # Trust the operator's config and try the assignment; the
@@ -9127,7 +9136,11 @@ def _dispatch_once_locked(
             from hermes_cli.profiles import profile_exists  # local import: avoids cycle
         except Exception:
             profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row_assignee):
+        if (
+            profile_exists is not None
+            and not profile_exists(row_assignee)
+            and not _external_harness_kind(row_assignee)
+        ):
             # Bucket separately from skipped_unassigned: the operator
             # cannot fix this by assigning a profile (the assignee IS the
             # intended owner — a terminal lane). Health telemetry uses
@@ -9268,7 +9281,11 @@ def _dispatch_once_locked(
             from hermes_cli.profiles import profile_exists
         except Exception:
             profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row["assignee"]):
+        if (
+            profile_exists is not None
+            and not profile_exists(row["assignee"])
+            and not _external_harness_kind(row["assignee"])
+        ):
             result.skipped_nonspawnable.append(row["id"])
             continue
         if dry_run:
@@ -9616,6 +9633,37 @@ def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[st
         return None
 
 
+_EXTERNAL_HARNESS_ASSIGNEES = {
+    "aside": "aside",
+    "aside-agent": "aside",
+    "aside-worker": "aside",
+    "codex": "codex",
+    "codex-agent": "codex",
+    "codex-worker": "codex",
+}
+
+
+def _external_harness_kind(assignee: Optional[str]) -> Optional[str]:
+    return _EXTERNAL_HARNESS_ASSIGNEES.get(str(assignee or "").strip().lower())
+
+
+def _external_harness_command(kind: str) -> str:
+    if kind == "aside":
+        try:
+            from hermes_cli.config import load_config
+
+            cmd = (
+                (load_config().get("mcp_servers") or {})
+                .get("aside", {})
+                .get("command")
+            )
+            if cmd:
+                return str(cmd)
+        except Exception:
+            pass
+    return shutil.which(kind) or kind
+
+
 def _default_spawn(
     task: Task,
     workspace: str,
@@ -9735,51 +9783,65 @@ def _default_spawn(
     # attributed correctly regardless of how the child loads config.
     env["HERMES_PROFILE"] = profile_arg
 
-    cmd = [
-        *_resolve_hermes_argv(),
-        "-p", profile_arg,
-        # Worker subprocesses switch to a profile-scoped HERMES_HOME above,
-        # so they see that profile's shell-hook allowlist instead of the
-        # dispatcher's root allowlist. Pass --accept-hooks explicitly so
-        # profile-local worker sessions still register configured hooks.
-        "--accept-hooks",
-    ]
-    if _is_orchestrator_dispatch_task(task) and task.foreground_fork_session_id:
-        cmd.extend(["--resume", task.foreground_fork_session_id])
-    # Auto-load the kanban-worker skill so every dispatched worker
-    # has the pattern library (good summary/metadata shapes, retry
-    # diagnostics, block-reason examples) in its context, even if
-    # the profile hasn't wired it into skills config. The MANDATORY
-    # lifecycle is already in the system prompt via KANBAN_GUIDANCE;
-    # this skill is the deeper reference. Users can point a profile
-    # at a different/additional skill via config if they want —
-    # --skills is additive to the profile's default skill set.
-    #
-    # Only add the flag when the skill actually resolves for the home
-    # the worker runs under: the bundled skill is absent from many
-    # profile-scoped skills dirs, and preloading a missing skill is
-    # fatal at CLI startup. Omitting it is safe — the lifecycle
-    # contract still ships via KANBAN_GUIDANCE.
-    if _kanban_worker_skill_available(env.get("HERMES_HOME")):
-        cmd.extend(["--skills", "kanban-worker"])
-    # Per-task force-loaded skills. Each name goes in its own
-    # `--skills X` pair rather than a single comma-joined arg: the CLI
-    # accepts both forms (action='append' + comma-split), but
-    # per-name pairs are easier to read in `ps` output and avoid any
-    # quoting ambiguity if a skill name ever contains unusual chars.
-    if task.skills:
-        for sk in task.skills:
-            if sk:
-                cmd.extend(["--skills", sk])
-    if task.model_override:
-        cmd.extend(["-m", task.model_override])
-    worker_toolsets = _resolve_worker_cli_toolsets(env.get("HERMES_HOME"))
-    if worker_toolsets:
-        cmd.extend(["--toolsets", ",".join(worker_toolsets)])
-    cmd.extend([
-        "chat",
-        "-q", prompt,
-    ])
+    external_harness = _external_harness_kind(profile_arg)
+    if external_harness:
+        cmd = [
+            sys.executable,
+            "-m", "hermes_cli.kanban_external_worker",
+            "--harness", external_harness,
+            "--command", _external_harness_command(external_harness),
+            "--task-id", task.id,
+            "--workspace", str(workspace),
+            "--board", resolved_board,
+        ]
+        if task.model_override:
+            cmd.extend(["--model", task.model_override])
+    else:
+        cmd = [
+            *_resolve_hermes_argv(),
+            "-p", profile_arg,
+            # Worker subprocesses switch to a profile-scoped HERMES_HOME above,
+            # so they see that profile's shell-hook allowlist instead of the
+            # dispatcher's root allowlist. Pass --accept-hooks explicitly so
+            # profile-local worker sessions still register configured hooks.
+            "--accept-hooks",
+        ]
+        if _is_orchestrator_dispatch_task(task) and task.foreground_fork_session_id:
+            cmd.extend(["--resume", task.foreground_fork_session_id])
+        # Auto-load the kanban-worker skill so every dispatched worker
+        # has the pattern library (good summary/metadata shapes, retry
+        # diagnostics, block-reason examples) in its context, even if
+        # the profile hasn't wired it into skills config. The MANDATORY
+        # lifecycle is already in the system prompt via KANBAN_GUIDANCE;
+        # this skill is the deeper reference. Users can point a profile
+        # at a different/additional skill via config if they want —
+        # --skills is additive to the profile's default skill set.
+        #
+        # Only add the flag when the skill actually resolves for the home
+        # the worker runs under: the bundled skill is absent from many
+        # profile-scoped skills dirs, and preloading a missing skill is
+        # fatal at CLI startup. Omitting it is safe — the lifecycle
+        # contract still ships via KANBAN_GUIDANCE.
+        if _kanban_worker_skill_available(env.get("HERMES_HOME")):
+            cmd.extend(["--skills", "kanban-worker"])
+        # Per-task force-loaded skills. Each name goes in its own
+        # `--skills X` pair rather than a single comma-joined arg: the CLI
+        # accepts both forms (action='append' + comma-split), but
+        # per-name pairs are easier to read in `ps` output and avoid any
+        # quoting ambiguity if a skill name ever contains unusual chars.
+        if task.skills:
+            for sk in task.skills:
+                if sk:
+                    cmd.extend(["--skills", sk])
+        if task.model_override:
+            cmd.extend(["-m", task.model_override])
+        worker_toolsets = _resolve_worker_cli_toolsets(env.get("HERMES_HOME"))
+        if worker_toolsets:
+            cmd.extend(["--toolsets", ",".join(worker_toolsets)])
+        cmd.extend([
+            "chat",
+            "-q", prompt,
+        ])
     # Redirect output to a per-task log under <board-root>/logs/.
     # Anchored at the board root (not the shared kanban root), so
     # `hermes kanban log` on a specific board reads its own file and

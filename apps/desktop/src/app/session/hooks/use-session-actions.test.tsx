@@ -11,6 +11,11 @@ import type { ClientSessionState } from '../../types'
 
 import { useSessionActions } from './use-session-actions'
 
+const windowsMock = vi.hoisted(() => ({
+  profile: null as null | string,
+  watchWindow: false
+}))
+
 vi.mock('@/hermes', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
   deleteSession: vi.fn(),
@@ -19,6 +24,17 @@ vi.mock('@/hermes', async importOriginal => ({
   setApiRequestProfile: vi.fn(),
   setSessionArchived: vi.fn()
 }))
+
+vi.mock('@/store/windows', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  isWatchWindow: () => windowsMock.watchWindow,
+  sessionWindowProfile: () => windowsMock.profile
+}))
+
+afterEach(() => {
+  windowsMock.profile = null
+  windowsMock.watchWindow = false
+})
 
 const RUNTIME_SESSION_ID = 'rt-new-001'
 
@@ -280,5 +296,37 @@ describe('resumeSession failure recovery', () => {
 
     expect(resumeParams).not.toHaveProperty('lazy')
     expect(resumeParams).not.toHaveProperty('eager_build')
+  })
+
+  it('hydrates watch windows from the stored transcript while lazily attaching cross-profile workers', async () => {
+    windowsMock.watchWindow = true
+    windowsMock.profile = 'elephant'
+
+    let resumeParams: Record<string, unknown> | undefined
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.resume') {
+        resumeParams = params
+
+        return { session_id: 'runtime-1', resumed: params?.session_id, messages: [], info: {} } as never
+      }
+
+      return {} as never
+    })
+
+    vi.mocked(getSessionMessages).mockClear()
+    vi.mocked(getSessionMessages).mockResolvedValue({
+      messages: [
+        { content: 'work kanban task t_001567f5', role: 'user', timestamp: 1 },
+        { content: 'still working', role: 'assistant', timestamp: 2 }
+      ],
+      session_id: 'stored-1'
+    } as never)
+
+    await runResume(requestGateway)
+
+    expect(resumeParams).toMatchObject({ lazy: true, profile: 'elephant', session_id: 'stored-1' })
+    expect(getSessionMessages).toHaveBeenCalledWith('stored-1', 'elephant')
+    expect($messages.get().map(message => message.role)).toEqual(['user', 'assistant'])
   })
 })

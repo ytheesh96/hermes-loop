@@ -59,7 +59,7 @@ import {
 } from '@/store/session'
 import { broadcastSessionsChanged } from '@/store/session-sync'
 import { reportBackendContract } from '@/store/updates'
-import { isWatchWindow } from '@/store/windows'
+import { isWatchWindow, sessionWindowProfile } from '@/store/windows'
 import type {
   SessionCreateResponse,
   SessionInfo,
@@ -273,11 +273,25 @@ function upsertResolvedSession(session: SessionInfo, storedSessionId: string) {
   ])
 }
 
-async function resolveStoredSession(storedSessionId: string): Promise<SessionInfo | undefined> {
+async function resolveStoredSession(storedSessionId: string, profileHint?: null | string): Promise<SessionInfo | undefined> {
   const cached = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
 
   if (cached) {
     return cached
+  }
+
+  const hintedProfile = profileHint ? normalizeProfileKey(profileHint) : null
+
+  if (hintedProfile) {
+    try {
+      const session = await getSession(storedSessionId, hintedProfile)
+
+      upsertResolvedSession(session, storedSessionId)
+
+      return session
+    } catch {
+      // Fall through: the hint may be stale if the URL was copied across profiles.
+    }
   }
 
   // Direct by-id on the live backend — one row lookup, no list scan. Covers
@@ -301,7 +315,7 @@ async function resolveStoredSession(storedSessionId: string): Promise<SessionInf
   const otherProfiles = $profiles
     .get()
     .map(profile => normalizeProfileKey(profile.name))
-    .filter(key => key !== activeKey)
+    .filter(key => key !== activeKey && key !== hintedProfile)
 
   for (const profile of otherProfiles) {
     try {
@@ -504,6 +518,7 @@ export function useSessionActions({
         if (uiModel && uiProvider) {
           try {
             const options = await getGlobalModelOptions()
+
             const repaired = repairStaleModelProviderSelection(options, {
               model: uiModel,
               provider: uiProvider
@@ -667,8 +682,9 @@ export function useSessionActions({
       // gateway call (no-op when it's already on that profile / single-profile).
       // resolveStoredSession finds the row by id (cheap), so an uncached pasted
       // id loads as fast as a sidebar click instead of hanging on a list scan.
-      const storedForProfile = await resolveStoredSession(storedSessionId)
-      const sessionProfile = storedForProfile?.profile
+      const routeProfile = sessionWindowProfile()
+      const storedForProfile = await resolveStoredSession(storedSessionId, routeProfile)
+      const sessionProfile = storedForProfile?.profile ?? routeProfile
 
       if (resumeRequestRef.current !== requestId) {
         return
@@ -700,7 +716,7 @@ export function useSessionActions({
         setCurrentBranch(cachedViewState.branch)
         setSessionStartedAt(Date.now())
 
-        if (!isWatchWindow() && !hasVisibleTranscriptMessage(cachedViewState.messages)) {
+        if (!hasVisibleTranscriptMessage(cachedViewState.messages)) {
           try {
             const storedMessages = await getSessionMessages(storedSessionId, sessionProfile)
 
@@ -787,9 +803,10 @@ export function useSessionActions({
         // REST transcript prefetch and the gateway resume RPC are independent
         // — run them concurrently so a big session's wall time is
         // max(prefetch, resume) instead of their sum. The prefetch paints the
-        // transcript as soon as it lands; the RPC binds the runtime id.
-        // Watch windows skip the prefetch — lazy resume attaches the live mirror.
-        const prefetchPromise = watchWindow ? null : getSessionMessages(storedSessionId, sessionProfile)
+        // transcript as soon as it lands; the RPC binds the runtime id. Watch
+        // windows still prefetch stored history; `lazy` only controls whether
+        // the gateway builds an agent while attaching to the live child mirror.
+        const prefetchPromise = getSessionMessages(storedSessionId, sessionProfile)
 
         const resumePromise = requestGateway<SessionResumeResponse>('session.resume', {
           session_id: storedSessionId,
