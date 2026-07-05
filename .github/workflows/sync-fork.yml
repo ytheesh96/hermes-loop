@@ -1,0 +1,121 @@
+name: Sync fork with upstream
+
+on:
+  schedule:
+    # Keep the fork from drifting too far from NousResearch/hermes-agent:main.
+    - cron: '17 10 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-fork-with-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge upstream into fork main
+    if: ${{ github.repository == 'ytheesh96/hermes-agent' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SYNC_BRANCH: ${{ github.event.repository.default_branch }}
+      ISSUE_LABEL: upstream-sync
+    steps:
+      - name: Sync fork branch
+        id: sync
+        run: |
+          set -euo pipefail
+
+          echo "Syncing ${GITHUB_REPOSITORY}:${SYNC_BRANCH} with its upstream parent..."
+          if output=$(gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/merge-upstream" \
+              -f branch="${SYNC_BRANCH}" \
+              2>&1); then
+            echo "${output}"
+            echo "status=success" >> "${GITHUB_OUTPUT}"
+          else
+            echo "${output}" >&2
+            {
+              echo "status=failure"
+              echo "details<<EOF"
+              echo "${output}"
+              echo "EOF"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+      - name: Close resolved upstream-sync issues
+        if: steps.sync.outputs.status == 'success'
+        run: |
+          set -euo pipefail
+
+          for issue in $(gh issue list \
+              --repo "${GITHUB_REPOSITORY}" \
+              --state open \
+              --label "${ISSUE_LABEL}" \
+              --json number \
+              --jq '.[].number'); do
+            gh issue close "${issue}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --comment "The scheduled upstream sync succeeded, so this alert is resolved."
+          done
+
+      - name: Open conflict issue
+        if: steps.sync.outputs.status != 'success'
+        env:
+          SYNC_DETAILS: ${{ steps.sync.outputs.details }}
+        run: |
+          set -euo pipefail
+
+          gh label create "${ISSUE_LABEL}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --description "Fork upstream sync needs manual attention" \
+            --color D93F0B \
+            2>/dev/null || true
+
+          existing_issue=$(gh issue list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --state open \
+            --label "${ISSUE_LABEL}" \
+            --json number \
+            --jq '.[0].number // empty')
+
+          body_file=$(mktemp)
+          cat > "${body_file}" <<EOF
+          The scheduled fork sync could not merge upstream into \`${SYNC_BRANCH}\` automatically.
+
+          **Repository:** \`${GITHUB_REPOSITORY}\`
+          **Workflow run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          ```
+          ${SYNC_DETAILS}
+          ```
+
+          Suggested manual recovery:
+
+          ```bash
+          git fetch origin upstream
+          git checkout ${SYNC_BRANCH}
+          git merge upstream/${SYNC_BRANCH}
+          # Resolve conflicts, run tests, then:
+          git push origin ${SYNC_BRANCH}
+          ```
+          EOF
+
+          if [ -n "${existing_issue}" ]; then
+            gh issue comment "${existing_issue}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --body-file "${body_file}"
+          else
+            gh issue create \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Upstream fork sync needs manual attention" \
+              --label "${ISSUE_LABEL}" \
+              --body-file "${body_file}"
+          fi
+
+          exit 1
