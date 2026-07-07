@@ -210,7 +210,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
     try {
       const [modelInfo, modelOptions, auxiliaryModels, moaModels] = await Promise.all([
         getGlobalModelInfo(),
-        getGlobalModelOptions(),
+        getGlobalModelOptions({ includeUnconfigured: true, explicitOnly: false }),
         getAuxiliaryModels(),
         getMoaModels().catch(() => null)
       ])
@@ -443,7 +443,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
         nextModel = ''
       }
 
-      const options = await getGlobalModelOptions()
+      const options = await getGlobalModelOptions({ includeUnconfigured: true, explicitOnly: false })
 
       if (profileEpoch.current !== epoch) {
         return

@@ -366,7 +366,10 @@ export function ChatView({
         throw new Error('Hermes gateway unavailable')
       }
 
-      return gateway.request<ModelOptionsResponse>('model.options', { session_id: activeSessionId })
+      return gateway.request<ModelOptionsResponse>('model.options', {
+        session_id: activeSessionId,
+        explicit_only: true
+      })
     },
     enabled: gatewayOpen
   })

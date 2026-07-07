@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -13,25 +14,33 @@ beforeAll(() => {
 const getGlobalModelInfo = vi.fn()
 const getGlobalModelOptions = vi.fn()
 const getAuxiliaryModels = vi.fn()
+const getMoaModels = vi.fn()
 const setModelAssignment = vi.fn()
 const getRecommendedDefaultModel = vi.fn()
+const saveMoaModels = vi.fn()
 const setEnvVar = vi.fn()
 const getHermesConfigRecord = vi.fn()
 const saveHermesConfig = vi.fn()
+const setApiRequestProfile = vi.fn()
+const startManualLocalEndpoint = vi.fn()
 const startManualProviderOAuth = vi.fn()
 
 vi.mock('@/hermes', () => ({
   getGlobalModelInfo: () => getGlobalModelInfo(),
-  getGlobalModelOptions: () => getGlobalModelOptions(),
+  getGlobalModelOptions: (opts?: unknown) => getGlobalModelOptions(opts),
   getAuxiliaryModels: () => getAuxiliaryModels(),
+  getMoaModels: () => getMoaModels(),
   setModelAssignment: (body: unknown) => setModelAssignment(body),
   getRecommendedDefaultModel: (slug: string) => getRecommendedDefaultModel(slug),
+  saveMoaModels: (body: unknown) => saveMoaModels(body),
   setEnvVar: (key: string, value: string) => setEnvVar(key, value),
   getHermesConfigRecord: () => getHermesConfigRecord(),
-  saveHermesConfig: (config: unknown) => saveHermesConfig(config)
+  saveHermesConfig: (config: unknown) => saveHermesConfig(config),
+  setApiRequestProfile: (profile: null | string) => setApiRequestProfile(profile)
 }))
 
 vi.mock('@/store/onboarding', () => ({
+  startManualLocalEndpoint: () => startManualLocalEndpoint(),
   startManualProviderOAuth: (slug: string) => startManualProviderOAuth(slug)
 }))
 
@@ -46,7 +55,8 @@ beforeEach(() => {
         authenticated: true,
         capabilities: { 'hermes-4': { reasoning: true, fast: true } }
       },
-      // An unconfigured api_key provider — surfaced by the full-universe payload.
+      // Model settings intentionally opts into the full provider universe so an
+      // unconfigured api_key provider can be activated inline.
       {
         name: 'DeepSeek',
         slug: 'deepseek',
@@ -61,6 +71,7 @@ beforeEach(() => {
     main: { provider: 'nous', model: 'hermes-4' },
     tasks: [{ task: 'vision', provider: 'auto', model: '', base_url: '' }]
   })
+  getMoaModels.mockResolvedValue(null)
   setModelAssignment.mockResolvedValue({ provider: 'nous', model: 'hermes-4', gateway_tools: [] })
   getRecommendedDefaultModel.mockResolvedValue({ provider: 'deepseek', model: 'deepseek-chat', free_tier: null })
   setEnvVar.mockResolvedValue({ ok: true })
@@ -75,25 +86,29 @@ afterEach(() => {
 
 async function renderModelSettings() {
   const { ModelSettings } = await import('./model-settings')
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 
-  return render(<ModelSettings />)
+  return render(
+    <QueryClientProvider client={client}>
+      <ModelSettings />
+    </QueryClientProvider>
+  )
 }
 
 describe('ModelSettings', () => {
-  it('loads the current main model and lists the full provider universe', async () => {
+  it('loads the current main model and opts into the full provider universe', async () => {
     await renderModelSettings()
 
     await waitFor(() => expect(getGlobalModelInfo).toHaveBeenCalled())
     await waitFor(() => expect(getGlobalModelOptions).toHaveBeenCalled())
 
-    // Open the provider Select — every provider from the full payload should be
-    // listed, including the unconfigured one. API-key setup appears after the
-    // provider is selected (covered below), not inside the select option.
+    expect(getGlobalModelOptions).toHaveBeenCalledWith({ includeUnconfigured: true, explicitOnly: false })
+
+    // Open the provider Select — Model settings opts into every provider so an
+    // unconfigured one can be selected and activated inline.
     const triggers = await screen.findAllByRole('combobox')
     fireEvent.click(triggers[0])
 
-    // "Nous" shows in both the trigger and the open list; the unconfigured
-    // provider is the unique signal of the full universe.
     expect((await screen.findAllByText('Nous')).length).toBeGreaterThan(0)
     expect(await screen.findByText(/DeepSeek/)).toBeTruthy()
   }, 10000)
