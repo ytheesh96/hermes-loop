@@ -491,48 +491,68 @@ The dashboard embeds the real `hermes --tui` — **not** a rewrite.  See `hermes
 
 ### Electron Desktop Chat App (`apps/desktop/`)
 
-A **separate** Electron + React + nanostore chat surface from both the classic
-CLI and the dashboard's embedded TUI. It talks to `tui_gateway` over JSON-RPC
-and does **not** embed `hermes --tui`. Start with the load-bearing rules below,
-then use the full desktop notes for routing and verification details.
+A **separate** chat surface from both the classic CLI and the dashboard's embedded TUI. It is an Electron + React + nanostore renderer (`@assistant-ui/react`) that talks to a `tui_gateway` backend over JSON-RPC (`requestGateway(method, params)`). The WebSocket/JSON-RPC transport lives in the framework-agnostic `apps/shared` package (`@hermes/shared` — `JsonRpcGatewayClient` + WS URL helpers), which the web dashboard (`web/`) also consumes; **desktop has no build/runtime dependency on the dashboard frontend** — it spawns a headless `hermes serve` backend server (the same gateway `dashboard` serves, minus the browser UI entirely: `serve` sets `headless_backend=True`, so `cmd_dashboard` skips `_build_web_ui` AND exports `HERMES_SERVE_HEADLESS=1` so `mount_spa()` disables the SPA even if a stray `web_dist/` exists — only the JSON-RPC/WS/API surface is reachable). `dashboard` and `serve` share `cmd_dashboard`/`start_server` but are independent surfaces — neither launches the other. The one exception is a backward-compat *fallback*: `serve` is newer, so the desktop spawn (`electron/backend-command.cjs` + `backendSupportsServe()` in `main.cjs`) detects whether the resolved runtime registers `serve` and, only when it does not (an older managed install / PATH `hermes` the app hasn't updated yet), rewrites the argv to the legacy `dashboard --no-open`. Without that, a new app against an un-upgraded runtime would crash on an unknown subcommand and brick every mid-upgrade user. It does NOT embed `hermes --tui` — it has its own composer, transcript, and slash-command pipeline. Route desktop bugs to the `hermes-desktop-app-work` skill, not `hermes-dashboard-work`.
 
-Load-bearing rules:
-- Do not rebuild the desktop transcript/composer in the dashboard or TUI;
-  desktop owns its own surface.
-- Slash palette curation lives in
-  `apps/desktop/src/lib/desktop-slash-commands.ts`; it may hide noisy
-  built-ins, but skill and `quick_commands` extensions must flow through both
-  execution and suggestion paths.
-- Dispatch lives in `app/session/hooks/use-prompt-actions.ts`; backend command
-  data comes from `commands.catalog`, `complete.slash`, `slash.exec`, and
-  `command.dispatch`.
-- Tests: `npm run test:ui --workspace apps/desktop -- src/lib/desktop-slash-commands.test.ts`.
+**Slash commands in the desktop app are curated client-side, then dispatched to the backend.** The pipeline:
 
-Full desktop notes: `website/docs/developer-guide/desktop-chat.md`.
+- **Backend already provides everything.** `tui_gateway/server.py` `commands.catalog` (empty-query list) and `complete.slash` (typed-query completions) both include built-in commands, user `quick_commands`, AND skill-derived commands (`scan_skill_commands()` / `get_skill_commands()`). The desktop app does not need a new RPC to see skills.
+- **The renderer curates via `apps/desktop/src/lib/desktop-slash-commands.ts`.** This is the load-bearing file. It holds `DESKTOP_COMMANDS` (the ~19 built-ins shown in the palette) plus block-lists for terminal-only / messaging-only / picker-owned / settings-owned / advanced commands that should NOT clutter the desktop popover.
+  - `isDesktopSlashCommand(name)` — gates **execution**. Returns true for built-ins AND for any non-built-in (skill / quick command), so typed extension commands run.
+  - `isDesktopSlashSuggestion(name)` — gates **discovery/completion**. Used by BOTH completion paths in `app/chat/composer/hooks/use-slash-completions.ts` (empty-query catalog filter + typed-query `complete.slash` filter) and by `filterDesktopCommandsCatalog`.
+  - `isDesktopSlashExtensionCommand(name)` — true when the command is NOT a known Hermes built-in (i.e. a skill or user quick command). Both suggestion and catalog-filter paths allow extensions through so skill commands surface in the palette. (Added when fixing "skill commands missing from the desktop slash palette" — the curated allow-list was silently dropping every skill/quick command from completions even though they executed fine when typed.)
+- **Dispatch** lives in `app/session/hooks/use-prompt-actions.ts` (`runSlash`): built-ins that the desktop owns (`/skin`, `/help`, `/new`, …) are handled locally or via `commands.catalog`; everything else goes to `slash.exec`, falling back to `command.dispatch` (which the gateway resolves into skill / alias / exec directives). A skill command resolves to `{type: "skill", message}` and is submitted as a normal prompt.
+
+**Rule:** the desktop slash palette's curation is about hiding noise (terminal-only / messaging-only built-ins), NOT about hiding user-activated extensions. Skill commands and `quick_commands` are extensions the backend surfaces — they belong in completions. If you tighten `desktop-slash-commands.ts`, keep `isDesktopSlashExtensionCommand` flowing into both the suggestion and catalog-filter paths. Tests: `apps/desktop/src/lib/desktop-slash-commands.test.ts` (run via the repo-root `vitest`, since `apps/desktop` resolves deps from the root workspace install).
 
 ---
 
 ## Adding New Tools
 
-Settle the footprint question first (see "The Footprint Ladder"): most
-capabilities should be a skill or plugin, not a core model tool. For custom or
-local-only tools, create a plugin under `~/.hermes/plugins/<name>/` and register
-tools with `ctx.register_tool(...)` instead of editing Hermes core.
+Before adding any tool, settle the footprint question first (see "The
+Footprint Ladder" in the Contribution Rubric): most capabilities should NOT
+be core tools. For custom or local-only tools, do **not** edit Hermes core.
+Use the plugin route instead: create `~/.hermes/plugins/<name>/plugin.yaml`
+and `~/.hermes/plugins/<name>/__init__.py`, then register tools with
+`ctx.register_tool(...)`. Plugin toolsets are discovered automatically and can be
+enabled or disabled without touching `tools/` or `toolsets.py`.
 
-Use the built-in route only when the user is explicitly contributing a core tool
-for the base system. Minimum checklist:
-- Create `tools/<name>.py` with a top-level `registry.register(...)` call,
-  a `check_fn`, and `requires_env` when credentials are needed.
-- Add the tool name to `toolsets.py` (`_HERMES_CORE_TOOLS` or a specific
-  toolset). Auto-discovery imports the module, but toolsets decide exposure.
-- Handlers must return JSON strings and report errors as JSON, not raise raw
-  exceptions for expected failures.
-- Use `get_hermes_home()` for persistent state and `display_hermes_home()` in
-  user-facing schema text; never hardcode `~/.hermes`.
-- Keep schema descriptions free of static cross-tool references; add dynamic
-  guidance in `model_tools.py` only when the referenced tool may be absent.
+Use the built-in route below only when the user is explicitly contributing a new
+core Hermes tool that should ship in the base system.
 
-Full guide: `website/docs/developer-guide/adding-tools.md`.
+Built-in/core tools require changes in **2 files**:
+
+**1. Create `tools/your_tool.py`:**
+```python
+import json, os
+from tools.registry import registry
+
+def check_requirements() -> bool:
+    return bool(os.getenv("EXAMPLE_API_KEY"))
+
+def example_tool(param: str, task_id: str = None) -> str:
+    return json.dumps({"success": True, "data": "..."})
+
+registry.register(
+    name="example_tool",
+    toolset="example",
+    schema={"name": "example_tool", "description": "...", "parameters": {...}},
+    handler=lambda args, **kw: example_tool(param=args.get("param", ""), task_id=kw.get("task_id")),
+    check_fn=check_requirements,
+    requires_env=["EXAMPLE_API_KEY"],
+)
+```
+
+**2. Add to `toolsets.py`** — either `_HERMES_CORE_TOOLS` (all platforms) or a new toolset. **This step is required:** auto-discovery imports the tool and registers its schema, but the tool is only *exposed to an agent* if its name appears in a toolset. `_HERMES_CORE_TOOLS` is not dead code — it's the default bundle every platform's base toolset inherits from.
+
+Auto-discovery: any `tools/*.py` file with a top-level `registry.register()` call is imported automatically — no manual import list to maintain. Wiring into a toolset is still a deliberate, manual step.
+
+The registry handles schema collection, dispatch, availability checking, and error wrapping. All handlers MUST return a JSON string.
+
+**Path references in tool schemas**: If the schema description mentions file paths (e.g. default output directories), use `display_hermes_home()` to make them profile-aware. The schema is generated at import time, which is after `_apply_profile_override()` sets `HERMES_HOME`.
+
+**State files**: If a tool stores persistent state (caches, logs, checkpoints), use `get_hermes_home()` for the base directory — never `Path.home() / ".hermes"`. This ensures each profile gets its own state.
+
+**Agent-level tools** (todo, memory): intercepted by `run_agent.py` before `handle_function_call()`. See `tools/todo_tool.py` for the pattern.
 
 ---
 
@@ -625,17 +645,90 @@ versa), you're on the wrong loader. Check `DEFAULT_CONFIG` coverage.
 
 ## Skin/Theme System
 
-The skin engine (`hermes_cli/skin_engine.py`) provides pure-data CLI visual
-customization: banner colors, spinner faces/verbs/wings, tool prefixes,
-per-tool emojis, and branding strings. Built-ins live in `_BUILTIN_SKINS`;
-user skins are drop-in YAML files under `~/.hermes/skins/` and inherit missing
-values from `default`. Activate with `/skin <name>` or `display.skin` in
-`config.yaml`.
+The skin engine (`hermes_cli/skin_engine.py`) provides data-driven CLI visual customization. Skins are **pure data** — no code changes needed to add a new skin.
 
-When adding/changing skin keys, update all consumers (`banner.py`,
-`agent/display.py`, `cli.py`, TUI theme plumbing when applicable) and the user
-docs. Full key reference and YAML template:
-`website/docs/user-guide/features/skins.md`.
+### Architecture
+
+```
+hermes_cli/skin_engine.py    # SkinConfig dataclass, built-in skins, YAML loader
+~/.hermes/skins/*.yaml       # User-installed custom skins (drop-in)
+```
+
+- `init_skin_from_config()` — called at CLI startup, reads `display.skin` from config
+- `get_active_skin()` — returns cached `SkinConfig` for the current skin
+- `set_active_skin(name)` — switches skin at runtime (used by `/skin` command)
+- `load_skin(name)` — loads from user skins first, then built-ins, then falls back to default
+- Missing skin values inherit from the `default` skin automatically
+
+### What skins customize
+
+| Element | Skin Key | Used By |
+|---------|----------|---------|
+| Banner panel border | `colors.banner_border` | `banner.py` |
+| Banner panel title | `colors.banner_title` | `banner.py` |
+| Banner section headers | `colors.banner_accent` | `banner.py` |
+| Banner dim text | `colors.banner_dim` | `banner.py` |
+| Banner body text | `colors.banner_text` | `banner.py` |
+| Response box border | `colors.response_border` | `cli.py` |
+| Spinner faces (waiting) | `spinner.waiting_faces` | `display.py` |
+| Spinner faces (thinking) | `spinner.thinking_faces` | `display.py` |
+| Spinner verbs | `spinner.thinking_verbs` | `display.py` |
+| Spinner wings (optional) | `spinner.wings` | `display.py` |
+| Tool output prefix | `tool_prefix` | `display.py` |
+| Per-tool emojis | `tool_emojis` | `display.py` → `get_tool_emoji()` |
+| Agent name | `branding.agent_name` | `banner.py`, `cli.py` |
+| Welcome message | `branding.welcome` | `cli.py` |
+| Response box label | `branding.response_label` | `cli.py` |
+| Prompt symbol | `branding.prompt_symbol` | `cli.py` |
+
+### Built-in skins
+
+- `default` — Classic Hermes gold/kawaii (the current look)
+- `ares` — Crimson/bronze war-god theme with custom spinner wings
+- `mono` — Clean grayscale monochrome
+- `slate` — Cool blue developer-focused theme
+
+### Adding a built-in skin
+
+Add to `_BUILTIN_SKINS` dict in `hermes_cli/skin_engine.py`:
+
+```python
+"mytheme": {
+    "name": "mytheme",
+    "description": "Short description",
+    "colors": { ... },
+    "spinner": { ... },
+    "branding": { ... },
+    "tool_prefix": "┊",
+},
+```
+
+### User skins (YAML)
+
+Users create `~/.hermes/skins/<name>.yaml`:
+
+```yaml
+name: cyberpunk
+description: Neon-soaked terminal theme
+
+colors:
+  banner_border: "#FF00FF"
+  banner_title: "#00FFFF"
+  banner_accent: "#FF1493"
+
+spinner:
+  thinking_verbs: ["jacking in", "decrypting", "uploading"]
+  wings:
+    - ["⟨⚡", "⚡⟩"]
+
+branding:
+  agent_name: "Cyber Agent"
+  response_label: " ⚡ Cyber "
+
+tool_prefix: "▏"
+```
+
+Activate with `/skin cyberpunk` or `display.skin: cyberpunk` in config.yaml.
 
 ---
 
@@ -788,27 +881,83 @@ Top-level `tags:` and `category:` are also accepted and mirrored from
 
 ### Skill authoring standards (HARDLINE)
 
-Every new or modernized bundled/optional skill must pass review before merge.
-Always-loaded checklist:
+Every new or modernized skill — bundled, optional, or contributed —
+must meet these standards before merge. Reviewers reject PRs that
+violate them.
 
-1. `description` is one sentence, ≤60 chars, ends with a period, and avoids
-   marketing language or repeating the skill name.
-2. SKILL.md prose names native Hermes tools or expected MCP servers; do not
-   headline shell utilities that Hermes wraps (`grep` → `search_files`,
-   `cat`/`head`/`tail` → `read_file`, `sed`/`awk` → `patch`).
-3. `platforms:` matches actual script imports and shell assumptions; prefer
-   cross-platform stdlib paths/process checks before narrowing support.
-4. `author` credits the human contributor first, with Hermes Agent only as a
-   secondary collaborator when relevant.
-5. Use the modern section order (`When to Use`, `Prerequisites`, `How to Run`,
-   `Quick Reference`, `Procedure`, `Pitfalls`, `Verification`) and keep prose
-   concise (~100 lines simple, ~200 complex).
-6. Put helpers in `scripts/`, long material in `references/`, templates in
-   `templates/`, and tests in `tests/skills/test_<skill>_skill.py` with no live
-   network calls.
-7. Keep `.env.example` edits isolated to clearly delimited blocks.
+1. **`description` ≤ 60 characters, one sentence, ends with a period.**
+   Long descriptions bloat skill listings and dilute the model's
+   attention when many skills are loaded. State the capability, not
+   the implementation. No marketing words ("powerful",
+   "comprehensive", "seamless", "advanced"). Don't repeat the skill
+   name. Verify with:
+   ```python
+   import re, pathlib
+   m = re.search(r'^description: (.*)$',
+                 pathlib.Path('skills/<cat>/<name>/SKILL.md').read_text(),
+                 re.MULTILINE)
+   assert len(m.group(1)) <= 60, len(m.group(1))
+   ```
 
-Full checklist: `website/docs/developer-guide/creating-skills.md#review-standards-for-bundled-and-optional-skills`.
+2. **Tools referenced in SKILL.md prose must be native Hermes tools or
+   MCP servers the skill explicitly expects.** When the skill needs a
+   capability, point at the proper tool by name in backticks
+   (`` `terminal` ``, `` `web_extract` ``, `` `read_file` ``,
+   `` `patch` ``, `` `search_files` ``, `` `vision_analyze` ``,
+   `` `browser_navigate` ``, `` `delegate_task` ``, etc.). Do NOT
+   name shell utilities the agent already has wrapped — `grep` →
+   `search_files`, `cat`/`head`/`tail` → `read_file`, `sed`/`awk` →
+   `patch`, `find`/`ls` → `search_files target='files'`. If the skill
+   depends on an MCP server, name the MCP server and document the
+   expected setup in `## Prerequisites`. Anything else (third-party
+   CLIs, shell pipelines, etc.) is fair game inside script files but
+   should not be the headline interaction surface in the prose.
+
+3. **`platforms:` gating audited against actual script imports.**
+   Skills that use POSIX-only primitives (`fcntl`, `termios`,
+   `os.setsid`, `os.kill(pid, 0)` for liveness, `/proc`, `/tmp`
+   hardcoded, `signal.SIGKILL`, bash heredocs, `osascript`, `apt`,
+   `systemctl`) must declare their supported platforms. Default
+   posture: try to fix it cross-platform first — `tempfile.gettempdir`,
+   `pathlib.Path`, `psutil.pid_exists`, Python-level filtering instead
+   of `grep`. Gate to a narrower set only when the dependency is
+   genuinely platform-bound.
+
+4. **`author` credits the human contributor first.** For external
+   contributions, the contributor's real name + GitHub handle goes
+   first; "Hermes Agent" is the secondary collaborator. If the
+   contributor's commit shows "Hermes Agent" as author (because they
+   used Hermes to draft the skill), replace it with their actual name
+   — credit the human, not the tool.
+
+5. **SKILL.md body uses the modern section order.** `# <Skill> Skill`
+   title, 2-3 sentence intro stating what it does and doesn't do,
+   `## When to Use`, `## Prerequisites`, `## How to Run`,
+   `## Quick Reference`, `## Procedure`, `## Pitfalls`,
+   `## Verification`. Target ~200 lines for a complex skill,
+   ~100 lines for a simple one. Cut redundant intro fluff, marketing
+   prose, and re-explanations of env vars already in
+   `## Prerequisites`.
+
+6. **Scripts go in `scripts/`, references in `references/`,
+   templates in `templates/`.** Don't expect the model to inline-write
+   parsers, XML walkers, or non-trivial logic every call — ship a
+   helper script. Reference it from SKILL.md by path relative to the
+   skill directory.
+
+7. **Tests live at `tests/skills/test_<skill>_skill.py`** and use only
+   stdlib + pytest + `unittest.mock`. No live network calls. Run via
+   `scripts/run_tests.sh tests/skills/test_<skill>_skill.py -q`.
+
+8. **`.env.example` additions are isolated to a clearly delimited
+   block.** Don't touch the surrounding file — contributor-supplied
+   `.env.example` versions are usually stale and edits outside the
+   skill's own block must be dropped during salvage.
+
+The full salvage / modernization checklist for external skill PRs
+lives in the `hermes-agent-dev` skill at
+`references/new-skill-pr-salvage.md` — load it before polishing
+contributor skill PRs.
 
 ---
 
@@ -1140,65 +1289,22 @@ scripts/run_tests.sh                                  # full suite, CI-parity
 scripts/run_tests.sh tests/gateway/                   # one directory
 scripts/run_tests.sh tests/agent/test_foo.py::test_x  # one test
 scripts/run_tests.sh -v --tb=long                     # pass-through pytest flags
-scripts/run_tests.sh --no-isolate tests/foo/          # disable subprocess isolation (faster, for debugging)
 ```
 
-### Subprocess-per-test isolation
+### Subprocess-per-test-file isolation
 
-Every test runs in a freshly-spawned Python subprocess via the in-tree plugin
-at `tests/_isolate_plugin.py`. This means module-level dicts/sets and
-ContextVars from one test cannot leak into the next — the historic
-`_reset_module_state` autouse fixture is gone.
+Every test file runs in a freshly-spawned Python subprocess via `run_tests_parallel.py`. This means module-level dicts/sets and
+ContextVars from one test file cannot leak into the next.
 
-Implementation notes:
+### Why the wrapper
 
-- The plugin uses `multiprocessing.get_context("spawn")`, which works on
-  Linux, macOS, and Windows alike (POSIX `fork` is not used).
-- Per-test overhead is ~0.5–1.0s (Python startup + pytest collection). xdist
-  parallelism amortizes this across cores; on a 20-core box the full suite
-  finishes in roughly the same wall time as before, but flake-free.
-- `isolate_timeout` (configured in `pyproject.toml`) caps each test at 30s.
-  Hangs are killed and surfaced as a failure report.
-- Pass `--no-isolate` to disable isolation — useful when debugging a single
-  test interactively, or when you specifically want to verify state leakage.
-- The plugin disables itself in child processes (sentinel envvar
-  `HERMES_ISOLATE_CHILD=1`), so there's no fork-bomb risk.
+|                     | Without wrapper                             | With wrapper                              |
+| ------------------- | ------------------------------------------- | ----------------------------------------- |
+| Provider API keys   | Whatever is in your env (auto-detects pool) | All env vars except a specific few unset. |
+| HOME / `~/.hermes/` | Your real config+auth.json                  | Temp dir per test                         |
+| Timezone            | Local TZ (PDT etc.)                         | UTC                                       |
+| Locale              | Whatever is set                             | C.UTF-8                                   |
 
-### Why the wrapper (and why the old "just call pytest" doesn't work)
-
-Five real sources of local-vs-CI drift the script closes:
-
-| | Without wrapper | With wrapper |
-|---|---|---|
-| Provider API keys | Whatever is in your env (auto-detects pool) | All `*_API_KEY`/`*_TOKEN`/etc. unset |
-| HOME / `~/.hermes/` | Your real config+auth.json | Temp dir per test |
-| Timezone | Local TZ (PDT etc.) | UTC |
-| Locale | Whatever is set | C.UTF-8 |
-| xdist workers | `-n auto` = all cores | `-n auto` (safe — subprocess isolation prevents cross-worker flakes) |
-
-`tests/conftest.py` also enforces points 1-4 as an autouse fixture so ANY pytest
-invocation (including IDE integrations) gets hermetic behavior — but the wrapper
-is belt-and-suspenders.
-
-### Running without the wrapper (only if you must)
-
-If you can't use the wrapper (e.g. inside an IDE that shells pytest directly),
-at minimum activate the venv. The isolation plugin loads automatically from
-`addopts` in `pyproject.toml`, so you get the same per-test process isolation
-either way.
-
-```bash
-source .venv/bin/activate   # or: source venv/bin/activate
-python -m pytest tests/ -q
-```
-
-If you need to bypass isolation for fast feedback while debugging:
-
-```bash
-python -m pytest tests/agent/test_foo.py -q --no-isolate
-```
-
-Always run the full suite before pushing changes.
 
 ### Don't write change-detector tests
 
