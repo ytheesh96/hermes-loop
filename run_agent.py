@@ -1679,9 +1679,12 @@ class AIAgent:
         if history is None:
             start_len = getattr(self, "_active_turn_persistence_history_len", 0) or 0
             if start_len:
-                # _flush_messages_to_session_db only needs the length. A dummy
-                # list avoids retaining another full copy of large histories.
-                history = [None] * start_len
+                # Marker-based DB dedup no longer consumes a dummy length-only
+                # history list. Mark the already-loaded prefix as durable so
+                # in-flight checkpoints append only current-turn rows.
+                for msg in messages[:start_len]:
+                    if isinstance(msg, dict):
+                        msg[_DB_PERSISTED_MARKER] = True
         self._flush_messages_to_session_db(messages, history)
 
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
@@ -1822,7 +1825,6 @@ class AIAgent:
                 id(item) for item in (conversation_history or [])
                 if isinstance(item, dict)
             }
-
             for _msg_idx, msg in enumerate(messages):
                 if not isinstance(msg, dict):
                     continue

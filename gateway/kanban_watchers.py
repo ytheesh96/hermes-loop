@@ -314,7 +314,14 @@ class GatewayKanbanWatchersMixin:
                             self._kanban_advance, sub, d["cursor"], board_slug,
                         )
                         continue
-                    sub_profile = sub.get("notifier_profile") or ""
+                    sub_profile = str(sub.get("notifier_profile") or "").strip()
+                    route_profile = sub_profile or None
+                    if route_profile and route_profile == str(notifier_profile or "").strip():
+                        # The active profile's adapters live in self.adapters,
+                        # not _profile_adapters[profile]. Preserve strict
+                        # secondary-profile routing without skipping the active
+                        # profile's own subscriptions.
+                        route_profile = None
                     # Route via the SAME chokepoint the authorization path uses
                     # (gateway/authz_mixin.py::_authorization_adapter): a stamped
                     # profile with its own adapter-registry entry must be served
@@ -324,7 +331,7 @@ class GatewayKanbanWatchersMixin:
                     # wrong bot (the cross-profile mis-delivery this whole change
                     # exists to fix). The helper returns None only when the profile
                     # (or default) genuinely has no adapter for the platform.
-                    adapter = self._authorization_adapter(plat, sub_profile or None)
+                    adapter = self._authorization_adapter(plat, route_profile)
                     if adapter is None:
                         logger.debug(
                             "kanban notifier: adapter %s disconnected before delivery for %s; rewinding claim",
@@ -339,7 +346,11 @@ class GatewayKanbanWatchersMixin:
                         )
                         continue
                     title = (task.title if task else sub["task_id"])[:120]
-                    board_tag = f"[{board_slug}] " if board_slug else ""
+                    board_tag = (
+                        f"[{board_slug}] "
+                        if board_slug and board_slug != _kb.DEFAULT_BOARD
+                        else ""
+                    )
                     for ev in d["events"]:
                         kind = ev.kind
                         # Identity prefix: attribute terminal pings to the
@@ -563,7 +574,7 @@ class GatewayKanbanWatchersMixin:
                                         chat_type="group",
                                         thread_id=sub.get("thread_id") or None,
                                         user_id=sub.get("user_id"),
-                                        profile=sub_profile or None,
+                                        profile=route_profile,
                                     )
                                     _synth_event = MessageEvent(
                                         text=_synth,

@@ -292,19 +292,15 @@ class _SlashWorker:
         if model:
             argv += ["--model", model]
 
-        # slash_worker runs the Hermes agent → needs provider credentials.
-        # Tier-1 secrets (gateway/GitHub/infra) are still stripped (#29157).
-        env = hermes_subprocess_env(inherit_credentials=True)
-        env["HERMES_SESSION_KEY"] = session_key
-        env["HERMES_SESSION_ID"] = session_key
-        env["HERMES_TENANT"] = session_key
-
         self._closed = False
         from hermes_cli._subprocess_compat import windows_hide_flags
 
         # slash_worker runs the Hermes agent → needs provider credentials.
         # Tier-1 secrets (gateway/GitHub/infra) are still stripped (#29157).
         env = hermes_subprocess_env(inherit_credentials=True)
+        env["HERMES_SESSION_KEY"] = session_key
+        env["HERMES_SESSION_ID"] = session_key
+        env["HERMES_TENANT"] = session_key
         if profile_home:
             # Global-remote / multi-profile sessions: the worker must resolve
             # config/skills/state against the session's profile home, not the
@@ -2309,11 +2305,49 @@ def _infer_provider_for_exact_model(model: str, *, avoid_provider: str = "") -> 
     return ""
 
 
+def _repair_provider_for_exact_model(model: str, provider: str) -> str:
+    model_s = str(model or "").strip()
+    provider_s = str(provider or "").strip()
+    if not model_s or not provider_s:
+        return provider_s
+    provider_l = provider_s.lower()
+    if provider_l in _BARE_BILLING_PROVIDERS or provider_l.startswith("custom:"):
+        return provider_s
+    if _provider_supports_exact_model(provider_s, model_s):
+        return provider_s
+
+    # Repair only the stale proxy-catalog shape: the stored provider advertises
+    # a foreign namespaced variant like ``openai/gpt-5.5`` while the stored model
+    # is the bare exact model ``gpt-5.5``. Do not second-guess an explicit UI
+    # provider pick just because another provider also serves that bare model.
+    wanted_l = model_s.lower()
+    has_foreign_namespaced_variant = False
+    for row in _model_provider_rows_for_repair():
+        if str(row.get("slug") or "").strip().lower() != provider_l:
+            continue
+        for candidate in row.get("models") or []:
+            candidate_s = str(candidate or "").strip()
+            if "/" not in candidate_s:
+                continue
+            ns, _, tail = candidate_s.rpartition("/")
+            if tail.lower() == wanted_l and ns.strip().lower() != provider_l:
+                has_foreign_namespaced_variant = True
+                break
+        break
+    if not has_foreign_namespaced_variant:
+        return provider_s
+
+    repaired = _infer_provider_for_exact_model(model_s, avoid_provider=provider_s)
+    return repaired or provider_s
+
+
 def _session_model_override_from_create(model: str, provider: str) -> dict | None:
     create_model = str(model or "").strip()
     create_provider = str(provider or "").strip()
     if not create_model:
         return None
+
+    create_provider = _repair_provider_for_exact_model(create_model, create_provider)
 
     return {"model": create_model, "provider": create_provider or None}
 
@@ -2384,6 +2418,9 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
                 "custom provider identity recovery failed", exc_info=True
             )
         provider = healed or ("" if not base_url else provider)
+
+    if model and provider:
+        provider = _repair_provider_for_exact_model(model, provider)
 
     if model:
         # Use the same dict-shaped override that live /model switches use so a
@@ -8579,12 +8616,9 @@ def _(rid, params: dict) -> dict:
                 ordinal = int(truncate_user_ordinal)
             except (TypeError, ValueError):
                 return _err(rid, 4004, "truncate_before_user_ordinal must be an integer")
-            history = session.get("history", [])
-            user_indices = [i for i, m in enumerate(history) if m.get("role") == "user"]
-            # Reject out-of-range ordinals on BOTH ends. A negative value would
-            # otherwise hit Python's negative indexing and persist data loss.
-            if ordinal < 0 or ordinal >= len(user_indices):
+            if ordinal < 0:
                 return _err(rid, 4018, "target user message is no longer in session history")
+            history = session.get("history", [])
             truncated, used_display_history = _truncate_history_before_user_ordinal(
                 session, history, ordinal
             )

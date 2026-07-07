@@ -3987,6 +3987,19 @@ def _orchestrator_profile_session_db(profile: Optional[str]) -> Any:
         return SessionDB()
 
 
+def _current_session_profile_name() -> str:
+    profile = os.environ.get("HERMES_PROFILE") or os.environ.get("HERMES_PROFILE_NAME")
+    if profile and str(profile).strip():
+        return str(profile).strip()
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        active = str(get_active_profile_name() or "").strip()
+        return active or "default"
+    except Exception:
+        return "default"
+
+
 def _orchestrator_parent_session_id(task: Task, session_db: Any) -> Optional[str]:
     """Resolve the foreground session that owns an orchestrator dispatch."""
     candidates = [
@@ -6655,6 +6668,180 @@ def request_review_task(
                 payload[key] = value
         _append_event(conn, task_id, "review_requested", payload, run_id=run_id)
         return True
+
+
+def _clear_review_routing_sql() -> str:
+    return (
+        "review_kind = NULL, resume_mode = NULL, "
+        "review_subject_assignee = NULL, "
+        "foreground_parent_session_id = NULL, "
+        "foreground_fork_session_id = NULL"
+    )
+
+
+def resolve_blocker_triage_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    action: str,
+    actor: str,
+    reason: Optional[str] = None,
+    instructions: Optional[str] = None,
+    assignee: Optional[str] = None,
+    reviewer: Optional[str] = None,
+    summary: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    followups: Optional[Iterable[dict[str, Any]]] = None,
+    expected_run_id: Optional[int] = None,
+) -> dict[str, Any]:
+    """Resolve an orchestrator blocker-triage review on the same task row.
+
+    Legacy workers used ``status='review'`` with
+    ``review_kind='blocker_triage'`` for blockers. New worker blockers call
+    ``block_task`` directly; this compatibility resolver only lets existing
+    rows complete/approve, return to the original worker with instructions,
+    create upstream follow-up cards, or route to QA review.
+    """
+    action = str(action or "").strip().lower()
+    actor = str(actor or "").strip() or "orchestrator"
+    if action not in BLOCKER_TRIAGE_ACTIONS:
+        raise ValueError(
+            f"unsupported blocker triage action {action!r}; expected one of "
+            + ", ".join(sorted(BLOCKER_TRIAGE_ACTIONS))
+        )
+
+    task = get_task(conn, task_id)
+    if task is None:
+        return {"ok": False, "outcome": "not_found"}
+    if task.review_kind != BLOCKER_TRIAGE_REVIEW_KIND:
+        return {"ok": False, "outcome": "not_blocker_triage"}
+    if task.status not in {"running", "review"}:
+        return {"ok": False, "outcome": "invalid_status", "status": task.status}
+    if expected_run_id is not None and task.current_run_id != int(expected_run_id):
+        return {"ok": False, "outcome": "stale_run"}
+
+    triage_summary = summary if summary is not None else reason
+    base_metadata = dict(metadata or {})
+    base_metadata.setdefault("blocker_triage_action", action)
+    base_metadata.setdefault("blocker_triage_actor", actor)
+    if instructions:
+        base_metadata.setdefault("instructions", instructions)
+
+    if action == "approve_complete":
+        ok = complete_task(
+            conn,
+            task_id,
+            result=reason,
+            summary=triage_summary or "blocker triage approved completion",
+            metadata=base_metadata,
+            expected_run_id=expected_run_id,
+        )
+        return {"ok": bool(ok), "outcome": "completed" if ok else "not_completed"}
+
+    if action == "route_reviewer_qa":
+        ok = request_review_task(
+            conn,
+            task_id,
+            reviewer=reviewer or "reviewer-qa",
+            review_kind=None,
+            resume_mode=None,
+            review_subject_assignee=task.review_subject_assignee or task.assignee,
+            reason=reason,
+            summary=triage_summary or instructions or "blocker triage routed to QA",
+            metadata=base_metadata,
+            expected_run_id=expected_run_id,
+        )
+        return {"ok": bool(ok), "outcome": "routed_reviewer_qa" if ok else "not_routed"}
+
+    created_cards: list[str] = []
+    if action == "create_followups":
+        for item in followups or []:
+            if not isinstance(item, dict):
+                raise ValueError("each followup must be an object")
+            title = str(item.get("title") or "").strip()
+            followup_assignee = str(item.get("assignee") or "").strip()
+            if not title or not followup_assignee:
+                raise ValueError("each followup requires title and assignee")
+            child_id = create_task(
+                conn,
+                title=title,
+                body=str(item.get("body") or ""),
+                assignee=followup_assignee,
+                created_by=f"blocker-triage:{task_id}",
+                tenant=task.tenant,
+                priority=int(item.get("priority") or 0),
+                workspace_kind=str(item.get("workspace_kind") or task.workspace_kind or "scratch"),
+                workspace_path=(
+                    str(item.get("workspace_path"))
+                    if item.get("workspace_path")
+                    else task.workspace_path
+                ),
+            )
+            link_tasks(conn, parent_id=child_id, child_id=task_id)
+            created_cards.append(child_id)
+        if not created_cards:
+            raise ValueError("create_followups requires at least one followup")
+
+    target_assignee = _canonical_assignee(assignee or task.review_subject_assignee or task.assignee)
+    new_status = "todo" if _task_has_undone_parents(conn, task_id) else "ready"
+    now = int(time.time())
+    with write_txn(conn):
+        cur = conn.execute(
+            f"""
+            UPDATE tasks
+               SET status = ?, assignee = ?, claim_lock = NULL,
+                   claim_expires = NULL, worker_pid = NULL,
+                   {_clear_review_routing_sql()}
+             WHERE id = ? AND status IN ('running', 'review')
+            """,
+            (new_status, target_assignee, task_id),
+        )
+        if cur.rowcount != 1:
+            return {"ok": False, "outcome": "not_routed"}
+        run_id = _end_run(
+            conn,
+            task_id,
+            outcome="blocker_triage_routed",
+            status="blocker_triage_routed",
+            summary=triage_summary or instructions,
+            metadata=base_metadata or None,
+        )
+        if run_id is None and (triage_summary or instructions or base_metadata):
+            run_id = _synthesize_ended_run(
+                conn,
+                task_id,
+                outcome="blocker_triage_routed",
+                summary=triage_summary or instructions,
+                metadata=base_metadata or None,
+            )
+        payload: dict[str, Any] = {
+            "action": action,
+            "actor": actor,
+            "assignee": target_assignee,
+            "status": new_status,
+        }
+        if reason:
+            payload["reason"] = reason
+        if instructions:
+            payload["instructions"] = instructions
+        if created_cards:
+            payload["created_cards"] = created_cards
+        _append_event(conn, task_id, "blocker_triage_resolved", payload, run_id=run_id)
+        if instructions:
+            conn.execute(
+                "INSERT INTO task_comments (task_id, author, body, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (task_id, actor, f"BLOCKER TRIAGE: {instructions}", now),
+            )
+
+    recompute_ready(conn)
+    return {
+        "ok": True,
+        "outcome": "followups_created" if created_cards else "returned_to_worker",
+        "status": new_status,
+        "assignee": target_assignee,
+        "created_cards": created_cards,
+    }
 
 
 def _task_has_undone_parents(conn: sqlite3.Connection, task_id: str) -> bool:

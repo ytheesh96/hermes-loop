@@ -2984,7 +2984,16 @@ class SessionDB:
                     "SELECT s.id FROM sessions s "
                     "WHERE s.parent_session_id = ? "
                     f"  AND ({_COMPRESSION_CHILD_SQL.format(a='s')}) "
-                    "ORDER BY started_at DESC LIMIT 1",
+                    "ORDER BY "
+                    "  CASE "
+                    "    WHEN s.end_reason = 'compression' THEN 0 "
+                    "    WHEN s.ended_at IS NULL THEN 1 "
+                    "    ELSE 2 "
+                    "  END, "
+                    "  COALESCE((SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id), s.started_at) DESC, "
+                    "  s.started_at DESC, "
+                    "  s.id DESC "
+                    "LIMIT 1",
                     (current,),
                 )
                 row = cursor.fetchone()
