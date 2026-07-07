@@ -52,15 +52,18 @@ _BRANCH_CHILD_SQL = (
 
 _COMPRESSION_CHILD_SQL = (
     "json_extract(COALESCE({a}.model_config, '{{}}'), '$._compressed_from') IS NOT NULL"
-    " OR EXISTS (SELECT 1 FROM sessions p"
-    "            WHERE p.id = {a}.parent_session_id"
-    "            AND p.end_reason = 'compression')"
     " OR (json_extract(COALESCE({a}.model_config, '{{}}'), '$._branched_from') IS NULL"
     "     AND json_extract(COALESCE({a}.model_config, '{{}}'), '$._delegate_from') IS NULL"
     "     AND EXISTS (SELECT 1 FROM messages m"
     "                 WHERE m.session_id = {a}.id"
     "                 AND m.role = 'user'"
     "                 AND m.content LIKE '[CONTEXT COMPACTION%'))"
+    " OR (json_extract(COALESCE({a}.model_config, '{{}}'), '$._branched_from') IS NULL"
+    "     AND json_extract(COALESCE({a}.model_config, '{{}}'), '$._delegate_from') IS NULL"
+    "     AND COALESCE({a}.source, '') != 'tool'"
+    "     AND EXISTS (SELECT 1 FROM sessions p"
+    "                 WHERE p.id = {a}.parent_session_id"
+    "                 AND p.end_reason = 'compression'))"
 )
 
 # Rows that surface in pickers: roots + branch children (subagent runs and
@@ -2962,91 +2965,15 @@ class SessionDB:
             current = child_id
         return current
 
-    def get_compression_lineage(self, session_id: str) -> List[str]:
-        """Return the compression-continuation ids from root to tip.
-
-        Unlike ``get_compression_tip()``, callers that surface a projected tip
-        to UI clients also need the intermediate ids. A user can still be routed
-        to an older segment after context compaction, so exposing the full chain
-        lets clients treat root, intermediate ids, and current tip as the same
-        logical conversation.
-        """
-        if not session_id:
-            return []
-
-        chain = [session_id]
-        seen = {session_id}
-        current = session_id
-
-        for _ in range(100):
-            with self._lock:
-                cursor = self._conn.execute(
-                    "SELECT s.id FROM sessions s "
-                    "WHERE s.parent_session_id = ? "
-                    f"  AND ({_COMPRESSION_CHILD_SQL.format(a='s')}) "
-                    "ORDER BY "
-                    "  CASE "
-                    "    WHEN s.end_reason = 'compression' THEN 0 "
-                    "    WHEN s.ended_at IS NULL THEN 1 "
-                    "    ELSE 2 "
-                    "  END, "
-                    "  COALESCE((SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id), s.started_at) DESC, "
-                    "  s.started_at DESC, "
-                    "  s.id DESC "
-                    "LIMIT 1",
-                    (current,),
-                )
-                row = cursor.fetchone()
-            if row is None:
-                return chain
-
-            next_id = row["id"]
-            if next_id in seen:
-                return chain
-
-            chain.append(next_id)
-            seen.add(next_id)
-            current = next_id
-
-        return chain
-
     def get_compression_lineage_root_to_tip(self, session_id: str) -> List[str]:
         """Return the full compression chain containing ``session_id``.
 
-        ``get_compression_lineage()`` walks forward from a known root. UI and
-        resume callers often start from the current tip, so first walk backward
-        across compression-only parent edges, then project forward again.
+        UI and resume callers often start from the current tip, so this keeps a
+        compatibility name for the root-to-tip lineage returned by
+        ``get_compression_lineage()``.
         """
-        if not session_id:
-            return []
+        return self.get_compression_lineage(session_id)
 
-        current = session_id
-        seen = set()
-        with self._lock:
-            for _ in range(100):
-                if not current or current in seen:
-                    break
-                seen.add(current)
-                row = self._conn.execute(
-                    f"""
-                    SELECT
-                        child.parent_session_id AS parent_id,
-                        ({_COMPRESSION_CHILD_SQL.format(a='child')}) AS is_compression_child
-                    FROM sessions child
-                    WHERE child.id = ?
-                    """,
-                    (current,),
-                ).fetchone()
-                if row is None:
-                    break
-                parent_id = row["parent_id"] if hasattr(row, "keys") else row[0]
-                is_compression_child = row["is_compression_child"] if hasattr(row, "keys") else row[1]
-                if not parent_id or not is_compression_child:
-                    break
-                current = parent_id
-
-        lineage = self.get_compression_lineage(current)
-        return lineage or [session_id]
     def distinct_session_cwds(self, include_archived: bool = False) -> List[Dict[str, Any]]:
         """Distinct non-empty session cwds with usage stats, for repo discovery.
 
@@ -5068,6 +4995,89 @@ class SessionDB:
     # Export and cleanup
     # =========================================================================
 
+    def _is_branch_child_row(self, session: Dict[str, Any]) -> bool:
+        raw = session.get("model_config")
+        if not raw:
+            return False
+        try:
+            cfg = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return isinstance(cfg, dict) and cfg.get("_branched_from") is not None
+
+    def _is_compression_child_row(self, child: Dict[str, Any]) -> bool:
+        parent_id = child.get("parent_session_id")
+        if not parent_id or self._is_branch_child_row(child):
+            return False
+        parent = self.get_session(parent_id)
+        return bool(parent and parent.get("end_reason") == "compression")
+
+    def get_compression_lineage(self, session_id: str) -> List[str]:
+        """Return compression ancestors through tip in chronological order."""
+        if not session_id:
+            return []
+
+        session = self.get_session(session_id)
+        if not session:
+            return []
+
+        current = session_id
+        seen = set()
+        with self._lock:
+            for _ in range(100):
+                if not current or current in seen:
+                    break
+                seen.add(current)
+                row = self._conn.execute(
+                    f"""
+                    SELECT
+                        child.parent_session_id AS parent_id,
+                        ({_COMPRESSION_CHILD_SQL.format(a='child')}) AS is_compression_child
+                    FROM sessions child
+                    WHERE child.id = ?
+                    """,
+                    (current,),
+                ).fetchone()
+                if row is None:
+                    break
+                parent_id = row["parent_id"] if hasattr(row, "keys") else row[0]
+                is_compression_child = row["is_compression_child"] if hasattr(row, "keys") else row[1]
+                if not parent_id or not is_compression_child:
+                    break
+                current = parent_id
+
+        lineage = [current]
+        seen = {current}
+        for _ in range(100):
+            with self._lock:
+                cursor = self._conn.execute(
+                    "SELECT s.id FROM sessions s "
+                    "WHERE s.parent_session_id = ? "
+                    f"  AND ({_COMPRESSION_CHILD_SQL.format(a='s')}) "
+                    "ORDER BY "
+                    "  CASE "
+                    "    WHEN s.end_reason = 'compression' THEN 0 "
+                    "    WHEN s.ended_at IS NULL THEN 1 "
+                    "    ELSE 2 "
+                    "  END, "
+                    "  COALESCE((SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id), s.started_at) DESC, "
+                    "  s.started_at DESC, "
+                    "  s.id DESC "
+                    "LIMIT 1",
+                    (current,),
+                )
+                row = cursor.fetchone()
+            if row is None:
+                break
+            next_id = row["id"]
+            if not next_id or next_id in seen:
+                break
+            lineage.append(next_id)
+            seen.add(next_id)
+            current = next_id
+
+        return lineage if session_id in lineage else [session_id]
+
     def export_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Export a single session with all its messages as a dict."""
         session = self.get_session(session_id)
@@ -5075,6 +5085,26 @@ class SessionDB:
             return None
         messages = self.get_messages(session_id)
         return {**session, "messages": messages}
+
+    def export_session_lineage(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Export a compression lineage as one logical session dict."""
+        lineage_ids = self.get_compression_lineage(session_id)
+        if not lineage_ids:
+            return None
+        segments = []
+        for sid in lineage_ids:
+            segment = self.export_session(sid)
+            if segment:
+                segments.append(segment)
+        if not segments:
+            return None
+        base = dict(segments[-1])
+        total_messages = sum(len(seg.get("messages") or []) for seg in segments)
+        base["segments"] = segments
+        base["lineage_session_ids"] = [seg["id"] for seg in segments]
+        base["message_count"] = total_messages
+        base["messages"] = [msg for seg in segments for msg in (seg.get("messages") or [])]
+        return base
 
     def export_all(self, source: str = None) -> List[Dict[str, Any]]:
         """
