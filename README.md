@@ -1,7 +1,9 @@
+<a id="hermes-loop-hermes-hackathon-submission"></a>
+
 # Hermes Loop & Durable Agent Workflows
 
 This fork is Vaitheesh Jeypalan's Hermes Loop / durable-agent-workflow
-build on top of [Nous Research's Hermes Agent](https://github.com/NousResearch/hermes-agent).
+built on top of [Nous Research's Hermes Agent](https://github.com/NousResearch/hermes-agent).
 It keeps the upstream agent framework intact while exploring how long-running
 AI work can feel like a visible, resumable branch: planned in a task graph,
 executed by durable workers, reviewed through explicit handoffs, and resumed
