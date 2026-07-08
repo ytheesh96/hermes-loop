@@ -513,13 +513,13 @@ def test_session_resume_resolves_compression_parent_to_tip(server, monkeypatch):
                 ]
             return [{"role": "assistant", "content": "tip reply"}]
 
-    def _make_agent(_sid, key, session_id=None, session_db=None):
+    def _make_agent(_sid, key, session_id=None, session_db=None, **_kwargs):
         made_agents.append((key, session_id))
         return object()
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
     monkeypatch.setattr(server, "_make_agent", _make_agent)
-    monkeypatch.setattr(server, "_init_session", lambda sid, key, agent, history, cols=80: None)
+    monkeypatch.setattr(server, "_init_session", lambda sid, key, agent, history, cols=80, **_kwargs: None)
     monkeypatch.setattr(server, "_session_info", lambda _agent, _session=None: {"model": "test/model"})
 
     resp = server.handle_request(
