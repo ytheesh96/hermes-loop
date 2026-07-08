@@ -408,12 +408,18 @@ def _load_busy_input_mode() -> str:
     return raw if raw in {"queue", "steer", "interrupt"} else "interrupt"
 
 
-def _notify_session_boundary(event_type: str, session_id: str | None) -> None:
+def _notify_session_boundary(
+    event_type: str, session_id: str | None, platform: str | None = None
+) -> None:
     """Fire session lifecycle hooks with CLI parity."""
     try:
         from hermes_cli.plugins import invoke_hook as _invoke_hook
 
-        _invoke_hook(event_type, session_id=session_id, platform="tui")
+        _invoke_hook(
+            event_type,
+            session_id=session_id,
+            platform=_resolve_agent_platform(platform),
+        )
     except Exception:
         pass
 
@@ -479,6 +485,7 @@ def _transfer_active_session_slot(
     new_lease, limit_message = _claim_active_session_slot(
         new_session_id,
         live_session_id=sid,
+        surface=_session_source(session),
     )
     if new_lease is not None:
         old_lease = session.pop("active_session_lease", None)
@@ -528,6 +535,42 @@ def _reserve_notification_turn(session: dict) -> bool:
 
 def _clear_notification_turn_reservation(session: dict) -> None:
     session.pop("_notification_turn_reserved", None)
+
+
+# Session sources the TUI/desktop backend must never end in state.db: the
+# messaging gateway owns those sessions' lifecycle — the TUI is only a viewer
+# (a resume of a Telegram/Discord/... session).  Ending one creates the
+# #60609 Groundhog Day routing loop (see _finalize_session).  Sources the
+# TUI backend itself creates ("tui", plus whatever a client passes as its
+# own ``source``) and the CLI's own sessions are NOT gateway-owned.
+_NON_GATEWAY_SOURCES = frozenset({
+    "", "tui", "cli", "webui", "desktop", "cron", "subagent", "test",
+    "local", "acp", "webhook", "api_server", "msgraph_webhook",
+})
+
+
+def _is_gateway_owned_source(source: str) -> bool:
+    """True when ``source`` names a messaging-gateway platform whose session
+    lifecycle belongs to the gateway, not to this TUI backend.
+
+    Structural rather than a hardcoded platform list: any source that
+    resolves to a known gateway ``Platform`` (built-in enum member OR a
+    registered platform plugin, via ``Platform._missing_``) counts, so new
+    platforms are covered automatically.  Local/self-owned sources are
+    excluded explicitly — ``local``/``webhook``/``api_server`` are Platform
+    members but their sessions are not owned by a remote chat surface that
+    routes by session_key, so reaping them is safe and keeps /resume clean.
+    """
+    src = (source or "").strip().lower()
+    if src in _NON_GATEWAY_SOURCES:
+        return False
+    try:
+        from gateway.config import Platform
+
+        Platform(src)  # raises ValueError for arbitrary non-platform strings
+        return True
+    except Exception:
+        return False
 
 
 def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> None:
@@ -607,7 +650,7 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
 
     session_key = session.get("session_key")
     session_id = getattr(agent, "session_id", None) or session_key
-    _notify_session_boundary("on_session_finalize", session_id)
+    _notify_session_boundary("on_session_finalize", session_id, _session_source(session))
 
     # Mark session ended in DB so it doesn't linger as a ghost row in /resume.
     # Use session_id (from agent.session_id) not session_key — after compression,
@@ -617,7 +660,17 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
         try:
             db = _get_db()
             if db is not None:
-                db.end_session(session_id, end_reason)
+                # Don't end gateway-originated sessions — the gateway owns
+                # their lifecycle.  The TUI is a viewer, not the owner.
+                # Ending a gateway session in state.db triggers a Groundhog
+                # Day routing loop: the gateway's #54878 self-heal detects
+                # the stale entry, recovers to the parent session, context
+                # compression splits back to the reaped child, and the cycle
+                # repeats on every inbound message.  (#60609)
+                row = db.get_session(session_id)
+                source = (row or {}).get("source", "")
+                if not _is_gateway_owned_source(source):
+                    db.end_session(session_id, end_reason)
         except Exception:
             pass
 
@@ -1307,6 +1360,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 kw = {"session_db": session_db}
                 if resume_sid := current.get("resume_session_id"):
                     kw["session_id"] = resume_sid
+                kw["platform_override"] = _session_source(current)
                 resume_overrides = current.get("resume_runtime_overrides")
                 if isinstance(resume_overrides, dict) and resume_overrides:
                     # Cold deferred resume: restore the full persisted runtime
@@ -1386,7 +1440,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
             with _sessions_lock:
                 if sid in _sessions:
                     _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
-            _notify_session_boundary("on_session_reset", key)
+            _notify_session_boundary("on_session_reset", key, _session_source(current))
 
             info = _session_info(agent, current)
             cfg_warn = _probe_config_health(_load_cfg())
@@ -1588,7 +1642,7 @@ def _session_source(session: dict | None) -> str:
         source = str(session.get("source") or "").strip()
         if source:
             return source
-    return "tui"
+    return _resolve_session_platform()
 
 
 def _register_session_cwd(session: dict | None) -> None:
@@ -2069,7 +2123,7 @@ def _set_session_context(session_key: str, cwd: str | None = None) -> list:
         # know the parent workspace pass it explicitly so spawned agents inherit
         # it instead of falling back to the gateway launch dir.
         resolved = cwd if cwd is not None else _cwd_for_session_key(session_key)
-        source = "tui"
+        source = _resolve_session_platform()
         with _sessions_lock:
             for sess in list(_sessions.values()):
                 if sess.get("session_key") == session_key:
@@ -2179,6 +2233,49 @@ def _resolve_model() -> str:
     if isinstance(m, str) and m:
         return m.strip()
     return "anthropic/claude-sonnet-4"
+
+
+def _resolve_session_platform() -> str:
+    """Resolve the platform tag for a tui_gateway-routed session.
+
+    The desktop app's chat panel and the standalone TUI both speak to this
+    gateway; without a branch they all get stamped ``platform="tui"``,
+    which makes the agent think it's talking to a terminal user. That
+    mis-tag is the root cause of the desktop chat agent suggesting
+    TUI-only slash commands (``/reload-mcp``, …) to chat-panel users.
+
+    Resolution:
+      * ``HERMES_DESKTOP=1`` and ``HERMES_DESKTOP_TERMINAL`` unset → "desktop"
+        (the chat-panel backend — a graphical React surface, not a terminal).
+      * ``HERMES_DESKTOP_TERMINAL=1`` → "tui"
+        (``hermes --tui`` running in the desktop's embedded terminal pane;
+        it IS a TUI, just embedded. The clarifier attached to the tui hint
+        in system_prompt.py tells the agent about the embedding.)
+      * neither set → "tui"
+        (standalone ``hermes --tui``.)
+    """
+    if is_truthy_value(os.environ.get("HERMES_DESKTOP")) and not is_truthy_value(
+        os.environ.get("HERMES_DESKTOP_TERMINAL")
+    ):
+        return "desktop"
+    return "tui"
+
+
+def _resolve_session_source(explicit: str | None) -> str:
+    """Default the session DB ``source`` field from the resolved platform.
+
+    A caller that explicitly passes ``source`` (e.g. a plugin session tagged
+    ``"telegram"``) keeps its value. Only an empty/None ``source`` falls back
+    to the env-resolved platform — so env-driven resolution never silently
+    rewrites a caller's intent.
+    """
+    if explicit:
+        return explicit
+    return _resolve_session_platform()
+
+
+def _resolve_agent_platform(source: str | None) -> str:
+    return _resolve_session_source(source)
 
 
 def _config_model_target() -> tuple[str, str]:
@@ -2763,7 +2860,7 @@ def _load_enabled_toolsets() -> list[str] | None:
         try:
             from agent.coding_context import coding_selection
 
-            selection = coding_selection(platform="tui")
+            selection = coding_selection(platform=_resolve_session_platform())
             if selection is not None:
                 # Fold in `project` here too: this is a GUI-only resolver, and
                 # the focus-mode coding posture returns before the fallback path
@@ -3528,6 +3625,18 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "usage": _get_usage(agent),
         "profile_name": _current_profile_name(),
     }
+    try:
+        from hermes_cli.config import (
+            detect_install_method,
+            format_unsupported_install_warning,
+            is_unsupported_install_method,
+        )
+
+        _install_method = detect_install_method()
+        if is_unsupported_install_method(_install_method):
+            info["install_warning"] = format_unsupported_install_warning(_install_method)
+    except Exception:
+        pass
     try:
         from hermes_cli import __version__, __release_date__
 
@@ -4454,6 +4563,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
             sid,
             session["session_key"],
             session_id=session["session_key"],
+            platform_override=_session_source(session),
             **reset_kw,
         )
     finally:
@@ -4603,6 +4713,7 @@ def _make_agent(
     provider_override: str | None = None,
     reasoning_config_override: dict | None = None,
     service_tier_override: str | None = None,
+    platform_override: str | None = None,
 ):
     from run_agent import AIAgent
 
@@ -4745,7 +4856,7 @@ def _make_agent(
         provider_sort=_pr.get("sort"),
         provider_require_parameters=_pr.get("require_parameters", False),
         provider_data_collection=_pr.get("data_collection"),
-        platform="tui",
+        platform=_resolve_agent_platform(platform_override),
         session_id=session_id or key,
         session_db=session_db if session_db is not None else _get_db(),
         ephemeral_system_prompt=system_prompt or None,
@@ -4758,6 +4869,35 @@ def _make_agent(
     )
 
 
+def _make_agent_compat(sid: str, key: str, **kwargs):
+    """Call _make_agent while tolerating legacy monkeypatch signatures.
+
+    Some tests and out-of-tree shims replace _make_agent with a smaller
+    signature. Production keeps passing the full resume/runtime surface, but
+    compatibility callers should not fail just because a shim lacks newer
+    keyword parameters like platform_override.
+    """
+    try:
+        signature = inspect.signature(_make_agent)
+    except (TypeError, ValueError):
+        return _make_agent(sid, key, **kwargs)
+    if any(
+        param.kind is inspect.Parameter.VAR_KEYWORD
+        for param in signature.parameters.values()
+    ):
+        return _make_agent(sid, key, **kwargs)
+    allowed = {
+        name
+        for name, param in signature.parameters.items()
+        if param.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    allowed.discard("sid")
+    allowed.discard("_sid")
+    allowed.discard("key")
+    return _make_agent(sid, key, **{k: v for k, v in kwargs.items() if k in allowed})
+
+
 def _init_session(
     sid: str,
     key: str,
@@ -4766,6 +4906,7 @@ def _init_session(
     cols: int = 80,
     cwd: str | None = None,
     session_db=None,
+    source: str | None = None,
 ):
     now = time.time()
     with _sessions_lock:
@@ -4785,6 +4926,7 @@ def _init_session(
             "cols": cols,
             "slash_worker": None,
             "show_reasoning": _load_show_reasoning(),
+            "source": _resolve_session_source(source),
             "tool_progress_mode": _load_tool_progress_mode(),
             "edit_snapshots": {},
             "tool_started_at": {},
@@ -4853,7 +4995,7 @@ def _init_session(
     with _sessions_lock:
         if sid in _sessions:
             _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
-    _notify_session_boundary("on_session_reset", key)
+    _notify_session_boundary("on_session_reset", key, _session_source(_sessions.get(sid, {})))
     _emit("session.info", sid, _session_info(agent, _sessions.get(sid, {})))
     _schedule_mcp_late_refresh(sid, agent)
 
@@ -5299,7 +5441,7 @@ def _(rid, params: dict) -> dict:
     except Exception:
         explicit_cwd = False
     resolved_cwd = _completion_cwd(params)
-    source = str(params.get("source") or "tui").strip() or "tui"
+    source = _resolve_session_source(str(params.get("source") or "").strip() or None)
     _enable_gateway_prompts()
 
     # ``profile`` (app-global remote mode): a new chat started under a non-launch
@@ -5333,7 +5475,9 @@ def _(rid, params: dict) -> dict:
 
     ready = threading.Event()
     now = time.time()
-    lease, limit_message = _claim_active_session_slot(key, live_session_id=sid)
+    lease, limit_message = _claim_active_session_slot(
+        key, live_session_id=sid, surface=source
+    )
     if limit_message is not None:
         return _err(rid, 4090, limit_message)
 
@@ -5764,7 +5908,10 @@ def _(rid, params: dict) -> dict:
     # (resume_session_id keeps the upgrade on the stored conversation).
     if is_truthy_value(params.get("lazy", False)):
         sid = uuid.uuid4().hex[:8]
-        lease, limit_message = _claim_active_session_slot(target, live_session_id=sid)
+        source = _resolve_session_source(str(params.get("source") or "").strip() or None)
+        lease, limit_message = _claim_active_session_slot(
+            target, live_session_id=sid, surface=source
+        )
         if limit_message is not None:
             return _err(rid, 4090, limit_message)
         try:
@@ -5783,7 +5930,7 @@ def _(rid, params: dict) -> dict:
             cwd=cwd,
             history=history,
             lease=lease,
-            source=str(params.get("source") or "tui").strip() or "tui",
+            source=source,
             close_on_disconnect=is_truthy_value(params.get("close_on_disconnect", False)),
             profile_home=profile_home,
             lazy=True,
@@ -5825,7 +5972,10 @@ def _(rid, params: dict) -> dict:
     # session's persisted runtime identity, and is a real (upgradable) session.
     if not is_truthy_value(params.get("eager_build", False)):
         sid = uuid.uuid4().hex[:8]
-        lease, limit_message = _claim_active_session_slot(target, live_session_id=sid)
+        source = _resolve_session_source(str(params.get("source") or "").strip() or None)
+        lease, limit_message = _claim_active_session_slot(
+            target, live_session_id=sid, surface=source
+        )
         if limit_message is not None:
             return _err(rid, 4090, limit_message)
         # Interactive resume routes approvals/clarify through gateway prompts;
@@ -5856,7 +6006,7 @@ def _(rid, params: dict) -> dict:
             cwd=cwd,
             history=history,
             lease=lease,
-            source=str(params.get("source") or "tui").strip() or "tui",
+            source=source,
             close_on_disconnect=is_truthy_value(params.get("close_on_disconnect", False)),
             display_history_prefix=prefix,
             profile_home=profile_home,
@@ -5895,7 +6045,10 @@ def _(rid, params: dict) -> dict:
     # _session_resume_lock across it would stall session.close on the main
     # dispatch thread (it's not a _LONG_HANDLER), blocking fast-path RPCs.
     sid = uuid.uuid4().hex[:8]
-    lease, limit_message = _claim_active_session_slot(target, live_session_id=sid)
+    source = _resolve_session_source(str(params.get("source") or "").strip() or None)
+    lease, limit_message = _claim_active_session_slot(
+        target, live_session_id=sid, surface=source
+    )
     if limit_message is not None:
         return _err(rid, 4090, limit_message)
     _enable_gateway_prompts()
@@ -5928,11 +6081,12 @@ def _(rid, params: dict) -> dict:
             # stored session row so switching chats does not inherit whatever
             # global model another chat last selected.
             stored_runtime_overrides = _stored_session_runtime_overrides(found)
-            agent = _make_agent(
+            agent = _make_agent_compat(
                 sid,
                 target,
                 session_id=target,
                 session_db=db,
+                platform_override=source,
                 **stored_runtime_overrides,
             )
         finally:
@@ -5984,17 +6138,20 @@ def _(rid, params: dict) -> dict:
                         cols=cols,
                         cwd=profile_resume_cwd,
                         session_db=db,
+                        source=source,
                     )
                 except TypeError as exc:
                     # Tests and out-of-tree shims sometimes monkeypatch
                     # _init_session with the legacy signature. Production keeps
-                    # passing cwd/session_db so profile-scoped resumes persist
+                    # passing cwd/session_db/source so profile-scoped resumes persist
                     # to the right DB, but the compatibility fallback preserves
                     # the older contract when the replacement rejects the new
                     # keyword arguments.
                     message = str(exc)
                     if "unexpected keyword argument" not in message or (
-                        "cwd" not in message and "session_db" not in message
+                        "cwd" not in message
+                        and "session_db" not in message
+                        and "source" not in message
                     ):
                         raise
                     _init_session(sid, target, agent, history, cols=cols)
@@ -8167,7 +8324,10 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4008, "nothing to branch — send a message first")
     new_key = _new_session_key()
     new_sid = uuid.uuid4().hex[:8]
-    lease, limit_message = _claim_active_session_slot(new_key, live_session_id=new_sid)
+    source = _session_source(session)
+    lease, limit_message = _claim_active_session_slot(
+        new_key, live_session_id=new_sid, surface=source
+    )
     if limit_message is not None:
         return _err(rid, 4090, limit_message)
     branch_name = params.get("name", "")
@@ -8183,7 +8343,7 @@ def _(rid, params: dict) -> dict:
             )
         db.create_session(
             new_key,
-            source=_session_source(session),
+            source=source,
             model=_resolve_model(),
             # Stable _branched_from marker so list_sessions_rich() keeps the
             # branch visible in /resume and /sessions. The TUI branch leaves
@@ -8208,11 +8368,21 @@ def _(rid, params: dict) -> dict:
     try:
         tokens = _set_session_context(new_key)
         try:
-            agent = _make_agent(new_sid, new_key, session_id=new_key)
+            agent = _make_agent(
+                new_sid,
+                new_key,
+                session_id=new_key,
+                platform_override=source,
+            )
         finally:
             _clear_session_context(tokens)
         _init_session(
-            new_sid, new_key, agent, list(history), cols=session.get("cols", 80)
+            new_sid,
+            new_key,
+            agent,
+            list(history),
+            cols=session.get("cols", 80),
+            source=source,
         )
         if new_sid in _sessions:
             _sessions[new_sid]["active_session_lease"] = lease
@@ -9106,6 +9276,10 @@ def _notification_poller_loop(
             emit_status=emit_status,
         ):
             process_registry.completion_queue.put(evt)
+            # Back off before re-polling: the re-queued event keeps the queue
+            # non-empty, so without a sleep this loop spins at full speed
+            # for as long as the session stays busy.
+            time.sleep(0.25)
             continue
 
     # Drain any remaining events after stop signal (process all pending
