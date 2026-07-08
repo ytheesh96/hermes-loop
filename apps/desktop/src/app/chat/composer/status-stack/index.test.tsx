@@ -276,8 +276,7 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
 
     render(<RootRowOverviewHarness state={state} />)
 
-    fireEvent.click(within(screen.getByTestId('loop-root-agents-card')).getByRole('button', { name: 'Show agents list' }))
-    fireEvent.click(within(screen.getByTestId('loop-root-agents-list')).getByRole('button', { name: /Focused child/i }))
+    fireEvent.click(within(screen.getByTestId('loop-root-agents-card')).getByTestId('loop-task-graph-node-t_child'))
     expect(screen.getByRole('heading', { name: /Focused child/i })).toBeTruthy()
 
     fireEvent.click(within(screen.getByTestId('composer-status-host')).getByRole('button', { name: /Root Loop row/i }))
@@ -310,11 +309,8 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
     expect(screen.getByTestId('loop-panel-body').className).not.toContain('p-3')
     expect(within(canvas).getByTestId('loop-task-graph-node-t_dependency_root')).toBeTruthy()
 
-    fireEvent.click(within(rootAgentsCard).getByRole('button', { name: 'Show agents list' }))
-
-    const agentsList = within(rootAgentsCard).getByTestId('loop-root-agents-list')
-    const [firstOverviewRow] = within(agentsList).getAllByRole('button')
-    expect(firstOverviewRow?.textContent).toContain('Dependency-gated Loop root')
+    expect(within(rootAgentsCard).queryByRole('button', { name: 'Show agents list' })).toBeNull()
+    expect(within(rootAgentsCard).queryByTestId('loop-root-agents-list')).toBeNull()
   })
 
   it('opens standalone delegated Loop root rows to a single-node overview canvas', () => {

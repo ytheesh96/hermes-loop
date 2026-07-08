@@ -80,12 +80,7 @@ import { isSecondaryWindow } from '../store/windows'
 import { ChatView } from './chat'
 import { requestComposerFocus, requestComposerInsert } from './chat/composer/focus'
 import { useComposerActions } from './chat/hooks/use-composer-actions'
-import {
-  ChatWorkRail,
-  WORK_RAIL_MAX_WIDTH,
-  WORK_RAIL_MIN_WIDTH,
-  WORK_RAIL_PANE_WIDTH
-} from './chat/right-rail'
+import { ChatWorkRail, WORK_RAIL_MAX_WIDTH, WORK_RAIL_MIN_WIDTH, WORK_RAIL_PANE_WIDTH } from './chat/right-rail'
 import { ChatSidebar } from './chat/sidebar'
 import { useLoopPanelController } from './chat/use-loop-panel-controller'
 import { CommandPalette } from './command-palette'
@@ -679,6 +674,8 @@ export function DesktopController() {
     requestGateway
   })
 
+  // Loop/Kanban tasks attach to the logical session key. The controller still
+  // projects rows onto activeSessionId for the live composer stack.
   const loopSourceSessionId = routedSessionId || selectedStoredSessionId || activeSessionId || ''
 
   const loopController = useLoopPanelController({
@@ -1185,8 +1182,8 @@ export function DesktopController() {
 
   const loopRailOpen = Boolean(
     loopController.open &&
-      !loopController.hidden &&
-      (loopController.state || loopController.selectedTaskId || loopController.focusedTaskId)
+    !loopController.hidden &&
+    (loopController.state || loopController.selectedTaskId || loopController.focusedTaskId)
   )
 
   const activePreviewTarget = filePreviewTarget || previewTarget

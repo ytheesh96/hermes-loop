@@ -27,7 +27,12 @@ const TODO_GLYPHS: Record<Exclude<TodoStatus, 'in_progress' | 'pending'>, { icon
 // (green = done, red = failed) so the slot is always filled and rows align.
 function leadingGlyph(item: ComposerStatusItem, s: Translations['statusStack']): ReactNode {
   if (item.statusIndicator) {
-    return <StatusIndicator ariaLabel={item.statusIndicator === 'active' ? s.running : undefined} kind={item.statusIndicator} />
+    return (
+      <StatusIndicator
+        ariaLabel={item.statusIndicator === 'active' ? s.running : undefined}
+        kind={item.statusIndicator}
+      />
+    )
   }
 
   if (item.todoStatus === 'pending') {
@@ -127,7 +132,7 @@ export const StatusItemRow = memo(function StatusItemRow({ item, onDismiss, onOp
       >
         <span
           className={cn(
-            'min-w-0 w-[18rem] shrink truncate text-[0.73rem] leading-4',
+            'min-w-0 w-[18rem] max-w-[18rem] shrink truncate text-[0.73rem] leading-4',
             failed
               ? 'text-destructive/90'
               : item.todoStatus && item.todoStatus !== 'in_progress'

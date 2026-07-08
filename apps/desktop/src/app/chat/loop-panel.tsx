@@ -1,6 +1,7 @@
 import {
   Fragment,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
@@ -19,18 +20,9 @@ import { StatusRow } from '@/components/chat/status-row'
 import { StatusSection } from '@/components/chat/status-section'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger
-} from '@/components/ui/dropdown-menu'
 import { LogView } from '@/components/ui/log-view'
-import { Tip } from '@/components/ui/tooltip'
 import { useResizeObserver } from '@/hooks/use-resize-observer'
 import { desktopGitDiff } from '@/lib/desktop-fs'
-import { GitBranch } from '@/lib/icons'
 import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
 import { cn } from '@/lib/utils'
 import type { ComposerStatusItem, StatusItemState } from '@/store/composer-status'
@@ -38,7 +30,6 @@ import type { PreviewTarget } from '@/store/preview'
 
 import { loopConnectedTaskIds } from './loop-state'
 import type {
-  CompactLoopTask,
   LoopPanelState,
   LoopRow,
   LoopTaskComment,
@@ -357,37 +348,6 @@ interface LoopDependencyGroup {
   rows: LoopRow[]
 }
 
-function recentLoopRootRows(groups: LoopDependencyGroup[], currentRootTaskId?: null | string): LoopRow[] {
-  const seen = new Set<string>()
-  const roots: LoopRow[] = []
-
-  // LoopPanelState has no reliable recency timestamp; keep session-source order
-  // and pin the active/current root first so "Recent Loops" stays predictable.
-  for (const group of groups) {
-    const row = group.anchor
-
-    if (seen.has(row.taskId)) {
-      continue
-    }
-
-    seen.add(row.taskId)
-
-    if (row.taskId !== currentRootTaskId && normalizedLoopValue(row.status) === 'archived') {
-      continue
-    }
-
-    roots.push(row)
-  }
-
-  const currentIndex = currentRootTaskId ? roots.findIndex(row => row.taskId === currentRootTaskId) : -1
-
-  if (currentIndex <= 0) {
-    return roots
-  }
-
-  return [roots[currentIndex]!, ...roots.slice(0, currentIndex), ...roots.slice(currentIndex + 1)]
-}
-
 const LOOP_DELEGATION_CREATED_BY_PREFIX = 'loop_delegation:'
 
 function isSelfAnchoredLoopRootRow(row: LoopRow): boolean {
@@ -677,7 +637,10 @@ function LoopStackRow({ group, onSelect, row, selected }: LoopStackRowProps) {
   const item = loopStackStatusItem(row, group)
 
   return (
-    <div className={cn('rounded-md', selected && 'bg-(--ui-row-hover-background)')} data-testid={`loop-card-${row.taskId}`}>
+    <div
+      className={cn('rounded-md', selected && 'bg-(--ui-row-hover-background)')}
+      data-testid={`loop-card-${row.taskId}`}
+    >
       <StatusItemRow item={item} onOpen={() => onSelect(row.taskId)} />
     </div>
   )
@@ -733,11 +696,7 @@ interface LoopTaskStackProps {
   state: LoopPanelState | null
 }
 
-export function LoopTaskStack({
-  onSelectTaskId,
-  selectedTaskId,
-  state
-}: LoopTaskStackProps) {
+export function LoopTaskStack({ onSelectTaskId, selectedTaskId, state }: LoopTaskStackProps) {
   const selected = useMemo(() => selectedRowFrom(state, selectedTaskId), [selectedTaskId, state])
   const groups = useMemo(() => loopDependencyGroups(state), [state])
   const collapsedAttentionRows = useMemo(() => attentionRows(state?.rows || []), [state])
@@ -976,10 +935,6 @@ function LoopTaskCommentsCard({
   )
 }
 
-function relationTitle(taskId: string, rowById: Map<string, LoopRow>): string {
-  return rowById.get(taskId)?.title || taskId
-}
-
 const INTERNAL_MARKDOWN_FIELD =
   /^(?:assignee|attachments|children|comments|completed_at|created_at|created_by|current_run_id|current_step_key|diagnostics|events|id|latest_run|latest_summary|links|metadata|parent_count|parents|priority|result|runs|session_id|started_at|status|tenant|warnings|workspace_kind|workspace_path)\s*:/i
 
@@ -1016,10 +971,6 @@ function cleanTaskMarkdown(text: string): string {
   return cleaned.join('\n').replace(/^\n+|\n+$/g, '')
 }
 
-function relatedTaskById(taskId: string, relatedTasks?: CompactLoopTask[]): CompactLoopTask | null {
-  return relatedTasks?.find(task => task.id === taskId) || null
-}
-
 function loopIntakeBlocksSubmit(row: LoopRow): boolean {
   const intakeState = (row.loopIntake?.state || '').trim().toLowerCase()
 
@@ -1048,7 +999,13 @@ function LoopTaskActions({
   const blocked = status === 'blocked'
   const archived = status === 'archived'
   const terminal = TERMINAL_LOOP_STATUSES.has(status)
-  const canSubmit = !planningNode && (status === 'triage' || status === 'scheduled') && !terminal && !isTentativeDecisionOptionEndpoint(row)
+
+  const canSubmit =
+    !planningNode &&
+    (status === 'triage' || status === 'scheduled') &&
+    !terminal &&
+    !isTentativeDecisionOptionEndpoint(row)
+
   const statusAction: LoopTaskAction = blocked ? 'unblock' : 'block'
   const statusLabel = blocked ? 'Unblock' : 'Block'
 
@@ -1820,13 +1777,19 @@ const LOOP_GRAPH_ACTION_TRAY_OVERLAP = 2
 const LOOP_GRAPH_CHOICE_GROUP_PADDING = 8
 const LOOP_GRAPH_CHOICE_GROUP_LABEL_HEIGHT = 20
 const LOOP_GRAPH_CANVAS_PADDING = 32
-const LOOP_GRAPH_MIN_ZOOM = 0.6
+const LOOP_GRAPH_MIN_ZOOM = 0.15
 const LOOP_GRAPH_MAX_ZOOM = 2
 const LOOP_GRAPH_ZOOM_SENSITIVITY = 0.0015
 
 interface LoopGraphViewportSize {
   height: number
   width: number
+}
+
+interface LoopGraphView {
+  scale: number
+  x: number
+  y: number
 }
 
 interface LoopGraphViewportMetrics {
@@ -1839,8 +1802,26 @@ interface LoopGraphViewportMetrics {
 
 const EMPTY_LOOP_GRAPH_VIEWPORT: LoopGraphViewportSize = { height: 0, width: 0 }
 
+const DEFAULT_LOOP_GRAPH_VIEW: LoopGraphView = { scale: 1, x: LOOP_GRAPH_CANVAS_PADDING, y: LOOP_GRAPH_CANVAS_PADDING }
+
 function clampLoopGraphZoom(zoom: number): number {
   return Math.min(LOOP_GRAPH_MAX_ZOOM, Math.max(LOOP_GRAPH_MIN_ZOOM, zoom))
+}
+
+function frameLoopGraphView(layout: LoopTaskGraphLayout, viewport: LoopGraphViewportSize): LoopGraphView {
+  if (viewport.width <= 0 || viewport.height <= 0) {
+    return DEFAULT_LOOP_GRAPH_VIEW
+  }
+
+  const availableWidth = Math.max(1, viewport.width - LOOP_GRAPH_CANVAS_PADDING * 2)
+  const availableHeight = Math.max(1, viewport.height - LOOP_GRAPH_CANVAS_PADDING * 2)
+  const scale = clampLoopGraphZoom(Math.min(1, availableWidth / layout.width, availableHeight / layout.height))
+
+  return {
+    scale,
+    x: Math.max(LOOP_GRAPH_CANVAS_PADDING, (viewport.width - layout.width * scale) / 2),
+    y: Math.max(LOOP_GRAPH_CANVAS_PADDING, (viewport.height - layout.height * scale) / 2)
+  }
 }
 
 function loopGraphViewportMetrics(
@@ -2034,7 +2015,8 @@ function loopTaskGraphEdges(rows: LoopRow[], fallbackRootTaskId?: string): LoopT
 
   if (fallbackRootTaskId && rowById.has(fallbackRootTaskId)) {
     for (const row of rows) {
-      const hasDependencyLinks = row.parents.length > 0 || row.children.length > 0 || row.parentCount > 0 || row.childCount > 0
+      const hasDependencyLinks =
+        row.parents.length > 0 || row.children.length > 0 || row.parentCount > 0 || row.childCount > 0
 
       if (row.taskId !== fallbackRootTaskId && !incomingTaskIds.has(row.taskId) && !hasDependencyLinks) {
         addEdge(fallbackRootTaskId, row.taskId)
@@ -2257,7 +2239,9 @@ function loopGraphRelatedTargetBelongsToTask(taskId: string, target: EventTarget
     return false
   }
 
-  return target.closest('[data-loop-task-graph-interaction]')?.getAttribute('data-loop-task-graph-interaction') === taskId
+  return (
+    target.closest('[data-loop-task-graph-interaction]')?.getAttribute('data-loop-task-graph-interaction') === taskId
+  )
 }
 
 function LoopTaskGraphActionTray({
@@ -2359,15 +2343,19 @@ function LoopTaskGraphNode({
       aria-label={`${selected ? 'Selected' : 'Select'} ${row.title} (${row.taskId})${choiceAria ? ` · ${choiceAria}` : ''}`}
       aria-pressed={selected}
       className={cn(
-        'absolute z-20 flex flex-col gap-1.5 rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-surface-background) p-2 text-left shadow-none transition-colors hover:border-(--ui-stroke-primary) hover:bg-(--ui-row-hover-background) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
+        'absolute z-20 flex flex-col gap-1.5 overflow-visible rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-surface-background) p-2 text-left shadow-none transition-colors hover:border-(--ui-stroke-primary) hover:bg-(--ui-row-hover-background) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
         onSelect || onOpen ? 'cursor-pointer' : 'cursor-default',
         isDoneLoopRow(row) && 'bg-(--ui-bg-secondary)/45',
         choiceState === 'candidate' && 'border-dashed border-(--ui-stroke-secondary)',
         choiceState === 'recommended' && 'border-dashed border-amber-500/60 bg-amber-500/[0.06]',
-        choiceState === 'chosen' && 'border-(--ui-stroke-primary) bg-(--ui-row-hover-background) ring-1 ring-(--ui-stroke-primary)/40',
-        choiceState === 'rejected' && !selected && 'border-dashed border-(--ui-stroke-tertiary) bg-(--ui-bg-secondary)/35 opacity-65',
+        choiceState === 'chosen' &&
+          'border-(--ui-stroke-primary) bg-(--ui-row-hover-background) ring-1 ring-(--ui-stroke-primary)/40',
+        choiceState === 'rejected' &&
+          !selected &&
+          'border-dashed border-(--ui-stroke-tertiary) bg-(--ui-bg-secondary)/35 opacity-65',
         pathConnected && !selected && 'border-(--ui-stroke-secondary) bg-(--ui-fill-quaternary)/45',
-        selected && 'border-(--ui-stroke-primary) bg-(--ui-row-hover-background) shadow-nous ring-1 ring-(--ui-stroke-primary)/30',
+        selected &&
+          'border-(--ui-stroke-primary) bg-(--ui-row-hover-background) shadow-nous ring-1 ring-(--ui-stroke-primary)/30',
         dimmed && 'opacity-55'
       )}
       data-choice-state={choiceState || undefined}
@@ -2406,8 +2394,10 @@ function LoopTaskGraphNode({
               className={cn(
                 'inline-flex shrink-0 items-center gap-1 rounded-[0.2rem] border px-1.5 py-0.5 text-[0.58rem] uppercase tracking-wide',
                 choiceState === 'candidate' && 'border-(--ui-stroke-tertiary) text-(--ui-text-tertiary)',
-                choiceState === 'recommended' && 'border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-300',
-                choiceState === 'chosen' && 'border-(--ui-stroke-primary)/60 bg-(--ui-row-hover-background) text-(--ui-text-primary)',
+                choiceState === 'recommended' &&
+                  'border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-300',
+                choiceState === 'chosen' &&
+                  'border-(--ui-stroke-primary)/60 bg-(--ui-row-hover-background) text-(--ui-text-primary)',
                 choiceState === 'rejected' && 'border-(--ui-stroke-tertiary) text-(--ui-text-quaternary)'
               )}
             >
@@ -2451,7 +2441,12 @@ function loopGraphSummaryItems(rows: LoopRow[]): { key: string; label: string }[
     const status = normalizedLoopValue(row.status)
     const text = attentionText(row)
 
-    return Boolean(row.reviewKind) || status === 'review' || text.includes('review-required') || text.includes('review required')
+    return (
+      Boolean(row.reviewKind) ||
+      status === 'review' ||
+      text.includes('review-required') ||
+      text.includes('review required')
+    )
   }).length
 
   return [
@@ -2500,8 +2495,11 @@ function LoopTaskGraph({
   selectedTaskId?: null | string
 }) {
   const [zoom, setZoom] = useState(1)
+  const [view, setView] = useState<LoopGraphView>(DEFAULT_LOOP_GRAPH_VIEW)
   const [hoveredTaskId, setHoveredTaskId] = useState<null | string>(null)
   const canvasRef = useRef<HTMLDivElement | null>(null)
+  const dragRef = useRef<null | { pointerId: number; startX: number; startY: number; view: LoopGraphView }>(null)
+  const lastAutoFrameKeyRef = useRef<null | string>(null)
   const [canvasViewport, setCanvasViewport] = useState<LoopGraphViewportSize>(EMPTY_LOOP_GRAPH_VIEWPORT)
 
   const measureCanvasViewport = useCallback(
@@ -2537,6 +2535,26 @@ function LoopTaskGraph({
   useResizeObserver(measureCanvasViewport, canvasRef)
 
   const layout = useMemo(() => loopTaskGraphLayout(rows), [rows])
+
+  const graphFrameKey = useMemo(
+    () => rows.map(row => `${row.taskId}:${row.parents.join(',')}:${row.children.join(',')}`).join('|'),
+    [rows]
+  )
+
+  useEffect(() => {
+    if (!fullPanel) {
+      return
+    }
+
+    const frameKey = `${graphFrameKey}:${Math.round(canvasViewport.width)}x${Math.round(canvasViewport.height)}`
+
+    if (lastAutoFrameKeyRef.current === frameKey) {
+      return
+    }
+
+    lastAutoFrameKeyRef.current = frameKey
+    setView(frameLoopGraphView(layout, canvasViewport))
+  }, [canvasViewport, fullPanel, graphFrameKey, layout])
 
   const viewportMetrics = useMemo(
     () => loopGraphViewportMetrics(layout, zoom, fullPanel, canvasViewport),
@@ -2600,14 +2618,69 @@ function LoopTaskGraph({
   const activeFocus = hoveredFocus.taskId ? hoveredFocus : selectedFocus
   const choiceGroups = layout.choiceGroups
 
-  const handleWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
-    if (!event.ctrlKey) {
-      return
-    }
+  const zoomFullGraph = useCallback((targetScale: number, sx: number, sy: number) => {
+    setView(current => {
+      const nextScale = clampLoopGraphZoom(targetScale)
+      const wx = (sx - current.x) / current.scale
+      const wy = (sy - current.y) / current.scale
 
-    event.preventDefault()
-    setZoom(currentZoom => clampLoopGraphZoom(currentZoom * Math.exp(-event.deltaY * LOOP_GRAPH_ZOOM_SENSITIVITY)))
+      return { scale: nextScale, x: sx - wx * nextScale, y: sy - wy * nextScale }
+    })
   }, [])
+
+  const zoomFullGraphBy = useCallback(
+    (factor: number) => {
+      const sx = canvasViewport.width > 0 ? canvasViewport.width / 2 : LOOP_GRAPH_CANVAS_PADDING
+      const sy = canvasViewport.height > 0 ? canvasViewport.height / 2 : LOOP_GRAPH_CANVAS_PADDING
+
+      setView(current => {
+        const nextScale = clampLoopGraphZoom(current.scale * factor)
+        const wx = (sx - current.x) / current.scale
+        const wy = (sy - current.y) / current.scale
+
+        return { scale: nextScale, x: sx - wx * nextScale, y: sy - wy * nextScale }
+      })
+    },
+    [canvasViewport.height, canvasViewport.width]
+  )
+
+  const resetFullGraphZoom = useCallback(() => {
+    const sx = canvasViewport.width > 0 ? canvasViewport.width / 2 : LOOP_GRAPH_CANVAS_PADDING
+    const sy = canvasViewport.height > 0 ? canvasViewport.height / 2 : LOOP_GRAPH_CANVAS_PADDING
+
+    zoomFullGraph(1, sx, sy)
+  }, [canvasViewport.height, canvasViewport.width, zoomFullGraph])
+
+  const handleWheel = useCallback(
+    (event: ReactWheelEvent<HTMLDivElement>) => {
+      if (!fullPanel) {
+        if (!event.ctrlKey) {
+          return
+        }
+
+        event.preventDefault()
+        setZoom(currentZoom => clampLoopGraphZoom(currentZoom * Math.exp(-event.deltaY * LOOP_GRAPH_ZOOM_SENSITIVITY)))
+
+        return
+      }
+
+      event.preventDefault()
+
+      if (event.ctrlKey || event.metaKey) {
+        const bounds = event.currentTarget.getBoundingClientRect()
+        const sx = event.clientX - bounds.left
+        const sy = event.clientY - bounds.top
+        const nextScale = clampLoopGraphZoom(view.scale * Math.exp(-event.deltaY * LOOP_GRAPH_ZOOM_SENSITIVITY))
+
+        zoomFullGraph(nextScale, sx, sy)
+
+        return
+      }
+
+      setView(current => ({ ...current, x: current.x - event.deltaX, y: current.y - event.deltaY }))
+    },
+    [fullPanel, view.scale, zoomFullGraph]
+  )
 
   const handleActionStart = useCallback((taskId: string) => {
     setHoveredTaskId(taskId)
@@ -2621,30 +2694,182 @@ function LoopTaskGraph({
     setHoveredTaskId(currentTaskId => (currentTaskId === taskId ? null : currentTaskId))
   }, [])
 
+  const frameFullGraph = useCallback(() => {
+    setView(frameLoopGraphView(layout, canvasViewport))
+  }, [canvasViewport, layout])
+
+  const handlePointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (!fullPanel || event.button !== 0) {
+        return
+      }
+
+      if ((event.target as Element | null)?.closest('[data-loop-task-graph-interaction]')) {
+        return
+      }
+
+      event.preventDefault()
+      dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, view }
+      event.currentTarget.setPointerCapture?.(event.pointerId)
+    },
+    [fullPanel, view]
+  )
+
+  const handlePointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return
+    }
+
+    setView({
+      ...drag.view,
+      x: drag.view.x + event.clientX - drag.startX,
+      y: drag.view.y + event.clientY - drag.startY
+    })
+  }, [])
+
+  const endPointerDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (dragRef.current?.pointerId === event.pointerId) {
+      dragRef.current = null
+    }
+  }, [])
+
+  const handleDoubleClick = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (!fullPanel || (event.target as Element | null)?.closest('[data-loop-task-graph-interaction]')) {
+        return
+      }
+
+      frameFullGraph()
+    },
+    [frameFullGraph, fullPanel]
+  )
+
+  const handleKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (!fullPanel || event.defaultPrevented) {
+        return
+      }
+
+      const target = event.target as Element | null
+
+      if (target?.closest('button, input, textarea, select, [contenteditable="true"]')) {
+        return
+      }
+
+      if (event.key.toLowerCase() === 'f') {
+        event.preventDefault()
+        frameFullGraph()
+      }
+    },
+    [frameFullGraph, fullPanel]
+  )
+
+  const fullPanelTransform = fullPanel
+    ? `translate(${view.x}px, ${view.y}px) scale(${view.scale})`
+    : `scale(${viewportMetrics.effectiveZoom})`
+
+  const toolbarButtonClass =
+    'inline-flex h-7 items-center justify-center gap-1 rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-surface-background)/95 px-2 text-[0.68rem] font-medium text-(--ui-text-primary) shadow-nous backdrop-blur hover:bg-(--ui-fill-quaternary)'
+
+  const toolbarIconButtonClass = cn(toolbarButtonClass, 'w-7 px-0 text-sm')
+
   return (
     <div
       aria-label={fullPanel ? 'Loop graph canvas' : undefined}
       className={cn(
-        'overflow-auto',
         fullPanel
-          ? 'h-full w-full min-h-0 bg-(--ui-editor-surface-background) p-0'
-          : 'max-h-80 min-h-48 rounded-md border border-(--ui-stroke-tertiary) p-3'
+          ? 'h-full w-full min-h-0 overflow-hidden bg-(--ui-editor-surface-background) p-0'
+          : 'max-h-80 min-h-48 overflow-auto rounded-md border border-(--ui-stroke-tertiary) p-3'
       )}
       data-testid="loop-task-graph"
-      data-zoom={viewportMetrics.effectiveZoom.toFixed(2)}
+      data-view-x={fullPanel ? Math.round(view.x) : undefined}
+      data-view-y={fullPanel ? Math.round(view.y) : undefined}
+      data-zoom={(fullPanel ? view.scale : viewportMetrics.effectiveZoom).toFixed(2)}
+      onDoubleClick={handleDoubleClick}
+      onKeyDown={handleKeyDown}
+      onPointerCancel={endPointerDrag}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={endPointerDrag}
       onWheel={handleWheel}
       ref={canvasRef}
       role={fullPanel ? 'region' : undefined}
+      tabIndex={fullPanel ? 0 : undefined}
     >
       {fullPanel ? null : <LoopGraphSummary rows={rows} />}
+      {fullPanel ? (
+        <div
+          aria-label="Loop graph toolbar"
+          className="absolute left-3 top-3 z-40 flex items-center gap-1 rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-surface-background)/90 p-1 shadow-nous backdrop-blur"
+          data-loop-task-graph-interaction="toolbar"
+          data-testid="loop-task-graph-toolbar"
+          onPointerDown={event => event.stopPropagation()}
+          onWheel={event => event.stopPropagation()}
+          role="toolbar"
+        >
+          <button
+            aria-label="Zoom out"
+            className={toolbarIconButtonClass}
+            onClick={() => zoomFullGraphBy(0.88)}
+            title="Zoom out"
+            type="button"
+          >
+            −
+          </button>
+          <button
+            aria-label="Zoom to 100%"
+            className={toolbarButtonClass}
+            onClick={resetFullGraphZoom}
+            title="Zoom to 100%"
+            type="button"
+          >
+            {Math.round(view.scale * 100)}%
+          </button>
+          <button
+            aria-label="Zoom in"
+            className={toolbarIconButtonClass}
+            onClick={() => zoomFullGraphBy(1.14)}
+            title="Zoom in"
+            type="button"
+          >
+            +
+          </button>
+          <button
+            aria-label="Frame everything · F"
+            className={toolbarIconButtonClass}
+            onClick={frameFullGraph}
+            title="Frame everything · F"
+            type="button"
+          >
+            <svg
+              aria-hidden="true"
+              fill="none"
+              height="16"
+              stroke="currentColor"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth="1.5"
+              viewBox="0 0 16 16"
+              width="16"
+            >
+              <path d="M5.8 3.25H3.25V5.8" />
+              <path d="M10.2 3.25h2.55V5.8" />
+              <path d="M12.75 10.2v2.55H10.2" />
+              <path d="M5.8 12.75H3.25V10.2" />
+            </svg>
+          </button>
+        </div>
+      ) : null}
       <div
-        className={cn('relative', fullPanel ? 'grid min-h-full min-w-full place-items-center' : 'mx-auto')}
+        className={cn('relative', fullPanel ? 'h-full min-h-full w-full min-w-full' : 'mx-auto')}
         data-testid="loop-task-graph-frame"
         style={{
-          height: viewportMetrics.frameHeight,
+          height: fullPanel ? '100%' : viewportMetrics.frameHeight,
           minHeight: fullPanel ? '100%' : undefined,
           minWidth: fullPanel ? '100%' : undefined,
-          width: viewportMetrics.frameWidth
+          width: fullPanel ? '100%' : viewportMetrics.frameWidth
         }}
       >
         <div
@@ -2652,9 +2877,9 @@ function LoopTaskGraph({
           data-testid="loop-task-graph-surface"
           style={{
             height: layout.height,
-            left: fullPanel ? viewportMetrics.offsetX : undefined,
-            top: fullPanel ? viewportMetrics.offsetY : undefined,
-            transform: `scale(${viewportMetrics.effectiveZoom})`,
+            left: fullPanel ? 0 : undefined,
+            top: fullPanel ? 0 : undefined,
+            transform: fullPanelTransform,
             transformOrigin: '0 0',
             width: layout.width
           }}
@@ -2720,7 +2945,9 @@ function LoopTaskGraph({
                   data-testid={`loop-task-graph-edge-${edge.from}-${edge.to}`}
                   fill="none"
                   key={edgeKey}
-                  markerEnd={highlighted || !activeFocus.taskId ? 'url(#loop-graph-arrow)' : 'url(#loop-graph-arrow-dim)'}
+                  markerEnd={
+                    highlighted || !activeFocus.taskId ? 'url(#loop-graph-arrow)' : 'url(#loop-graph-arrow-dim)'
+                  }
                   opacity={opacity}
                   stroke="currentColor"
                   strokeDasharray={edge.tentative ? '0.5 8' : undefined}
@@ -2959,145 +3186,22 @@ function loopOverviewStatusItem(row: LoopRow, options: { preferAssigneeForQueued
   }
 }
 
-function loopWorkerSessionId(row: LoopRow): string | undefined {
-  return row.workerActivity?.worker_session_id || row.latestRun?.worker_session_id || undefined
-}
-
-function openLoopAgentRow(
-  row: LoopRow,
-  onTaskAction: ((action: LoopTaskAction, row: LoopRow) => void) | undefined,
-  fallback: () => void
-) {
-  if (loopWorkerSessionId(row) && onTaskAction) {
-    onTaskAction('worker-session', row)
-
-    return
-  }
-
-  fallback()
-}
-
-function loopTaskAgentState(status?: null | string): StatusItemState {
-  const value = normalizedLoopValue(status)
-
-  if (value === 'blocked' || value === 'stale' || FAILED_LOOP_STATUSES.has(value)) {
-    return 'failed'
-  }
-
-  if (ACTIVE_OVERVIEW_STATUSES.has(value)) {
-    return 'running'
-  }
-
-  return 'done'
-}
-
-function loopStatusIndicatorFromStatus(status?: null | string): StatusIndicatorKind {
-  const value = normalizedLoopValue(status)
-
-  if (FAILED_LOOP_STATUSES.has(value)) {
-    return 'failed'
-  }
-
-  if (ACTIVE_OVERVIEW_STATUSES.has(value)) {
-    return 'active'
-  }
-
-  if (DONE_OVERVIEW_STATUSES.has(value)) {
-    return 'done'
-  }
-
-  if (value === 'triage') {
-    return 'triage'
-  }
-
-  if (QUEUED_OVERVIEW_STATUSES.has(value)) {
-    return 'pending'
-  }
-
-  return 'unknown'
-}
-
-type LoopTaskAgentRelation = 'blocked-by' | 'blocking'
-
-function loopTaskAgentRelationLabel(relation: LoopTaskAgentRelation): string {
-  return relation === 'blocked-by' ? 'Blocked by' : 'Blocking'
-}
-
-function loopTaskAgentCurrentTool(relation: LoopTaskAgentRelation, activity?: string): string {
-  return [loopTaskAgentRelationLabel(relation), activity].filter(Boolean).join(' · ')
-}
-
-function loopTaskAgentStatusItem(row: LoopRow, relation: LoopTaskAgentRelation): ComposerStatusItem {
-  const currentTool = loopWorkerCurrentTool(row)
-  const profile = loopTaskGraphAgentLabel(row)
-
-  return {
-    currentTool: loopTaskAgentCurrentTool(relation, currentTool),
-    profile,
-    id: `kanban-agent:${row.taskId}:${row.workerActivity?.run_id ?? row.latestRun?.id ?? 'relation'}`,
-    kanbanTaskId: row.taskId,
-    runId: row.workerActivity?.run_id ?? row.latestRun?.id,
-    sessionId: row.workerActivity?.worker_session_id || row.latestRun?.worker_session_id || undefined,
-    state: loopOverviewItemState(row),
-    statusIndicator: loopRowStatusIndicator(row),
-    title: row.title,
-    type: 'kanban-agent'
-  }
-}
-
-function loopRelatedTaskAgentStatusItem(
-  taskId: string,
-  related: CompactLoopTask | null,
-  relation: LoopTaskAgentRelation,
-  rowById: Map<string, LoopRow>
-): ComposerStatusItem {
-  const status = related?.status
-  const assignee = loopTextValue(related?.assignee)
-
-  const activity =
-    normalizedLoopValue(status) === 'archived'
-      ? 'Archived'
-      : related
-        ? loopTextValue(status)
-        : 'Task details unavailable'
-
-  const showActivity = activity !== assignee ? activity : undefined
-
-  return {
-    currentTool: loopTaskAgentCurrentTool(relation, showActivity),
-    profile: assignee,
-    id: `kanban-agent-relation:${taskId}`,
-    kanbanTaskId: taskId,
-    state: loopTaskAgentState(status),
-    statusIndicator: loopStatusIndicatorFromStatus(status),
-    title: related?.title || relationTitle(taskId, rowById),
-    type: 'kanban-agent'
-  }
-}
-
 function LoopRootAgentsCard({
   groups,
   onOpenTaskTab,
-  onSwitchLoop,
   onTaskAction,
-  recentLoops,
   root
 }: {
   groups: RootOverviewGroups
   onOpenTaskTab?: (row: LoopRow) => void
-  onSwitchLoop?: (row: LoopRow) => void
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
-  recentLoops: LoopRow[]
   root: LoopRow
 }) {
-  const [view, setView] = useState<'canvas' | 'list'>('canvas')
   const [selectedGraphTaskId, setSelectedGraphTaskId] = useState<null | string>(null)
   const rows = [root, ...groups.active, ...groups.attention, ...groups.queued, ...groups.other, ...groups.completed]
-  const showCanvas = view === 'canvas'
   const selectedGraphRow = selectedGraphTaskId ? rows.find(row => row.taskId === selectedGraphTaskId) || null : null
 
   useEffect(() => {
-    setView('canvas')
     setSelectedGraphTaskId(null)
   }, [root.taskId])
 
@@ -3107,36 +3211,14 @@ function LoopRootAgentsCard({
 
   return (
     <section
-      aria-label={showCanvas ? 'Loop graph canvas' : 'Loop agents list'}
+      aria-label="Loop graph canvas"
       className="relative flex h-full min-h-0 w-full min-w-0 max-w-full flex-1 flex-col overflow-hidden bg-(--ui-editor-surface-background) text-xs"
       data-root-overview-canvas="true"
       data-testid="loop-root-agents-card"
     >
-      <div className="absolute right-2 top-2 z-40 flex items-center gap-1">
-        <LoopSwitchMenu currentRoot={root} onSwitchLoop={onSwitchLoop} roots={recentLoops} />
-        <Tip label={showCanvas ? 'Show agents list' : 'Show graph canvas'} side="left">
-          <Button
-            aria-label={showCanvas ? 'Show agents list' : 'Show graph canvas'}
-            className={cn(
-              'text-muted-foreground/80 shadow-nous hover:text-foreground',
-              showCanvas && 'bg-(--ui-surface-background) text-(--ui-text-primary)'
-            )}
-            onClick={() => setView(value => (value === 'canvas' ? 'list' : 'canvas'))}
-            size="icon-xs"
-            type="button"
-            variant="ghost"
-          >
-            {showCanvas ? (
-              <Codicon name="list-unordered" size="0.875rem" />
-            ) : (
-              <GitBranch aria-hidden className="size-3.5" />
-            )}
-          </Button>
-        </Tip>
-      </div>
       {rows.length === 0 ? (
         <EmptyDetail>No agents yet.</EmptyDetail>
-      ) : showCanvas ? (
+      ) : (
         <LoopTaskGraph
           fullPanel
           onOpenTaskTab={onOpenTaskTab}
@@ -3145,209 +3227,18 @@ function LoopRootAgentsCard({
           rows={rows}
           selectedTaskId={selectedGraphRow?.taskId || null}
         />
-      ) : (
-        <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-auto px-3 pb-3 pt-10" data-testid="loop-root-agents-list">
-          {rows.map(row => (
-            <StatusItemRow
-              item={loopOverviewStatusItem(row, { preferAssigneeForQueued: row.taskId === root.taskId })}
-              key={row.taskId}
-              onOpen={
-                onOpenTaskTab || onTaskAction
-                  ? () => openLoopAgentRow(row, onTaskAction, () => onOpenTaskTab?.(row))
-                  : undefined
-              }
-            />
-          ))}
-        </div>
       )}
     </section>
-  )
-}
-
-function LoopSwitchMenu({
-  currentRoot,
-  onSwitchLoop,
-  roots
-}: {
-  currentRoot: LoopRow
-  onSwitchLoop?: (row: LoopRow) => void
-  roots: LoopRow[]
-}) {
-  if (roots.length === 0) {
-    return null
-  }
-
-  return (
-    <DropdownMenu>
-      <Tip label="Switch Loop" side="left">
-        <DropdownMenuTrigger asChild>
-          <Button
-            aria-label="Switch Loop"
-            className="bg-(--ui-surface-background) px-2 text-[0.68rem] text-(--ui-text-primary) shadow-nous"
-            size="xs"
-            type="button"
-            variant="ghost"
-          >
-            Switch Loop
-          </Button>
-        </DropdownMenuTrigger>
-      </Tip>
-      <DropdownMenuContent align="end" aria-label="Recent Loops" className="w-72 p-1" sideOffset={6}>
-        <DropdownMenuLabel className="px-2 pb-1 pt-0.5 text-[0.625rem] font-semibold uppercase tracking-wider text-(--ui-text-tertiary)">
-          Recent Loops
-        </DropdownMenuLabel>
-        {roots.map(row => {
-          const current = row.taskId === currentRoot.taskId
-
-          return (
-            <DropdownMenuItem
-              className="items-start gap-2 px-2 py-1.5"
-              data-testid={`loop-switch-row-${row.taskId}`}
-              disabled={!onSwitchLoop}
-              key={row.taskId}
-              onSelect={() => onSwitchLoop?.(row)}
-            >
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-[0.73rem] font-medium text-(--ui-text-primary)">{row.title || row.taskId}</div>
-                <div className="truncate text-[0.64rem] text-(--ui-text-tertiary)">
-                  {current ? 'Current Loop' : 'Attach to this session'} · {row.status || 'unknown'}
-                </div>
-              </div>
-              <span className="shrink-0 pt-0.5 text-[0.62rem] text-(--ui-text-tertiary)">
-                {current ? 'Current' : 'Open graph'}
-              </span>
-            </DropdownMenuItem>
-          )
-        })}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-}
-
-function LoopTaskAgentsCard({
-  onSelectTaskId,
-  onTaskAction,
-  row,
-  rowById
-}: {
-  onSelectTaskId?: (taskId: string) => void
-  onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
-  row: LoopRow
-  rowById: Map<string, LoopRow>
-}) {
-  const [view, setView] = useState<'canvas' | 'list'>('canvas')
-
-  useEffect(() => {
-    setView('canvas')
-  }, [row.taskId])
-
-  const seen = new Set<string>()
-
-  const taskRelations = [
-    ...row.children.map(taskId => ({ relation: 'blocking' as const, taskId })),
-    ...row.parents.map(taskId => ({ relation: 'blocked-by' as const, taskId }))
-  ]
-
-  const items = taskRelations.flatMap(({ relation, taskId }) => {
-    if (seen.has(taskId)) {
-      return []
-    }
-
-    seen.add(taskId)
-
-    const relatedRow = rowById.get(taskId)
-
-    return [
-      {
-        item: relatedRow
-          ? loopTaskAgentStatusItem(relatedRow, relation)
-          : loopRelatedTaskAgentStatusItem(
-              taskId,
-              relatedTaskById(taskId, row.externalChildTasks) || relatedTaskById(taskId, row.externalParentTasks),
-              relation,
-              rowById
-            ),
-        taskId,
-        row: relatedRow
-      }
-    ]
-  })
-
-  const subgraphRows = useMemo(() => {
-    const ids = new Set<string>([row.taskId, ...row.parents, ...row.children])
-
-    return Array.from(rowById.values()).filter(r => ids.has(r.taskId))
-  }, [rowById, row.taskId, row.parents, row.children])
-
-  const showAction = items.length > 0
-  const showCanvas = showAction && view === 'canvas'
-
-  if (items.length === 0) {
-    return null
-  }
-
-  return (
-    <DetailSection
-      action={
-        showAction ? (
-          <Tip label={showCanvas ? 'Show agents list' : 'Show graph canvas'} side="left">
-            <Button
-              aria-label={showCanvas ? 'Show agents list' : 'Show graph canvas'}
-              className={cn(
-                '-my-1 text-muted-foreground/80 hover:text-foreground',
-                showCanvas && 'bg-(--ui-bg-secondary) text-(--ui-text-primary)'
-              )}
-              onClick={() => setView(value => (value === 'canvas' ? 'list' : 'canvas'))}
-              size="icon-xs"
-              type="button"
-              variant="ghost"
-            >
-              {showCanvas ? (
-                <Codicon name="list-unordered" size="0.875rem" />
-              ) : (
-                <GitBranch aria-hidden className="size-3.5" />
-              )}
-            </Button>
-          </Tip>
-        ) : null
-      }
-      testId="loop-task-agents-card"
-      title={showCanvas ? 'Loop graph' : 'Agents'}
-    >
-      {showCanvas ? (
-        <LoopTaskGraph onOpenTaskTab={targetRow => onSelectTaskId?.(targetRow.taskId)} rows={subgraphRows} selectedTaskId={row.taskId} />
-      ) : (
-        <div className="flex flex-col gap-0.5" data-testid="loop-task-agents-list">
-          {items.map(({ item, row: relatedRow, taskId }) => (
-            <StatusItemRow
-              item={item}
-              key={taskId}
-              onOpen={
-                relatedRow
-                  ? () => openLoopAgentRow(relatedRow, onTaskAction, () => onSelectTaskId?.(taskId))
-                  : onSelectTaskId
-                    ? () => onSelectTaskId(taskId)
-                    : undefined
-              }
-            />
-          ))}
-        </div>
-      )}
-    </DetailSection>
   )
 }
 
 function LoopRootOverview({
   group,
   onOpenTaskTab,
-  onSwitchLoop,
-  recentLoops,
   onTaskAction
 }: {
   group: LoopDependencyGroup
   onOpenTaskTab?: (row: LoopRow) => void
-  onSwitchLoop?: (row: LoopRow) => void
-  recentLoops: LoopRow[]
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
 }) {
   const root = group.anchor
@@ -3355,14 +3246,7 @@ function LoopRootOverview({
 
   return (
     <div className="flex h-full min-h-0 min-w-0 max-w-full flex-col">
-      <LoopRootAgentsCard
-        groups={groups}
-        onOpenTaskTab={onOpenTaskTab}
-        onSwitchLoop={onSwitchLoop}
-        onTaskAction={onTaskAction}
-        recentLoops={recentLoops}
-        root={root}
-      />
+      <LoopRootAgentsCard groups={groups} onOpenTaskTab={onOpenTaskTab} onTaskAction={onTaskAction} root={root} />
     </div>
   )
 }
@@ -3374,10 +3258,8 @@ function LoopTaskDetails({
   commentsError,
   onAddComment,
   onBack,
-  onSelectTaskId,
   onTaskAction,
-  row,
-  rowById
+  row
 }: {
   backLabel?: null | string
   detail?: LoopTaskDetail | null
@@ -3385,10 +3267,8 @@ function LoopTaskDetails({
   commentsError?: null | string
   onAddComment?: LoopTaskCommentSubmit
   onBack?: () => void
-  onSelectTaskId?: (taskId: string) => void
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
   row: LoopRow
-  rowById: Map<string, LoopRow>
 }) {
   return (
     <div className="grid min-w-0 max-w-full gap-3">
@@ -3417,9 +3297,6 @@ function LoopTaskDetails({
         </div>
       </section>
       <LoopForegroundHandoffCard row={row} />
-
-      {/* Child/parent agent rows for navigating the task execution graph. */}
-      <LoopTaskAgentsCard onSelectTaskId={onSelectTaskId} onTaskAction={onTaskAction} row={row} rowById={rowById} />
 
       {/* Markdown task description/spec with a graceful empty state. */}
       <DetailSection title="Description">
@@ -3751,11 +3628,6 @@ export function LoopPanel({
 
   const overviewAnchor = selectedOverviewGroup?.anchor || null
   const loopOverviewEligible = loopDependencyGroupShowsOverview(selectedOverviewGroup)
-
-  const recentLoops = useMemo(
-    () => recentLoopRootRows(dependencyGroups, overviewAnchor?.taskId || focusedTaskId || stateRootTaskId || null),
-    [dependencyGroups, focusedTaskId, overviewAnchor?.taskId, stateRootTaskId]
-  )
 
   const showingLoopOverview = Boolean(
     loopOverviewEligible && overviewAnchor && (!focusedTaskId || focusedTaskId === overviewAnchor.taskId)
@@ -4094,16 +3966,6 @@ export function LoopPanel({
       }
     : openTaskTab
 
-  const switchLoopRoot = useCallback(
-    (row: LoopRow) => {
-      setActiveTaskTabId(null)
-      setActiveArtifactTabId(null)
-      setNavigationStack([])
-      focusDrawerTask(row.taskId)
-    },
-    [focusDrawerTask]
-  )
-
   const loopTabTitle = overviewAnchor?.title || selected?.title || 'Loop'
 
   const baseTabLabel =
@@ -4263,10 +4125,8 @@ export function LoopPanel({
                         ? selectBaseTab
                         : undefined
                     }
-                    onSelectTaskId={selectRelatedTask}
                     onTaskAction={onTaskAction}
                     row={activeTaskTabRow}
-                    rowById={rowById}
                   />
                 </div>
               ) : (
@@ -4284,9 +4144,7 @@ export function LoopPanel({
                 <LoopRootOverview
                   group={selectedOverviewGroup}
                   onOpenTaskTab={openLoopOverviewTask}
-                  onSwitchLoop={switchLoopRoot}
                   onTaskAction={onTaskAction}
-                  recentLoops={recentLoops}
                 />
               </div>
             ) : selected ? (
@@ -4298,10 +4156,8 @@ export function LoopPanel({
                   detailError={selectedTaskDetailError}
                   onAddComment={onAddTaskComment}
                   onBack={detailBack}
-                  onSelectTaskId={selectRelatedTask}
                   onTaskAction={onTaskAction}
                   row={selected}
-                  rowById={rowById}
                 />
               </div>
             ) : missingTaskId ? (

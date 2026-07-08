@@ -17,7 +17,14 @@ const mocks = vi.hoisted(() => {
     selectedTaskDetail: null
     selectedTaskDetailError: null
     selectedTaskId: null | string
-    state: null | { message: string; rawJson: string; revision: number; rootTaskId: string; rows: unknown[]; status: string }
+    state: null | {
+      message: string
+      rawJson: string
+      revision: number
+      rootTaskId: string
+      rows: unknown[]
+      status: string
+    }
     tabKey: string
   }
 
@@ -101,7 +108,13 @@ vi.mock('./chat/hooks/use-composer-actions', () => ({
 
 vi.mock('./chat/right-rail', () => ({
   ChatPreviewRail: () => <div data-testid="chat-preview-rail" />,
-  ChatWorkRail: ({ loop, previewOpen }: { loop: ReturnType<typeof mocks.defaultLoopController>; previewOpen: boolean }) =>
+  ChatWorkRail: ({
+    loop,
+    previewOpen
+  }: {
+    loop: ReturnType<typeof mocks.defaultLoopController>
+    previewOpen: boolean
+  }) =>
     previewOpen || (loop.open && !loop.hidden && (loop.state || loop.selectedTaskId || loop.focusedTaskId)) ? (
       <div data-testid="chat-work-rail" />
     ) : null,
@@ -118,7 +131,11 @@ vi.mock('./chat/use-loop-panel-controller', () => ({ useLoopPanelController: moc
 vi.mock('./command-palette', () => ({ CommandPalette: () => null }))
 vi.mock('./gateway/hooks/use-gateway-boot', () => ({ useGatewayBoot: vi.fn() }))
 vi.mock('./gateway/hooks/use-gateway-request', () => ({
-  useGatewayRequest: () => ({ connectionRef: { current: null }, gatewayRef: { current: null }, requestGateway: vi.fn() })
+  useGatewayRequest: () => ({
+    connectionRef: { current: null },
+    gatewayRef: { current: null },
+    requestGateway: vi.fn()
+  })
 }))
 vi.mock('./hooks/use-keybinds', () => ({ useKeybinds: vi.fn() }))
 vi.mock('./model-picker-overlay', () => ({ ModelPickerOverlay: () => null }))
@@ -127,7 +144,9 @@ vi.mock('./pet-generate/pet-generate-overlay', () => ({ PetGenerateOverlay: () =
 vi.mock('./right-sidebar', () => ({ RightSidebarPane: () => null }))
 vi.mock('./right-sidebar/file-actions', () => ({ FileActionDialogs: () => null }))
 vi.mock('./right-sidebar/review', () => ({ ReviewPane: () => null }))
-vi.mock('./right-sidebar/store', () => ({ $terminalTakeover: { get: () => false, listen: () => () => {}, subscribe: () => () => {} } }))
+vi.mock('./right-sidebar/store', () => ({
+  $terminalTakeover: { get: () => false, listen: () => () => {}, subscribe: () => () => {} }
+}))
 vi.mock('./right-sidebar/terminal/persistent', () => ({ PersistentTerminal: () => null, TerminalSlot: () => null }))
 vi.mock('./session/hooks/use-context-suggestions', () => ({ useContextSuggestions: vi.fn() }))
 vi.mock('./session/hooks/use-cwd-actions', () => ({ useCwdActions: () => ({ refreshProjectBranch: vi.fn() }) }))
@@ -200,9 +219,13 @@ vi.mock('./shell/hooks/use-overlay-routing', () => ({
 vi.mock('./shell/hooks/use-status-snapshot', () => ({
   useStatusSnapshot: () => ({ gatewayLogLines: [], inferenceStatus: null, statusSnapshot: null })
 }))
-vi.mock('./shell/hooks/use-statusbar-items', () => ({ useStatusbarItems: () => ({ leftStatusbarItems: [], statusbarItems: [] }) }))
+vi.mock('./shell/hooks/use-statusbar-items', () => ({
+  useStatusbarItems: () => ({ leftStatusbarItems: [], statusbarItems: [] })
+}))
 vi.mock('./shell/model-menu-panel', () => ({ ModelMenuPanel: () => null }))
-vi.mock('./shell/use-group-registry', () => ({ useGroupRegistry: () => ({ flat: { left: [], right: [] }, set: vi.fn() }) }))
+vi.mock('./shell/use-group-registry', () => ({
+  useGroupRegistry: () => ({ flat: { left: [], right: [] }, set: vi.fn() })
+}))
 vi.mock('./updates-overlay', () => ({ UpdatesOverlay: () => null }))
 
 import { PREVIEW_PANE_ID } from '@/store/layout'
@@ -245,7 +268,7 @@ describe('DesktopController Loop session-source wiring', () => {
     $paneStates.set({})
   })
 
-  it('mounts the Loop session-source controller for normal chat sessions and wires composer task rows to the work rail', () => {
+  it('uses the logical session key for Loop source while a runtime session is active', () => {
     renderController()
 
     expect(mocks.useLoopPanelController).toHaveBeenCalledWith(
