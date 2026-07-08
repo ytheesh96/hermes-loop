@@ -11531,6 +11531,7 @@ class WebhookCreate(BaseModel):
     description: Optional[str] = None
     events: List[str] = []
     prompt: Optional[str] = None
+    script: Optional[str] = None
     skills: List[str] = []
     deliver: str = "log"
     deliver_only: bool = False
@@ -11547,6 +11548,7 @@ def _webhook_route_summary(name: str, route: Dict[str, Any], base_url: str) -> D
         "deliver": route.get("deliver", "log"),
         "deliver_only": bool(route.get("deliver_only")),
         "prompt": route.get("prompt", ""),
+        "script": route.get("script", ""),
         "skills": list(route.get("skills") or []),
         "created_at": route.get("created_at"),
         "url": f"{base_url}/webhooks/{name}",
@@ -11630,6 +11632,8 @@ async def create_webhook(body: WebhookCreate):
         "deliver": body.deliver or "log",
         "created_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
     }
+    if body.script and body.script.strip():
+        route["script"] = body.script.strip()
     if body.deliver_only:
         route["deliver_only"] = True
     if body.deliver_chat_id:
