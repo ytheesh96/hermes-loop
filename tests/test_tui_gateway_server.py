@@ -7395,13 +7395,21 @@ def test_browser_manage_connect_default_local_retries_after_launch(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", _opener)
     with patch.dict(sys.modules, {"tools.browser_tool": fake}):
-        with patch(
-            "hermes_cli.browser_connect.try_launch_chrome_debug", return_value=True
+        with (
+            patch(
+                "hermes_cli.browser_connect.launch_chrome_debug",
+                return_value=ChromeDebugLaunch(launched=True),
+            ) as launch_chrome,
+            patch(
+                "hermes_cli.browser_connect.subprocess.Popen",
+                side_effect=AssertionError("test attempted to launch a real browser"),
+            ),
         ):
             resp = server.handle_request(
                 {"id": "1", "method": "browser.manage", "params": {"action": "connect"}}
             )
 
+    launch_chrome.assert_called_once()
     assert resp["result"]["connected"] is True
     assert resp["result"]["url"] == "http://127.0.0.1:9222"
     assert resp["result"]["messages"] == [
