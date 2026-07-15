@@ -43,7 +43,6 @@ export type LoopTaskAction =
   | 'archive-loop'
   | 'ask-hermes'
   | 'block'
-  | 'decompose'
   | 'details'
   | 'escalate-review'
   | 'kanban'
@@ -51,6 +50,8 @@ export type LoopTaskAction =
   | 'park'
   | 'reject-review'
   | 'start'
+  | 'submit'
+  | 'triage'
   | 'unblock'
   | 'worker-run'
   | 'worker-session'
@@ -486,6 +487,7 @@ function detailRowFromTaskDetail(detail?: LoopTaskDetail | null, selectedTaskId?
     externalParentTasks: task.external_parent_tasks,
     latestRun,
     latestSummary: task.latest_summary || latestRun?.summary || null,
+    loopIntake: task.loop_intake || null,
     loopHandoffs: task.loop_handoffs || [],
     parentCount: parents.length || task.parent_count || task.parents_count || 0,
     parents,
@@ -971,18 +973,10 @@ function cleanTaskMarkdown(text: string): string {
   return cleaned.join('\n').replace(/^\n+|\n+$/g, '')
 }
 
-function loopIntakeBlocksSubmit(row: LoopRow): boolean {
+function loopTaskIsPlanned(row: LoopRow): boolean {
   const intakeState = (row.loopIntake?.state || '').trim().toLowerCase()
 
-  return (
-    row.loopIntake?.needed === true &&
-    row.loopIntake.dispatchable !== true &&
-    !['spec-ready', 'spec_ready', 'approved'].includes(intakeState)
-  )
-}
-
-function loopSubmitTitle(row: LoopRow): string | undefined {
-  return loopIntakeBlocksSubmit(row) ? 'Submit the specified task for Kanban execution.' : undefined
+  return row.loopIntake?.needed === true && intakeState === 'planned'
 }
 
 function LoopTaskActions({
@@ -997,20 +991,36 @@ function LoopTaskActions({
   const archived = status === 'archived'
   const terminal = TERMINAL_LOOP_STATUSES.has(status)
 
-  const canSubmit = (status === 'triage' || status === 'scheduled') && !terminal
+  const planned = loopTaskIsPlanned(row)
+  const canSubmit = status === 'scheduled' && planned && !terminal
+  const canTriage = (status === 'triage' || status === 'scheduled') && !planned && !terminal
 
   const statusAction: LoopTaskAction = blocked ? 'unblock' : 'block'
   const statusLabel = blocked ? 'Unblock' : 'Block'
 
   return (
     <div className="flex flex-wrap gap-1.5" data-testid="loop-task-actions">
+      {canTriage && (
+        <Button
+          aria-label={`Triage ${row.taskId}`}
+          className="h-7 gap-1.5 px-2 text-xs"
+          disabled={!onTaskAction}
+          onClick={() => onTaskAction?.('triage', row)}
+          title="Clarify this task, improve its specification, and plan dependencies when useful."
+          type="button"
+          variant="default"
+        >
+          <Codicon name="sparkle" size="0.82rem" />
+          <span>Triage</span>
+        </Button>
+      )}
       {canSubmit && (
         <Button
           aria-label={`Submit ${row.taskId}`}
           className="h-7 gap-1.5 px-2 text-xs"
           disabled={!onTaskAction}
-          onClick={() => onTaskAction?.('decompose', row)}
-          title={loopSubmitTitle(row)}
+          onClick={() => onTaskAction?.('submit', row)}
+          title="Submit this planned task graph for Kanban execution."
           type="button"
           variant="default"
         >

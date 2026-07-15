@@ -237,6 +237,34 @@ def _handle_loop_graph(args: dict[str, Any], **_kwargs) -> str:
         return tool_error("root_task_id is required")
     action = str(args.get("action") or "read").strip().lower()
     board = args.get("board")
+    if action == "triage":
+        from hermes_cli import kanban_decompose
+
+        try:
+            scoped_board = str(board or kb.get_current_board()).strip()
+            with kb.scoped_current_board(scoped_board):
+                outcome = kanban_decompose.decompose_task(
+                    root_task_id,
+                    author=str(args.get("author") or "foreground-triage").strip(),
+                    loop_safe=True,
+                )
+            return json.dumps(
+                {
+                    "ok": bool(outcome.ok),
+                    "task_id": outcome.task_id,
+                    "reason": outcome.reason,
+                    "fanout": bool(outcome.fanout),
+                    "child_ids": outcome.child_ids or [],
+                    "new_title": outcome.new_title,
+                    "state": "planned" if outcome.ok else None,
+                },
+                ensure_ascii=False,
+            )
+        except ValueError as exc:
+            return tool_error(str(exc))
+        except Exception as exc:
+            return tool_error(f"loop_graph triage failed: {type(exc).__name__}: {exc}")
+
     conn = kb.connect(board=board)
     try:
         try:
@@ -261,7 +289,7 @@ def _handle_loop_graph(args: dict[str, Any], **_kwargs) -> str:
                     ),
                     ensure_ascii=False,
                 )
-            return tool_error("action must be 'read' or 'patch'")
+            return tool_error("action must be 'read', 'patch', or 'triage'")
         except graph.LoopError as exc:
             return json.dumps(graph.error_response(exc, conn, root_task_id), ensure_ascii=False)
         except ValueError as exc:
@@ -533,13 +561,18 @@ def _handle_loop_request_review(args: dict[str, Any], **_kwargs) -> str:
 LOOP_GRAPH_SCHEMA = {
     "name": "loop_graph",
     "description": (
-        "Read or safely update a durable Loop task graph with expected_revision + mutation_id guards. "
+        "Read or safely update a durable Loop task graph, or triage a specified root into a scheduled plan. "
+        "Patch uses expected_revision + mutation_id guards; triage never dispatches work. "
         "Responses are compact: success/error plus graph revision data."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["read", "patch"]},
+            "action": {
+                "type": "string",
+                "enum": ["read", "patch", "triage"],
+                "description": "Use triage only after clarification/specification; it plans one task or a scheduled dependency graph.",
+            },
             "root_task_id": {"type": "string", "description": "Durable Loop root task id, or a legacy Loop identity/tenant id."},
             "include_nodes": {"type": "boolean", "description": "For read only, include compact Kanban dependency tasks."},
             "expected_revision": {"type": "integer", "description": "For patch, graph_revision from the last read."},
@@ -553,6 +586,7 @@ LOOP_GRAPH_SCHEMA = {
                 ),
                 "items": {"type": "object"},
             },
+            "author": {"type": "string", "description": "For triage, audit author recorded on planning changes."},
             "board": {
                 "type": "string",
                 "description": "Optional Kanban board slug override; omit for current/pinned board.",

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Loop Triage"
+  short_description: "Clarify, specify, and safely plan Loop tasks"
+  default_prompt: "Use $loop-triage to clarify and plan this Loop task without dispatching it."

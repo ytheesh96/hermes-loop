@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  activateLoopTask,
   addLoopTaskComment,
   createLoopDraftTask,
-  decomposeLoopTask,
   getCronJobs,
   getGlobalModelInfo,
   getGlobalModelOptions,
@@ -372,31 +372,16 @@ describe('Hermes REST session helpers', () => {
     })
   })
 
-  it('decomposes Loop root tasks through the profile-scoped kanban API', async () => {
-    api.mockResolvedValue({ child_ids: [], fanout: false, ok: true, task_id: 't_root' })
+  it('activates an existing Loop plan through the profile-scoped kanban API', async () => {
+    api.mockResolvedValue({ activated_ids: ['t_root'], ok: true, task_id: 't_root' })
 
-    await decomposeLoopTask('t_root', 'peacock', { board: 'developer' })
+    await activateLoopTask('t_root', 'peacock', { board: 'developer' })
 
     expect(api).toHaveBeenCalledWith({
       body: {},
       method: 'POST',
-      path: '/api/plugins/kanban/tasks/t_root/decompose?board=developer',
-      profile: 'peacock',
-      timeoutMs: 600_000
-    })
-  })
-
-  it('marks Loop intake approval when Submit decomposes a clarified draft', async () => {
-    api.mockResolvedValue({ child_ids: [], fanout: false, ok: true, task_id: 't_root' })
-
-    await decomposeLoopTask('t_root', 'peacock', { approveIntake: true, board: 'developer' })
-
-    expect(api).toHaveBeenCalledWith({
-      body: { approve_intake: true },
-      method: 'POST',
-      path: '/api/plugins/kanban/tasks/t_root/decompose?board=developer',
-      profile: 'peacock',
-      timeoutMs: 600_000
+      path: '/api/plugins/kanban/tasks/t_root/activate?board=developer',
+      profile: 'peacock'
     })
   })
 

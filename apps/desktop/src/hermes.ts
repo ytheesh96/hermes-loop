@@ -727,28 +727,26 @@ export async function reviewLoopHandoffForTask(
   })
 }
 
-export interface LoopTaskDecomposeResult {
-  child_ids: string[]
-  fanout: boolean
-  new_title?: string | null
+export interface LoopTaskActivateResult {
+  activated_ids: string[]
+  already_active?: boolean
+  fanout?: boolean
   ok: boolean
   reason?: string | null
+  statuses?: Record<string, string>
   task_id: string
 }
 
-export function decomposeLoopTask(
+export function activateLoopTask(
   taskId: string,
   profile?: string | null,
-  options: { approveIntake?: boolean; board?: null | string } = {}
-): Promise<LoopTaskDecomposeResult> {
-  const body = options.approveIntake ? { approve_intake: true } : {}
-
-  return window.hermesDesktop.api<LoopTaskDecomposeResult>({
+  options: { board?: null | string } = {}
+): Promise<LoopTaskActivateResult> {
+  return window.hermesDesktop.api<LoopTaskActivateResult>({
     ...(profile ? { profile } : profileScoped()),
-    path: `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/decompose${kanbanBoardQuery(options.board)}`,
+    path: `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/activate${kanbanBoardQuery(options.board)}`,
     method: 'POST',
-    body,
-    timeoutMs: 10 * 60_000
+    body: {}
   })
 }
 

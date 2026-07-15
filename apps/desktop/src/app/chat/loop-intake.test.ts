@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildLoopChatDraft } from './loop-intake'
+import { buildLoopChatDraft, buildLoopTriageDraft } from './loop-intake'
 import { deriveLoopPanelStateFromTenantSource, type TenantLoopSource } from './loop-state'
 
 const titleOnlyIntakeSource: TenantLoopSource = {
@@ -37,19 +37,13 @@ describe('Loop intake foreground trigger', () => {
     })
   })
 
-  it('turns intake-needed rows into an immediate root-spec prompt', () => {
+  it('turns intake-needed rows into the foreground triage skill command', () => {
     const row = deriveLoopPanelStateFromTenantSource(titleOnlyIntakeSource)!.rows[0]!
-    const draft = buildLoopChatDraft(row)
+    const draft = buildLoopTriageDraft(row, 'developer')
 
-    expect(draft).toContain('For Loop row t_intake (Launch a Peacock workflow)')
-    expect(draft).toContain('spec this rough task immediately')
-    expect(draft).toContain('Treat this row as the real Loop/Kanban root')
-    expect(draft).toContain('loop_graph update_node')
-    expect(draft).toContain('Acceptance criteria')
-    expect(draft).toContain('Original request')
-    expect(draft).toContain('Ask one clarify question only if')
-    expect(draft).toContain('Do not dispatch, decompose, delegate')
-    expect(draft).not.toContain('create the next decision branch')
+    expect(draft).toBe(
+      '/loop-triage Triage Loop root t_intake on Kanban board developer: Launch a Peacock workflow'
+    )
   })
 
   it('ignores legacy planning projections', () => {
@@ -80,5 +74,11 @@ describe('Loop intake foreground trigger', () => {
     })
 
     expect(buildLoopChatDraft(state!.rows[0]!)).toBe('Help me with Loop task t_ready: Ready spec')
+  })
+
+  it('keeps Ask in chat generic even when the task still needs triage', () => {
+    const row = deriveLoopPanelStateFromTenantSource(titleOnlyIntakeSource)!.rows[0]!
+
+    expect(buildLoopChatDraft(row)).toBe('Help me with Loop task t_intake: Launch a Peacock workflow')
   })
 })

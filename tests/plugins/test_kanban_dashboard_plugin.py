@@ -603,6 +603,11 @@ def test_loop_intake_needed_blocks_ready_and_decompose_until_approved(client):
     assert decompose.json()["ok"] is False
     assert "Loop intake is still required" in decompose.json()["reason"]
 
+    activate = client.post(f"/api/plugins/kanban/tasks/{task_id}/activate", json={})
+    assert activate.status_code == 200, activate.text
+    assert activate.json()["ok"] is False
+    assert "must be triaged" in activate.json()["reason"]
+
     still_planning = client.get(f"/api/plugins/kanban/tasks/{task_id}")
     assert still_planning.json()["task"]["status"] == "scheduled"
 
@@ -693,36 +698,54 @@ def test_decompose_submit_approves_loop_intake_before_decomposing(client, monkey
     }
 
 
-def test_decompose_submit_can_approve_loop_safe_planning_without_dispatchability(client, monkeypatch):
+def test_activate_loop_plan_promotes_only_dependency_free_children(client, monkeypatch):
     created = client.post(
         "/api/plugins/kanban/loop-drafts",
-        json={"title": "Submit plans safely", "session_id": "session-intake-loop-safe"},
+        json={"title": "Activate planned graph", "session_id": "session-intake-loop-safe"},
     )
     task_id = created.json()["task"]["id"]
-    calls = []
-
-    def fake_decompose_task(decompose_task_id, *, author=None, loop_safe=False):
-        calls.append((decompose_task_id, author, loop_safe))
-
-        return SimpleNamespace(
-            ok=True,
-            task_id=decompose_task_id,
-            reason=None,
-            fanout=True,
-            child_ids=["t_option"],
-            new_title=None,
+    conn = kb.connect()
+    try:
+        child_ids = kb.decompose_triage_task(
+            conn,
+            task_id,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "Research", "body": "Find facts", "assignee": "researcher", "parents": []},
+                {"title": "Implement", "body": "Build it", "assignee": "engineer", "parents": [0]},
+            ],
+            author="foreground-triage",
+            auto_promote=False,
+            allowed_root_statuses={"scheduled"},
+            root_next_status="scheduled",
+            loop_intake_payload={
+                "needed": True,
+                "state": "planned",
+                "source": "foreground_triage",
+                "dispatchable": False,
+                "fanout": True,
+            },
         )
+    finally:
+        conn.close()
+    assert child_ids and len(child_ids) == 2
 
-    monkeypatch.setattr("hermes_cli.kanban_decompose.decompose_task", fake_decompose_task)
-
-    submitted = client.post(
-        f"/api/plugins/kanban/tasks/{task_id}/decompose",
-        json={"approve_intake": True, "author": "desktop-submit", "loop_safe": True},
+    monkeypatch.setattr(
+        "hermes_cli.kanban_decompose.decompose_task",
+        lambda *_args, **_kwargs: pytest.fail("Submit must not run the decomposer"),
     )
 
+    submitted = client.post(f"/api/plugins/kanban/tasks/{task_id}/activate", json={})
+
     assert submitted.status_code == 200, submitted.text
-    assert submitted.json()["ok"] is True
-    assert calls == [(task_id, "desktop-submit", True)]
+    payload = submitted.json()
+    assert payload["ok"] is True
+    assert payload["fanout"] is True
+    assert payload["statuses"] == {
+        task_id: "todo",
+        child_ids[0]: "ready",
+        child_ids[1]: "todo",
+    }
 
     detail = client.get(f"/api/plugins/kanban/tasks/{task_id}")
     assert detail.status_code == 200, detail.text
@@ -730,12 +753,74 @@ def test_decompose_submit_can_approve_loop_safe_planning_without_dispatchability
         "needed": True,
         "state": "approved",
         "source": "desktop_submit",
-        "dispatchable": False,
+        "dispatchable": True,
     }
 
-    ready = client.patch(f"/api/plugins/kanban/tasks/{task_id}", json={"status": "ready"})
-    assert ready.status_code == 409
-    assert "Loop intake is still required" in ready.json()["detail"]
+    repeated = client.post(f"/api/plugins/kanban/tasks/{task_id}/activate", json={})
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["ok"] is True
+    assert repeated.json()["already_active"] is True
+
+
+def test_activate_rejects_legacy_approved_hold_without_a_plan(client):
+    created = client.post(
+        "/api/plugins/kanban/loop-drafts",
+        json={"title": "Legacy held task", "session_id": "session-legacy-held"},
+    )
+    task_id = created.json()["task"]["id"]
+    held = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}",
+        json={
+            "body": "Specified but never planned.",
+            "loop_intake": {
+                "needed": True,
+                "state": "approved",
+                "source": "desktop_submit",
+                "dispatchable": False,
+            },
+        },
+    )
+    assert held.status_code == 200, held.text
+
+    submitted = client.post(f"/api/plugins/kanban/tasks/{task_id}/activate", json={})
+
+    assert submitted.status_code == 200, submitted.text
+    assert submitted.json()["ok"] is False
+    assert "must be triaged" in submitted.json()["reason"]
+
+
+def test_activate_single_task_plan_promotes_root_to_ready(client):
+    created = client.post(
+        "/api/plugins/kanban/loop-drafts",
+        json={"title": "Activate one task", "session_id": "session-intake-single"},
+    )
+    task_id = created.json()["task"]["id"]
+    conn = kb.connect()
+    try:
+        ok = kb.specify_triage_task(
+            conn,
+            task_id,
+            body="**Objective**\n\nShip the single task.",
+            allowed_statuses={"scheduled"},
+            next_status="scheduled",
+            recompute=False,
+            loop_intake_payload={
+                "needed": True,
+                "state": "planned",
+                "source": "foreground_triage",
+                "dispatchable": False,
+                "fanout": False,
+                "child_ids": [],
+            },
+        )
+    finally:
+        conn.close()
+    assert ok is True
+
+    submitted = client.post(f"/api/plugins/kanban/tasks/{task_id}/activate", json={})
+
+    assert submitted.status_code == 200, submitted.text
+    assert submitted.json()["statuses"] == {task_id: "ready"}
 
 
 def test_bodyful_loop_draft_and_unrelated_triage_rows_do_not_need_intake(client):

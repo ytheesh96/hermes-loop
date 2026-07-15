@@ -424,7 +424,86 @@ def _task_has_unresolved_loop_intake(conn: sqlite3.Connection, task_id: str) -> 
         return False
     if intake.get("dispatchable") is True:
         return False
-    return str(intake.get("state") or "").strip().lower() not in {"spec-ready", "spec_ready", "approved"}
+    return str(intake.get("state") or "").strip().lower() not in {
+        "planned",
+        "spec-ready",
+        "spec_ready",
+        "approved",
+    }
+
+
+def _loop_intake_is_planned(intake: Optional[dict[str, Any]]) -> bool:
+    if not intake or intake.get("needed") is not True or intake.get("dispatchable") is True:
+        return False
+    return str(intake.get("state") or "").strip().lower() == "planned"
+
+
+def _activate_planned_loop(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    author: str,
+) -> dict[str, Any]:
+    intake = _loop_intake_state_for_task(conn, task_id)
+    if intake and intake.get("dispatchable") is True and str(intake.get("state") or "").lower() == "approved":
+        return {"ok": True, "task_id": task_id, "activated_ids": [], "already_active": True}
+    if not _loop_intake_is_planned(intake):
+        return {
+            "ok": False,
+            "task_id": task_id,
+            "activated_ids": [],
+            "reason": f"Loop task {task_id} must be triaged before it can be submitted.",
+        }
+
+    rows = conn.execute(
+        "SELECT id, status FROM tasks WHERE id = ? OR created_by = ? ORDER BY created_at ASC, id ASC",
+        (task_id, f"loop:{task_id}"),
+    ).fetchall()
+    if not any(str(row["id"]) == task_id for row in rows):
+        return {"ok": False, "task_id": task_id, "activated_ids": [], "reason": "unknown task id"}
+
+    task_ids = list(dict.fromkeys(str(row["id"]) for row in rows))
+    scheduled_ids = [str(row["id"]) for row in rows if row["status"] == "scheduled"]
+    with kanban_db.write_txn(conn):
+        if scheduled_ids:
+            placeholders = ",".join("?" for _ in scheduled_ids)
+            conn.execute(
+                f"UPDATE tasks SET status = 'todo' WHERE id IN ({placeholders}) AND status = 'scheduled'",
+                tuple(scheduled_ids),
+            )
+            for activated_id in scheduled_ids:
+                kanban_db._append_event(
+                    conn,
+                    activated_id,
+                    "loop_plan_activated",
+                    {"root_task_id": task_id, "author": author},
+                )
+        kanban_db._append_event(
+            conn,
+            task_id,
+            _LOOP_INTAKE_EVENT_KIND,
+            {
+                "needed": True,
+                "state": "approved",
+                "source": "desktop_submit",
+                "dispatchable": True,
+                "author": author,
+            },
+        )
+
+    kanban_db.recompute_ready(conn)
+    status_rows = conn.execute(
+        f"SELECT id, status FROM tasks WHERE id IN ({','.join('?' for _ in task_ids)})",
+        tuple(task_ids),
+    ).fetchall()
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "activated_ids": scheduled_ids,
+        "already_active": False,
+        "fanout": len(task_ids) > 1,
+        "statuses": {str(row["id"]): str(row["status"]) for row in status_rows},
+    }
 
 
 def _task_has_loop_intake_blocking_ready(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -3831,6 +3910,29 @@ class DecomposeBody(BaseModel):
     author: Optional[str] = None
     approve_intake: bool = False
     loop_safe: bool = False
+
+
+class ActivateLoopBody(BaseModel):
+    author: Optional[str] = None
+
+
+@router.post("/tasks/{task_id}/activate")
+def activate_loop_task_endpoint(
+    task_id: str,
+    payload: ActivateLoopBody,
+    board: Optional[str] = Query(None),
+):
+    """Activate an existing scheduled Loop plan without planning it again."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return _activate_planned_loop(
+            conn,
+            task_id,
+            author=(payload.author or "desktop-submit").strip() or "desktop-submit",
+        )
+    finally:
+        conn.close()
 
 
 @router.post("/tasks/{task_id}/decompose")

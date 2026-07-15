@@ -4,6 +4,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -74,6 +75,45 @@ def test_loop_graph_tool_is_in_core_but_minimal_and_gated(monkeypatch, tmp_path)
     schema = registry.get_definitions(set(resolve_toolset("hermes-cli")), quiet=True)
     names = {s["function"].get("name") for s in schema if "function" in s}
     assert "loop_graph" not in names
+
+
+def test_loop_graph_triage_uses_loop_safe_planning_on_the_scoped_board(loop_env, monkeypatch):
+    from hermes_cli import kanban_db as kb
+
+    calls = []
+
+    def fake_decompose(task_id, *, author=None, loop_safe=False):
+        calls.append((task_id, author, loop_safe, kb.get_current_board()))
+        return SimpleNamespace(
+            child_ids=["t_child"],
+            fanout=True,
+            new_title=None,
+            ok=True,
+            reason="decomposed into 1 children",
+            task_id=task_id,
+        )
+
+    monkeypatch.setattr("hermes_cli.kanban_decompose.decompose_task", fake_decompose)
+
+    result = _call(
+        {
+            "action": "triage",
+            "author": "foreground-triage",
+            "board": "default",
+            "root_task_id": "t_root",
+        }
+    )
+
+    assert result == {
+        "child_ids": ["t_child"],
+        "fanout": True,
+        "new_title": None,
+        "ok": True,
+        "reason": "decomposed into 1 children",
+        "state": "planned",
+        "task_id": "t_root",
+    }
+    assert calls == [("t_root", "foreground-triage", True, "default")]
 
 
 def test_loop_delegation_toolset_is_explicit_and_gated(monkeypatch, tmp_path):

@@ -6,12 +6,13 @@ import { PREVIEW_PANE_ID } from '@/store/layout'
 import { $paneStates } from '@/store/panes'
 import { openSessionInNewWindow } from '@/store/windows'
 
+import { onComposerSubmitRequest } from './composer/focus'
 import { useLoopPanelController } from './use-loop-panel-controller'
 
 const hermesMocks = vi.hoisted(() => ({
   addLoopTaskComment: vi.fn(),
+  activateLoopTask: vi.fn(),
   createLoopDraftTask: vi.fn(),
-  decomposeLoopTask: vi.fn(),
   getLoopCanvasPositions: vi.fn(),
   getLoopSessionSource: vi.fn(),
   getLoopTaskDetail: vi.fn(),
@@ -140,6 +141,57 @@ function renderControllerHarness({ gatewayOpen = false }: { gatewayOpen?: boolea
           type="button"
         >
           Open new Loop root
+        </button>
+        <button
+          onClick={() =>
+            controller.onTaskAction('triage', {
+              active: true,
+              childCount: 0,
+              children: [],
+              commentCount: 0,
+              depth: 0,
+              loopIntake: {
+                dispatchable: false,
+                needed: true,
+                source: 'slash_loop_draft',
+                state: 'drafted'
+              },
+              parentCount: 0,
+              parents: [],
+              status: 'scheduled',
+              taskId: 't_intake',
+              title: 'Rough Loop task'
+            })
+          }
+          type="button"
+        >
+          Triage Loop task
+        </button>
+        <button
+          onClick={() =>
+            controller.onTaskAction('submit', {
+              active: false,
+              body: '**Objective**\n\nValidate the staged Loop workflow.',
+              childCount: 0,
+              children: [],
+              commentCount: 0,
+              depth: 0,
+              loopIntake: {
+                dispatchable: false,
+                needed: true,
+                source: 'slash_loop_draft',
+                state: 'planned'
+              },
+              parentCount: 0,
+              parents: [],
+              status: 'scheduled',
+              taskId: 't_intake',
+              title: 'Specified Loop task'
+            })
+          }
+          type="button"
+        >
+          Submit Loop task
         </button>
         <button
           onClick={() =>
@@ -272,6 +324,38 @@ describe('useLoopPanelController', () => {
     await waitFor(() => expect(screen.getByTestId('loop-selected').textContent).toBe('t_new'))
     expect(screen.getByTestId('loop-open').textContent).toBe('true')
     expect($paneStates.get()[PREVIEW_PANE_ID]?.open).toBe(true)
+  })
+
+  it('submits the foreground Triage skill with the source board', async () => {
+    const submissions: Array<{ target: string; text: string }> = []
+    const unsubscribe = onComposerSubmitRequest(detail => submissions.push(detail))
+
+    renderControllerHarness({ gatewayOpen: true })
+    await waitFor(() => expect(screen.getByTestId('loop-root').textContent).toBe('LIVE DISPOSABLE DEMO'))
+    fireEvent.click(screen.getByRole('button', { name: /triage loop task/i }))
+
+    await waitFor(() => expect(submissions).toHaveLength(1))
+    expect(submissions[0]).toEqual({
+      target: 'main',
+      text: '/loop-triage Triage Loop root t_intake on Kanban board default: Rough Loop task'
+    })
+
+    unsubscribe()
+  })
+
+  it('submits by activating the existing plan without decomposing again', async () => {
+    hermesMocks.activateLoopTask.mockResolvedValue({
+      activated_ids: ['t_intake'],
+      ok: true,
+      task_id: 't_intake'
+    })
+
+    renderControllerHarness({ gatewayOpen: true })
+    await waitFor(() => expect(screen.getByTestId('loop-root').textContent).toBe('LIVE DISPOSABLE DEMO'))
+    fireEvent.click(screen.getByRole('button', { name: /submit loop task/i }))
+
+    await waitFor(() => expect(hermesMocks.activateLoopTask).toHaveBeenCalledTimes(1))
+    expect(hermesMocks.activateLoopTask).toHaveBeenCalledWith('t_intake', 'default', { board: 'default' })
   })
 
   it('creates a title-only task through the draft API and opens the persisted row', async () => {

@@ -7227,6 +7227,7 @@ def specify_triage_task(
     allowed_statuses: Optional[set[str]] = None,
     next_status: str = "todo",
     recompute: bool = True,
+    loop_intake_payload: Optional[dict[str, Any]] = None,
 ) -> bool:
     """Flesh out a triage task and promote it to ``todo``.
 
@@ -7307,6 +7308,8 @@ def specify_triage_task(
             "specified",
             {"changed_fields": changed_fields} if changed_fields else None,
         )
+        if loop_intake_payload:
+            _append_event(conn, task_id, "loop_intake_state", dict(loop_intake_payload))
     # Outside the write_txn above, so we don't nest BEGIN IMMEDIATE — the
     # ready-promotion pass opens its own IMMEDIATE txn. This runs the same
     # logic the dispatcher would on its next tick, so a specified task
@@ -7327,6 +7330,7 @@ def decompose_triage_task(
     auto_promote: bool = True,
     allowed_root_statuses: Optional[set[str]] = None,
     root_next_status: str = "todo",
+    loop_intake_payload: Optional[dict[str, Any]] = None,
 ) -> Optional[list[str]]:
     """Fan a planning task out into child tasks and park/promote the root.
 
@@ -7593,6 +7597,10 @@ def decompose_triage_task(
                 "auto_promote": auto_promote,
             },
         )
+        if loop_intake_payload:
+            intake_payload = dict(loop_intake_payload)
+            intake_payload["child_ids"] = child_ids
+            _append_event(conn, task_id, "loop_intake_state", intake_payload)
 
     # Outside the write_txn: promote parent-free children to 'ready'
     # so the dispatcher picks them up on its next tick. Same pattern

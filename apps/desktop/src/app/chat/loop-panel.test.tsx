@@ -2819,7 +2819,7 @@ describe('LoopPanel', () => {
     expect(screen.queryByRole('button', { name: /escalate review/i })).toBeNull()
   })
 
-  it('renders a single draft Loop row as task details and gates submit through decompose', () => {
+  it('renders a single draft Loop row as task details and routes it through Triage', () => {
     const state = deriveLoopPanelStateFromTenantSource({
       session_id: 'sess-draft-root',
       root_task_id: 't_draft_root',
@@ -2848,13 +2848,14 @@ describe('LoopPanel', () => {
     expect(screen.getByTestId('loop-task-card')).toBeTruthy()
     expect(screen.queryByTestId('loop-root-card')).toBeNull()
 
-    const submit = screen.getByRole('button', { name: /Submit t_draft_root/i }) as HTMLButtonElement
-    expect(submit.disabled).toBe(false)
-    fireEvent.click(submit)
-    expect(onTaskAction).toHaveBeenCalledWith('decompose', expect.objectContaining({ taskId: 't_draft_root' }))
+    const triage = screen.getByRole('button', { name: /Triage t_draft_root/i }) as HTMLButtonElement
+    expect(triage.disabled).toBe(false)
+    expect(screen.queryByRole('button', { name: /Submit t_draft_root/i })).toBeNull()
+    fireEvent.click(triage)
+    expect(onTaskAction).toHaveBeenCalledWith('triage', expect.objectContaining({ taskId: 't_draft_root' }))
   })
 
-  it('keeps submit clickable for a specified slash Loop draft', () => {
+  it('keeps submit clickable for a planned slash Loop draft', () => {
     const state = deriveLoopPanelStateFromTenantSource({
       session_id: 'sess-intake-root',
       root_task_id: 't_intake_root',
@@ -2871,7 +2872,7 @@ describe('LoopPanel', () => {
             dispatchable: false,
             needed: true,
             source: 'slash_loop_draft',
-            state: 'drafted'
+            state: 'planned'
           },
           included_child_ids: [],
           included_parent_ids: []
@@ -2885,10 +2886,11 @@ describe('LoopPanel', () => {
 
     const submit = screen.getByRole('button', { name: /Submit t_intake_root/i }) as HTMLButtonElement
     expect(submit.disabled).toBe(false)
-    expect(submit.title).toBe('Submit the specified task for Kanban execution.')
+    expect(submit.title).toBe('Submit this planned task graph for Kanban execution.')
+    expect(screen.queryByRole('button', { name: /Triage t_intake_root/i })).toBeNull()
 
     fireEvent.click(submit)
-    expect(onTaskAction).toHaveBeenCalledWith('decompose', expect.objectContaining({ taskId: 't_intake_root' }))
+    expect(onTaskAction).toHaveBeenCalledWith('submit', expect.objectContaining({ taskId: 't_intake_root' }))
   })
 
   it('defaults the overview to the original root even after decomposition links children before the root', () => {
@@ -3612,6 +3614,99 @@ describe('LoopPanel', () => {
     expect(onTaskAction).not.toHaveBeenCalled()
   })
 
+  it('offers one Triage action before planning and Submit afterward', () => {
+    const source = {
+      latest_event_id: 1,
+      root_task_id: 't_intake',
+      session_id: 'sess-intake-actions',
+      tasks: [
+        {
+          body: null,
+          id: 't_intake',
+          loop_intake: {
+            dispatchable: false,
+            needed: true,
+            source: 'slash_loop_draft',
+            state: 'drafted'
+          },
+          status: 'scheduled',
+          title: 'Rough Loop task'
+        }
+      ]
+    }
+
+    const onTaskAction = vi.fn()
+    const state = deriveLoopPanelStateFromTenantSource(source)!
+
+    const { rerender } = render(
+      <LoopPanel
+        onTaskAction={onTaskAction}
+        open
+        selectedTaskDetail={{ task: source.tasks[0] }}
+        selectedTaskId="t_intake"
+        state={state}
+      />
+    )
+
+    const actions = screen.getByTestId('loop-task-actions')
+    const triage = within(actions).getByRole('button', { name: /triage t_intake/i })
+
+    expect(within(actions).queryByRole('button', { name: /submit t_intake/i })).toBeNull()
+    expect(within(actions).queryByRole('button', { name: /specify t_intake/i })).toBeNull()
+    expect(within(actions).queryByRole('button', { name: /decompose t_intake/i })).toBeNull()
+
+    fireEvent.click(triage)
+    expect(onTaskAction).toHaveBeenCalledWith('triage', expect.objectContaining({ taskId: 't_intake' }))
+
+    rerender(
+      <LoopPanel
+        onTaskAction={onTaskAction}
+        open
+        selectedTaskId="t_intake"
+        state={deriveLoopPanelStateFromTenantSource({
+          ...source,
+          tasks: [
+            {
+              ...source.tasks[0],
+              body: '**Objective**\n\nImplement the rough task.',
+              loop_intake: { ...source.tasks[0].loop_intake, state: 'planned' }
+            }
+          ]
+        })}
+      />
+    )
+
+    expect(screen.queryByRole('button', { name: /triage t_intake/i })).toBeNull()
+    expect(screen.getByRole('button', { name: /submit t_intake/i })).toBeTruthy()
+  })
+
+  it('does not mistake a legacy non-dispatchable approval for a planned task', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      latest_event_id: 1,
+      root_task_id: 't_legacy_hold',
+      session_id: 'sess-legacy-hold',
+      tasks: [
+        {
+          body: '**Objective**\n\nSpecified but never planned.',
+          id: 't_legacy_hold',
+          loop_intake: {
+            dispatchable: false,
+            needed: true,
+            source: 'desktop_submit',
+            state: 'approved'
+          },
+          status: 'scheduled',
+          title: 'Legacy held task'
+        }
+      ]
+    })!
+
+    render(<LoopPanel onTaskAction={vi.fn()} open selectedTaskId="t_legacy_hold" state={state} />)
+
+    expect(screen.getByRole('button', { name: /triage t_legacy_hold/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /submit t_legacy_hold/i })).toBeNull()
+  })
+
   it('exposes standalone draft submit and focused task action utilities', () => {
     const state = actionState()
     const onTaskAction = vi.fn()
@@ -3628,7 +3723,8 @@ describe('LoopPanel', () => {
     expect(screen.getByRole('heading', { name: /Description/i })).toBeTruthy()
     expect(screen.queryByText('Loop spec')).toBeNull()
     expect(screen.getByText('Draft Loop spec')).toBeTruthy()
-    expect(within(taskActions).getByRole('button', { name: /submit t_triage/i })).toBeTruthy()
+    expect(within(taskActions).getByRole('button', { name: /triage t_triage/i })).toBeTruthy()
+    expect(within(taskActions).queryByRole('button', { name: /submit t_triage/i })).toBeNull()
     expect(within(taskActions).getByRole('button', { name: /^block t_triage$/i })).toBeTruthy()
     expect(within(taskActions).getByRole('button', { name: /archive t_triage/i })).toBeTruthy()
     expect(within(taskActions).getByRole('button', { name: /ask in chat about t_triage/i })).toBeTruthy()
@@ -3636,14 +3732,14 @@ describe('LoopPanel', () => {
     expect(within(taskActions).queryByRole('button', { name: /open source task\/details for t_triage/i })).toBeNull()
     expect(within(taskActions).queryByRole('button', { name: /refresh details for t_triage/i })).toBeNull()
     const drawerText = document.body.textContent || ''
-    expect(drawerText.indexOf('Submit')).toBeLessThan(drawerText.indexOf('Draft Loop spec'))
+    expect(drawerText.indexOf('Triage')).toBeLessThan(drawerText.indexOf('Draft Loop spec'))
     expect(drawerText.indexOf('Description')).toBeLessThan(drawerText.indexOf('Draft Loop spec'))
     expect(screen.queryByRole('heading', { name: /Quick actions/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /park t_triage/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /start t_triage/i })).toBeNull()
 
-    fireEvent.click(within(taskActions).getByRole('button', { name: /submit t_triage/i }))
-    expect(onTaskAction).toHaveBeenCalledWith('decompose', expect.objectContaining({ taskId: 't_triage' }))
+    fireEvent.click(within(taskActions).getByRole('button', { name: /triage t_triage/i }))
+    expect(onTaskAction).toHaveBeenCalledWith('triage', expect.objectContaining({ taskId: 't_triage' }))
     fireEvent.click(within(taskActions).getByRole('button', { name: /archive t_triage/i }))
     expect(onTaskAction).toHaveBeenCalledWith('archive', expect.objectContaining({ taskId: 't_triage' }))
     fireEvent.click(within(taskActions).getByRole('button', { name: /ask in chat about t_triage/i }))
@@ -3657,7 +3753,7 @@ describe('LoopPanel', () => {
     expect(within(blockedTaskActions).getByRole('button', { name: /archive t_blocked/i })).toBeTruthy()
     expect(screen.queryByRole('button', { name: /park t_blocked/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /^Block t_blocked$/i })).toBeNull()
-    expect(screen.queryByRole('button', { name: /decompose t_blocked/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /triage t_blocked/i })).toBeNull()
 
     fireEvent.click(within(blockedTaskActions).getByRole('button', { name: /unblock t_blocked/i }))
     expect(onTaskAction).toHaveBeenCalledWith('unblock', expect.objectContaining({ taskId: 't_blocked' }))

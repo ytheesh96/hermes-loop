@@ -292,7 +292,6 @@ const LOOP_GRAPH_COLUMN_GAP = 18
 const LOOP_GRAPH_COMPONENT_GAP = 72
 const LOOP_GRAPH_ROW_GAP = 34
 const LOOP_GRAPH_PADDING = 32
-const LOOP_GRAPH_ACTION_TRAY_GAP = 8
 const LOOP_GRAPH_CANVAS_PADDING = 32
 const LOOP_GRAPH_MIN_ZOOM = 0.3
 const LOOP_GRAPH_MAX_ZOOM = 2
@@ -1311,7 +1310,7 @@ function LoopTaskGraphCreateNode({
           data-testid="loop-task-graph-create-action-tray"
           style={{
             left: draft.x,
-            top: draft.y + LOOP_GRAPH_NODE_HEIGHT + LOOP_GRAPH_ACTION_TRAY_GAP
+            top: draft.y + LOOP_GRAPH_NODE_HEIGHT
           }}
         >
           <Button

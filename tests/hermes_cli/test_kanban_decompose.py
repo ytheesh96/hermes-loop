@@ -170,6 +170,7 @@ def test_loop_safe_decompose_keeps_root_and_options_scheduled(kanban_home):
         children = [kb.get_task(conn, cid) for cid in outcome.child_ids]
         promoted = kb.recompute_ready(conn)
         after_recompute = [kb.get_task(conn, cid) for cid in outcome.child_ids]
+        intake_events = [event for event in kb.list_events(conn, tid) if event.kind == "loop_intake_state"]
 
     assert promoted == 0
     assert root is not None
@@ -177,6 +178,60 @@ def test_loop_safe_decompose_keeps_root_and_options_scheduled(kanban_home):
     assert [child.status for child in children if child is not None] == ["scheduled", "scheduled"]
     assert [child.status for child in after_recompute if child is not None] == ["scheduled", "scheduled"]
     assert [child.session_id for child in children if child is not None] == ["origin-session", "origin-session"]
+    assert intake_events[-1].payload["state"] == "planned"
+    assert intake_events[-1].payload["dispatchable"] is False
+    assert intake_events[-1].payload["child_ids"] == outcome.child_ids
+
+
+def test_loop_safe_single_task_fallback_stays_scheduled_and_planned(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="tighten this task",
+            created_by="loop:pending",
+            session_id="origin-session",
+            triage=True,
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET created_by = ?, status = 'scheduled' WHERE id = ?",
+                (f"loop:{tid}", tid),
+            )
+
+    llm_payload = jsonlib.dumps({
+        "fanout": False,
+        "rationale": "single unit",
+        "title": "Tightened title",
+        "body": "Tightened body",
+    })
+
+    patches = _patch_list_profiles(["orchestrator"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload), _patch_extra_body():
+            outcome = decomp.decompose_task(tid, author="foreground-triage", loop_safe=True)
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok is True
+    assert outcome.fanout is False
+    with kb.connect() as conn:
+        root = kb.get_task(conn, tid)
+        intake_events = [event for event in kb.list_events(conn, tid) if event.kind == "loop_intake_state"]
+    assert root is not None
+    assert root.status == "scheduled"
+    assert root.title == "Tightened title"
+    assert intake_events[-1].payload == {
+        "author": "foreground-triage",
+        "child_ids": [],
+        "dispatchable": False,
+        "fanout": False,
+        "needed": True,
+        "source": "foreground_triage",
+        "state": "planned",
+    }
 
 
 def test_decompose_fanout_false_assigns_default_when_unassigned(kanban_home):

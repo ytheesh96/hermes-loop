@@ -3,9 +3,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
+  activateLoopTask,
   addLoopTaskComment,
   createLoopDraftTask,
-  decomposeLoopTask,
   getLoopCanvasPositions,
   getLoopSessionSource,
   getLoopTaskDetail,
@@ -25,8 +25,8 @@ import { setPaneOpen } from '@/store/panes'
 import { $activeGatewayProfile } from '@/store/profile'
 import { openSessionInNewWindow } from '@/store/windows'
 
-import { requestComposerInsert } from './composer/focus'
-import { buildLoopChatDraft } from './loop-intake'
+import { requestComposerInsert, requestComposerSubmit } from './composer/focus'
+import { buildLoopChatDraft, buildLoopTriageDraft } from './loop-intake'
 import type { LoopTaskAction } from './loop-panel'
 import { loopSessionSourceRefetchInterval } from './loop-refresh'
 import {
@@ -61,16 +61,6 @@ function archiveableLoopRows(state: LoopPanelState | null, fallback: LoopRow): L
 
     return true
   })
-}
-
-function shouldApproveLoopIntakeOnSubmit(row: LoopRow): boolean {
-  const intake = row.loopIntake
-
-  if (!intake || intake.needed !== true || intake.dispatchable === true) {
-    return false
-  }
-
-  return true
 }
 
 function loopPanelAutoOpenParams(): { enabled: boolean; taskId: null | string } {
@@ -197,9 +187,9 @@ export function useLoopPanelController({
     }
   })
 
-  const loopTaskDecomposeMutation = useMutation({
-    mutationFn: ({ approveIntake, taskId }: { approveIntake?: boolean; taskId: string }) =>
-      decomposeLoopTask(taskId, activeGatewayProfile, { approveIntake, board: loopSourceBoard }),
+  const loopTaskActivateMutation = useMutation({
+    mutationFn: ({ taskId }: { taskId: string }) =>
+      activateLoopTask(taskId, activeGatewayProfile, { board: loopSourceBoard }),
     onSuccess: async result => {
       if (!result.ok) {
         notify({
@@ -514,11 +504,14 @@ export function useLoopPanelController({
         return
       }
 
-      if (action === 'decompose') {
-        loopTaskDecomposeMutation.mutate({
-          approveIntake: shouldApproveLoopIntakeOnSubmit(row),
-          taskId: row.taskId
-        })
+      if (action === 'triage') {
+        requestComposerSubmit(buildLoopTriageDraft(row, loopSourceBoard), { target: 'main' })
+
+        return
+      }
+
+      if (action === 'submit') {
+        loopTaskActivateMutation.mutate({ taskId: row.taskId })
 
         return
       }
@@ -560,8 +553,9 @@ export function useLoopPanelController({
       loopPanelState,
       loopReviewDecisionMutation,
       loopTaskArchiveMutation,
-      loopTaskDecomposeMutation,
+      loopTaskActivateMutation,
       loopTaskStatusMutation,
+      loopSourceBoard,
       onAddContextRef
     ]
   )

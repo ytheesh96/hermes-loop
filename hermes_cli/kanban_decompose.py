@@ -317,6 +317,49 @@ def _normalize_assignee_choice(
 
 
 _LOOP_SAFE_STATUSES = {"triage", "scheduled"}
+_LOOP_INTAKE_EVENT_KIND = "loop_intake_state"
+
+
+def _latest_event_payload(conn: Any, task_id: str, kind: str) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+        (task_id, kind),
+    ).fetchone()
+    if not row:
+        return {}
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _existing_loop_plan(conn: Any, task_id: str) -> DecomposeOutcome | None:
+    intake = _latest_event_payload(conn, task_id, _LOOP_INTAKE_EVENT_KIND)
+    if str(intake.get("state") or "").strip().lower() != "planned":
+        return None
+    decomposition = _latest_event_payload(conn, task_id, "decomposed")
+    raw_child_ids = intake.get("child_ids") or decomposition.get("child_ids") or []
+    child_ids = [str(child_id) for child_id in raw_child_ids if str(child_id).strip()]
+    return DecomposeOutcome(
+        task_id,
+        True,
+        "already planned",
+        fanout=bool(child_ids),
+        child_ids=child_ids,
+    )
+
+
+def _loop_planned_payload(*, author: str, fanout: bool) -> dict[str, Any]:
+    return {
+        "needed": True,
+        "state": "planned",
+        "source": "foreground_triage",
+        "dispatchable": False,
+        "fanout": fanout,
+        "child_ids": [],
+        "author": author,
+    }
 
 
 def decompose_task(
@@ -336,8 +379,11 @@ def decompose_task(
     with kb.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
         loop_root_id = kb._loop_root_for_task(conn, task_id) if task is not None else None
+        existing_plan = _existing_loop_plan(conn, task_id) if loop_safe and task is not None else None
     if task is None:
         return DecomposeOutcome(task_id, False, "unknown task id")
+    if existing_plan is not None:
+        return existing_plan
     if loop_safe:
         if task.status not in _LOOP_SAFE_STATUSES:
             return DecomposeOutcome(
@@ -382,7 +428,6 @@ def decompose_task(
         roster=_format_roster(roster),
         default_assignee=default_assignee,
     )
-
     parsed = None
     raw = ""
     finish_reason: str | None = None
@@ -459,14 +504,20 @@ def decompose_task(
                 allowed_statuses=_LOOP_SAFE_STATUSES if loop_safe else None,
                 next_status="scheduled" if loop_safe else "todo",
                 recompute=not loop_safe,
+                loop_intake_payload=(
+                    _loop_planned_payload(author=audit_author, fanout=False)
+                    if loop_safe
+                    else None
+                ),
             )
         if not ok:
             reason = "task moved out of Loop planning before promotion" if loop_safe else "task moved out of triage before promotion"
             return DecomposeOutcome(task_id, False, reason)
-        return DecomposeOutcome(
+        outcome = DecomposeOutcome(
             task_id, True, "single task (no fanout)",
             fanout=False, new_title=title_val,
         )
+        return outcome
 
     raw_tasks = parsed.get("tasks") or []
     if not isinstance(raw_tasks, list) or not raw_tasks:
@@ -529,6 +580,11 @@ def decompose_task(
                 auto_promote=auto_promote,
                 allowed_root_statuses=_LOOP_SAFE_STATUSES if loop_safe else None,
                 root_next_status="scheduled" if loop_safe else "todo",
+                loop_intake_payload=(
+                    _loop_planned_payload(author=audit_author, fanout=True)
+                    if loop_safe
+                    else None
+                ),
             )
     except ValueError as exc:
         return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")
@@ -540,10 +596,11 @@ def decompose_task(
         reason = "task moved out of Loop planning before decomposition" if loop_safe else "task moved out of triage before decomposition"
         return DecomposeOutcome(task_id, False, reason)
 
-    return DecomposeOutcome(
+    outcome = DecomposeOutcome(
         task_id, True, f"decomposed into {len(child_ids)} children",
         fanout=True, child_ids=child_ids,
     )
+    return outcome
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
