@@ -15,6 +15,7 @@ import { openSessionInNewWindow } from '@/store/windows'
 import { ComposerStatusStack } from './index'
 
 vi.mock('@/store/windows', () => ({
+  isSecondaryWindow: () => false,
   openSessionInNewWindow: vi.fn()
 }))
 

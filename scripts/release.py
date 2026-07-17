@@ -46,6 +46,8 @@ ACP_REGISTRY_MANIFEST = REPO_ROOT / "acp_registry" / "agent.json"
 # Auto-extracted from noreply emails + manual overrides
 AUTHOR_MAP = {
     "ytheesh96@gmail.com": "ytheesh96",  # Fork upstream-sync PR author mapping.
+    "nousbot@nousresearch.com": "nousbot-eng",  # Upstream automation commits.
+    "theunathi@gmail.com": "UnathiCodex",  # Upstream contributor commit bcf0d7457.
     "agent@agents-Mac-mini.local": "momomojo",  # PR #43692 (kanban: run goal-mode workers with -Q; commit used an unlinked local identity)
     "markvlcek@gmail.com": "MarkVLK",  # Desktop structured Fallback Models editor and test coverage.
     "gigakun@agentmail.to": "gigakun3030",  # PR #61163 (models: remove unavailable OpenCode Zen free models)

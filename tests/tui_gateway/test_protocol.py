@@ -546,7 +546,13 @@ def test_session_resume_resolves_compression_parent_to_tip(server, monkeypatch):
         def reopen_session(self, sid):
             db_events.append(("reopen", sid))
 
-        def get_messages_as_conversation(self, sid, include_ancestors=False):
+        def get_messages_as_conversation(
+            self,
+            sid,
+            include_ancestors=False,
+            include_compression_lineage=False,
+            repair_alternation=False,
+        ):
             db_events.append(("history", sid, include_ancestors))
             if include_ancestors:
                 return [
