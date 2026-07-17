@@ -19,9 +19,7 @@ import {
   updateLoopTaskStatus
 } from '@/hermes'
 import { reconcileKanbanSessionSourceForComposer } from '@/store/composer-status'
-import { PREVIEW_PANE_ID } from '@/store/layout'
 import { notify, notifyError } from '@/store/notifications'
-import { setPaneOpen } from '@/store/panes'
 import { $activeGatewayProfile } from '@/store/profile'
 import { openSessionInNewWindow } from '@/store/windows'
 
@@ -269,7 +267,6 @@ export function useLoopPanelController({
     }
 
     pendingSelectedLoopTaskIdRef.current = null
-    setPaneOpen(PREVIEW_PANE_ID, true)
     setSelectedLoopTaskId(taskId)
     setFocusedLoopTaskId(taskId)
     setLoopFocusRequestKey(key => key + 1)
@@ -297,7 +294,6 @@ export function useLoopPanelController({
 
     autoOpenedLoopPanelRef.current = autoOpenKey
 
-    setPaneOpen(PREVIEW_PANE_ID, true)
     setSelectedLoopTaskId(targetTaskId)
     setFocusedLoopTaskId(targetTaskId)
     setLoopFocusRequestKey(key => key + 1)
@@ -308,7 +304,6 @@ export function useLoopPanelController({
   const handleSelectLoopTaskId = useCallback(
     (taskId: string) => {
       pendingSelectedLoopTaskIdRef.current = loopPanelState?.rows.some(row => row.taskId === taskId) ? null : taskId
-      setPaneOpen(PREVIEW_PANE_ID, true)
       setSelectedLoopTaskId(taskId)
       setFocusedLoopTaskId(taskId)
       setLoopFocusRequestKey(key => key + 1)
@@ -327,7 +322,6 @@ export function useLoopPanelController({
       }
 
       pendingSelectedLoopTaskIdRef.current = null
-      setPaneOpen(PREVIEW_PANE_ID, true)
       setSelectedLoopTaskId(null)
       setFocusedLoopTaskId(null)
       setLoopFocusRequestKey(key => key + 1)

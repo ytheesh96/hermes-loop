@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  desktopSlashCommandHasArgOptions,
   desktopSkinSlashCompletions,
+  desktopSlashCommandHasArgOptions,
   desktopSlashDescription,
   desktopSlashUnavailableMessage,
   filterDesktopCommandsCatalog,
