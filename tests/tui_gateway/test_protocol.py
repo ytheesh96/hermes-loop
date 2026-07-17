@@ -351,7 +351,7 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch):
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             return [
                 {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": "yo", "reasoning": "thoughts"},
@@ -411,7 +411,7 @@ def test_session_resume_defaults_to_deferred_build(server, monkeypatch):
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             return [
                 {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": "yo"},
@@ -546,7 +546,13 @@ def test_session_resume_resolves_compression_parent_to_tip(server, monkeypatch):
         def reopen_session(self, sid):
             db_events.append(("reopen", sid))
 
-        def get_messages_as_conversation(self, sid, include_ancestors=False):
+        def get_messages_as_conversation(
+            self,
+            sid,
+            include_ancestors=False,
+            include_compression_lineage=False,
+            repair_alternation=False,
+        ):
             db_events.append(("history", sid, include_ancestors))
             if include_ancestors:
                 return [
@@ -610,7 +616,7 @@ def test_session_resume_handles_multimodal_list_content(server, monkeypatch):
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             return [multimodal_user, text_only_assistant]
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
@@ -660,7 +666,7 @@ def test_session_resume_lazy_registers_watch_session_without_agent(server, monke
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             return [
                 {"role": "user", "content": "delegated goal"},
             ]
@@ -733,7 +739,7 @@ def test_session_resume_lazy_reports_running_for_inflight_child(server, monkeypa
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             return [{"role": "user", "content": "delegated goal"}]
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
@@ -784,7 +790,7 @@ def test_session_resume_lazy_tolerates_missing_row_for_active_child(server, monk
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             # No rows for an unwritten session.
             return []
 
@@ -881,7 +887,7 @@ def test_session_resume_reuses_existing_live_session(server, monkeypatch):
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             return [
                 {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": "yo"},
@@ -1103,7 +1109,7 @@ def test_session_resume_live_payload_uses_current_history_with_ancestors(server,
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             if include_ancestors:
                 return ancestor_history + current_history
             return list(current_history)

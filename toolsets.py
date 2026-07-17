@@ -77,6 +77,7 @@ _HERMES_CORE_TOOLS = [
     "kanban_request_orchestrator_handoff",
     "kanban_create", "kanban_link", "kanban_unblock",
     "kanban_decompose",
+    "kanban_attach", "kanban_attach_url", "kanban_attachments",
     # Loop graph editing — one compact tool, default-enabled but gated by
     # loop.enabled so users can remove the schema surface if needed.
     "loop_graph",
@@ -269,8 +270,8 @@ TOOLSETS = {
             "set). The dispatcher runs inside the gateway by default; see "
             "`kanban.dispatch_in_gateway` in config.yaml. Lets workers mark "
             "tasks done with structured handoffs, block for human input, "
-            "heartbeat during long ops, comment on threads, and (for "
-            "orchestrators) list, unblock, and fan out tasks."
+            "heartbeat during long ops, comment on threads, attach files, and "
+            "(for orchestrators) list, unblock, and fan out tasks."
         ),
         "tools": [
             "kanban_show", "kanban_list", "kanban_complete", "kanban_block",
@@ -279,6 +280,7 @@ TOOLSETS = {
             "kanban_request_orchestrator_handoff",
             "kanban_create", "kanban_link", "kanban_unblock",
             "kanban_decompose",
+            "kanban_attach", "kanban_attach_url", "kanban_attachments",
         ],
         "includes": [],
     },

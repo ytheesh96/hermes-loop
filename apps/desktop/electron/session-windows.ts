@@ -50,9 +50,17 @@ function buildSessionWindowUrl(
   const query = new URLSearchParams({ win: 'secondary' })
   const profileKey = typeof profile === 'string' ? profile.trim() : ''
 
-  if (newSession) query.set('new', '1')
-  if (watch) query.set('watch', '1')
-  if (profileKey) query.set('profile', profileKey)
+  if (newSession) {
+    query.set('new', '1')
+  }
+
+  if (watch) {
+    query.set('watch', '1')
+  }
+
+  if (profileKey) {
+    query.set('profile', profileKey)
+  }
   const route = newSession ? '#/' : `#/${encodeURIComponent(sessionId)}`
 
   if (devServer) {

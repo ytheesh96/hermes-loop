@@ -13,20 +13,23 @@ import { Activity, AlertCircle, Clock, Command, FolderOpen, Hash, Loader2, Termi
 import type { RuntimeReadinessResult } from '@/lib/runtime-readiness'
 import { contextBarLabel, LiveDuration, usageContextLabel } from '@/lib/statusbar'
 import { cn } from '@/lib/utils'
+import { $statusItemsBySession, type ComposerStatusItem } from '@/store/composer-status'
 import { copyFilePath, revealFile } from '@/store/file-actions'
 import { revealFileInTree } from '@/store/layout'
 import { $activeGatewayProfile } from '@/store/profile'
-import { setGlobalYolo, setSessionYolo } from '@/lib/yolo-session'
-import { $statusItemsBySession, type ComposerStatusItem } from '@/store/composer-status'
 import {
   $activeSessionId,
   $busy,
   $connection,
   $currentCwd,
   $currentUsage,
+  $selectedStoredSessionId,
+  $sessions,
   $sessionStartedAt,
   $turnStartedAt,
+  sessionMatchesStoredId
 } from '@/store/session'
+import { $focusedRuntimeId, $focusedSessionState, $focusedStoredSessionId } from '@/store/session-states'
 import { $gatewayRestarting } from '@/store/system-actions'
 import {
   $backendUpdateApply,
@@ -40,6 +43,8 @@ import type { StatusResponse } from '@/types/hermes'
 
 import { CRON_ROUTE } from '../../routes'
 import type { StatusbarItem } from '../statusbar-controls'
+
+const EMPTY_USAGE = { calls: 0, input: 0, output: 0, total: 0 } as const
 
 function workspaceLabel(cwd: string): string {
   const normalized = cwd.replace(/[\\/]+$/, '')
@@ -128,16 +133,16 @@ export function useStatusbarItems({
   const { t } = useI18n()
   const copy = t.shell.statusbar
   const fileMenu = t.fileMenu
-  const activeSessionId = useStore($activeSessionId)
+  const primaryActiveSessionId = useStore($activeSessionId)
   const activeGatewayProfile = useStore($activeGatewayProfile)
   const terminalTakeover = useStore($terminalTakeover)
-  const busy = useStore($busy)
+  const primaryBusy = useStore($busy)
   const currentCwd = useStore($currentCwd)
-  const currentUsage = useStore($currentUsage)
+  const primaryUsage = useStore($currentUsage)
   const gatewayRestarting = useStore($gatewayRestarting)
-  const sessionStartedAt = useStore($sessionStartedAt)
-  const turnStartedAt = useStore($turnStartedAt)
   const statusItemsBySession = useStore($statusItemsBySession)
+  const primarySessionStartedAt = useStore($sessionStartedAt)
+  const primaryTurnStartedAt = useStore($turnStartedAt)
   const updateStatus = useStore($updateStatus)
   const updateApply = useStore($updateApply)
   const backendUpdateStatus = useStore($backendUpdateStatus)
@@ -145,10 +150,41 @@ export function useStatusbarItems({
   const desktopVersion = useStore($desktopVersion)
   const connection = useStore($connection)
 
+  // The FOCUSED session (interacted tile, else the primary — the same
+  // derivation the titlebar title follows): every session-scoped readout
+  // below (context count, timers, busy pulse) tracks it, so clicking into a
+  // tile makes the statusbar describe THAT session.
+  const focusedStoredSessionId = useStore($focusedStoredSessionId)
+  const focusedRuntimeId = useStore($focusedRuntimeId)
+  const focusedState = useStore($focusedSessionState)
+  const sessions = useStore($sessions)
+  const selectedStoredSessionId = useStore($selectedStoredSessionId)
+  const primaryFocused = !focusedStoredSessionId || focusedStoredSessionId === selectedStoredSessionId
+
+  const activeSessionId = primaryFocused ? primaryActiveSessionId : (focusedRuntimeId ?? null)
+  const busy = primaryFocused ? primaryBusy : Boolean(focusedState?.busy)
+
+  // EMPTY_USAGE (module constant) keeps the fallback referentially stable —
+  // a fresh `{...}` each render would bust the usage-label memos below.
+  const currentUsage = primaryFocused ? primaryUsage : (focusedState?.usage ?? EMPTY_USAGE)
+
+  const turnStartedAt = primaryFocused ? primaryTurnStartedAt : (focusedState?.turnStartedAt ?? null)
+
+  // A tile's session-start comes from its stored row (the cache only knows
+  // runtime state); seconds → ms.
+  const focusedRow = focusedStoredSessionId
+    ? sessions.find(s => sessionMatchesStoredId(s, focusedStoredSessionId))
+    : null
+
+  const sessionStartedAt = primaryFocused
+    ? primarySessionStartedAt
+    : focusedRow?.started_at
+      ? focusedRow.started_at * 1000
+      : null
+
   const contextUsage = useMemo(() => usageContextLabel(currentUsage), [currentUsage])
   const contextBar = useMemo(() => contextBarLabel(currentUsage), [currentUsage])
   const approvalModeItem = useApprovalModeStatusbarItem(activeGatewayProfile, requestGateway)
-
 
   const gatewayMenuContent = useMemo(
     () => (close: () => void) => (
@@ -446,9 +482,10 @@ export function useStatusbarItems({
       },
       {
         ...approvalModeItem,
-        hidden: gatewayState !== 'open',
+        hidden: gatewayState !== 'open'
       },
       {
+        actionId: 'view.showTerminal',
         className: `w-7 justify-center px-0${terminalTakeover ? ' bg-accent/55 text-foreground' : ''}`,
         hidden: !chatOpen,
         icon: <Terminal className="size-3.5" />,
@@ -475,7 +512,7 @@ export function useStatusbarItems({
       sessionStartedAt,
       gatewayState,
       terminalTakeover,
-      turnStartedAt,
+      turnStartedAt
     ]
   )
 
