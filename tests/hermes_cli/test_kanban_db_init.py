@@ -1,10 +1,128 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from pathlib import Path
 
 from hermes_cli import kanban_db as kb
+
+
+def test_legacy_loop_handoffs_are_exported_once_before_table_drop(tmp_path):
+    db_path = tmp_path / "legacy-loop-handoffs.db"
+    with kb.connect(db_path) as conn:
+        task_id = kb.create_task(conn, title="existing task")
+
+    raw = sqlite3.connect(str(db_path))
+    raw.executescript(
+        """
+        CREATE TABLE loop_handoffs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            summary TEXT,
+            payload TEXT,
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX idx_loop_handoffs_task ON loop_handoffs(task_id);
+        """
+    )
+    rows = [
+        (task_id, "pending", "existing task row", '{"decision":"review"}', 100),
+        ("t_deleted", "resolved", "orphaned row", None, 200),
+    ]
+    raw.executemany(
+        "INSERT INTO loop_handoffs "
+        "(task_id, state, summary, payload, created_at) VALUES (?, ?, ?, ?, ?)",
+        rows,
+    )
+    raw.commit()
+    raw.close()
+
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    with kb.connect(db_path) as migrated:
+        assert migrated.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'loop_handoffs'"
+        ).fetchone() is None
+        claimed = kb.claim_task(
+            migrated,
+            task_id,
+            claimer="post-legacy-handoff-migration-test",
+        )
+        assert claimed is not None
+        assert claimed.status == "running"
+        exports = migrated.execute(
+            "SELECT task_id, payload FROM task_events "
+            "WHERE kind = 'legacy_loop_handoff_exported' ORDER BY id"
+        ).fetchall()
+
+    assert [row["task_id"] for row in exports] == [task_id, "t_deleted"]
+    assert [json.loads(row["payload"])["row"] for row in exports] == [
+        {
+            "id": 1,
+            "task_id": task_id,
+            "state": "pending",
+            "summary": "existing task row",
+            "payload": '{"decision":"review"}',
+            "created_at": 100,
+        },
+        {
+            "id": 2,
+            "task_id": "t_deleted",
+            "state": "resolved",
+            "summary": "orphaned row",
+            "payload": None,
+            "created_at": 200,
+        },
+    ]
+    assert all(
+        json.loads(row["payload"])["source_table"] == "loop_handoffs"
+        and json.loads(row["payload"])["schema_version"] == 1
+        for row in exports
+    )
+
+    # Re-running initialization cannot duplicate the durable export: the
+    # source table was dropped only after both rows were copied atomically.
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    with kb.connect(db_path) as replayed:
+        count = replayed.execute(
+            "SELECT COUNT(*) FROM task_events "
+            "WHERE kind = 'legacy_loop_handoff_exported'"
+        ).fetchone()[0]
+    assert count == 2
+
+
+def test_legacy_foreground_session_metadata_migrates_to_canonical_session_id(
+    tmp_path,
+):
+    db_path = tmp_path / "legacy-foreground-session.db"
+    with kb.connect(db_path) as conn:
+        task_id = kb.create_task(conn, title="legacy routed task")
+
+    raw = sqlite3.connect(str(db_path))
+    raw.execute(
+        "ALTER TABLE tasks ADD COLUMN foreground_parent_session_id TEXT"
+    )
+    raw.execute(
+        "ALTER TABLE tasks ADD COLUMN foreground_fork_session_id TEXT"
+    )
+    raw.execute(
+        "UPDATE tasks SET foreground_parent_session_id = ?, "
+        "foreground_fork_session_id = ? WHERE id = ?",
+        ("foreground-session", "obsolete-fork", task_id),
+    )
+    raw.commit()
+    raw.close()
+
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    with kb.connect(db_path) as migrated:
+        task = kb.get_task(migrated, task_id)
+
+    assert task is not None
+    assert task.session_id == "foreground-session"
+    assert not hasattr(task, "foreground_parent_session_id")
+    assert not hasattr(task, "foreground_fork_session_id")
 
 
 def _make_legacy_db(path: Path) -> None:

@@ -194,6 +194,5 @@ Every tool has a CLI equivalent for human operators and scripts:
 - `kanban_block` ↔ `hermes kanban block <id> "reason"`
 - etc.
 
-Use the worker tools from inside an agent; graph creation and the retained
-`hermes kanban request-review` compatibility command are human/foreground
-surfaces, not worker actions.
+Use the worker tools from inside an agent; graph creation and committed
+review/follow-up task creation are foreground actions, not worker actions.

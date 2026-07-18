@@ -190,7 +190,7 @@ def test_kanban_tools_visible_with_toolset_config(monkeypatch, tmp_path):
     expected = {
         "kanban_list",
         "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
-        "kanban_resolve_blocker", "kanban_comment", "kanban_create",
+        "kanban_comment", "kanban_create",
         "kanban_decompose",
         "kanban_link",
         "kanban_unblock",
@@ -404,6 +404,107 @@ def test_complete_happy_path(worker_env):
         assert run.metadata == {"files": 2}
     finally:
         conn.close()
+
+
+def test_complete_routes_exact_dependency_transitions_to_progress(
+    monkeypatch, worker_env
+):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_progress
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        specification_child = kb.create_task(
+            conn,
+            title="Specify after parent",
+            assignee="specifier",
+            parents=[worker_env],
+            needs_specification=True,
+        )
+        ready_child = kb.create_task(
+            conn,
+            title="Run after parent",
+            assignee="worker",
+            parents=[worker_env],
+        )
+        unrelated_ready = kb.create_task(
+            conn,
+            title="Already ready and unrelated",
+            assignee="worker",
+        )
+        assert kb.get_task(conn, specification_child).status == "todo"
+        assert kb.get_task(conn, ready_child).status == "todo"
+    finally:
+        conn.close()
+
+    original_complete_task = kb.complete_task
+    completion_calls = []
+
+    def recording_complete_task(conn, task_id, **kwargs):
+        completion_calls.append(kwargs.get("transitions"))
+        return original_complete_task(conn, task_id, **kwargs)
+
+    progress_calls = []
+
+    def fake_decompose_and_dispatch(
+        specification_task_ids,
+        *,
+        ready_task_ids=None,
+        board=None,
+        conn=None,
+        author=None,
+        policy=None,
+    ):
+        specification_ids = list(specification_task_ids)
+        ready_ids = list(ready_task_ids or [])
+        progress_calls.append(
+            {
+                "specification_ids": specification_ids,
+                "ready_ids": ready_ids,
+                "board": board,
+                "author": author,
+            }
+        )
+        assert kb.get_task(conn, specification_child).status == "triage"
+        assert kb.get_task(conn, ready_child).status == "ready"
+        return {
+            "specification_task_ids": specification_ids,
+            "decomposition": [],
+            "candidate_task_ids": [*specification_ids, *ready_ids],
+            "dispatch": {"spawned": []},
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(kb, "complete_task", recording_complete_task)
+    monkeypatch.setattr(
+        kanban_progress,
+        "decompose_and_dispatch",
+        fake_decompose_and_dispatch,
+    )
+
+    result = json.loads(
+        kt._handle_complete({"summary": "unlock both descendants"})
+    )
+
+    assert result["ok"] is True
+    assert len(completion_calls) == 1
+    assert isinstance(completion_calls[0], kb.ReadyTransitions)
+    assert completion_calls[0].newly_specifiable == [specification_child]
+    assert completion_calls[0].newly_ready == [ready_child]
+    assert progress_calls == [
+        {
+            "specification_ids": [specification_child],
+            "ready_ids": [ready_child],
+            "board": kb.DEFAULT_BOARD,
+            "author": "completion-auto-decomposer",
+        }
+    ]
+    assert result["candidate_task_ids"] == [
+        specification_child,
+        ready_child,
+    ]
+    assert unrelated_ready not in result["candidate_task_ids"]
 
 
 def test_complete_metadata_round_trips_through_show(worker_env):
@@ -846,7 +947,6 @@ def test_block_emits_terminal_blocked_event(worker_env):
         assert event.kind == "blocked"
         assert event.payload is not None
         assert event.payload["reason"] == "need repository access evidence"
-        assert kb.list_loop_handoffs(conn) == []
     finally:
         conn.close()
 
@@ -1227,6 +1327,108 @@ def test_foreground_create_preserves_workflow_identity(foreground_env):
         conn.close()
 
 
+@pytest.mark.parametrize(
+    ("triage", "refreshed_status"),
+    [
+        (True, "ready"),
+        (False, "running"),
+    ],
+)
+def test_foreground_create_progress_is_scoped_and_returns_refreshed_status(
+    monkeypatch, foreground_env, triage, refreshed_status
+):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_progress
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        unrelated_ready = kb.create_task(
+            conn,
+            title="Unrelated ready",
+            assignee="peer",
+        )
+        unrelated_triage = kb.create_task(
+            conn,
+            title="Unrelated triage",
+            assignee="peer",
+            triage=True,
+        )
+    finally:
+        conn.close()
+
+    progress_calls = []
+
+    def fake_decompose_and_dispatch(
+        specification_task_ids,
+        *,
+        ready_task_ids=None,
+        board=None,
+        conn=None,
+        author=None,
+    ):
+        specification_ids = list(specification_task_ids)
+        ready_ids = list(ready_task_ids or [])
+        candidate_ids = [*specification_ids, *ready_ids]
+        progress_calls.append(
+            {
+                "specification_ids": specification_ids,
+                "ready_ids": ready_ids,
+                "candidate_ids": candidate_ids,
+                "board": board,
+                "author": author,
+            }
+        )
+        assert len(candidate_ids) == 1
+        conn.execute(
+            "UPDATE tasks SET status = ?, needs_specification = 0 "
+            "WHERE id = ?",
+            (refreshed_status, candidate_ids[0]),
+        )
+        conn.commit()
+        return {
+            "specification_task_ids": specification_ids,
+            "decomposition": [],
+            "candidate_task_ids": candidate_ids,
+            "dispatch": {"spawned": candidate_ids},
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        kanban_progress,
+        "decompose_and_dispatch",
+        fake_decompose_and_dispatch,
+    )
+
+    result = json.loads(
+        kt._handle_create(
+            {
+                "title": f"Scoped {'triage' if triage else 'ready'} follow-up",
+                "assignee": "peer",
+                "body": "Complete worker-ready specification.",
+                "triage": triage,
+            }
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == refreshed_status
+    assert len(progress_calls) == 1
+    call = progress_calls[0]
+    assert call["specification_ids"] == (
+        [result["task_id"]] if triage else []
+    )
+    assert call["ready_ids"] == (
+        [] if triage else [result["task_id"]]
+    )
+    assert call["candidate_ids"] == [result["task_id"]]
+    assert call["board"] == kb.DEFAULT_BOARD
+    assert call["author"] == "foreground-auto-decomposer"
+    assert unrelated_ready not in call["candidate_ids"]
+    assert unrelated_triage not in call["candidate_ids"]
+    assert result["candidate_task_ids"] == [result["task_id"]]
+
+
 def test_foreground_create_rejects_multiple_parent_workflows(foreground_env):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
@@ -1469,10 +1671,80 @@ def test_foreground_create_allocates_idempotent_workflow(foreground_env):
 def test_create_schema_keeps_workflow_identity_internal():
     from tools.kanban_tools import KANBAN_CREATE_SCHEMA
 
-    assert "workflow_id" not in KANBAN_CREATE_SCHEMA["parameters"]["properties"]
+    properties = KANBAN_CREATE_SCHEMA["parameters"]["properties"]
+    assert "workflow_id" not in properties
+    assert "triage" not in properties
+    assert KANBAN_CREATE_SCHEMA["parameters"]["required"] == ["title"]
+    assert "auto-decomposer" in properties["assignee"]["description"]
     assert "workflow identity" in KANBAN_CREATE_SCHEMA["description"]
     assert "Never pass a blocked task as a parent" in KANBAN_CREATE_SCHEMA["description"]
     assert "Loop-root lineage" not in KANBAN_CREATE_SCHEMA["description"]
+
+
+def test_title_only_foreground_create_enters_auto_decomposer(
+    monkeypatch,
+    foreground_env,
+):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_progress
+    from tools import kanban_tools as kt
+
+    calls = []
+
+    def fake_decompose_and_dispatch(
+        specification_task_ids,
+        *,
+        ready_task_ids=None,
+        board=None,
+        conn=None,
+        author=None,
+    ):
+        calls.append(
+            (
+                list(specification_task_ids),
+                list(ready_task_ids or []),
+                board,
+                author,
+            )
+        )
+        return {
+            "specification_task_ids": list(specification_task_ids),
+            "decomposition": [],
+            "candidate_task_ids": [],
+            "dispatch": {"spawned": []},
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        kanban_progress,
+        "decompose_and_dispatch",
+        fake_decompose_and_dispatch,
+    )
+
+    result = json.loads(
+        kt._handle_create(
+            {
+                "title": "Review the completed implementation",
+                "body": "Check the authentication edge cases.",
+            }
+        )
+    )
+
+    assert result["ok"] is True
+    assert calls == [
+        (
+            [result["task_id"]],
+            [],
+            kb.DEFAULT_BOARD,
+            "foreground-auto-decomposer",
+        )
+    ]
+    with kb.connect() as conn:
+        task = kb.get_task(conn, result["task_id"])
+    assert task is not None
+    assert task.status == "triage"
+    assert task.assignee is None
+    assert task.needs_specification is True
 
 
 def test_foreground_create_inherits_parent_dir_workspace(monkeypatch, foreground_env):
@@ -1660,11 +1932,6 @@ def test_create_rejects_no_title(foreground_env):
     assert json.loads(kt._handle_create({"title": "   ", "assignee": "x"})).get("error")
 
 
-def test_create_rejects_no_assignee(foreground_env):
-    from tools import kanban_tools as kt
-    assert json.loads(kt._handle_create({"title": "t"})).get("error")
-
-
 def test_create_rejects_non_list_parents(foreground_env):
     from tools import kanban_tools as kt
     out = kt._handle_create({"title": "t", "assignee": "a", "parents": 42})
@@ -1677,6 +1944,7 @@ def test_create_parses_triage_string_false(foreground_env):
     out = kt._handle_create({
         "title": "not triage",
         "assignee": "peer",
+        "body": "A complete worker-ready specification.",
         "triage": "false",
     })
     d = json.loads(out)
@@ -1687,6 +1955,27 @@ def test_create_parses_triage_string_false(foreground_env):
         assert task.status == "ready"
     finally:
         conn.close()
+
+
+def test_create_vague_legacy_triage_false_still_uses_decomposer(
+    foreground_env,
+):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    out = kt._handle_create(
+        {
+            "title": "vague legacy create",
+            "triage": "false",
+        }
+    )
+    data = json.loads(out)
+
+    assert data["ok"] is True
+    with kb.connect() as conn:
+        task = kb.get_task(conn, data["task_id"])
+    assert task.status == "triage"
+    assert task.needs_specification is True
 
 
 def test_create_parses_triage_string_true(foreground_env):
@@ -2031,16 +2320,6 @@ def test_worker_cannot_decompose_via_direct_handler(worker_env):
         "task_id": worker_env,
         "activation": "explicit_user_request",
         "proof_packet": {"summary": "attempted worker graph mutation"},
-    }))
-    assert "orchestrator-only" in out.get("error", "")
-
-
-def test_worker_cannot_resolve_blocker_via_direct_handler(worker_env):
-    from tools import kanban_tools as kt
-
-    out = json.loads(kt._handle_resolve_blocker({
-        "task_id": worker_env,
-        "action": "resume",
     }))
     assert "orchestrator-only" in out.get("error", "")
 

@@ -62,10 +62,9 @@ def _tui_notification_session_key(conn: Any, task_id: str, fallback: str) -> str
     except Exception:
         task = None
     if task is not None:
-        for attr in ("foreground_parent_session_id", "session_id"):
-            source_session = str(getattr(task, attr, None) or "").strip()
-            if source_session:
-                return _known_session_tip(source_session) or source_session
+        source_session = str(getattr(task, "session_id", None) or "").strip()
+        if source_session:
+            return _known_session_tip(source_session) or source_session
         tenant_tip = _known_session_tip(getattr(task, "tenant", None) or "")
         if tenant_tip:
             return tenant_tip

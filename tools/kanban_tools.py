@@ -651,7 +651,10 @@ def _handle_complete(args: dict, **kw) -> str:
     metadata = _stamp_worker_session_metadata(tid, metadata)
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
+        from hermes_cli import kanban_db as _kanban_db
+
+        effective_board = str(board or _kanban_db.get_current_board()).strip()
+        kb, conn = _connect(board=effective_board)
         try:
             # Goal-mode pre-completion judge gate (Issue #38367).
             # Prevent workers from bypassing the auxiliary judge by
@@ -686,13 +689,20 @@ def _handle_complete(args: dict, **kw) -> str:
                         "continuation tasks."
                     )
 
+            from hermes_cli import kanban_progress
+
+            policy = kanban_progress.load_progress_policy()
+            transitions = kb.ReadyTransitions()
             try:
-                ok = kb.complete_task(
-                    conn, tid,
-                    result=result, summary=summary, metadata=metadata,
-                    created_cards=created_cards,
-                    expected_run_id=_worker_run_id(tid),
-                )
+                with kb.scoped_current_board(effective_board):
+                    ok = kb.complete_task(
+                        conn, tid,
+                        result=result, summary=summary, metadata=metadata,
+                        created_cards=created_cards,
+                        expected_run_id=_worker_run_id(tid),
+                        transitions=transitions,
+                        recompute_dependents=False,
+                    )
             except kb.ArtifactPreservationError as artifact_err:
                 return tool_error(
                     f"kanban_complete could not preserve the declared artifacts: "
@@ -724,8 +734,32 @@ def _handle_complete(args: dict, **kw) -> str:
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
                 )
+            recovery_warnings = (
+                kanban_progress.capture_completion_transitions(
+                    [tid],
+                    transitions=transitions,
+                    board=effective_board,
+                    conn=conn,
+                    policy=policy,
+                )
+            )
+            progress = kanban_progress.advance_transitions(
+                transitions,
+                board=effective_board,
+                conn=conn,
+                author="completion-auto-decomposer",
+                policy=policy,
+                recovery_warnings=recovery_warnings,
+            )
             run = kb.latest_run(conn, tid)
-            return _ok(task_id=tid, run_id=run.id if run else None)
+            return _ok(
+                task_id=tid,
+                run_id=run.id if run else None,
+                decomposition=progress["decomposition"],
+                candidate_task_ids=progress["candidate_task_ids"],
+                dispatch=progress["dispatch"],
+                warnings=progress["warnings"],
+            )
         finally:
             conn.close()
     except ValueError as e:
@@ -865,55 +899,6 @@ def _handle_decompose(args: dict, **kw) -> str:
     except Exception as e:
         logger.exception("kanban_decompose failed")
         return tool_error(f"kanban_decompose: {e}")
-
-
-def _handle_resolve_blocker(args: dict, **kw) -> str:
-    """Resolve the current blocker-triage review with an explicit outcome."""
-    guard = _require_orchestrator_tool("kanban_resolve_blocker")
-    if guard:
-        return guard
-    tid = _default_task_id(args.get("task_id"))
-    if not tid:
-        return tool_error("task_id is required (or set HERMES_KANBAN_TASK in the env)")
-    ownership_err = _enforce_worker_task_ownership(tid)
-    if ownership_err:
-        return ownership_err
-    action = args.get("action")
-    actor = os.environ.get("HERMES_PROFILE") or os.environ.get("HERMES_PROFILE_NAME") or "orchestrator"
-    metadata = args.get("metadata")
-    if metadata is not None and not isinstance(metadata, dict):
-        return tool_error(f"metadata must be an object/dict, got {type(metadata).__name__}")
-    followups = args.get("followups")
-    if followups is not None and not isinstance(followups, list):
-        return tool_error(f"followups must be a list, got {type(followups).__name__}")
-    board = args.get("board")
-    try:
-        kb, conn = _connect(board=board)
-        try:
-            result = kb.resolve_blocker_triage_task(
-                conn,
-                tid,
-                action=str(action or ""),
-                actor=actor,
-                reason=args.get("reason"),
-                instructions=args.get("instructions"),
-                assignee=args.get("assignee"),
-                reviewer=args.get("reviewer"),
-                summary=args.get("summary"),
-                metadata=metadata,
-                followups=followups,
-                expected_run_id=_worker_run_id(tid),
-            )
-            if not result.get("ok"):
-                return tool_error(f"kanban_resolve_blocker failed: {result}")
-            return _ok(task_id=tid, **result)
-        finally:
-            conn.close()
-    except ValueError as e:
-        return tool_error(f"kanban_resolve_blocker: {e}")
-    except Exception as e:
-        logger.exception("kanban_resolve_blocker failed")
-        return tool_error(f"kanban_resolve_blocker: {e}")
 
 
 def _handle_heartbeat(args: dict, **kw) -> str:
@@ -1235,12 +1220,7 @@ def _handle_create(args: dict, **kw) -> str:
     title = args.get("title")
     if not title or not str(title).strip():
         return tool_error("title is required")
-    assignee = args.get("assignee")
-    if not assignee:
-        return tool_error(
-            "assignee is required — name the profile that should execute this "
-            "task (the dispatcher will only spawn tasks with an assignee)"
-        )
+    assignee = str(args.get("assignee") or "").strip() or None
     body = args.get("body")
     parents = args.get("parents") or []
     tenant = args.get("tenant") or get_session_env("HERMES_TENANT", "")
@@ -1262,6 +1242,17 @@ def _handle_create(args: dict, **kw) -> str:
     triage, bool_error = _parse_bool_arg(args, "triage")
     if bool_error:
         return tool_error(bool_error)
+    # Title/context-only foreground work is a dependency-aware skeleton: it
+    # stays todo behind unfinished parents, then enters triage when eligible.
+    # The canonical decomposer decides single-task specification versus
+    # fan-out and assigns the worker-ready frontier. Explicit legacy triage
+    # remains accepted internally, while a fully specified + routed call can
+    # still go straight to ready.
+    needs_specification = not (
+        assignee
+        and isinstance(body, str)
+        and bool(body.strip())
+    )
     idempotency_key = args.get("idempotency_key")
     max_runtime_seconds = args.get("max_runtime_seconds")
     initial_status = args.get("initial_status") or "running"
@@ -1295,7 +1286,10 @@ def _handle_create(args: dict, **kw) -> str:
     )
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
+        from hermes_cli import kanban_db as _kanban_db
+
+        effective_board = str(board or _kanban_db.get_current_board()).strip()
+        kb, conn = _connect(board=effective_board)
         try:
             parent_tasks = []
             missing_parents = []
@@ -1398,41 +1392,73 @@ def _handle_create(args: dict, **kw) -> str:
                     idempotency_key=workflow_key,
                 )
 
-            new_tid = kb.create_task(
-                conn,
-                title=str(title).strip(),
-                body=body,
-                assignee=str(assignee),
-                parents=tuple(parents),
-                tenant=tenant,
-                priority=int(priority) if priority is not None else 0,
-                workspace_kind=str(workspace_kind),
-                workspace_path=workspace_path,
-                project_id=project_id,
-                triage=triage,
-                idempotency_key=idempotency_key,
-                max_runtime_seconds=(
-                    int(max_runtime_seconds)
-                    if max_runtime_seconds is not None else None
-                ),
-                skills=skills,
-                goal_mode=goal_mode,
-                goal_max_turns=(
-                    int(goal_max_turns) if goal_max_turns is not None else None
-                ),
-                initial_status=str(initial_status),
-                created_by=os.environ.get("HERMES_PROFILE") or "orchestrator",
-                session_id=session_id,
-                workflow_id=workflow_id,
-                reject_blocked_parents=True,
-            )
+            with kb.scoped_current_board(effective_board):
+                new_tid = kb.create_task(
+                    conn,
+                    title=str(title).strip(),
+                    body=body,
+                    assignee=assignee,
+                    parents=tuple(parents),
+                    tenant=tenant,
+                    priority=int(priority) if priority is not None else 0,
+                    workspace_kind=str(workspace_kind),
+                    workspace_path=workspace_path,
+                    project_id=project_id,
+                    triage=triage,
+                    idempotency_key=idempotency_key,
+                    max_runtime_seconds=(
+                        int(max_runtime_seconds)
+                        if max_runtime_seconds is not None else None
+                    ),
+                    skills=skills,
+                    goal_mode=goal_mode,
+                    goal_max_turns=(
+                        int(goal_max_turns)
+                        if goal_max_turns is not None
+                        else None
+                    ),
+                    initial_status=str(initial_status),
+                    created_by=(
+                        os.environ.get("HERMES_PROFILE") or "orchestrator"
+                    ),
+                    session_id=session_id,
+                    workflow_id=workflow_id,
+                    board=effective_board,
+                    needs_specification=needs_specification,
+                    reject_blocked_parents=True,
+                )
             new_task = kb.get_task(conn, new_tid)
             subscribed = _maybe_auto_subscribe(conn, new_tid)
+            from hermes_cli import kanban_progress
+
+            specification_ids = (
+                [new_tid]
+                if new_task is not None and new_task.status == "triage"
+                else []
+            )
+            ready_ids = (
+                [new_tid]
+                if new_task is not None
+                and new_task.status in {"ready", "review"}
+                else []
+            )
+            progress = kanban_progress.decompose_and_dispatch(
+                specification_ids,
+                ready_task_ids=ready_ids,
+                board=effective_board,
+                conn=conn,
+                author="foreground-auto-decomposer",
+            )
+            new_task = kb.get_task(conn, new_tid)
             return _ok(
                 task_id=new_tid,
                 status=new_task.status if new_task else None,
                 subscribed=subscribed,
                 workflow_id=workflow_id,
+                decomposition=progress["decomposition"],
+                candidate_task_ids=progress["candidate_task_ids"],
+                dispatch=progress["dispatch"],
+                warnings=progress["warnings"],
             )
         finally:
             conn.close()
@@ -1802,40 +1828,6 @@ KANBAN_DECOMPOSE_SCHEMA = {
 }
 
 
-KANBAN_RESOLVE_BLOCKER_SCHEMA = {
-    "name": "kanban_resolve_blocker",
-    "description": (
-        "Resolve an orchestrator blocker-triage review for the same task row. "
-        "Use only when this task was routed with review_kind='blocker_triage'. "
-        "Supported actions: approve_complete, return_to_worker, create_followups, "
-        "route_reviewer_qa."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "string", "description": _DESC_TASK_ID_DEFAULT},
-            "action": {
-                "type": "string",
-                "description": "One of approve_complete, return_to_worker, create_followups, route_reviewer_qa.",
-            },
-            "reason": {"type": "string", "description": "Concise reason/evidence for the triage decision."},
-            "instructions": {"type": "string", "description": "Fix instructions when returning to a worker or creating a visible handoff."},
-            "assignee": {"type": "string", "description": "Assignee for return_to_worker; defaults to review_subject_assignee."},
-            "reviewer": {"type": "string", "description": "Reviewer for route_reviewer_qa; defaults to reviewer-qa."},
-            "summary": {"type": "string", "description": "Optional run summary for the triage decision."},
-            "metadata": {"type": "object", "description": "Optional structured triage decision facts."},
-            "followups": {
-                "type": "array",
-                "description": "Follow-up cards for create_followups. Each needs title and assignee; optional body, priority, workspace_kind, workspace_path.",
-                "items": {"type": "object"},
-            },
-            "board": _board_schema_prop(),
-        },
-        "required": ["action"],
-    },
-}
-
-
 KANBAN_HEARTBEAT_SCHEMA = {
     "name": "kanban_heartbeat",
     "description": (
@@ -2012,18 +2004,19 @@ KANBAN_CREATE_SCHEMA = {
             "assignee": {
                 "type": "string",
                 "description": (
-                    "Profile name that should execute this task "
-                    "(e.g. 'researcher-a', 'reviewer', 'writer'). "
-                    "Required — tasks without an assignee are never "
-                    "dispatched."
+                    "Optional profile for an already worker-ready task. Omit "
+                    "it for title/context-only work: the auto-decomposer will "
+                    "choose single-task specification or fan-out and route "
+                    "the resulting frontier."
                 ),
             },
             "body": {
                 "type": "string",
                 "description": (
-                    "Opening post: full spec, acceptance criteria, "
-                    "links. The assigned worker reads this as part of "
-                    "its context."
+                    "Optional context, constraints, evidence, links, or full "
+                    "specification. For title/context-only work, omit assignee "
+                    "so the auto-decomposer can specify or fan out the task. "
+                    "Workers also receive this opening post as context."
                 ),
             },
             "parents": {
@@ -2074,14 +2067,6 @@ KANBAN_CREATE_SCHEMA = {
                     "set, the task becomes a git worktree under the project's "
                     "primary repo with a deterministic branch (project slug + "
                     "task id), instead of a random branch."
-                ),
-            },
-            "triage": {
-                "type": "boolean",
-                "description": (
-                    "If true, task lands in 'triage' instead of 'todo' "
-                    "— a specifier profile is expected to flesh out "
-                    "the body before work starts."
                 ),
             },
             "idempotency_key": {
@@ -2148,7 +2133,7 @@ KANBAN_CREATE_SCHEMA = {
             },
             "board": _board_schema_prop(),
         },
-        "required": ["title", "assignee"],
+        "required": ["title"],
     },
 }
 
@@ -2239,16 +2224,6 @@ registry.register(
     check_fn=_check_kanban_graph_control_mode,
     emoji="⚗",
 )
-
-registry.register(
-    name="kanban_resolve_blocker",
-    toolset="kanban",
-    schema=KANBAN_RESOLVE_BLOCKER_SCHEMA,
-    handler=_handle_resolve_blocker,
-    check_fn=_check_kanban_orchestrator_mode,
-    emoji="🧭",
-)
-
 
 registry.register(
     name="kanban_heartbeat",

@@ -85,7 +85,7 @@ import threading
 import logging
 import time
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -282,29 +282,9 @@ DEFAULT_CRASH_GRACE_SECONDS = 30
 # 0/1/2 codes the worker uses for success / generic failure / usage error.
 KANBAN_RATE_LIMIT_EXIT_CODE = 75
 
-# ``blocker_triage`` stays here only so existing legacy review rows still
-# dispatch through the orchestrator compatibility resolver. New worker blockers
-# should use ``block_task`` directly; the worker tool rejects new blocker-triage
-# review requests.
+# Existing legacy review rows still dispatch as ordinary orchestrator tasks.
+# New review work is represented by a separate reviewer task.
 ORCHESTRATOR_REVIEW_KINDS = {"blocker_triage", "foreground_judgment"}
-
-BLOCKER_TRIAGE_REVIEW_KIND = "blocker_triage"
-BLOCKER_TRIAGE_ASSIGNEE = "orchestrator"
-BLOCKER_TRIAGE_TERMINAL_METADATA_FLAG = "terminal_blocker"
-BLOCKER_TRIAGE_TERMINAL_KINDS = {
-    "system",
-    "credentials",
-    "external_access",
-    "policy",
-    "not_routable",
-}
-
-BLOCKER_TRIAGE_ACTIONS = {
-    "approve_complete",
-    "return_to_worker",
-    "create_followups",
-    "route_reviewer_qa",
-}
 
 
 def _resolve_crash_grace_seconds() -> int:
@@ -885,7 +865,7 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
     # A concurrent connect(board=normed) after the rename/delete recreates
     # an empty sqlite file via mkdir(exist_ok=True); the cache entry must be
     # dropped first so the schema init pass re-runs on that fresh file.
-    _INITIALIZED_PATHS.discard(str((d / "kanban.db").resolve()))
+    invalidate_db_caches(d / "kanban.db")
 
     if archive:
         archive_root = boards_root() / "_archived"
@@ -1037,8 +1017,6 @@ class Task:
     review_kind: Optional[str] = None
     resume_mode: Optional[str] = None
     review_subject_assignee: Optional[str] = None
-    foreground_parent_session_id: Optional[str] = None
-    foreground_fork_session_id: Optional[str] = None
     # Typed block reason (one of VALID_BLOCK_KINDS) or None for legacy/un-typed
     # blocks. Set by ``block_task``; preserved across unblock so a re-block for
     # the same kind is recognisable as an unblock↔re-block loop.
@@ -1136,12 +1114,6 @@ class Task:
             ),
             review_subject_assignee=(
                 row["review_subject_assignee"] if "review_subject_assignee" in keys else None
-            ),
-            foreground_parent_session_id=(
-                row["foreground_parent_session_id"] if "foreground_parent_session_id" in keys else None
-            ),
-            foreground_fork_session_id=(
-                row["foreground_fork_session_id"] if "foreground_fork_session_id" in keys else None
             ),
             block_kind=(
                 row["block_kind"] if "block_kind" in keys and row["block_kind"] else None
@@ -1349,8 +1321,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     review_kind          TEXT,
     resume_mode          TEXT,
     review_subject_assignee TEXT,
-    foreground_parent_session_id TEXT,
-    foreground_fork_session_id TEXT,
     -- Typed block reason set by ``block_task`` (one of VALID_BLOCK_KINDS, or
     -- NULL for legacy/un-typed blocks). Drives routing: ``dependency`` never
     -- sits in ``blocked`` (goes to ``todo`` for parent-gating); the others go
@@ -1479,58 +1449,6 @@ CREATE TABLE IF NOT EXISTS workflow_notify_subs (
     )
 );
 
-CREATE TABLE IF NOT EXISTS loop_handoffs (
-    id                             INTEGER PRIMARY KEY AUTOINCREMENT,
-    idempotency_key                TEXT NOT NULL UNIQUE,
-    root_task_id                   TEXT NOT NULL,
-    tenant                         TEXT,
-    task_id                        TEXT NOT NULL,
-    run_id                         INTEGER,
-    source_event_id                INTEGER,
-    handoff_kind                   TEXT NOT NULL,
-    intent                         TEXT,
-    target_actor                   TEXT,
-    state                          TEXT NOT NULL,
-    claimed_by                     TEXT,
-    claimed_at                     INTEGER,
-    attention                      TEXT,
-    verification_state             TEXT NOT NULL,
-    verification_status            TEXT NOT NULL DEFAULT 'unknown',
-    worker_profile                 TEXT,
-    worker_session_id              TEXT,
-    originating_session_id         TEXT,
-    task_title                     TEXT,
-    task_body                      TEXT,
-    summary                        TEXT,
-    reason                         TEXT,
-    worker_metadata_json           TEXT,
-    payload_json                   TEXT,
-    artifacts_json                 TEXT,
-    changed_files_json             TEXT,
-    created_cards_json             TEXT,
-    parent_state_snapshot_json     TEXT,
-    child_state_snapshot_json      TEXT,
-    review_task_id                 TEXT,
-    review_run_id                  INTEGER,
-    reviewer_session_id            TEXT,
-    review_batch_id                TEXT,
-    decision_actor                 TEXT,
-    decision_reason                TEXT,
-    resolution_action              TEXT,
-    resolved_by                    TEXT,
-    resolution_summary             TEXT,
-    auto_actions_log_json          TEXT,
-    escalation_reason              TEXT,
-    escalation_options_json        TEXT,
-    final_summary_sent_at          INTEGER,
-    escalation_notified_at         INTEGER,
-    created_at                     INTEGER NOT NULL,
-    updated_at                     INTEGER NOT NULL,
-    started_at                     INTEGER,
-    completed_at                   INTEGER,
-    resolved_at                    INTEGER
-);
-
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
@@ -1545,10 +1463,6 @@ CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_
 CREATE INDEX IF NOT EXISTS idx_workflow_notify       ON workflow_notify_subs(workflow_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workflows_idempotency
     ON workflows(idempotency_key) WHERE idempotency_key IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_loop_handoffs_root_state ON loop_handoffs(root_task_id, state, updated_at);
-CREATE INDEX IF NOT EXISTS idx_loop_handoffs_tenant_state ON loop_handoffs(tenant, state, updated_at);
-CREATE INDEX IF NOT EXISTS idx_loop_handoffs_task ON loop_handoffs(task_id, updated_at);
-CREATE INDEX IF NOT EXISTS idx_loop_handoffs_review_task ON loop_handoffs(review_task_id);
 """
 
 
@@ -1560,6 +1474,30 @@ _INITIALIZED_PATHS: set[str] = set()
 _INIT_LOCK = threading.RLock()
 _SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_BUSY_TIMEOUT_MS = 120_000
+
+
+@dataclass(frozen=True)
+class _DbFileIdentity:
+    """Filesystem identity used to scope one process-local quarantine entry."""
+
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+
+
+@dataclass(frozen=True)
+class _QuarantinedDb:
+    identity: _DbFileIdentity
+    backup_path: Optional[Path]
+    reason: str
+
+
+# A corrupt board is retried frequently by long-lived gateway watchers. Cache
+# the failure only for the exact bytes/inode we inspected so those retries do
+# not repeat a full integrity scan and backup. Replacing or modifying the file
+# changes its identity and automatically makes the next open probe it again.
+_QUARANTINED_DBS: dict[str, _QuarantinedDb] = {}
 
 # Bounded acquire for the cross-process init lock (#36644). The original bare
 # blocking flock had no timeout, so a wedged holder blocked the dispatcher's
@@ -1586,6 +1524,33 @@ def _resolve_busy_timeout_ms() -> int:
         if parsed > 0:
             return parsed
     return DEFAULT_BUSY_TIMEOUT_MS
+
+
+def _db_file_identity(path: Path) -> Optional[_DbFileIdentity]:
+    """Return the fields that distinguish one on-disk DB generation."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return _DbFileIdentity(
+        device=stat.st_dev,
+        inode=stat.st_ino,
+        size=stat.st_size,
+        mtime_ns=stat.st_mtime_ns,
+    )
+
+
+def invalidate_db_caches(db_path: Path) -> None:
+    """Forget process-local state after a DB path is removed or replaced.
+
+    This does not and cannot close connections owned by another process.
+    Restore callers must still quiesce external DB users before replacing a
+    live SQLite file.
+    """
+    resolved = str(db_path.resolve())
+    with _INIT_LOCK:
+        _INITIALIZED_PATHS.discard(resolved)
+        _QUARANTINED_DBS.pop(resolved, None)
 
 
 def _sqlite_connect(path: Path) -> sqlite3.Connection:
@@ -1910,8 +1875,10 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
     treated as corruption; they propagate raw so the caller sees a
     normal lock failure and no spurious ``.corrupt`` backup is made.
 
-    No-op for missing files, zero-byte files (treated as fresh), and
-    paths already proven healthy this process (cache hit).
+    No-op for missing files, zero-byte files (treated as fresh), and paths
+    already proven healthy this process. An unchanged corrupt file is also
+    rejected from a process-local identity cache, avoiding another full scan
+    and backup on every watcher retry.
 
     Path-trust note: ``path`` arrives via :func:`connect`, which itself
     resolves it from an explicit ``db_path`` argument, the
@@ -1927,13 +1894,29 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
         resolved = path.resolve()
     except OSError:
         return
-    try:
-        if not resolved.exists() or resolved.stat().st_size == 0:
-            return
-    except OSError:
+    cache_key = str(resolved)
+    identity = _db_file_identity(resolved)
+    if identity is None:
+        with _INIT_LOCK:
+            _QUARANTINED_DBS.pop(cache_key, None)
         return
-    if str(resolved) in _INITIALIZED_PATHS:
+    if identity.size == 0:
+        with _INIT_LOCK:
+            _QUARANTINED_DBS.pop(cache_key, None)
         return
+    if cache_key in _INITIALIZED_PATHS:
+        return
+    with _INIT_LOCK:
+        quarantined = _QUARANTINED_DBS.get(cache_key)
+        if quarantined is not None and quarantined.identity != identity:
+            _QUARANTINED_DBS.pop(cache_key, None)
+            quarantined = None
+    if quarantined is not None:
+        raise KanbanDbCorruptError(
+            resolved,
+            quarantined.backup_path,
+            quarantined.reason,
+        )
     reason: Optional[str] = None
     try:
         probe = _sqlite_connect(resolved)
@@ -1951,7 +1934,41 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
     if reason is None:
         return
     backup = _backup_corrupt_db(resolved)
+    # Only cache a result for the exact file generation that was inspected.
+    # If another actor replaced or modified it while the probe/backup ran, the
+    # next open must inspect that new generation rather than inherit this one.
+    if _db_file_identity(resolved) == identity:
+        with _INIT_LOCK:
+            _QUARANTINED_DBS[cache_key] = _QuarantinedDb(
+                identity=identity,
+                backup_path=backup,
+                reason=reason,
+            )
     raise KanbanDbCorruptError(resolved, backup, reason)
+
+
+def _open_configured_connection(path: Path) -> sqlite3.Connection:
+    """Open one steady-state Kanban connection and apply connection pragmas."""
+
+    conn = _sqlite_connect(path)
+    try:
+        conn.row_factory = sqlite3.Row
+        with _INIT_LOCK:
+            from hermes_state import apply_wal_with_fallback
+
+            apply_wal_with_fallback(
+                conn,
+                db_label=f"kanban.db ({path.name})",
+            )
+            conn.execute("PRAGMA synchronous=FULL")
+            conn.execute("PRAGMA wal_autocheckpoint=100")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA secure_delete=ON")
+            conn.execute("PRAGMA cell_size_check=ON")
+    except Exception:
+        conn.close()
+        raise
+    return conn
 
 
 def connect(
@@ -1995,23 +2012,19 @@ def connect(
     # connection with WAL/pragmas under the cheap in-process _INIT_LOCK.
     resolved = str(path.resolve())
     if resolved in _INITIALIZED_PATHS:
-        conn = _sqlite_connect(path)
-        try:
-            conn.row_factory = sqlite3.Row
-            with _INIT_LOCK:
-                from hermes_state import apply_wal_with_fallback
-                apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
-                conn.execute("PRAGMA synchronous=FULL")
-                conn.execute("PRAGMA wal_autocheckpoint=100")
-                conn.execute("PRAGMA foreign_keys=ON")
-                conn.execute("PRAGMA secure_delete=ON")
-                conn.execute("PRAGMA cell_size_check=ON")
-        except Exception:
-            conn.close()
-            raise
-        return conn
+        return _open_configured_connection(path)
 
     with _cross_process_init_lock(path):
+        # A notifier and dispatcher can miss the fast-path cache together, then
+        # serialize here. Recheck after the lock so the second thread never raw-
+        # opens the database header after the first thread has established a
+        # live SQLite connection. On POSIX, closing any ordinary file descriptor
+        # for an inode can cancel that process's advisory locks for the inode,
+        # including locks SQLite owns through a different descriptor.
+        resolved = str(path.resolve())
+        if resolved in _INITIALIZED_PATHS:
+            return _open_configured_connection(path)
+
         # Cheap byte-level check first — catches the #29507 TLS-overwrite shape
         # and other invalid-header cases without opening a sqlite connection.
         _validate_sqlite_header(path)
@@ -2020,30 +2033,9 @@ def connect(
         # via _INITIALIZED_PATHS so it only runs once per process per path.
         _guard_existing_db_is_healthy(path)
         resolved = str(path.resolve())
-        conn = _sqlite_connect(path)
+        conn = _open_configured_connection(path)
         try:
-            conn.row_factory = sqlite3.Row
             with _INIT_LOCK:
-                # WAL activation can take an exclusive lock while SQLite creates the
-                # sidecar files for a fresh database. Keep it in the same process-local
-                # critical section as schema initialization so concurrent gateway
-                # startup threads do not race before _INITIALIZED_PATHS is populated.
-                # WAL doesn't work on network filesystems (NFS/SMB/FUSE). Shared helper
-                # falls back to DELETE with one WARNING so kanban stays usable there.
-                # See hermes_state._WAL_INCOMPAT_MARKERS for detection logic.
-                from hermes_state import apply_wal_with_fallback
-                apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
-                # FULL (was NORMAL): fsync before each checkpoint to narrow the
-                # crash window that can leave a b-tree page header torn.
-                conn.execute("PRAGMA synchronous=FULL")
-                conn.execute("PRAGMA wal_autocheckpoint=100")
-                conn.execute("PRAGMA foreign_keys=ON")
-                # Zero freed pages so a later torn write cannot expose stale
-                # cell content; persisted in the DB header for new DBs.
-                conn.execute("PRAGMA secure_delete=ON")
-                # Surface corrupt cells as read errors instead of silent
-                # wrong-data returns.
-                conn.execute("PRAGMA cell_size_check=ON")
                 needs_init = resolved not in _INITIALIZED_PATHS
                 if needs_init:
                     # Idempotent: runs CREATE TABLE IF NOT EXISTS + the additive
@@ -2116,12 +2108,16 @@ def init_db(
         path = kanban_db_path(board=board)
     path.parent.mkdir(parents=True, exist_ok=True)
     resolved = str(path.resolve())
-    # Clear the cache entry so the underlying connect() re-runs the
-    # schema + migration pass unconditionally.
-    with _INIT_LOCK:
-        _INITIALIZED_PATHS.discard(resolved)
-    with contextlib.closing(connect(path)):
-        pass
+    already_initialized = resolved in _INITIALIZED_PATHS
+    with contextlib.closing(connect(path)) as conn:
+        if already_initialized:
+            # Force only the idempotent schema/migration pass. Clearing the
+            # cache would send connect() back through its raw header probe; if
+            # another connection is live in this process, that raw close can
+            # cancel SQLite's POSIX advisory locks for the shared inode.
+            with _INIT_LOCK:
+                conn.executescript(SCHEMA_SQL)
+                _migrate_add_optional_columns(conn)
     return path
 
 
@@ -2186,8 +2182,7 @@ def _backfill_legacy_workflow_membership(conn: sqlite3.Connection) -> None:
     now = int(time.time())
     for workflow_id in sorted(set(assignments.values())):
         root = conn.execute(
-            "SELECT id, title, body, status, session_id, "
-            "foreground_parent_session_id, tenant, "
+            "SELECT id, title, body, status, session_id, tenant, "
             "workspace_kind, workspace_path, created_at "
             "FROM tasks WHERE id = ?",
             (workflow_id,),
@@ -2209,8 +2204,7 @@ def _backfill_legacy_workflow_membership(conn: sqlite3.Connection) -> None:
                 continue
             placeholders = ",".join("?" for _ in member_ids)
             metadata_row = conn.execute(
-                "SELECT id, title, body, status, session_id, "
-                "foreground_parent_session_id, tenant, workspace_kind, "
+                "SELECT id, title, body, status, session_id, tenant, workspace_kind, "
                 "workspace_path, created_at FROM tasks "
                 f"WHERE id IN ({placeholders}) ORDER BY created_at, id LIMIT 1",
                 tuple(member_ids),
@@ -2232,8 +2226,7 @@ def _backfill_legacy_workflow_membership(conn: sqlite3.Connection) -> None:
                 workflow_id,
                 metadata_row["title"],
                 workflow_status,
-                metadata_row["foreground_parent_session_id"]
-                or metadata_row["session_id"],
+                metadata_row["session_id"],
                 metadata_row["tenant"],
                 metadata_row["body"],
                 metadata_row["workspace_kind"] or "scratch",
@@ -2301,6 +2294,37 @@ def _archive_identity_only_loop_roots(conn: sqlite3.Connection) -> None:
             "WHERE id = ? AND status != 'archived'",
             (task_id,),
         )
+
+
+def _retire_legacy_loop_handoffs(conn: sqlite3.Connection) -> None:
+    """Atomically export legacy handoff rows to the audit log, then drop them."""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'loop_handoffs'"
+    ).fetchone()
+    if exists is None:
+        return
+
+    with write_txn(conn):
+        rows = conn.execute("SELECT * FROM loop_handoffs ORDER BY id").fetchall()
+        exported_at = int(time.time())
+        for row in rows:
+            raw = dict(row)
+            payload = json.dumps(
+                {
+                    "schema_version": 1,
+                    "source_table": "loop_handoffs",
+                    "row": raw,
+                },
+                ensure_ascii=False,
+            )
+            conn.execute(
+                "INSERT INTO task_events "
+                "(task_id, run_id, kind, payload, created_at) "
+                "VALUES (?, NULL, 'legacy_loop_handoff_exported', ?, ?)",
+                (str(raw.get("task_id") or ""), payload, exported_at),
+            )
+        conn.execute("DROP TABLE loop_handoffs")
 
 
 def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
@@ -2452,11 +2476,19 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         "review_kind",
         "resume_mode",
         "review_subject_assignee",
-        "foreground_parent_session_id",
-        "foreground_fork_session_id",
     ):
         if column not in cols:
             _add_column_if_missing(conn, "tasks", column, f"{column} TEXT")
+    # The removed foreground-fork protocol used a second routing column before
+    # ``session_id`` became canonical. Preserve that identity once, then leave
+    # the legacy column inert on old SQLite files.
+    if "foreground_parent_session_id" in cols:
+        conn.execute(
+            "UPDATE tasks SET session_id = foreground_parent_session_id "
+            "WHERE session_id IS NULL "
+            "AND foreground_parent_session_id IS NOT NULL "
+            "AND TRIM(foreground_parent_session_id) != ''"
+        )
     if "block_kind" not in cols:
         # Typed block reason (VALID_BLOCK_KINDS) or NULL for legacy/un-typed
         # blocks. Existing blocked rows get NULL, which is treated as a
@@ -2579,29 +2611,7 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 "pending_expires_at INTEGER",
             )
 
-    loop_handoffs_exist = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='loop_handoffs'"
-    ).fetchone() is not None
-    if loop_handoffs_exist:
-        handoff_cols = {
-            row["name"] for row in conn.execute("PRAGMA table_info(loop_handoffs)")
-        }
-        for column in (
-            "intent",
-            "target_actor",
-            "payload_json",
-            "resolution_action",
-            "resolved_by",
-        ):
-            if column not in handoff_cols:
-                _add_column_if_missing(conn, "loop_handoffs", column, f"{column} TEXT")
-        handoff_cols = {
-            row["name"] for row in conn.execute("PRAGMA table_info(loop_handoffs)")
-        }
-        if "claimed_by" not in handoff_cols:
-            _add_column_if_missing(conn, "loop_handoffs", "claimed_by", "claimed_by TEXT")
-        if "claimed_at" not in handoff_cols:
-            _add_column_if_missing(conn, "loop_handoffs", "claimed_at", "claimed_at INTEGER")
+    _retire_legacy_loop_handoffs(conn)
 
     # One-shot backfill: any task that is 'running' before runs existed
     # had its claim_lock / claim_expires / worker_pid on the task row.
@@ -2814,45 +2824,6 @@ def _rebuild_drifted_tables(conn: sqlite3.Connection) -> None:
         raise
 
 
-def _check_file_length_invariant(conn: sqlite3.Connection) -> None:
-    """Read the SQLite header page_count and compare against actual file size.
-
-    Raises sqlite3.DatabaseError if the file is shorter than the header claims
-    (torn-extend corruption).
-    """
-    try:
-        row = conn.execute("PRAGMA database_list").fetchone()
-        if row is None:
-            return
-        path_str = row[2]  # column 2 is the file path; empty for in-memory DBs
-        if not path_str:
-            return  # in-memory or unnamed DB; skip
-        path = path_str
-        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
-        file_size = os.path.getsize(path)
-        with open(path, "rb") as f:
-            f.seek(28)
-            header_bytes = f.read(4)
-        if len(header_bytes) < 4:
-            return  # can't read header; skip
-        header_page_count = int.from_bytes(header_bytes, "big")
-        if header_page_count == 0:
-            return  # new/empty DB; skip
-        actual_pages = file_size // page_size
-        if actual_pages < header_page_count:
-            raise sqlite3.DatabaseError(
-                f"torn-extend detected: page count mismatch on {path}: "
-                f"header claims {header_page_count} pages, "
-                f"file has {actual_pages} pages "
-                f"(missing {header_page_count - actual_pages} pages, "
-                f"file_size={file_size}, page_size={page_size})"
-            )
-    except sqlite3.DatabaseError:
-        raise
-    except Exception:
-        pass  # I/O errors during check are non-fatal; let normal ops continue
-
-
 # SQLite's own busy_timeout uses a near-deterministic backoff, so concurrent
 # writers re-collide in lockstep under a stampede. A jittered retry on the
 # transaction boundary breaks that convoy. Mirrors state.db's _execute_write:
@@ -2912,6 +2883,9 @@ def write_txn(conn: sqlite3.Connection):
     else:
         try:
             _execute_boundary_with_retry(conn, "COMMIT")
+            # Keep any future integrity checks inside SQLite. On POSIX, closing
+            # a separate raw descriptor for this inode cancels the process's
+            # SQLite advisory locks and can split the active WAL generation.
         except Exception:
             # COMMIT exhausted retries with the txn still open; roll back so the
             # connection isn't poisoned for the next BEGIN IMMEDIATE.
@@ -2920,9 +2894,6 @@ def write_txn(conn: sqlite3.Connection):
             except sqlite3.OperationalError:
                 pass
             raise
-        # Post-commit file-length check: header page_count must match actual file pages.
-        # A discrepancy means a torn-extend — raise now rather than silently corrupt.
-        _check_file_length_invariant(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -3889,10 +3860,7 @@ def create_loop_skeleton_graph(
                         conn,
                         workflow_id=workflow_id,
                         title=legacy_root["title"],
-                        origin_session_id=(
-                            legacy_root["foreground_parent_session_id"]
-                            or legacy_root["session_id"]
-                        ),
+                        origin_session_id=legacy_root["session_id"],
                         tenant=legacy_root["tenant"],
                         shared_context=legacy_root["body"],
                         workspace_kind=legacy_root["workspace_kind"] or "scratch",
@@ -4608,8 +4576,8 @@ def link_tasks(
             raise ValueError(
                 "review gate dependency would deadlock: a task blocked with "
                 "review-required must not be the parent of its reviewer task. "
-                "Move the same task to status='review' or link the reviewer "
-                "as an upstream gate instead."
+                "Create the reviewer task without the blocked task as a parent, "
+                "or link the reviewer as an upstream gate instead."
             )
         conn.execute(
             "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
@@ -5344,117 +5312,11 @@ def _append_loop_root_notification_event(
     return _append_event(conn, root_task_id, synthetic_kind, root_payload)
 
 
-def _lineage_session_id(
-    conn: sqlite3.Connection,
-    task_id: str,
-    *,
-    root_task_id: Optional[str] = None,
-) -> Optional[str]:
-    """Best-effort foreground session id from a task, root, or ancestors."""
-    candidates = [str(task_id or "").strip()]
-    root = str(root_task_id or "").strip()
-    if root and root not in candidates:
-        candidates.append(root)
-    candidates.extend(pid for pid in parent_ids(conn, task_id) if pid not in candidates)
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            row = conn.execute(
-                "SELECT session_id FROM tasks WHERE id = ?",
-                (candidate,),
-            ).fetchone()
-        except sqlite3.OperationalError:
-            return None
-        session_id = row["session_id"] if row and "session_id" in row.keys() else None
-        if isinstance(session_id, str) and session_id.strip():
-            return session_id.strip()
-    return None
-
-
-def _is_loop_root_handoff_source(
-    conn: sqlite3.Connection,
-    task_id: str,
-    root_task_id: Optional[str] = None,
-) -> bool:
-    """Whether ``task_id`` is the Loop root/final-closeout handoff source.
-
-    Loop children can be parent-free when they are the first runnable nodes in a
-    decomposed graph, so parent absence alone is not a reliable root signal. A
-    task is the root/final closeout source when its Loop identity points at
-    itself (``created_by='loop:<task_id>'``). Legacy single-node Loop roots used
-    a synthetic root id with no separate root task row; keep that shape as a
-    root source only when the task has no dependency parents and the root id is
-    not another canonical task.
-    """
-    task_id = str(task_id or "").strip()
-    if not task_id:
-        return False
-    root_task_id = str(root_task_id or _loop_root_for_task(conn, task_id) or "").strip()
-    if not root_task_id:
-        return False
-    if root_task_id == task_id:
-        return True
-    if parent_ids(conn, task_id):
-        return False
-    root_row = conn.execute("SELECT 1 FROM tasks WHERE id = ?", (root_task_id,)).fetchone()
-    return root_row is None
-
-
-_LOOP_HANDOFF_ACTIVE_STATES = {"assigned", "reviewing"}
-# Autonomous reviewer actions may only act on pending/active handoffs that are
-# still waiting for review. Escalated and terminal rows require human/user
-# resolution and must never be auto-approved or auto-released by a later retry.
-_LOOP_HANDOFF_AUTONOMOUS_ACTION_STATES = {
-    "recorded",
-    "queued",
-    "batched",
-    "assigned",
-    "reviewing",
-}
-_LOOP_HANDOFF_TERMINAL_STATES = {
-    "approved",
-    "released",
-    "blocked_waiting",
-    "escalated",
-    "rejected",
-    "closed",
-    "ignored_duplicate",
-    "cancelled_superseded",
-}
-_LOOP_HANDOFF_REPAIR_LIMIT = 2
-LOOP_HANDOFF_ARTIFACT_DETAIL_POLICY = "metadata_only_untrusted_path"
-_LOOP_HANDOFF_SAFE_FOLLOWUP_KINDS = {"code", "test", "tests", "docs", "doc"}
-_LOOP_HANDOFF_ESCALATION_FLAGS = {
-    "live_mutation",
-    "push",
-    "restart",
-    "secrets",
-    "product_decision",
-    "unclear_acceptance_criteria",
-    "failed_evidence_tradeoff",
-    "repeated_failed_auto_repair",
-    "external_side_effect",
-    "destructive_side_effect",
-    "privacy_sensitive",
-    "ambiguous",
-}
-
 
 def _json_list(value: Any) -> list[Any]:
     if isinstance(value, (list, tuple)):
-        return [item for item in value]
+        return list(value)
     return []
-
-
-def _decode_json_list(raw: Optional[str]) -> list[Any]:
-    if not raw:
-        return []
-    try:
-        value = json.loads(raw)
-    except Exception:
-        return []
-    return value if isinstance(value, list) else []
 
 
 def _decode_json_dict(raw: Optional[str]) -> dict[str, Any]:
@@ -5466,1201 +5328,6 @@ def _decode_json_dict(raw: Optional[str]) -> dict[str, Any]:
         return {}
     return value if isinstance(value, dict) else {}
 
-
-def _clean_handoff_token(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    text = str(value).strip().lower().replace("-", "_")
-    return text or None
-
-
-def _normalize_handoff_target_actor(value: Any) -> Optional[str]:
-    token = _clean_handoff_token(value)
-    if not token:
-        return None
-    if token in {"foreground", "live_foreground", "loop_foreground"}:
-        return "orchestrator"
-    if token in {"user", "needs_user", "human_required"}:
-        return "human"
-    if token in {"reviewer_qa", "qa_reviewer"}:
-        return "qa"
-    return token
-
-
-def _normalize_handoff_resolution_actor(value: Any) -> Optional[str]:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    token = _clean_handoff_token(text)
-    if token in {"foreground", "live_foreground", "loop_foreground"}:
-        return "orchestrator"
-    if token in {"user", "needs_user", "human_required"}:
-        return "human"
-    return text
-
-
-def _loop_handoff_queue_state(state: Optional[str]) -> str:
-    normalized = _clean_handoff_token(state) or ""
-    if normalized in {"recorded", "queued", "batched"}:
-        return "open"
-    if normalized in {"assigned", "reviewing"}:
-        return "claimed"
-    if normalized in {"cancelled_superseded", "ignored_duplicate", "canceled", "cancelled"}:
-        return "canceled"
-    if normalized == "escalated":
-        return "open"
-    if normalized in {
-        "approved",
-        "blocked_waiting",
-        "closed",
-        "rejected",
-        "released",
-        "resolved",
-    }:
-        return "resolved"
-    return "open" if not normalized else normalized
-
-
-def _infer_handoff_intent(
-    handoff_kind: Optional[str],
-    metadata: Optional[dict[str, Any]] = None,
-    reason: Optional[str] = None,
-) -> str:
-    metadata = metadata if isinstance(metadata, dict) else {}
-    explicit = _clean_handoff_token(metadata.get("intent") or metadata.get("handoff_intent"))
-    if explicit:
-        return explicit
-
-    kind = _clean_handoff_token(handoff_kind) or ""
-    reason_text = str(reason or "").strip().lower()
-    metadata_kind = _clean_handoff_token(
-        metadata.get("handoff_kind") or metadata.get("escalation_kind")
-    ) or ""
-
-    if "decision" in kind or "decision" in metadata_kind or reason_text.startswith(
-        ("product-decision:", "needs-user:", "foreground-required:")
-    ):
-        return "decide"
-    if "orchestrator" in kind or metadata.get("orchestrator_handoff") is True:
-        return "restructure"
-    if kind == "worker_completed":
-        return "approve"
-    if kind == "worker_blocked" or reason_text.startswith(
-        (
-            "blocked-waiting:",
-            "human-required:",
-            "human-review:",
-            "orchestrator-required:",
-            "review-required:",
-            "safety-boundary:",
-        )
-    ):
-        return "unblock"
-    return "review"
-
-
-def _infer_handoff_target_actor(
-    handoff_kind: Optional[str],
-    intent: Optional[str],
-    metadata: Optional[dict[str, Any]] = None,
-    reason: Optional[str] = None,
-) -> str:
-    metadata = metadata if isinstance(metadata, dict) else {}
-    explicit = _normalize_handoff_target_actor(metadata.get("target_actor") or metadata.get("target"))
-    if explicit:
-        return explicit
-
-    intent_value = _clean_handoff_token(intent) or ""
-    kind = _clean_handoff_token(handoff_kind) or ""
-    reason_text = str(reason or "").strip().lower()
-
-    if metadata.get("orchestrator_handoff") is True or "orchestrator" in kind:
-        return "orchestrator"
-    if reason_text.startswith(("needs-user:", "human-required:")):
-        return "human"
-    if reason_text.startswith(("review-required:", "human-review:")):
-        return "qa"
-    if intent_value in {"decide", "approve"}:
-        return "orchestrator"
-    if intent_value == "review":
-        return "qa"
-    if reason_text.startswith(("foreground-required:", "product-decision:")):
-        return "orchestrator"
-    if intent_value in {"restructure", "unblock"}:
-        return "orchestrator"
-    return "orchestrator"
-
-
-def _loop_handoff_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    out = dict(row)
-    out["artifacts"] = _decode_json_list(out.pop("artifacts_json", None))
-    out["changed_files"] = _decode_json_list(out.pop("changed_files_json", None))
-    out["created_cards"] = _decode_json_list(out.pop("created_cards_json", None))
-    out["parent_state_snapshot"] = _decode_json_list(out.pop("parent_state_snapshot_json", None))
-    out["child_state_snapshot"] = _decode_json_list(out.pop("child_state_snapshot_json", None))
-    out["worker_metadata"] = _decode_json_dict(out.pop("worker_metadata_json", None))
-    out["payload"] = _decode_json_dict(out.pop("payload_json", None))
-    out["auto_actions_log"] = _decode_json_list(out.pop("auto_actions_log_json", None))
-    out["escalation_options"] = _decode_json_list(out.pop("escalation_options_json", None))
-    if not out.get("intent"):
-        out["intent"] = _infer_handoff_intent(
-            out.get("handoff_kind"), out.get("worker_metadata"), out.get("reason")
-        )
-    target_actor = _normalize_handoff_target_actor(out.get("target_actor"))
-    if target_actor:
-        out["target_actor"] = target_actor
-    else:
-        out["target_actor"] = _infer_handoff_target_actor(
-            out.get("handoff_kind"), out.get("intent"), out.get("worker_metadata"), out.get("reason")
-        )
-    out["queue_state"] = _loop_handoff_queue_state(out.get("state"))
-    return out
-
-
-def list_loop_handoffs(
-    conn: sqlite3.Connection,
-    *,
-    root_task_id: Optional[str] = None,
-    tenant: Optional[str] = None,
-    state: Optional[str] = None,
-    task_id: Optional[str] = None,
-) -> list[dict[str, Any]]:
-    """Return no foreground handoffs; the foreground handoff system is removed."""
-    return []
-
-
-def request_loop_foreground_decision(
-    conn: sqlite3.Connection,
-    task_id: str,
-    *,
-    question: str,
-    options: Optional[Iterable[Any]] = None,
-    recommendation: Optional[str] = None,
-    summary: Optional[str] = None,
-    reason: Optional[str] = None,
-    metadata: Optional[dict[str, Any]] = None,
-    expected_run_id: Optional[int] = None,
-) -> dict[str, Any]:
-    """Ask the Loop orchestrator for a mid-run decision.
-
-    Unlike ``block_task`` this keeps the worker row running. The worker can do
-    reversible prep while an orchestrator handoff records a durable decision, then
-    re-read ``kanban_show``/handoff details before committing to the path.
-    """
-    question_text = str(question or "").strip()
-    if not question_text:
-        raise ValueError("question is required")
-
-    clean_options: list[Any] = []
-    for option in options or []:
-        if isinstance(option, str):
-            text = option.strip()
-            if text:
-                clean_options.append(text)
-        elif isinstance(option, dict):
-            clean_options.append(option)
-        elif option is not None:
-            clean_options.append(str(option))
-    if len(clean_options) < 2:
-        raise ValueError("at least two decision options are required")
-
-    now = int(time.time())
-    with write_txn(conn):
-        if expected_run_id is None:
-            task_row = conn.execute(
-                "SELECT * FROM tasks WHERE id = ? AND status = 'running'",
-                (task_id,),
-            ).fetchone()
-        else:
-            task_row = conn.execute(
-                "SELECT * FROM tasks WHERE id = ? AND status = 'running' AND current_run_id = ?",
-                (task_id, int(expected_run_id)),
-            ).fetchone()
-        if task_row is None:
-            raise ValueError(f"task {task_id} is not running or run id is stale")
-
-        root_task_id = _loop_root_for_task(conn, task_id)
-        if not root_task_id:
-            raise ValueError(f"task {task_id} is not part of a Loop")
-
-        run_id = (
-            int(expected_run_id)
-            if expected_run_id is not None
-            else task_row["current_run_id"]
-        )
-        conn.execute(
-            "UPDATE tasks SET last_heartbeat_at = ? WHERE id = ?",
-            (now, task_id),
-        )
-        if run_id is not None:
-            conn.execute(
-                "UPDATE task_runs SET last_heartbeat_at = ? WHERE id = ?",
-                (now, run_id),
-            )
-
-        decision_payload: dict[str, Any] = {
-            "root_task_id": root_task_id,
-            "handoff_kind": "worker_decision_requested",
-            "question": question_text,
-            "options": clean_options,
-        }
-        if summary is not None:
-            decision_payload["summary"] = summary
-        if reason is not None:
-            decision_payload["reason"] = reason
-        if recommendation:
-            decision_payload["recommendation"] = str(recommendation).strip()
-        if run_id is not None:
-            decision_payload["run_id"] = run_id
-        source_event_id = _append_event(
-            conn,
-            task_id,
-            "loop_decision_requested",
-            decision_payload,
-            run_id=run_id,
-        )
-        return {
-            "ok": True,
-            "task_id": task_id,
-            "root_task_id": root_task_id,
-            "run_id": run_id,
-            "source_event_id": source_event_id,
-            "handoff": {},
-        }
-
-
-def loop_handoff_status(
-    conn: sqlite3.Connection,
-    *,
-    tenant: str,
-    root_task_id: str,
-) -> dict[str, Any]:
-    rows = list_loop_handoffs(conn, tenant=tenant, root_task_id=root_task_id)
-    pending = sum(1 for row in rows if row["state"] in {"recorded", "queued", "batched"})
-    active = sum(1 for row in rows if row["state"] in _LOOP_HANDOFF_ACTIVE_STATES)
-    terminal = sum(1 for row in rows if row["state"] in _LOOP_HANDOFF_TERMINAL_STATES)
-    escalated = sum(1 for row in rows if row["state"] == "escalated" or row.get("attention") == "needs-user")
-    approved = sum(
-        1
-        for row in rows
-        if row["state"] in {"closed", "approved", "released"}
-        and row.get("verification_state") == "approved"
-    )
-    decision_recorded = sum(
-        1
-        for row in rows
-        if row["state"] == "closed"
-        and row.get("verification_state") == "decision-recorded"
-        and row.get("verification_status") == "passed"
-    )
-    resolved = approved + decision_recorded
-    needs_attention = pending + active + escalated
-    return {
-        "tenant": tenant,
-        "root_task_id": root_task_id,
-        "pending_count": pending,
-        "active_count": active,
-        "terminal_count": terminal,
-        "total_count": len(rows),
-        "approved_count": approved,
-        "decision_recorded_count": decision_recorded,
-        "resolved_count": resolved,
-        "escalated_count": escalated,
-        "needs_attention_count": needs_attention,
-        "quiet_green": bool(rows) and needs_attention == 0 and resolved == len(rows),
-    }
-
-
-_ORCHESTRATOR_DISPATCH_SOURCE = "kanban-orchestrator-fork"
-_ORCHESTRATOR_PARENT_STUB_SOURCE = "kanban-orchestrator-parent"
-
-
-def _is_orchestrator_dispatch_task(task: Task) -> bool:
-    """Return True when a dispatcher-spawned run uses the orchestrator lane."""
-    return (task.assignee or "").strip() == "orchestrator"
-
-
-def _orchestrator_profile_session_db(profile: Optional[str]) -> Any:
-    """Return the SessionDB that the spawned orchestrator process will read."""
-    from hermes_state import SessionDB
-
-    profile_arg = (str(profile or "orchestrator").strip()) or "orchestrator"
-    try:
-        from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
-
-        profile_arg = normalize_profile_name(profile_arg)
-        profile_home = Path(resolve_profile_env(profile_arg))
-        return SessionDB(db_path=profile_home / "state.db")
-    except FileNotFoundError:
-        return SessionDB()
-    except Exception:
-        return SessionDB()
-
-
-def _current_session_profile_name() -> str:
-    profile = os.environ.get("HERMES_PROFILE") or os.environ.get("HERMES_PROFILE_NAME")
-    if profile and str(profile).strip():
-        return str(profile).strip()
-    try:
-        from hermes_cli.profiles import get_active_profile_name
-
-        active = str(get_active_profile_name() or "").strip()
-        return active or "default"
-    except Exception:
-        return "default"
-
-
-def _orchestrator_parent_session_id(task: Task, session_db: Any) -> Optional[str]:
-    """Resolve the foreground session that owns an orchestrator dispatch."""
-    candidates = [
-        task.foreground_parent_session_id,
-        task.session_id,
-        task.tenant,
-    ]
-    seen: set[str] = set()
-    for value in candidates:
-        session_id = str(value or "").strip()
-        if not session_id or session_id in seen:
-            continue
-        seen.add(session_id)
-        try:
-            if session_db.get_session(session_id):
-                return session_id
-        except Exception:
-            continue
-    explicit = str(task.foreground_parent_session_id or "").strip()
-    return explicit or None
-
-
-def _orchestrator_fork_session_id(task: Task, parent_session_id: str) -> str:
-    run_part = str(task.current_run_id or "no-run")
-    digest = hashlib.sha256(
-        f"{parent_session_id}\0{task.id}\0{run_part}".encode("utf-8")
-    ).hexdigest()[:32]
-    return f"kanban-orch-{digest}"
-
-
-def _ensure_orchestrator_parent_stub(
-    fork_session_db: Any,
-    parent_session_id: str,
-    task: Task,
-    parent_profile: str = "default",
-) -> None:
-    """Ensure ``parent_session_id`` exists in the DB that will store the fork.
-
-    SessionDB enforces ``sessions.parent_session_id`` as an intra-database
-    foreign key. Foreground parents may live in the foreground profile DB while
-    orchestrator workers read a different profile DB, so create a narrow local
-    parent row in the orchestrator DB before inserting the fork child. The real
-    lineage remains in ``_branched_from`` and ``_kanban_orchestrator_fork``.
-    """
-    try:
-        if fork_session_db.get_session(parent_session_id):
-            return
-    except Exception:
-        pass
-
-    model_config = {
-        "_external_foreground_parent_session": {
-            "session_id": parent_session_id,
-            "profile": parent_profile,
-            "session_ref": _profile_qualified_session_ref(parent_profile, parent_session_id),
-            "task_id": task.id,
-            "run_id": task.current_run_id,
-        }
-    }
-    fork_session_db.create_session(
-        parent_session_id,
-        _ORCHESTRATOR_PARENT_STUB_SOURCE,
-        model_config=model_config,
-    )
-
-
-def _profile_qualified_session_ref(profile: Optional[str], session_id: str) -> str:
-    profile_name = (str(profile or "").strip() or "default")
-    return f"{profile_name}/{session_id}"
-
-
-def _compact_orchestrator_dispatch_packet(
-    task: Task,
-    parent_session_id: str,
-    fork_session_id: str,
-    *,
-    parent_profile: str = "default",
-) -> str:
-    body = task.body or ""
-    if len(body) > 2000:
-        body = body[:2000] + "…"
-    parent_session_ref = _profile_qualified_session_ref(parent_profile, parent_session_id)
-    payload = {
-        "kind": "kanban_orchestrator_dispatch",
-        "task": {
-            "id": task.id,
-            "title": task.title,
-            "body": body,
-            "status": task.status,
-            "assignee": task.assignee,
-            "tenant": task.tenant,
-            "review_kind": task.review_kind,
-            "resume_mode": task.resume_mode,
-            "review_subject_assignee": task.review_subject_assignee,
-        },
-        "audit_ids": {
-            "task_id": task.id,
-            "run_id": task.current_run_id,
-            "parent_foreground_session_id": parent_session_id,
-            "parent_foreground_session_profile": parent_profile,
-            "parent_session_ref": parent_session_ref,
-            "fork_session_id": fork_session_id,
-        },
-        "context_refs": {
-            "parent_session": {
-                "profile": parent_profile,
-                "session_id": parent_session_id,
-                "session_ref": parent_session_ref,
-                "session_search": {
-                    "session_id": parent_session_ref,
-                },
-            },
-        },
-        "instructions": [
-            "This is an isolated compact orchestrator dispatch session.",
-            "Do not mutate the live foreground parent transcript directly.",
-            "Do not assume the foreground transcript was copied into this session.",
-            f"If parent history is needed, call session_search with session_id={parent_session_ref!r} (or profile={parent_profile!r} and session_id={parent_session_id!r}).",
-            "Use Kanban tools to route child work and record durable decisions.",
-        ],
-    }
-    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
-
-
-def ensure_orchestrator_fork_for_dispatch(conn: sqlite3.Connection, task: Task) -> Task:
-    """Create/reuse the foreground-session fork for an orchestrator run.
-
-    The dispatcher calls this after a task has been claimed, so
-    ``task.current_run_id`` is the idempotency key for the run. The fork id is
-    deterministic for ``(parent_session_id, task_id, run_id)`` and the DB update
-    only appends one audit event, so duplicate dispatcher ticks for one claimed
-    run cannot create duplicate branch sessions.
-    """
-    if not _is_orchestrator_dispatch_task(task):
-        return task
-    existing_fork = str(task.foreground_fork_session_id or "").strip()
-    if existing_fork:
-        return task
-
-    from hermes_state import SessionDB
-
-    parent_session_db = SessionDB()
-    parent_session_id = _orchestrator_parent_session_id(task, parent_session_db)
-    if not parent_session_id:
-        return task
-    parent_profile = _current_session_profile_name()
-    parent_session_ref = _profile_qualified_session_ref(parent_profile, parent_session_id)
-
-    fork_session_id = _orchestrator_fork_session_id(task, parent_session_id)
-    fork_session_db = _orchestrator_profile_session_db(task.assignee)
-
-    model_config = {
-        "_branched_from": parent_session_id,
-        "_branched_from_ref": parent_session_ref,
-        "_kanban_orchestrator_fork": {
-            "task_id": task.id,
-            "run_id": task.current_run_id,
-            "parent_foreground_session_id": parent_session_id,
-            "parent_foreground_session_profile": parent_profile,
-            "parent_session_ref": parent_session_ref,
-            "fork_session_id": fork_session_id,
-        },
-    }
-    _ensure_orchestrator_parent_stub(
-        fork_session_db,
-        parent_session_id,
-        task,
-        parent_profile=parent_profile,
-    )
-    fork_session_db.create_session(
-        fork_session_id,
-        _ORCHESTRATOR_DISPATCH_SOURCE,
-        model_config=model_config,
-        parent_session_id=parent_session_id,
-    )
-    try:
-        if not fork_session_db.get_messages(fork_session_id):
-            fork_session_db.append_message(
-                fork_session_id,
-                "user",
-                _compact_orchestrator_dispatch_packet(
-                    task,
-                    parent_session_id,
-                    fork_session_id,
-                    parent_profile=parent_profile,
-                ),
-                observed=True,
-            )
-    except Exception:
-        _log.debug(
-            "kanban orchestrator: failed to seed fork transcript for task %s",
-            task.id,
-            exc_info=True,
-        )
-
-    payload = {
-        "task_id": task.id,
-        "run_id": task.current_run_id,
-        "parent_foreground_session_id": parent_session_id,
-        "parent_foreground_session_profile": parent_profile,
-        "parent_session_ref": parent_session_ref,
-        "fork_session_id": fork_session_id,
-        "session_source": _ORCHESTRATOR_DISPATCH_SOURCE,
-    }
-    with write_txn(conn):
-        conn.execute(
-            """
-            UPDATE tasks
-               SET foreground_parent_session_id = COALESCE(foreground_parent_session_id, ?),
-                   foreground_fork_session_id = ?
-             WHERE id = ?
-               AND current_run_id IS ?
-               AND (foreground_fork_session_id IS NULL OR foreground_fork_session_id = ?)
-            """,
-            (parent_session_id, fork_session_id, task.id, task.current_run_id, fork_session_id),
-        )
-        already = conn.execute(
-            """
-            SELECT 1 FROM task_events
-             WHERE task_id = ?
-               AND kind = 'orchestrator_fork_session'
-               AND run_id IS ?
-               AND json_extract(payload, '$.fork_session_id') = ?
-             LIMIT 1
-            """,
-            (task.id, task.current_run_id, fork_session_id),
-        ).fetchone()
-        if already is None:
-            _append_event(
-                conn,
-                task.id,
-                "orchestrator_fork_session",
-                payload,
-                run_id=task.current_run_id,
-            )
-
-    return replace(
-        task,
-        foreground_parent_session_id=parent_session_id,
-        foreground_fork_session_id=fork_session_id,
-    )
-
-
-def _extract_acceptance_criteria(body: Optional[str]) -> Optional[str]:
-    if not body:
-        return None
-    text = str(body).strip()
-    marker = "acceptance criteria:"
-    idx = text.lower().find(marker)
-    if idx < 0:
-        return None
-    return text[idx + len(marker):].strip() or None
-
-
-def _handoff_row_by_id(conn: sqlite3.Connection, handoff_id: int) -> Optional[dict[str, Any]]:
-    row = conn.execute("SELECT * FROM loop_handoffs WHERE id = ?", (int(handoff_id),)).fetchone()
-    return _loop_handoff_row_to_dict(row) if row else None
-
-
-def build_loop_handoff_proof_packet(conn: sqlite3.Connection, handoff_id: int | dict[str, Any]) -> dict[str, Any]:
-    """Return the compact evidence packet for legacy handoff rows."""
-    handoff = handoff_id if isinstance(handoff_id, dict) else _handoff_row_by_id(conn, int(handoff_id))
-    if not handoff:
-        raise ValueError(f"loop handoff {handoff_id!r} not found")
-    task = get_task(conn, handoff["task_id"])
-    run = None
-    if handoff.get("run_id") is not None:
-        run = conn.execute("SELECT * FROM task_runs WHERE id = ?", (handoff["run_id"],)).fetchone()
-    event = None
-    if handoff.get("source_event_id") is not None:
-        event = conn.execute("SELECT id, kind, created_at FROM task_events WHERE id = ?", (handoff["source_event_id"],)).fetchone()
-    worker_metadata = handoff.get("worker_metadata") or {}
-    packet = {
-        "packet_kind": "loop_handoff_proof_packet",
-        "handoff_id": handoff["id"],
-        "root_task_id": handoff["root_task_id"],
-        "tenant": handoff.get("tenant"),
-        "handoff": {
-            "id": handoff["id"],
-            "intent": handoff.get("intent"),
-            "target_actor": handoff.get("target_actor"),
-            "queue_state": handoff.get("queue_state"),
-            "legacy_state": handoff.get("state"),
-            "kind": handoff.get("handoff_kind"),
-            "resolution_action": handoff.get("resolution_action"),
-            "resolved_by": handoff.get("resolved_by"),
-        },
-        "task": {
-            "id": handoff["task_id"],
-            "title": handoff.get("task_title") or (task.title if task else None),
-            "body": handoff.get("task_body") or (task.body if task else None),
-            "acceptance_criteria": _extract_acceptance_criteria(handoff.get("task_body") or (task.body if task else None)),
-            "status": task.status if task else None,
-            "assignee": task.assignee if task else handoff.get("worker_profile"),
-        },
-        "worker": {
-            "profile": handoff.get("worker_profile"),
-            "summary": handoff.get("summary"),
-            "reason": handoff.get("reason"),
-            "metadata": worker_metadata,
-            "transcript_session_id": handoff.get("worker_session_id"),
-            "originating_session_id": handoff.get("originating_session_id"),
-        },
-        "evidence": {
-            "artifacts": handoff.get("artifacts", []),
-            "changed_files": handoff.get("changed_files", []),
-            "tests": worker_metadata.get("tests_run"),
-            "build": worker_metadata.get("build"),
-            "verification_status": handoff.get("verification_status"),
-            "verification_state": handoff.get("verification_state"),
-        },
-        "graph_state": {
-            "parents": handoff.get("parent_state_snapshot", []),
-            "children": handoff.get("child_state_snapshot", []),
-            "handoff_kind": handoff.get("handoff_kind"),
-            "state": handoff.get("state"),
-            "attention": handoff.get("attention"),
-        },
-        "audit_ids": {
-            "handoff_id": handoff["id"],
-            "task_id": handoff["task_id"],
-            "run_id": handoff.get("run_id"),
-            "source_event_id": handoff.get("source_event_id"),
-            "source_event_kind": event["kind"] if event else None,
-            "review_task_id": handoff.get("review_task_id"),
-            "review_run_id": handoff.get("review_run_id"),
-            "reviewer_session_id": handoff.get("reviewer_session_id"),
-            "detail_ref": f"loop_handoff:{handoff['id']}",
-            "transcript_ref": handoff.get("worker_session_id"),
-        },
-    }
-    if run is not None:
-        packet["worker"]["run"] = {
-            "id": run["id"],
-            "status": run["status"],
-            "outcome": run["outcome"],
-            "started_at": run["started_at"],
-            "ended_at": run["ended_at"],
-        }
-    return packet
-
-
-def _artifact_detail(path_value: str) -> dict[str, Any]:
-    """Return metadata-only artifact detail for an untrusted worker path.
-
-    Worker handoff metadata can contain arbitrary absolute paths. The dashboard
-    may display the reference, but must not read or stat it through this API:
-    even a bounded preview would become a local-file disclosure primitive if a
-    worker or DB row pointed at secrets outside the task workspace.
-    """
-    return {
-        "path": str(path_value or "").strip(),
-        "content_preview": None,
-        "content_policy": LOOP_HANDOFF_ARTIFACT_DETAIL_POLICY,
-    }
-
-
-def get_loop_handoff_details(conn: sqlite3.Connection, handoff_id: int) -> dict[str, Any]:
-    """Fetch safe on-demand handoff details referenced by a proof packet."""
-    handoff = _handoff_row_by_id(conn, int(handoff_id))
-    if not handoff:
-        raise ValueError(f"loop handoff {handoff_id!r} not found")
-    return {
-        "ok": True,
-        "handoff": handoff,
-        "proof_packet": build_loop_handoff_proof_packet(conn, handoff),
-        "task": get_task(conn, handoff["task_id"]),
-        "events": list_events(conn, handoff["task_id"]),
-        "runs": list_runs(conn, handoff["task_id"]),
-        "attachments": list_attachments(conn, handoff["task_id"]),
-        "detail_semantics": {
-            "artifact_content": LOOP_HANDOFF_ARTIFACT_DETAIL_POLICY,
-            "transcript_content": "metadata_only",
-        },
-        "transcript": {
-            "worker_session_id": handoff.get("worker_session_id"),
-            "originating_session_id": handoff.get("originating_session_id"),
-            "content_preview": None,
-            "content_policy": "metadata_only",
-        },
-        "artifact_details": [
-            _artifact_detail(path)
-            for path in handoff.get("artifacts", [])
-            if isinstance(path, str) and path.strip()
-        ],
-    }
-
-
-def _append_handoff_auto_action(conn: sqlite3.Connection, handoff: dict[str, Any], action: dict[str, Any]) -> list[dict[str, Any]]:
-    log = handoff.get("auto_actions_log", [])
-    if not isinstance(log, list):
-        log = []
-    entry = {"at": int(time.time()), **action}
-    log.append(entry)
-    conn.execute(
-        "UPDATE loop_handoffs SET auto_actions_log_json = ?, updated_at = ? WHERE id = ?",
-        (json.dumps(log, ensure_ascii=False), entry["at"], handoff["id"]),
-    )
-    _append_event(conn, handoff["task_id"], "loop_handoff_auto_action", entry, run_id=handoff.get("run_id"))
-    return log
-
-
-def _escalate_loop_handoff(
-    conn: sqlite3.Connection,
-    handoff: dict[str, Any],
-    *,
-    actor: str,
-    action: str,
-    reason: Optional[str],
-    flags: Iterable[str],
-    escalation_reason: str,
-) -> dict[str, Any]:
-    now = int(time.time())
-    allowed_states = tuple(sorted(_LOOP_HANDOFF_AUTONOMOUS_ACTION_STATES))
-    placeholders = ",".join("?" for _ in allowed_states)
-    cur = conn.execute(
-        f"""
-        UPDATE loop_handoffs
-           SET state = 'escalated', attention = 'needs-user',
-               verification_state = 'needs-user', decision_actor = ?,
-               decision_reason = ?, escalation_reason = ?, updated_at = ?
-         WHERE id = ? AND state IN ({placeholders})
-        """,
-        (actor, reason, escalation_reason, now, handoff["id"], *allowed_states),
-    )
-    if cur.rowcount != 1:
-        refreshed = _handoff_row_by_id(conn, int(handoff["id"])) or handoff
-        current_state = str(refreshed.get("state") or "").strip()
-        _append_handoff_auto_action(
-            conn,
-            refreshed,
-            {
-                "actor": actor,
-                "action": action,
-                "outcome": "rejected_state",
-                "reason": reason,
-                "current_state": current_state,
-            },
-        )
-        return {"ok": False, "outcome": "rejected_state", "current_state": current_state}
-    refreshed = _handoff_row_by_id(conn, int(handoff["id"])) or handoff
-    _append_handoff_auto_action(
-        conn,
-        refreshed,
-        {
-            "actor": actor,
-            "action": action,
-            "outcome": "escalated",
-            "reason": reason,
-            "flags": sorted(flags),
-            "escalation_reason": escalation_reason,
-        },
-    )
-    return {
-        "ok": False,
-        "outcome": "escalated",
-        "escalation_reason": escalation_reason,
-        "notification": {"level": "escalation", "state": "needs-user"},
-    }
-
-
-def resolve_handoff(
-    conn: sqlite3.Connection,
-    handoff_id: int,
-    *,
-    action: str,
-    resolution_summary: Optional[str] = None,
-    payload: Optional[dict[str, Any]] = None,
-    actor: Optional[str] = None,
-) -> dict[str, Any]:
-    """Resolve one durable handoff through the neutral handoff state path."""
-    action = str(action or "").strip()
-    if not action:
-        raise ValueError("action is required")
-    actor_value = _normalize_handoff_resolution_actor(actor) or "handoff-resolver"
-    now = int(time.time())
-    with write_txn(conn):
-        handoff = _handoff_row_by_id(conn, int(handoff_id))
-        if not handoff:
-            raise ValueError(f"handoff {handoff_id!r} not found")
-        queue_state = _loop_handoff_queue_state(handoff.get("state"))
-        if queue_state in {"resolved", "canceled"}:
-            return {
-                "ok": False,
-                "outcome": "already_resolved",
-                "handoff": handoff,
-                "queue_state": queue_state,
-            }
-
-        resolution_payload = payload if isinstance(payload, dict) else {}
-        merged_payload = dict(handoff.get("payload") or {})
-        if resolution_payload:
-            merged_payload["resolution_payload"] = resolution_payload
-        if resolution_summary:
-            merged_payload["resolution_summary"] = str(resolution_summary)
-
-        normalized_action = action.lower().replace("-", "_")
-        cancel_actions = {"cancel", "canceled", "cancelled", "supersede"}
-        terminal_state = "cancelled_superseded" if normalized_action in cancel_actions else "closed"
-        verification_state = "canceled" if terminal_state == "cancelled_superseded" else "resolved"
-        verification_status = "canceled" if terminal_state == "cancelled_superseded" else "passed"
-        cur = conn.execute(
-            """
-            UPDATE loop_handoffs
-               SET state = ?, attention = NULL,
-                   verification_state = ?, verification_status = ?,
-                   decision_actor = ?, decision_reason = ?,
-                   resolution_action = ?, resolved_by = ?,
-                   resolution_summary = ?,
-                   payload_json = ?,
-                   resolved_at = COALESCE(resolved_at, ?),
-                   completed_at = COALESCE(completed_at, ?),
-                   updated_at = ?
-             WHERE id = ?
-               AND state NOT IN ('approved', 'released', 'blocked_waiting',
-                                 'rejected', 'closed', 'ignored_duplicate',
-                                 'cancelled_superseded')
-            """,
-            (
-                terminal_state,
-                verification_state,
-                verification_status,
-                actor_value,
-                resolution_summary,
-                normalized_action,
-                actor_value,
-                resolution_summary,
-                json.dumps(merged_payload, ensure_ascii=False) if merged_payload else None,
-                now,
-                now,
-                now,
-                int(handoff_id),
-            ),
-        )
-        refreshed = _handoff_row_by_id(conn, int(handoff_id)) or handoff
-        if cur.rowcount != 1:
-            return {
-                "ok": False,
-                "outcome": "already_resolved",
-                "handoff": refreshed,
-                "queue_state": refreshed.get("queue_state"),
-            }
-        _append_event(
-            conn,
-            refreshed["task_id"],
-            "handoff_resolved",
-            {
-                "handoff_id": int(handoff_id),
-                "action": normalized_action,
-                "actor": actor_value,
-                "resolution_summary": resolution_summary,
-            },
-            run_id=refreshed.get("run_id"),
-        )
-    return {
-        "ok": True,
-        "outcome": "canceled" if terminal_state == "cancelled_superseded" else "resolved",
-        "handoff": refreshed,
-        "queue_state": refreshed.get("queue_state"),
-    }
-
-
-def _keep_loop_root_running_for_followups(
-    conn: sqlite3.Connection,
-    handoff: dict[str, Any],
-    *,
-    actor: str,
-    reason: Optional[str],
-    created_cards: list[str],
-    now: int,
-) -> Optional[int]:
-    """Re-open a final/root handoff source row while repair children run."""
-    task_id = str(handoff.get("task_id") or "").strip()
-    if not _is_loop_root_handoff_source(conn, task_id, handoff.get("root_task_id")):
-        return None
-    task = conn.execute(
-        "SELECT assignee, current_run_id FROM tasks WHERE id = ? AND status = 'done'",
-        (task_id,),
-    ).fetchone()
-    if task is None:
-        return None
-    metadata = {
-        "loop_handoff_id": handoff.get("id"),
-        "evidence_gap": reason,
-        "created_cards": created_cards,
-    }
-    current_run_id = task["current_run_id"]
-    if current_run_id is None:
-        cur = conn.execute(
-            """
-            INSERT INTO task_runs (
-                task_id, profile, status, claim_lock, claim_expires,
-                worker_pid, started_at, summary, metadata
-            ) VALUES (?, ?, 'running', NULL, NULL, NULL, ?, ?, ?)
-            """,
-            (
-                task_id,
-                actor or task["assignee"],
-                now,
-                reason,
-                json.dumps(metadata, ensure_ascii=False),
-            ),
-        )
-        current_run_id = int(cur.lastrowid)
-    conn.execute(
-        """
-        UPDATE tasks
-           SET status = 'running', completed_at = NULL,
-               claim_lock = NULL, claim_expires = NULL, worker_pid = NULL,
-               current_run_id = ?
-         WHERE id = ? AND status = 'done'
-        """,
-        (current_run_id, task_id),
-    )
-    _append_event(
-        conn,
-        task_id,
-        "loop_final_evidence_followups",
-        {
-            "handoff_id": handoff.get("id"),
-            "reason": reason,
-            "created_cards": created_cards,
-            "root_status": "running",
-        },
-        run_id=current_run_id,
-    )
-    return int(current_run_id)
-
-
-def _release_loop_root_after_approved_handoff(
-    conn: sqlite3.Connection,
-    handoff: dict[str, Any],
-    *,
-    reason: Optional[str],
-    now: int,
-) -> Optional[int]:
-    """Close a root row held running for foreground final acceptance."""
-    task_id = str(handoff.get("task_id") or "").strip()
-    if not _is_loop_root_handoff_source(conn, task_id, handoff.get("root_task_id")):
-        return None
-    task = conn.execute(
-        "SELECT status FROM tasks WHERE id = ?",
-        (task_id,),
-    ).fetchone()
-    if task is None or task["status"] != "running":
-        return None
-    run_id = _end_run(
-        conn,
-        task_id,
-        outcome="completed",
-        status="done",
-        summary=reason or handoff.get("summary") or handoff.get("reason"),
-        metadata={"loop_handoff_id": handoff.get("id"), "final_evidence": "approved"},
-    )
-    conn.execute(
-        """
-        UPDATE tasks
-           SET status = 'done', completed_at = COALESCE(completed_at, ?),
-               claim_lock = NULL, claim_expires = NULL, worker_pid = NULL
-         WHERE id = ? AND status = 'running'
-        """,
-        (now, task_id),
-    )
-    _append_event(
-        conn,
-        task_id,
-        "loop_final_evidence_accepted",
-        {"handoff_id": handoff.get("id"), "reason": reason, "root_status": "done"},
-        run_id=run_id,
-    )
-    return run_id
-
-
-def review_loop_handoff_autonomous_action(
-    conn: sqlite3.Connection,
-    handoff_id: int,
-    *,
-    action: str,
-    actor: str,
-    reason: Optional[str] = None,
-    evidence_passed: bool = False,
-    prohibited_flags: Optional[Iterable[str]] = None,
-    followups: Optional[Iterable[dict[str, Any]]] = None,
-    repair_attempts: int = 0,
-    max_repair_attempts: int = _LOOP_HANDOFF_REPAIR_LIMIT,
-) -> dict[str, Any]:
-    """Enforce safe autonomous reviewer actions and audit every decision."""
-    actor = str(actor or "").strip() or "reviewer"
-    action = str(action or "").strip()
-    flags = {str(flag).strip() for flag in (prohibited_flags or []) if str(flag).strip()}
-    now = int(time.time())
-    handoff = _handoff_row_by_id(conn, int(handoff_id))
-    if not handoff:
-        raise ValueError(f"loop handoff {handoff_id!r} not found")
-    current_state = str(handoff.get("state") or "").strip()
-    if current_state not in _LOOP_HANDOFF_AUTONOMOUS_ACTION_STATES:
-        _append_handoff_auto_action(
-            conn,
-            handoff,
-            {
-                "actor": actor,
-                "action": action,
-                "outcome": "rejected_state",
-                "reason": reason,
-                "current_state": current_state,
-            },
-        )
-        return {"ok": False, "outcome": "rejected_state", "current_state": current_state}
-    escalation_reason = None
-    if flags:
-        unknown = flags - _LOOP_HANDOFF_ESCALATION_FLAGS
-        safe_flags = flags - unknown
-        escalation_reason = "prohibited reviewer action(s): " + ", ".join(sorted(safe_flags or flags))
-    elif repair_attempts >= max_repair_attempts and action in {"auto_repair", "create_followups"}:
-        escalation_reason = "repeated_failed_auto_repair"
-    elif action == "approve_release" and not evidence_passed:
-        escalation_reason = "evidence did not pass"
-    elif action not in {"approve_release", "create_followups", "record_decision"}:
-        escalation_reason = f"unsupported autonomous action: {action}"
-    if escalation_reason:
-        return _escalate_loop_handoff(conn, handoff, actor=actor, action=action, reason=reason, flags=flags, escalation_reason=escalation_reason)
-
-    followup_items: list[tuple[str, dict[str, Any]]] = []
-    if action == "create_followups":
-        for item in followups or []:
-            kind = str(item.get("kind") or "").strip().lower()
-            title = str(item.get("title") or "").strip()
-            assignee = str(item.get("assignee") or "").strip()
-            if kind not in _LOOP_HANDOFF_SAFE_FOLLOWUP_KINDS or not title or not assignee:
-                return _escalate_loop_handoff(
-                    conn,
-                    handoff,
-                    actor=actor,
-                    action=action,
-                    reason=reason or "unsafe or incomplete follow-up request",
-                    flags={"ambiguous"},
-                    escalation_reason="unsafe follow-up request",
-                )
-            followup_items.append((kind, item))
-        if not followup_items:
-            return _escalate_loop_handoff(
-                conn,
-                handoff,
-                actor=actor,
-                action=action,
-                reason=reason or "missing follow-up task request",
-                flags={"ambiguous"},
-                escalation_reason="missing follow-up task request",
-            )
-
-    allowed_states = tuple(sorted(_LOOP_HANDOFF_AUTONOMOUS_ACTION_STATES))
-    placeholders = ",".join("?" for _ in allowed_states)
-    cur = conn.execute(
-        f"""
-        UPDATE loop_handoffs
-           SET state = 'closed', attention = NULL,
-               verification_state = ?, verification_status = ?,
-               decision_actor = ?, decision_reason = ?,
-               resolution_action = ?, resolved_by = ?,
-               resolution_summary = ?, resolved_at = COALESCE(resolved_at, ?),
-               completed_at = COALESCE(completed_at, ?), updated_at = ?
-         WHERE id = ? AND state IN ({placeholders})
-        """,
-        (
-            "decision-recorded"
-            if action == "record_decision"
-            else "followups-created" if action == "create_followups" and not evidence_passed else "approved",
-            "passed"
-            if action == "record_decision"
-            else "failed" if action == "create_followups" and not evidence_passed else "passed",
-            actor,
-            reason,
-            action,
-            actor,
-            reason,
-            now,
-            now,
-            now,
-            handoff["id"],
-            *allowed_states,
-        ),
-    )
-    if cur.rowcount != 1:
-        refreshed = _handoff_row_by_id(conn, int(handoff["id"])) or handoff
-        current_state = str(refreshed.get("state") or "").strip()
-        _append_handoff_auto_action(
-            conn,
-            refreshed,
-            {
-                "actor": actor,
-                "action": action,
-                "outcome": "rejected_state",
-                "reason": reason,
-                "current_state": current_state,
-            },
-        )
-        return {"ok": False, "outcome": "rejected_state", "current_state": current_state}
-
-    created_cards: list[str] = []
-    for kind, item in followup_items:
-        card_id = create_task(
-            conn,
-            title=str(item.get("title") or ""),
-            body=str(item.get("body") or ""),
-            assignee=str(item.get("assignee") or ""),
-            created_by=f"loop-review:{handoff['id']}",
-            tenant=handoff.get("tenant"),
-            parents=[handoff["task_id"]],
-            workspace_kind="worktree",
-            branch_name=f"loop-review/{handoff['id']}/{len(created_cards) + 1}",
-            idempotency_key=f"loop-review:{handoff['id']}:{kind}:{item.get('title')}",
-        )
-        created_cards.append(card_id)
-
-    outcome = (
-        "decision_recorded"
-        if action == "record_decision"
-        else "followups_created" if action == "create_followups" and not evidence_passed else "approved"
-    )
-    if outcome == "followups_created":
-        root_repair_run_id = _keep_loop_root_running_for_followups(
-            conn,
-            handoff,
-            actor=actor,
-            reason=reason,
-            created_cards=created_cards,
-            now=now,
-        )
-        if root_repair_run_id is not None:
-            conn.execute(
-                """
-                UPDATE loop_handoffs
-                   SET state = 'assigned', attention = 'needs-orchestrator',
-                       resolved_at = NULL, completed_at = NULL, updated_at = ?
-                 WHERE id = ?
-                """,
-                (now, handoff["id"]),
-            )
-    elif action == "approve_release" and evidence_passed:
-        _release_loop_root_after_approved_handoff(conn, handoff, reason=reason, now=now)
-
-    refreshed = _handoff_row_by_id(conn, int(handoff["id"])) or handoff
-    notification_state = "followups-created" if outcome == "followups_created" else "approved"
-    _append_handoff_auto_action(conn, refreshed, {"actor": actor, "action": action, "outcome": outcome, "reason": reason, "created_cards": created_cards})
-    recompute_ready(conn)
-    return {
-        "ok": True,
-        "outcome": outcome,
-        "created_cards": created_cards,
-        "notification": {"level": "quiet", "state": notification_state},
-    }
 
 def _end_run(
     conn: sqlite3.Connection,
@@ -6949,8 +5616,27 @@ def _auto_complete_decomposed_shell(
     return True
 
 
+@dataclass
+class ReadyTransitions:
+    """Exact task ids changed by one dependency-resolution pass.
+
+    Callers that only need the historical count can keep ignoring this. Push
+    paths pass an instance so they can advance only the tasks made eligible by
+    their own durable mutation instead of scanning and spawning the whole
+    board.
+    """
+
+    newly_specifiable: list[str] = field(default_factory=list)
+    newly_ready: list[str] = field(default_factory=list)
+    auto_completed: list[str] = field(default_factory=list)
+
+
 def recompute_ready(
-    conn: sqlite3.Connection, failure_limit: int = None,
+    conn: sqlite3.Connection,
+    failure_limit: int = None,
+    *,
+    transitions: Optional[ReadyTransitions] = None,
+    caused_by_task_ids: Optional[Iterable[str]] = None,
 ) -> int:
     """Promote dependency-satisfied ``todo`` tasks to their next runnable lane.
 
@@ -6963,7 +5649,13 @@ def recompute_ready(
     completion boundary; it is never visible to the dispatcher as ``ready``.
 
     Returns the number of tasks transitioned. Safe to call inside or outside
-    an existing transaction; it opens its own IMMEDIATE txn.
+    an existing transaction; it opens its own IMMEDIATE txn. When
+    ``transitions`` is supplied, it is populated with the exact ids promoted
+    to specification/ready or auto-completed while preserving the integer
+    return contract used by existing callers. ``caused_by_task_ids`` restricts
+    the pass to direct descendants of those tasks plus descendants unlocked by
+    an auto-completed aggregate shell. The default remains a whole-board
+    reconciliation scan.
 
     ``blocked`` tasks are also considered for promotion (so a task
     blocked purely by a parent dependency unblocks itself when the
@@ -6992,17 +5684,43 @@ def recompute_ready(
         failure_limit = DEFAULT_FAILURE_LIMIT
     promoted = 0
     auto_completed: list[str] = []
+    causal_seeds = _normalize_dispatch_candidate_ids(caused_by_task_ids)
     with write_txn(conn):
+        candidate_ids: Optional[set[str]] = None
+        if causal_seeds is not None:
+            candidate_ids = set()
+            if causal_seeds:
+                placeholders = ",".join("?" for _ in causal_seeds)
+                candidate_ids.update(
+                    str(row["child_id"])
+                    for row in conn.execute(
+                        "SELECT child_id FROM task_links "
+                        f"WHERE parent_id IN ({placeholders})",
+                        causal_seeds,
+                    ).fetchall()
+                )
         # Iterate to a fixed point so auto-completing a shell can unlock its
         # downstream node in this same dependency-resolution pass.
         while True:
             changed_this_pass = 0
-            todo_rows = conn.execute(
+            todo_sql = (
                 "SELECT id, status, consecutive_failures, max_retries, "
                 "needs_specification FROM tasks "
                 "WHERE status IN ('todo', 'blocked') "
-                "ORDER BY created_at, id"
-            ).fetchall()
+            )
+            todo_params: tuple[str, ...] = ()
+            if candidate_ids is not None:
+                if not candidate_ids:
+                    break
+                ordered_candidates = tuple(sorted(candidate_ids))
+                todo_sql += (
+                    "AND id IN ("
+                    + ",".join("?" for _ in ordered_candidates)
+                    + ") "
+                )
+                todo_params = ordered_candidates
+            todo_sql += "ORDER BY created_at, id"
+            todo_rows = conn.execute(todo_sql, todo_params).fetchall()
             for row in todo_rows:
                 task_id = row["id"]
                 cur_status = row["status"]
@@ -7032,6 +5750,17 @@ def recompute_ready(
                         promoted += 1
                         changed_this_pass += 1
                         auto_completed.append(str(task_id))
+                        if transitions is not None:
+                            transitions.auto_completed.append(str(task_id))
+                        if candidate_ids is not None:
+                            candidate_ids.update(
+                                str(child["child_id"])
+                                for child in conn.execute(
+                                    "SELECT child_id FROM task_links "
+                                    "WHERE parent_id = ?",
+                                    (task_id,),
+                                ).fetchall()
+                            )
                     continue
                 next_status = "triage" if row["needs_specification"] else "ready"
                 if cur_status == "blocked":
@@ -7071,8 +5800,12 @@ def recompute_ready(
                         "specification_requested",
                         {"reason": "dependencies_satisfied"},
                     )
+                    if transitions is not None:
+                        transitions.newly_specifiable.append(str(task_id))
                 else:
                     _append_event(conn, task_id, "promoted", None)
+                    if transitions is not None:
+                        transitions.newly_ready.append(str(task_id))
                 promoted += 1
                 changed_this_pass += 1
             if changed_this_pass == 0:
@@ -7142,12 +5875,8 @@ def claim_task(
         undone = conn.execute(
             "SELECT 1 FROM task_links l "
             "JOIN tasks p ON p.id = l.parent_id "
-            "JOIN tasks c ON c.id = l.child_id "
             "WHERE l.child_id = ? AND p.status NOT IN ('done', 'archived') "
-            "AND NOT EXISTS ("
-            "  SELECT 1 FROM loop_handoffs h "
-            "  WHERE c.created_by = ('loop-review:' || h.id) AND h.task_id = p.id"
-            ") LIMIT 1",
+            "LIMIT 1",
             (task_id,),
         ).fetchone()
         if undone:
@@ -7740,6 +6469,8 @@ def complete_task(
     metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None,
     expected_run_id: Optional[int] = None,
+    transitions: Optional[ReadyTransitions] = None,
+    recompute_dependents: bool = True,
 ) -> bool:
     """Transition ``running|ready -> done`` and record ``result``.
 
@@ -7768,6 +6499,11 @@ def complete_task(
     Any suspected phantom references are recorded as a
     ``suspected_hallucinated_references`` event. This pass is advisory
     and never blocks.
+
+    ``recompute_dependents=False`` lets a post-commit progress service apply
+    the configured failure policy and defer model work and dispatch until the
+    full mutation boundary is settled. Legacy callers retain the historical
+    immediate recompute by default.
     """
     now = int(time.time())
 
@@ -7937,8 +6673,15 @@ def complete_task(
     # just tracks "is there a current pathology the breaker should
     # care about", and a success resets that question.
     _clear_failure_counter(conn, task_id)
-    # Recompute ready status for dependents (separate txn so children see done).
-    recompute_ready(conn)
+    # Recompute ready status for dependents (separate txn so children see
+    # done). Tool/service callers may request the exact changed ids for the
+    # post-commit push path; legacy callers keep the bool return unchanged.
+    if recompute_dependents:
+        recompute_ready(
+            conn,
+            transitions=transitions,
+            caused_by_task_ids=(task_id,),
+        )
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
     _done_task = get_task(conn, task_id)
@@ -8794,335 +7537,6 @@ def block_task(
         reason=reason,
     )
     return True
-
-
-
-def request_review_task(
-    conn: sqlite3.Connection,
-    task_id: str,
-    *,
-    reviewer: Optional[str] = "reviewer-qa",
-    review_kind: Optional[str] = None,
-    resume_mode: Optional[str] = None,
-    review_subject_assignee: Optional[str] = None,
-    foreground_parent_session_id: Optional[str] = None,
-    foreground_fork_session_id: Optional[str] = None,
-    reason: Optional[str] = None,
-    summary: Optional[str] = None,
-    metadata: Optional[dict] = None,
-    expected_run_id: Optional[int] = None,
-) -> bool:
-    """Route the same task into the review lane.
-
-    This is the Loop-native alternative to creating a dependent reviewer
-    child task. The implementation worker's run is closed with
-    ``review_requested`` and the task itself moves to ``status='review'``;
-    the dispatcher later claims it with :func:`claim_review_task` and
-    force-loads ``sdlc-review``.
-    """
-    def _clean(value: Optional[str]) -> Optional[str]:
-        if value is None:
-            return None
-        text = str(value).strip()
-        return text or None
-
-    review_assignee = str(reviewer or "reviewer-qa").strip() or "reviewer-qa"
-    review_kind = _clean(review_kind)
-    resume_mode = _clean(resume_mode)
-    foreground_parent_session_id = _clean(foreground_parent_session_id)
-    foreground_fork_session_id = _clean(foreground_fork_session_id)
-    with write_txn(conn):
-        row = conn.execute(
-            "SELECT status, assignee FROM tasks WHERE id = ?", (task_id,),
-        ).fetchone()
-        if not row:
-            return False
-        previous_assignee = row["assignee"]
-        review_subject = _clean(review_subject_assignee) or _clean(previous_assignee)
-        status = row["status"]
-        if expected_run_id is None:
-            cur = conn.execute(
-                """
-                UPDATE tasks
-                   SET status       = 'review',
-                       assignee     = ?,
-                       review_kind  = ?,
-                       resume_mode  = ?,
-                       review_subject_assignee = ?,
-                       foreground_parent_session_id = ?,
-                       foreground_fork_session_id = ?,
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
-                 WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked', 'review')
-                """,
-                (
-                    review_assignee,
-                    review_kind,
-                    resume_mode,
-                    review_subject,
-                    foreground_parent_session_id,
-                    foreground_fork_session_id,
-                    task_id,
-                ),
-            )
-        else:
-            cur = conn.execute(
-                """
-                UPDATE tasks
-                   SET status       = 'review',
-                       assignee     = ?,
-                       review_kind  = ?,
-                       resume_mode  = ?,
-                       review_subject_assignee = ?,
-                       foreground_parent_session_id = ?,
-                       foreground_fork_session_id = ?,
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
-                 WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked', 'review')
-                   AND current_run_id = ?
-                """,
-                (
-                    review_assignee,
-                    review_kind,
-                    resume_mode,
-                    review_subject,
-                    foreground_parent_session_id,
-                    foreground_fork_session_id,
-                    task_id,
-                    int(expected_run_id),
-                ),
-            )
-        if cur.rowcount != 1:
-            return False
-        review_metadata = dict(metadata or {})
-        routing_metadata = {
-            "review_kind": review_kind,
-            "resume_mode": resume_mode,
-            "review_subject_assignee": review_subject,
-            "foreground_parent_session_id": foreground_parent_session_id,
-            "foreground_fork_session_id": foreground_fork_session_id,
-        }
-        for key, value in routing_metadata.items():
-            if value is not None and key not in review_metadata:
-                review_metadata[key] = value
-        run_id = _end_run(
-            conn,
-            task_id,
-            outcome="review_requested",
-            status="review_requested",
-            summary=summary if summary is not None else reason,
-            metadata=review_metadata or None,
-        )
-        if run_id is None and (summary or metadata or reason):
-            run_id = _synthesize_ended_run(
-                conn,
-                task_id,
-                outcome="review_requested",
-                summary=summary if summary is not None else reason,
-                metadata=review_metadata or None,
-            )
-        payload: dict[str, Any] = {
-            "reviewer": review_assignee,
-            "previous_assignee": previous_assignee,
-        }
-        if reason:
-            payload["reason"] = reason
-        if summary:
-            payload["summary"] = summary.strip().splitlines()[0][:400]
-        for key, value in routing_metadata.items():
-            if value is not None:
-                payload[key] = value
-        _append_event(conn, task_id, "review_requested", payload, run_id=run_id)
-        return True
-
-
-def _clear_review_routing_sql() -> str:
-    return (
-        "review_kind = NULL, resume_mode = NULL, "
-        "review_subject_assignee = NULL, "
-        "foreground_parent_session_id = NULL, "
-        "foreground_fork_session_id = NULL"
-    )
-
-
-def resolve_blocker_triage_task(
-    conn: sqlite3.Connection,
-    task_id: str,
-    *,
-    action: str,
-    actor: str,
-    reason: Optional[str] = None,
-    instructions: Optional[str] = None,
-    assignee: Optional[str] = None,
-    reviewer: Optional[str] = None,
-    summary: Optional[str] = None,
-    metadata: Optional[dict] = None,
-    followups: Optional[Iterable[dict[str, Any]]] = None,
-    expected_run_id: Optional[int] = None,
-) -> dict[str, Any]:
-    """Resolve an orchestrator blocker-triage review on the same task row.
-
-    Legacy workers used ``status='review'`` with
-    ``review_kind='blocker_triage'`` for blockers. New worker blockers call
-    ``block_task`` directly; this compatibility resolver only lets existing
-    rows complete/approve, return to the original worker with instructions,
-    create upstream follow-up cards, or route to QA review.
-    """
-    action = str(action or "").strip().lower()
-    actor = str(actor or "").strip() or "orchestrator"
-    if action not in BLOCKER_TRIAGE_ACTIONS:
-        raise ValueError(
-            f"unsupported blocker triage action {action!r}; expected one of "
-            + ", ".join(sorted(BLOCKER_TRIAGE_ACTIONS))
-        )
-
-    task = get_task(conn, task_id)
-    if task is None:
-        return {"ok": False, "outcome": "not_found"}
-    if task.review_kind != BLOCKER_TRIAGE_REVIEW_KIND:
-        return {"ok": False, "outcome": "not_blocker_triage"}
-    if task.status not in {"running", "review"}:
-        return {"ok": False, "outcome": "invalid_status", "status": task.status}
-    if expected_run_id is not None and task.current_run_id != int(expected_run_id):
-        return {"ok": False, "outcome": "stale_run"}
-
-    triage_summary = summary if summary is not None else reason
-    base_metadata = dict(metadata or {})
-    base_metadata.setdefault("blocker_triage_action", action)
-    base_metadata.setdefault("blocker_triage_actor", actor)
-    if instructions:
-        base_metadata.setdefault("instructions", instructions)
-
-    if action == "approve_complete":
-        ok = complete_task(
-            conn,
-            task_id,
-            result=reason,
-            summary=triage_summary or "blocker triage approved completion",
-            metadata=base_metadata,
-            expected_run_id=expected_run_id,
-        )
-        return {"ok": bool(ok), "outcome": "completed" if ok else "not_completed"}
-
-    if action == "route_reviewer_qa":
-        ok = request_review_task(
-            conn,
-            task_id,
-            reviewer=reviewer or "reviewer-qa",
-            review_kind=None,
-            resume_mode=None,
-            review_subject_assignee=task.review_subject_assignee or task.assignee,
-            reason=reason,
-            summary=triage_summary or instructions or "blocker triage routed to QA",
-            metadata=base_metadata,
-            expected_run_id=expected_run_id,
-        )
-        return {"ok": bool(ok), "outcome": "routed_reviewer_qa" if ok else "not_routed"}
-
-    created_cards: list[str] = []
-    if action == "create_followups":
-        for item in followups or []:
-            if not isinstance(item, dict):
-                raise ValueError("each followup must be an object")
-            title = str(item.get("title") or "").strip()
-            followup_assignee = str(item.get("assignee") or "").strip()
-            if not title or not followup_assignee:
-                raise ValueError("each followup requires title and assignee")
-            child_id = create_task(
-                conn,
-                title=title,
-                body=str(item.get("body") or ""),
-                assignee=followup_assignee,
-                created_by=f"blocker-triage:{task_id}",
-                tenant=task.tenant,
-                priority=int(item.get("priority") or 0),
-                workspace_kind=str(item.get("workspace_kind") or task.workspace_kind or "scratch"),
-                workspace_path=(
-                    str(item.get("workspace_path"))
-                    if item.get("workspace_path")
-                    else task.workspace_path
-                ),
-            )
-            link_tasks(conn, parent_id=child_id, child_id=task_id)
-            created_cards.append(child_id)
-        if not created_cards:
-            raise ValueError("create_followups requires at least one followup")
-
-    target_assignee = _canonical_assignee(assignee or task.review_subject_assignee or task.assignee)
-    new_status = "todo" if _task_has_undone_parents(conn, task_id) else "ready"
-    now = int(time.time())
-    with write_txn(conn):
-        cur = conn.execute(
-            f"""
-            UPDATE tasks
-               SET status = ?, assignee = ?, claim_lock = NULL,
-                   claim_expires = NULL, worker_pid = NULL,
-                   {_clear_review_routing_sql()}
-             WHERE id = ? AND status IN ('running', 'review')
-            """,
-            (new_status, target_assignee, task_id),
-        )
-        if cur.rowcount != 1:
-            return {"ok": False, "outcome": "not_routed"}
-        run_id = _end_run(
-            conn,
-            task_id,
-            outcome="blocker_triage_routed",
-            status="blocker_triage_routed",
-            summary=triage_summary or instructions,
-            metadata=base_metadata or None,
-        )
-        if run_id is None and (triage_summary or instructions or base_metadata):
-            run_id = _synthesize_ended_run(
-                conn,
-                task_id,
-                outcome="blocker_triage_routed",
-                summary=triage_summary or instructions,
-                metadata=base_metadata or None,
-            )
-        payload: dict[str, Any] = {
-            "action": action,
-            "actor": actor,
-            "assignee": target_assignee,
-            "status": new_status,
-        }
-        if reason:
-            payload["reason"] = reason
-        if instructions:
-            payload["instructions"] = instructions
-        if created_cards:
-            payload["created_cards"] = created_cards
-        _append_event(conn, task_id, "blocker_triage_resolved", payload, run_id=run_id)
-        if instructions:
-            conn.execute(
-                "INSERT INTO task_comments (task_id, author, body, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (task_id, actor, f"BLOCKER TRIAGE: {instructions}", now),
-            )
-
-    recompute_ready(conn)
-    return {
-        "ok": True,
-        "outcome": "followups_created" if created_cards else "returned_to_worker",
-        "status": new_status,
-        "assignee": target_assignee,
-        "created_cards": created_cards,
-    }
-
-
-def _task_has_undone_parents(conn: sqlite3.Connection, task_id: str) -> bool:
-    return bool(
-        conn.execute(
-            "SELECT 1 FROM task_links l "
-            "JOIN tasks p ON p.id = l.parent_id "
-            "WHERE l.child_id = ? AND p.status != 'done' LIMIT 1",
-            (task_id,),
-        ).fetchone()
-    )
 
 
 
@@ -11855,6 +10269,78 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     return False
 
 
+def _normalize_dispatch_candidate_ids(
+    candidate_task_ids: Optional[Iterable[str]],
+) -> Optional[tuple[str, ...]]:
+    """Normalize an optional spawn-selection scope once per dispatch pass."""
+
+    if candidate_task_ids is None:
+        return None
+    raw_ids: Iterable[str]
+    if isinstance(candidate_task_ids, str):
+        raw_ids = (candidate_task_ids,)
+    else:
+        raw_ids = candidate_task_ids
+    return tuple(
+        dict.fromkeys(
+            task_id
+            for raw in raw_ids
+            if raw is not None and (task_id := str(raw).strip())
+        )
+    )
+
+
+def _run_dispatch_recovery_maintenance(
+    conn: sqlite3.Connection,
+    *,
+    failure_limit: int,
+    stale_timeout_seconds: int,
+) -> DispatchResult:
+    """Run the whole-board repair phase used by a recovery dispatcher tick.
+
+    This phase deliberately stays separate from exact post-commit dispatch.
+    Polling/recovery ticks repair stale, crashed, timed-out, or historically
+    missed board state before selecting work. A caller that already holds the
+    exact durable transition ids must not repeat those whole-board scans before
+    claiming its candidates.
+    """
+
+    # Reap zombie children from previously spawned workers. See
+    # reap_worker_zombies() for the full rationale.
+    reap_worker_zombies()
+
+    result = DispatchResult()
+    result.reclaimed = release_stale_claims(conn)
+    result.stale = detect_stale_running(
+        conn,
+        stale_timeout_seconds=stale_timeout_seconds,
+    )
+    result.crashed = detect_crashed_workers(conn)
+    # detect_crashed_workers stashes protocol-violation auto-blocks on
+    # itself so the public list-return stays stable. Pull them into the
+    # DispatchResult here so telemetry / tests see the trip.
+    crash_auto_blocked = getattr(
+        detect_crashed_workers,
+        "_last_auto_blocked",
+        [],
+    )
+    if crash_auto_blocked:
+        result.auto_blocked.extend(crash_auto_blocked)
+    # Rate-limited requeues (quota wall, no failure counted) — surface for
+    # telemetry / tests. These tasks went back to ``ready`` and the respawn
+    # guard will defer them until the quota window clears.
+    crash_rate_limited = getattr(
+        detect_crashed_workers,
+        "_last_rate_limited",
+        [],
+    )
+    if crash_rate_limited:
+        result.rate_limited.extend(crash_rate_limited)
+    result.timed_out = enforce_max_runtime(conn)
+    result.promoted = recompute_ready(conn, failure_limit=failure_limit)
+    return result
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -11868,6 +10354,7 @@ def dispatch_once(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    candidate_task_ids: Optional[Iterable[str]] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -11883,7 +10370,17 @@ def dispatch_once(
     The lock is keyed off the board's resolved DB path, so unrelated
     boards tick in parallel. See :func:`_dispatch_tick_lock` for the
     cross-process / cross-platform mechanics.
+
+    ``candidate_task_ids=None`` runs the recovery dispatcher: whole-board
+    maintenance followed by normal ready/review selection. An explicit
+    iterable is the exact post-commit path: it skips recovery maintenance and
+    selects only those ready/review rows. Both paths retain the same
+    board-scoped lock, live capacity checks, claim CAS, spawn-failure handling,
+    and per-profile limits.
     """
+    normalized_candidates = _normalize_dispatch_candidate_ids(
+        candidate_task_ids
+    )
     try:
         db_path = kanban_db_path(board=board)
     except Exception:
@@ -11902,6 +10399,7 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            candidate_task_ids=normalized_candidates,
         )
     with _dispatch_tick_lock(db_path) as held:
         if not held:
@@ -11918,6 +10416,7 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            candidate_task_ids=normalized_candidates,
         )
 
 
@@ -11934,18 +10433,22 @@ def _dispatch_once_locked(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    candidate_task_ids: Optional[tuple[str, ...]] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
-    Steps:
+    Recovery ticks (``candidate_task_ids is None``):
       1. Reclaim stale running tasks (TTL expired).
       2. Reclaim stale running tasks (no recent heartbeat).
       3. Reclaim crashed running tasks (host-local PID no longer alive).
-      3. Promote todo -> ready where all parents are done.
-      4. For each ready task with an assignee, atomically claim and call
+      4. Promote todo -> ready where all parents are done.
+      5. For each ready task with an assignee, atomically claim and call
          ``spawn_fn(task, workspace_path, board) -> Optional[int]``. The
          return value (if any) is recorded as ``worker_pid`` so subsequent
          ticks can detect crashes before the TTL expires.
+
+    Exact post-commit ticks skip steps 1–4 and run step 5 only for the supplied
+    candidates.
 
     Spawn failures are counted per-task. After ``failure_limit`` consecutive
     failures the task is auto-blocked with the last error as its reason —
@@ -11962,70 +10465,60 @@ def _dispatch_once_locked(
     ``spawn_fn`` defaults to ``_default_spawn``. Tests pass a stub.
     ``board`` pins workspace/log/db resolution for this tick to a specific
     board. When omitted, the current-board resolution chain is used.
+    ``candidate_task_ids`` has already been normalized by ``dispatch_once``.
     """
-    # Reap zombie children from previously spawned workers. See
-    # reap_worker_zombies() for the full rationale.
-    reap_worker_zombies()
+    if candidate_task_ids is None:
+        result = _run_dispatch_recovery_maintenance(
+            conn,
+            failure_limit=failure_limit,
+            stale_timeout_seconds=stale_timeout_seconds,
+        )
+    else:
+        # Exact post-commit callers already performed dependency resolution
+        # and supplied the durable transition ids. Going straight to the
+        # shared selection/claim/spawn phase keeps the nudge proportional to
+        # that frontier instead of to every historical task on the board.
+        result = DispatchResult()
+        if not candidate_task_ids:
+            return result
 
-    result = DispatchResult()
-    result.reclaimed = release_stale_claims(conn)
-    result.stale = detect_stale_running(
-        conn, stale_timeout_seconds=stale_timeout_seconds,
-    )
-    result.crashed = detect_crashed_workers(conn)
-    # detect_crashed_workers stashes protocol-violation auto-blocks on
-    # itself so the public list-return stays stable. Pull them into the
-    # DispatchResult here so telemetry / tests see the trip.
-    _crash_auto_blocked = getattr(
-        detect_crashed_workers, "_last_auto_blocked", []
-    )
-    if _crash_auto_blocked:
-        result.auto_blocked.extend(_crash_auto_blocked)
-    # Rate-limited requeues (quota wall, no failure counted) — surface for
-    # telemetry / tests. These tasks went back to ``ready`` and the respawn
-    # guard will defer them until the quota window clears.
-    _crash_rate_limited = getattr(
-        detect_crashed_workers, "_last_rate_limited", []
-    )
-    if _crash_rate_limited:
-        result.rate_limited.extend(_crash_rate_limited)
-    result.timed_out = enforce_max_runtime(conn)
-    result.promoted = recompute_ready(conn, failure_limit=failure_limit)
-
-    # Count tasks already running so max_spawn enforces concurrency rather
-    # than a per-tick spawn budget. See the docstring above for the full
-    # rationale; the short version is that a 60-second tick interval with a
-    # per-tick budget of N would grow concurrency by N every tick on a busy
-    # board, since "running" tasks aren't reclaimed by completion alone —
-    # they sit in status='running' until the worker calls
-    # kanban_complete/kanban_block (or the dispatcher TTL-reclaims them).
+    # Both knobs are live board-wide concurrency caps. Use the tighter cap
+    # without rewriting either one to "remaining slots": the loop below
+    # compares the cap to ``running_count + spawned``. Replacing a cap with
+    # the remaining count double-counts existing workers and can underfill the
+    # board (e.g. 2 running, cap 3 used to compare 2 >= remaining 1).
+    caps = [cap for cap in (max_spawn, max_in_progress) if cap is not None]
+    effective_cap = min(caps) if caps else None
     running_count = 0
-    if max_spawn is not None:
+    if effective_cap is not None:
         running_count = int(
             conn.execute(
                 "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
             ).fetchone()[0]
         )
+        if running_count >= effective_cap:
+            return result
 
-    ready_rows = conn.execute(
+    ready_sql = (
         "SELECT id, assignee FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
-        "ORDER BY priority DESC, created_at ASC"
-    ).fetchall()
-    # Honour kanban.max_in_progress: if the board already has enough running
-    # tasks, skip spawning this tick so slow workers (local LLMs,
-    # resource-constrained hosts) can finish what they have before more tasks
-    # pile up and time out.
-    if max_in_progress is not None and ready_rows:
-        in_progress = conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
-        ).fetchone()[0]
-        if in_progress >= max_in_progress:
-            return result
-        # Only spawn enough to reach the cap, respecting max_spawn too.
-        remaining = max_in_progress - in_progress
-        if max_spawn is None or max_spawn > remaining:
-            max_spawn = remaining
+    )
+    ready_params: tuple[str, ...] = ()
+    if candidate_task_ids is not None:
+        if not candidate_task_ids:
+            ready_rows = []
+        else:
+            ready_sql += (
+                "AND id IN ("
+                + ",".join("?" for _ in candidate_task_ids)
+                + ") "
+            )
+            ready_params = candidate_task_ids
+            ready_sql += "ORDER BY priority DESC, created_at ASC"
+            ready_rows = conn.execute(ready_sql, ready_params).fetchall()
+    else:
+        ready_sql += "ORDER BY priority DESC, created_at ASC"
+        ready_rows = conn.execute(ready_sql).fetchall()
     spawned = 0
     # Per-profile concurrency cap (#21582): when set, track how many
     # workers each assignee already has in flight, and refuse to spawn
@@ -12066,7 +10559,7 @@ def _dispatch_once_locked(
             # there, with the existing diagnostic.
             _default_assignee_resolved = True
     for row in ready_rows:
-        if max_spawn is not None and running_count + spawned >= max_spawn:
+        if effective_cap is not None and running_count + spawned >= effective_cap:
             break
         row_assignee = row["assignee"]
         if not row_assignee:
@@ -12175,6 +10668,7 @@ def _dispatch_once_locked(
             continue
         if dry_run:
             result.spawned.append((row["id"], row_assignee, ""))
+            spawned += 1
             # Increment per-profile counter even in dry_run so the cap
             # check sees the would-be spawn on subsequent iterations.
             # Without this, dry_run reports every task as spawnable and
@@ -12206,7 +10700,6 @@ def _dispatch_once_locked(
         if claimed.workspace_kind == "worktree":
             set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
-        claimed = ensure_orchestrator_fork_for_dispatch(conn, claimed)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             # Back-compat: older spawn_fn signatures accept only
@@ -12256,30 +10749,89 @@ def _dispatch_once_locked(
     # Same concurrency model as ready dispatch: review spawns count
     # against max_spawn alongside ready tasks, so the total number of
     # running workers stays bounded.
-    review_rows = conn.execute(
+    review_sql = (
         "SELECT id, assignee FROM tasks "
         "WHERE status = 'review' AND claim_lock IS NULL "
-        "ORDER BY priority DESC, created_at ASC"
-    ).fetchall()
+    )
+    review_params: tuple[str, ...] = ()
+    if candidate_task_ids is not None:
+        if not candidate_task_ids:
+            review_rows = []
+        else:
+            review_sql += (
+                "AND id IN ("
+                + ",".join("?" for _ in candidate_task_ids)
+                + ") "
+            )
+            review_params = candidate_task_ids
+            review_sql += "ORDER BY priority DESC, created_at ASC"
+            review_rows = conn.execute(review_sql, review_params).fetchall()
+    else:
+        review_sql += "ORDER BY priority DESC, created_at ASC"
+        review_rows = conn.execute(review_sql).fetchall()
     for row in review_rows:
-        if max_spawn is not None and running_count + spawned >= max_spawn:
+        if effective_cap is not None and running_count + spawned >= effective_cap:
             break
-        if not row["assignee"]:
-            result.skipped_unassigned.append(row["id"])
-            continue
+        row_assignee = row["assignee"]
+        if not row_assignee:
+            if _default_assignee and _default_assignee_resolved:
+                if not dry_run:
+                    try:
+                        with write_txn(conn):
+                            conn.execute(
+                                "UPDATE tasks SET assignee = ? WHERE id = ? "
+                                "AND (assignee IS NULL OR assignee = '')",
+                                (_default_assignee, row["id"]),
+                            )
+                            _append_event(
+                                conn,
+                                row["id"],
+                                "assigned",
+                                {
+                                    "assignee": _default_assignee,
+                                    "source": "kanban.default_assignee",
+                                },
+                            )
+                    except Exception:
+                        _log.debug(
+                            "kanban dispatch: failed to apply "
+                            "default_assignee=%r to review task %s",
+                            _default_assignee,
+                            row["id"],
+                            exc_info=True,
+                        )
+                        result.skipped_unassigned.append(row["id"])
+                        continue
+                row_assignee = _default_assignee
+                result.auto_assigned_default.append(row["id"])
+            else:
+                result.skipped_unassigned.append(row["id"])
+                continue
         try:
             from hermes_cli.profiles import profile_exists
         except Exception:
             profile_exists = None  # type: ignore[assignment]
         if (
             profile_exists is not None
-            and not profile_exists(row["assignee"])
-            and not _external_harness_kind(row["assignee"])
+            and not profile_exists(row_assignee)
+            and not _external_harness_kind(row_assignee)
         ):
             result.skipped_nonspawnable.append(row["id"])
             continue
+        if _per_profile_cap is not None:
+            current = _per_profile_running.get(row_assignee, 0)
+            if current >= _per_profile_cap:
+                result.skipped_per_profile_capped.append(
+                    (row["id"], row_assignee, current)
+                )
+                continue
         if dry_run:
-            result.spawned.append((row["id"], row["assignee"], ""))
+            result.spawned.append((row["id"], row_assignee, ""))
+            spawned += 1
+            if _per_profile_cap is not None:
+                _per_profile_running[row_assignee] = (
+                    _per_profile_running.get(row_assignee, 0) + 1
+                )
             continue
         claimed = claim_review_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
@@ -12313,7 +10865,6 @@ def _dispatch_once_locked(
         )
         if not orchestrator_review:
             claimed.skills = ["sdlc-review"]
-        claimed = ensure_orchestrator_fork_for_dispatch(conn, claimed)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             import inspect
@@ -12329,6 +10880,10 @@ def _dispatch_once_locked(
                 _set_worker_pid(conn, claimed.id, int(pid))
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
+            if _per_profile_cap is not None and claimed.assignee:
+                _per_profile_running[claimed.assignee] = (
+                    _per_profile_running.get(claimed.assignee, 0) + 1
+                )
         except Exception as exc:
             auto = _record_spawn_failure(
                 conn, claimed.id, str(exc),
@@ -12721,16 +11276,6 @@ def _default_spawn(
         env["TERMINAL_CWD"] = workspace
     if task.branch_name:
         env["HERMES_KANBAN_BRANCH"] = task.branch_name
-    if task.review_kind:
-        env["HERMES_KANBAN_REVIEW_KIND"] = task.review_kind
-    if task.resume_mode:
-        env["HERMES_KANBAN_RESUME_MODE"] = task.resume_mode
-    if task.review_subject_assignee:
-        env["HERMES_KANBAN_REVIEW_SUBJECT_ASSIGNEE"] = task.review_subject_assignee
-    if task.foreground_parent_session_id:
-        env["HERMES_FOREGROUND_PARENT_SESSION_ID"] = task.foreground_parent_session_id
-    if task.foreground_fork_session_id:
-        env["HERMES_FOREGROUND_FORK_SESSION_ID"] = task.foreground_fork_session_id
     if task.current_run_id is not None:
         env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
     if task.claim_lock:
@@ -12804,8 +11349,6 @@ def _default_spawn(
             # profile-local worker sessions still register configured hooks.
             "--accept-hooks",
         ]
-        if _is_orchestrator_dispatch_task(task) and task.foreground_fork_session_id:
-            cmd.extend(["--resume", task.foreground_fork_session_id])
         # Auto-load the kanban-worker skill when it resolves for the worker home.
         if _kanban_worker_skill_available(env.get("HERMES_HOME")):
             cmd.extend(["--skills", "kanban-worker"])

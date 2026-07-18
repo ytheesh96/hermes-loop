@@ -120,21 +120,12 @@ def _resolve_board(board: Optional[str]) -> Optional[str]:
 
 
 def _conn(board: Optional[str] = None):
-    """Open a kanban_db connection, creating the schema on first use.
-
-    Every handler that mutates the DB goes through this so the plugin
-    self-heals on a fresh install (no user-visible "no such table"
-    error if somebody hits POST /tasks before GET /board).
-    ``init_db`` is idempotent.
+    """Open a kanban_db connection, auto-initializing on first use.
 
     ``board`` is the query-param slug (already normalised by
     :func:`_resolve_board`). When ``None`` the active board is used
     via the resolution chain (env var → ``current`` file → ``default``).
     """
-    try:
-        kanban_db.init_db(board=board)
-    except Exception as exc:
-        log.warning("kanban init_db failed: %s", exc)
     return kanban_db.connect(board=board)
 
 
@@ -945,10 +936,8 @@ def _query_session_source_rows(
         placeholders = ",".join("?" for _ in lineage_session_ids)
         disjuncts.append(f"session_id IN ({placeholders})")
         params.extend(lineage_session_ids)
-        disjuncts.append(f"foreground_parent_session_id IN ({placeholders})")
-        params.extend(lineage_session_ids)
-        # Legacy fallback for rows created before tasks.session_id became the
-        # primary source identity.
+        # Tenant used to double as source identity before ``session_id`` was
+        # introduced. Keep this read-only fallback for those older rows.
         disjuncts.append(f"tenant IN ({placeholders})")
         params.extend(lineage_session_ids)
 
@@ -1262,9 +1251,22 @@ def get_session_source(
 
     candidate_boards = _session_source_board_candidates(board)
     referenced_task_ids = _loop_tool_task_ids_for_sessions(lineage_session_ids)
+    attempted_paths: set[str] = set()
+    first_candidate_error: Optional[Exception] = None
+    fallback: Optional[
+        tuple[str, sqlite3.Connection, list[str], list[str]]
+    ] = None
     for candidate_board in candidate_boards:
-        candidate_conn = _conn(board=candidate_board)
+        candidate_path = str(
+            kanban_db.kanban_db_path(board=candidate_board).resolve()
+        )
+        if candidate_path in attempted_paths:
+            continue
+        attempted_paths.add(candidate_path)
+
+        candidate_conn: Optional[sqlite3.Connection] = None
         try:
+            candidate_conn = _conn(board=candidate_board)
             candidate_rows, candidate_inferred, candidate_filters = _query_session_source_rows(
                 candidate_conn,
                 lineage_session_ids,
@@ -1272,11 +1274,31 @@ def get_session_source(
                 include_archived=include_archived,
                 referenced_task_ids=referenced_task_ids,
             )
+        except (kanban_db.KanbanDbCorruptError, sqlite3.Error, OSError) as exc:
+            if candidate_conn is not None:
+                candidate_conn.close()
+            if board is not None:
+                if fallback is not None:
+                    fallback[1].close()
+                raise
+            if first_candidate_error is None:
+                first_candidate_error = exc
+            log.warning(
+                "Skipping unreadable Kanban board %r during session-source discovery: %s",
+                candidate_board,
+                exc,
+            )
+            continue
         except Exception:
-            candidate_conn.close()
+            if candidate_conn is not None:
+                candidate_conn.close()
+            if fallback is not None:
+                fallback[1].close()
             raise
 
-        if candidate_rows or board is not None:
+        if candidate_rows:
+            if fallback is not None:
+                fallback[1].close()
             selected_board = candidate_board
             conn = candidate_conn
             rows = candidate_rows
@@ -1284,18 +1306,26 @@ def get_session_source(
             tenant_filters = candidate_filters
             break
 
-        candidate_conn.close()
+        if fallback is None:
+            fallback = (
+                candidate_board,
+                candidate_conn,
+                candidate_inferred,
+                candidate_filters,
+            )
+        else:
+            candidate_conn.close()
 
     if conn is None:
-        selected_board = candidate_boards[0]
-        conn = _conn(board=selected_board)
-        rows, inferred_tenants, tenant_filters = _query_session_source_rows(
-            conn,
-            lineage_session_ids,
-            explicit_tenant=explicit_tenant,
-            include_archived=include_archived,
-            referenced_task_ids=referenced_task_ids,
-        )
+        if fallback is not None:
+            selected_board, conn, inferred_tenants, tenant_filters = fallback
+        elif first_candidate_error is not None:
+            raise first_candidate_error
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail="No readable Kanban board is available",
+            )
 
     try:
         tasks = [kanban_db.Task.from_row(row) for row in rows]
@@ -2449,109 +2479,6 @@ def patch_loop_graph(
         conn.close()
 
 
-@router.get("/loop-handoffs")
-def list_loop_handoffs(
-    root_task_id: Optional[str] = Query(None),
-    tenant: Optional[str] = Query(None),
-    state: Optional[str] = Query(None),
-    task_id: Optional[str] = Query(None),
-    status_only: bool = Query(False),
-    board: Optional[str] = Query(None),
-):
-    board = _resolve_board(board)
-    conn = _conn(board=board)
-    try:
-        if status_only:
-            if not tenant or not root_task_id:
-                raise HTTPException(status_code=400, detail="status_only requires tenant and root_task_id")
-            return kanban_db.loop_handoff_status(conn, tenant=tenant, root_task_id=root_task_id)
-        return {
-            "ok": True,
-            "handoffs": kanban_db.list_loop_handoffs(
-                conn,
-                root_task_id=root_task_id,
-                tenant=tenant,
-                state=state,
-                task_id=task_id,
-            ),
-        }
-    finally:
-        conn.close()
-
-
-class LoopHandoffAutoActionBody(BaseModel):
-    action: str
-    actor: Optional[str] = None
-    reason: Optional[str] = None
-    evidence_passed: bool = False
-    prohibited_flags: list[str] = Field(default_factory=list)
-    followups: list[dict[str, Any]] = Field(default_factory=list)
-    repair_attempts: int = 0
-
-
-class HandoffResolveBody(BaseModel):
-    action: str
-    actor: Optional[str] = None
-    resolution_summary: Optional[str] = None
-    payload: dict[str, Any] = Field(default_factory=dict)
-
-
-@router.get("/loop-handoffs/{handoff_id}")
-def get_loop_handoff_details(handoff_id: int, board: Optional[str] = Query(None)):
-    raise HTTPException(status_code=410, detail="Loop foreground handoffs were removed")
-
-
-def _resolve_handoff_response(
-    handoff_id: int,
-    payload: HandoffResolveBody,
-    *,
-    board: Optional[str],
-):
-    board = _resolve_board(board)
-    conn = _conn(board=board)
-    try:
-        try:
-            return kanban_db.resolve_handoff(
-                conn,
-                handoff_id,
-                action=payload.action,
-                actor=payload.actor or "dashboard",
-                resolution_summary=payload.resolution_summary,
-                payload=payload.payload,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc))
-    finally:
-        conn.close()
-
-
-@router.post("/handoffs/{handoff_id}/resolve")
-def resolve_handoff(
-    handoff_id: int,
-    payload: HandoffResolveBody,
-    board: Optional[str] = Query(None),
-):
-    return _resolve_handoff_response(handoff_id, payload, board=board)
-
-
-@router.post("/loop-handoffs/{handoff_id}/resolve")
-def resolve_loop_handoff(
-    handoff_id: int,
-    payload: HandoffResolveBody,
-    board: Optional[str] = Query(None),
-):
-    raise HTTPException(status_code=410, detail="Loop foreground handoffs were removed")
-
-
-@router.post("/loop-handoffs/{handoff_id}/auto-action")
-def review_loop_handoff_auto_action(
-    handoff_id: int,
-    payload: LoopHandoffAutoActionBody,
-    board: Optional[str] = Query(None),
-):
-    raise HTTPException(status_code=410, detail="Loop foreground handoffs were removed")
-
-
 # ---------------------------------------------------------------------------
 # Attachments — upload / list / download / delete (#35338)
 # ---------------------------------------------------------------------------
@@ -2717,7 +2644,9 @@ class UpdateTaskBody(BaseModel):
 @router.patch("/tasks/{task_id}")
 def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
-    conn = _conn(board=board)
+    effective_board = board or kanban_db.get_current_board()
+    conn = _conn(board=effective_board)
+    completion_progress = None
     try:
         task = kanban_db.get_task(conn, task_id)
         if task is None:
@@ -2749,12 +2678,37 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
             if s == "ready" and _task_has_loop_intake_blocking_ready(conn, task_id):
                 raise HTTPException(status_code=409, detail=_loop_intake_required_reason(task_id))
             if s == "done":
-                ok = kanban_db.complete_task(
-                    conn, task_id,
-                    result=payload.result,
-                    summary=payload.summary,
-                    metadata=payload.metadata,
-                )
+                from hermes_cli import kanban_progress
+
+                policy = kanban_progress.load_progress_policy()
+                transitions = kanban_db.ReadyTransitions()
+                with kanban_db.scoped_current_board(effective_board):
+                    ok = kanban_db.complete_task(
+                        conn, task_id,
+                        result=payload.result,
+                        summary=payload.summary,
+                        metadata=payload.metadata,
+                        transitions=transitions,
+                        recompute_dependents=False,
+                    )
+                if ok:
+                    recovery_warnings = (
+                        kanban_progress.capture_completion_transitions(
+                            [task_id],
+                            transitions=transitions,
+                            board=effective_board,
+                            conn=conn,
+                            policy=policy,
+                        )
+                    )
+                    completion_progress = kanban_progress.advance_transitions(
+                        transitions,
+                        board=effective_board,
+                        conn=conn,
+                        author="dashboard-completion-auto-decomposer",
+                        policy=policy,
+                        recovery_warnings=recovery_warnings,
+                    )
             elif s == "blocked":
                 ok = kanban_db.block_task(conn, task_id, reason=payload.block_reason)
             elif s == "scheduled":
@@ -2838,7 +2792,12 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                 )
 
         updated = kanban_db.get_task(conn, task_id)
-        return {"task": _task_dict_with_loop_intake(conn, updated) if updated else None}
+        response = {
+            "task": _task_dict_with_loop_intake(conn, updated) if updated else None
+        }
+        if completion_progress is not None:
+            response["progress"] = completion_progress
+        return response
     finally:
         conn.close()
 
@@ -3198,7 +3157,16 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
         raise HTTPException(status_code=400, detail="ids is required")
     results: list[dict] = []
     board = _resolve_board(board)
-    conn = _conn(board=board)
+    effective_board = board or kanban_db.get_current_board()
+    conn = _conn(board=effective_board)
+    completion_transitions = kanban_db.ReadyTransitions()
+    completion_policy = None
+    completed_ids: list[str] = []
+    completion_recovery_warnings: list[str] = []
+    if payload.status == "done" and not payload.archive:
+        from hermes_cli import kanban_progress
+
+        completion_policy = kanban_progress.load_progress_policy()
     try:
         for tid in ids:
             entry: dict[str, Any] = {"id": tid, "ok": True}
@@ -3214,12 +3182,26 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                 if payload.status is not None and not payload.archive:
                     s = payload.status
                     if s == "done":
-                        ok = kanban_db.complete_task(
-                            conn, tid,
-                            result=payload.result,
-                            summary=payload.summary,
-                            metadata=payload.metadata,
-                        )
+                        with kanban_db.scoped_current_board(effective_board):
+                            ok = kanban_db.complete_task(
+                                conn, tid,
+                                result=payload.result,
+                                summary=payload.summary,
+                                metadata=payload.metadata,
+                                transitions=completion_transitions,
+                                recompute_dependents=False,
+                            )
+                        if ok:
+                            completed_ids.append(tid)
+                            completion_recovery_warnings.extend(
+                                kanban_progress.capture_completion_transitions(
+                                    [tid],
+                                    transitions=completion_transitions,
+                                    board=effective_board,
+                                    conn=conn,
+                                    policy=completion_policy,
+                                )
+                            )
                     elif s == "blocked":
                         ok = kanban_db.block_task(conn, tid)
                     elif s == "ready":
@@ -3278,7 +3260,17 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
             except Exception as e:  # defensive — one bad id shouldn't kill the batch
                 entry.update(ok=False, error=str(e))
             results.append(entry)
-        return {"results": results}
+        response: dict[str, Any] = {"results": results}
+        if completed_ids:
+            response["progress"] = kanban_progress.advance_transitions(
+                completion_transitions,
+                board=effective_board,
+                conn=conn,
+                author="dashboard-completion-auto-decomposer",
+                policy=completion_policy,
+                recovery_warnings=completion_recovery_warnings,
+            )
+        return response
     finally:
         conn.close()
 
@@ -3646,13 +3638,14 @@ def specify_task_endpoint(
     ``async def`` without an explicit ``run_in_executor``.
     """
     board = _resolve_board(board)
+    effective_board = board or kanban_db.get_current_board()
     # Pin the board for the duration of this call so the specifier module
     # (which calls ``kb.connect()`` with no args) hits the right DB. Use a
     # context-local override rather than mutating the process-global
     # HERMES_KANBAN_BOARD env var — this endpoint runs in FastAPI's
     # threadpool, so two concurrent requests for different boards would
     # otherwise race on the shared env var and cross-write (issue #38323).
-    with kanban_db.scoped_current_board(board or kanban_db.DEFAULT_BOARD):
+    with kanban_db.scoped_current_board(effective_board):
         # Import lazily so a missing auxiliary client at import time
         # doesn't break plugin load.
         from hermes_cli import kanban_specify  # noqa: WPS433 (intentional)
@@ -4359,7 +4352,8 @@ def decompose_task_endpoint(
     can take minutes on reasoning models.
     """
     board = _resolve_board(board)
-    conn = _conn(board=board)
+    effective_board = board or kanban_db.get_current_board()
+    conn = _conn(board=effective_board)
     try:
         if payload.approve_intake and _task_has_loop_intake_pending_submit(conn, task_id):
             with kanban_db.write_txn(conn):
@@ -4394,12 +4388,25 @@ def decompose_task_endpoint(
     # endpoint runs in FastAPI's threadpool, so mutating the process-global
     # HERMES_KANBAN_BOARD env var would let concurrent requests for
     # different boards race and cross-write (issue #38323).
-    with kanban_db.scoped_current_board(board or kanban_db.DEFAULT_BOARD):
+    with kanban_db.scoped_current_board(effective_board):
         from hermes_cli import kanban_decompose  # noqa: WPS433 (intentional)
         outcome = kanban_decompose.decompose_task(
             task_id,
             author=(payload.author or None),
             loop_safe=payload.loop_safe,
+        )
+
+    progress = {
+        "candidate_task_ids": [],
+        "dispatch": {"spawned": []},
+        "warnings": [],
+    }
+    if outcome.ok:
+        from hermes_cli import kanban_progress  # noqa: WPS433 (intentional)
+
+        progress = kanban_progress.dispatch_candidates(
+            [outcome.task_id, *(outcome.child_ids or [])],
+            board=effective_board,
         )
 
     return {
@@ -4409,6 +4416,9 @@ def decompose_task_endpoint(
         "fanout": bool(outcome.fanout),
         "child_ids": outcome.child_ids or [],
         "new_title": outcome.new_title,
+        "candidate_task_ids": progress["candidate_task_ids"],
+        "dispatch": progress["dispatch"],
+        "warnings": progress["warnings"],
     }
 
 

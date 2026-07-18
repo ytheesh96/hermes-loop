@@ -208,66 +208,25 @@ def _wait_for_loop_item(kb: Any, conn: Any, task_id: str, execution: dict[str, A
         time.sleep(0.05)
 
 
-def _positive_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed >= 1 else None
+def _poke_dispatcher_once(
+    _kb: Any,
+    conn: Any,
+    board: Any,
+    warnings: list[str],
+    *,
+    candidate_task_ids: Any = None,
+) -> dict[str, Any]:
+    """Compatibility wrapper for one exact, config-aware dispatch nudge."""
 
+    from hermes_cli import kanban_progress
 
-def _dispatch_config(kb: Any) -> dict[str, Any]:
-    """Resolve the dispatcher knobs used by CLI/gateway dispatch paths."""
-    try:
-        from hermes_cli.config import load_config
-
-        cfg = load_config()
-        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
-    except Exception:
-        kanban_cfg = {}
-    default_failure_limit = getattr(
-        kb,
-        "DEFAULT_FAILURE_LIMIT",
-        getattr(kb, "DEFAULT_SPAWN_FAILURE_LIMIT", 2),
+    progress = kanban_progress.dispatch_candidates(
+        candidate_task_ids,
+        board=board,
+        conn=conn,
     )
-    return {
-        "default_assignee": (kanban_cfg.get("default_assignee") or "").strip() or None,
-        # Keep the inline poke narrow: creating one Loop item should not fan
-        # out an entire stale ready queue when no gateway dispatcher is
-        # running. Operators can still raise the one-shot cap explicitly with
-        # kanban.max_spawn.
-        "max_spawn": _positive_int(kanban_cfg.get("max_spawn")) or 1,
-        "max_in_progress": _positive_int(kanban_cfg.get("max_in_progress")),
-        "max_in_progress_per_profile": _positive_int(
-            kanban_cfg.get("max_in_progress_per_profile")
-        ),
-        "failure_limit": _positive_int(kanban_cfg.get("failure_limit")) or default_failure_limit,
-    }
-
-
-def _poke_dispatcher_once(kb: Any, conn: Any, board: Any, warnings: list[str]) -> dict[str, Any]:
-    """Run one dispatcher tick so newly-created Loop work can start promptly."""
-    try:
-        result = kb.dispatch_once(conn, board=board, **_dispatch_config(kb))
-    except Exception as exc:
-        message = f"inline dispatch failed: {type(exc).__name__}: {exc}"
-        warnings.append(message)
-        return {"spawned": [], "error": message}
-    return {
-        "spawned": [task_id for task_id, _assignee, _workspace in result.spawned],
-        "skipped_locked": bool(getattr(result, "skipped_locked", False)),
-        "skipped_nonspawnable": list(getattr(result, "skipped_nonspawnable", []) or []),
-        "skipped_unassigned": list(getattr(result, "skipped_unassigned", []) or []),
-        "skipped_per_profile_capped": [
-            task_id
-            for task_id, _assignee, _current in (
-                getattr(result, "skipped_per_profile_capped", []) or []
-            )
-        ],
-        "auto_blocked": list(getattr(result, "auto_blocked", []) or []),
-    }
+    warnings.extend(progress["warnings"])
+    return progress["dispatch"]
 
 
 def _loop_item_id(args: dict[str, Any]) -> str:
@@ -419,7 +378,10 @@ def _handle_loop_create(args: dict[str, Any], **_kwargs) -> str:
     workspace_kind = str(args.get("workspace_kind") or "scratch")
     triage = bool(args.get("triage", False))
     try:
-        kb, conn = _connect(board=board)
+        from hermes_cli import kanban_db as _kanban_db
+
+        effective_board = str(board or _kanban_db.get_current_board()).strip()
+        kb, conn = _connect(board=effective_board)
         try:
             parent_ids = tuple(
                 dict.fromkeys(
@@ -492,39 +454,58 @@ def _handle_loop_create(args: dict[str, Any], **_kwargs) -> str:
                         f"loop-create:{task_key}" if task_key else None
                     ),
                 )
-            task_id = kb.create_task(
-                conn,
-                title=objective,
-                body=_build_body(
-                    objective,
-                    args.get("acceptance_criteria"),
-                    proof_packet,
-                    args.get("body") or args.get("context"),
-                ),
-                assignee=assignee,
-                created_by=os.environ.get("HERMES_PROFILE") or "foreground",
-                workspace_kind=workspace_kind,
-                workspace_path=args.get("workspace_path"),
-                branch_name=args.get("branch_name"),
-                tenant=tenant,
-                priority=int(args.get("priority") or 0),
-                parents=parent_ids,
-                triage=triage,
-                idempotency_key=args.get("idempotency_key"),
-                max_runtime_seconds=(int(args["max_runtime_seconds"]) if args.get("max_runtime_seconds") is not None else None),
-                skills=args.get("skills"),
-                goal_mode=bool(args.get("goal_mode", False)),
-                goal_max_turns=(int(args["goal_max_turns"]) if args.get("goal_max_turns") is not None else None),
-                initial_status=str(args.get("initial_status") or "running"),
-                session_id=session_id,
-                workflow_id=workflow_id,
-                board=board,
-            )
+            with kb.scoped_current_board(effective_board):
+                task_id = kb.create_task(
+                    conn,
+                    title=objective,
+                    body=_build_body(
+                        objective,
+                        args.get("acceptance_criteria"),
+                        proof_packet,
+                        args.get("body") or args.get("context"),
+                    ),
+                    assignee=assignee,
+                    created_by=(
+                        os.environ.get("HERMES_PROFILE") or "foreground"
+                    ),
+                    workspace_kind=workspace_kind,
+                    workspace_path=args.get("workspace_path"),
+                    branch_name=args.get("branch_name"),
+                    tenant=tenant,
+                    priority=int(args.get("priority") or 0),
+                    parents=parent_ids,
+                    triage=triage,
+                    idempotency_key=args.get("idempotency_key"),
+                    max_runtime_seconds=(
+                        int(args["max_runtime_seconds"])
+                        if args.get("max_runtime_seconds") is not None
+                        else None
+                    ),
+                    skills=args.get("skills"),
+                    goal_mode=bool(args.get("goal_mode", False)),
+                    goal_max_turns=(
+                        int(args["goal_max_turns"])
+                        if args.get("goal_max_turns") is not None
+                        else None
+                    ),
+                    initial_status=str(
+                        args.get("initial_status") or "running"
+                    ),
+                    session_id=session_id,
+                    workflow_id=workflow_id,
+                    board=effective_board,
+                )
             from tools.kanban_notify import maybe_auto_subscribe
 
             subscribed = maybe_auto_subscribe(conn, task_id)
             warnings: list[str] = []
-            dispatch = _poke_dispatcher_once(kb, conn, board, warnings)
+            dispatch = _poke_dispatcher_once(
+                kb,
+                conn,
+                effective_board,
+                warnings,
+                candidate_task_ids=[task_id],
+            )
             task, completed = _wait_for_loop_item(kb, conn, task_id, execution)
             if task is None:
                 return tool_error(f"created task {task_id} could not be read back")
@@ -582,26 +563,39 @@ def _handle_loop_create_graph(args: dict[str, Any], **_kwargs) -> str:
     session_id = str(args.get("session_id") or get_source_session_id() or "").strip() or None
     warnings: list[str] = []
     try:
-        kb, conn = _connect(board=board)
+        from hermes_cli import kanban_db as _kanban_db
+
+        effective_board = str(board or _kanban_db.get_current_board()).strip()
+        kb, conn = _connect(board=effective_board)
         try:
-            result = kb.create_loop_skeleton_graph(
-                conn,
-                nodes=nodes,
-                workflow_id=(
-                    str(args.get("workflow_id") or "").strip()
-                    or get_current_workflow_id("")
-                    or None
-                ),
-                root_task_id=str(args.get("root_task_id") or "").strip() or None,
-                shared_context=args.get("shared_context"),
-                session_id=session_id,
-                tenant=str(args.get("tenant") or "").strip() or None,
-                workspace_kind=str(args.get("workspace_kind") or "scratch"),
-                workspace_path=args.get("workspace_path"),
-                board=board,
-                created_by=str(args.get("created_by") or "").strip() or None,
-                idempotency_scope=str(args.get("idempotency_scope") or "").strip() or None,
-            )
+            with kb.scoped_current_board(effective_board):
+                result = kb.create_loop_skeleton_graph(
+                    conn,
+                    nodes=nodes,
+                    workflow_id=(
+                        str(args.get("workflow_id") or "").strip()
+                        or get_current_workflow_id("")
+                        or None
+                    ),
+                    root_task_id=(
+                        str(args.get("root_task_id") or "").strip() or None
+                    ),
+                    shared_context=args.get("shared_context"),
+                    session_id=session_id,
+                    tenant=str(args.get("tenant") or "").strip() or None,
+                    workspace_kind=str(
+                        args.get("workspace_kind") or "scratch"
+                    ),
+                    workspace_path=args.get("workspace_path"),
+                    board=effective_board,
+                    created_by=(
+                        str(args.get("created_by") or "").strip() or None
+                    ),
+                    idempotency_scope=(
+                        str(args.get("idempotency_scope") or "").strip()
+                        or None
+                    ),
+                )
 
             from tools.kanban_notify import maybe_auto_subscribe
 
@@ -613,10 +607,44 @@ def _handle_loop_create_graph(args: dict[str, Any], **_kwargs) -> str:
             subscribed = bool(
                 first_task_id and maybe_auto_subscribe(conn, first_task_id)
             )
-            dispatch = _poke_dispatcher_once(kb, conn, board, warnings)
+            from hermes_cli import kanban_progress
+
+            specification_ids = [
+                str(item.get("task_id") or "").strip()
+                for item in result.get("items") or []
+                if item.get("status") == "triage"
+                and item.get("needs_specification")
+            ]
+            ready_ids = [
+                str(item.get("task_id") or "").strip()
+                for item in result.get("items") or []
+                if item.get("status") in {"ready", "review"}
+            ]
+            progress = kanban_progress.decompose_and_dispatch(
+                specification_ids,
+                ready_task_ids=ready_ids,
+                board=effective_board,
+                conn=conn,
+                author="foreground-auto-decomposer",
+            )
+            warnings.extend(progress["warnings"])
+
+            # The durable graph response should describe the state after the
+            # just-in-time compiler/dispatcher, not the pre-compile skeleton.
+            for item in result.get("items") or []:
+                task_id = str(item.get("task_id") or "").strip()
+                task = kb.get_task(conn, task_id) if task_id else None
+                if task is not None:
+                    item.update(
+                        status=task.status,
+                        needs_specification=bool(task.needs_specification),
+                        assignee=task.assignee,
+                    )
             return _json_ok(
                 **result,
-                dispatch=dispatch,
+                decomposition=progress["decomposition"],
+                candidate_task_ids=progress["candidate_task_ids"],
+                dispatch=progress["dispatch"],
                 subscribed_workflow_id=(
                     result.get("workflow_id") if subscribed else None
                 ),
@@ -929,7 +957,7 @@ LOOP_BLOCK_SCHEMA = {
 
 registry.register(
     name="loop_graph",
-    toolset="loop",
+    toolset="loop_delegation",
     schema=LOOP_GRAPH_SCHEMA,
     handler=_handle_loop_graph,
     check_fn=_check_loop_foreground_enabled,

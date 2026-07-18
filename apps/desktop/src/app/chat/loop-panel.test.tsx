@@ -388,7 +388,7 @@ describe('deriveLoopPanelState', () => {
     })
   })
 
-  it('preserves orchestrator review routing and foreground fork metadata on Loop rows', () => {
+  it('preserves orchestrator review routing on Loop rows', () => {
     const state = deriveLoopPanelStateFromTenantSource({
       session_id: 'sess-fork',
       workflow_id: 't_root',
@@ -403,8 +403,6 @@ describe('deriveLoopPanelState', () => {
           review_kind: 'blocker_triage',
           resume_mode: 'fork',
           review_subject_assignee: 'peacock',
-          foreground_parent_session_id: 'sess-parent',
-          foreground_fork_session_id: 'sess-fork',
           included_parent_ids: ['t_root'],
           included_child_ids: []
         },
@@ -422,9 +420,7 @@ describe('deriveLoopPanelState', () => {
     expect(state?.rows[0]).toMatchObject({
       reviewKind: 'blocker_triage',
       resumeMode: 'fork',
-      reviewSubjectAssignee: 'peacock',
-      foregroundParentSessionId: 'sess-parent',
-      foregroundForkSessionId: 'sess-fork'
+      reviewSubjectAssignee: 'peacock'
     })
   })
 
@@ -1879,8 +1875,6 @@ describe('LoopPanel', () => {
           review_kind: 'blocker_triage',
           resume_mode: 'fork',
           review_subject_assignee: 'peacock',
-          foreground_parent_session_id: 'sess-parent',
-          foreground_fork_session_id: 'sess-fork',
           included_child_ids: [],
           included_parent_ids: ['t_root']
         }

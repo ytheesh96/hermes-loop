@@ -24,6 +24,16 @@ import { cn } from '@/lib/utils'
 import type { ComposerStatusItem, StatusItemState } from '@/store/composer-status'
 import type { PreviewTarget } from '@/store/preview'
 
+import {
+  isDoneLoopRow,
+  isPanelActiveLoopRow,
+  LOOP_FAILED_STATUSES,
+  LOOP_TERMINAL_STATUSES,
+  loopAttentionText,
+  loopTextValue,
+  loopWorkerCurrentTool,
+  normalizedLoopValue
+} from './loop-selectors'
 import { loopTaskAllowsDependencyEdits, loopTaskPhaseLabel } from './loop-state'
 import type {
   LoopPanelState,
@@ -92,14 +102,16 @@ function loopRowStatusIndicator(row: LoopRow): StatusIndicatorKind {
   const status = normalizedLoopValue(row.status)
   const runStatus = normalizedLoopValue(row.latestRun?.status)
   const runOutcome = normalizedLoopValue(row.latestRun?.outcome)
-  const active = isActiveLoopRow(row) || row.active
+  const active = isPanelActiveLoopRow(row) || row.active
 
   if (row.specificationFailure) {
     return row.specificationFailure.backing_off ? 'attention' : 'failed'
   }
 
   const failed =
-    FAILED_LOOP_STATUSES.has(status) || FAILED_LOOP_STATUSES.has(runStatus) || FAILED_LOOP_STATUSES.has(runOutcome)
+    LOOP_FAILED_STATUSES.has(status) ||
+    LOOP_FAILED_STATUSES.has(runStatus) ||
+    LOOP_FAILED_STATUSES.has(runOutcome)
 
   const attention = attentionScore(row) > 0 && !failed
 
@@ -147,45 +159,6 @@ function completedLoopRows(rows: LoopRow[]): number {
   }).length
 }
 
-const TERMINAL_LOOP_STATUSES = new Set(['archived', 'cancelled', 'complete', 'completed', 'done'])
-
-const FAILED_LOOP_STATUSES = new Set([
-  'blocked',
-  'crashed',
-  'error',
-  'failed',
-  'failure',
-  'stale',
-  'timed_out',
-  'timeout'
-])
-
-function normalizedLoopValue(value?: null | string): string {
-  return (value || '').trim().toLowerCase().replaceAll('-', '_')
-}
-
-function attentionText(row: LoopRow): string {
-  return [
-    row.status,
-    row.title,
-    row.body,
-    row.result,
-    row.latestSummary,
-    row.latestRun?.error,
-    row.latestRun?.outcome,
-    row.latestRun?.status,
-    row.latestRun?.summary,
-    row.reviewKind,
-    row.resumeMode,
-    row.reviewSubjectAssignee,
-    row.foregroundParentSessionId,
-    row.foregroundForkSessionId
-  ]
-    .filter((value): value is string => Boolean(value))
-    .join(' ')
-    .toLowerCase()
-}
-
 function isOrchestratorReviewRow(row: LoopRow): boolean {
   const reviewKind = normalizedLoopValue(row.reviewKind)
   const assignee = normalizedLoopValue(row.assignee)
@@ -199,13 +172,17 @@ function attentionReason(row: LoopRow): string {
   const status = normalizedLoopValue(row.status)
   const runStatus = normalizedLoopValue(row.latestRun?.status)
   const runOutcome = normalizedLoopValue(row.latestRun?.outcome)
-  const text = attentionText(row)
+  const text = loopAttentionText(row)
 
   if (status === 'blocked') {
     return row.childCount > 0 ? `Blocked · ${row.childCount} downstream` : 'Blocked'
   }
 
-  if (FAILED_LOOP_STATUSES.has(status) || FAILED_LOOP_STATUSES.has(runStatus) || FAILED_LOOP_STATUSES.has(runOutcome)) {
+  if (
+    LOOP_FAILED_STATUSES.has(status) ||
+    LOOP_FAILED_STATUSES.has(runStatus) ||
+    LOOP_FAILED_STATUSES.has(runOutcome)
+  ) {
     return 'Worker failed'
   }
 
@@ -234,9 +211,14 @@ function attentionScore(row: LoopRow): number {
   const status = normalizedLoopValue(row.status)
   const runStatus = normalizedLoopValue(row.latestRun?.status)
   const runOutcome = normalizedLoopValue(row.latestRun?.outcome)
-  const text = attentionText(row)
+  const text = loopAttentionText(row)
 
-  if (TERMINAL_LOOP_STATUSES.has(status) || status === 'running' || status === 'claimed' || status === 'in_progress') {
+  if (
+    LOOP_TERMINAL_STATUSES.has(status) ||
+    status === 'running' ||
+    status === 'claimed' ||
+    status === 'in_progress'
+  ) {
     return 0
   }
 
@@ -245,9 +227,9 @@ function attentionScore(row: LoopRow): number {
   if (status === 'blocked') {
     score = 90
   } else if (
-    FAILED_LOOP_STATUSES.has(status) ||
-    FAILED_LOOP_STATUSES.has(runStatus) ||
-    FAILED_LOOP_STATUSES.has(runOutcome)
+    LOOP_FAILED_STATUSES.has(status) ||
+    LOOP_FAILED_STATUSES.has(runStatus) ||
+    LOOP_FAILED_STATUSES.has(runOutcome)
   ) {
     score = 88
   } else if (isOrchestratorReviewRow(row)) {
@@ -271,19 +253,7 @@ function attentionRows(rows: LoopRow[]): LoopRow[] {
     .map(item => item.row)
 }
 
-const ACTIVE_OVERVIEW_STATUSES = new Set(['claimed', 'in_progress', 'running'])
 const QUEUED_OVERVIEW_STATUSES = new Set(['queued', 'ready', 'scheduled', 'todo', 'triage'])
-const DONE_OVERVIEW_STATUSES = new Set(['archived', 'cancelled', 'complete', 'completed', 'done'])
-
-function isDoneLoopRow(row: LoopRow): boolean {
-  return DONE_OVERVIEW_STATUSES.has(normalizedLoopValue(row.status))
-}
-
-function isActiveLoopRow(row: LoopRow): boolean {
-  const status = normalizedLoopValue(row.status)
-
-  return (row.activeDecompositionChildCount || 0) > 0 || ACTIVE_OVERVIEW_STATUSES.has(status)
-}
 
 function isQueuedLoopRow(row: LoopRow): boolean {
   const status = normalizedLoopValue(row.status)
@@ -400,8 +370,6 @@ function detailRowFromTaskDetail(detail?: LoopTaskDetail | null, selectedTaskId?
     reviewSubjectAssignee: task.review_subject_assignee,
     result: task.result,
     sourceSessionId: task.session_id,
-    foregroundParentSessionId: task.foreground_parent_session_id,
-    foregroundForkSessionId: task.foreground_fork_session_id,
     status,
     specificationFailure: task.specification_failure || null,
     taskId: task.id,
@@ -894,7 +862,7 @@ function LoopTaskActions({
 }) {
   const status = normalizedLoopValue(row.status)
   const blocked = status === 'blocked'
-  const terminal = TERMINAL_LOOP_STATUSES.has(status)
+  const terminal = LOOP_TERMINAL_STATUSES.has(status)
 
   const statusAction: LoopTaskAction = blocked ? 'unblock' : 'block'
   const statusLabel = blocked ? 'Unblock' : 'Block'
@@ -1549,54 +1517,6 @@ function WorkerActivityDetails({
   )
 }
 
-const loopTextValue = (value: unknown): string | undefined =>
-  typeof value === 'string' && value.trim() ? value.trim() : undefined
-
-const loopToolLabel = (name: string): string =>
-  name
-    .split('_')
-    .filter(Boolean)
-    .map(part => part[0]!.toUpperCase() + part.slice(1))
-    .join(' ') || name
-
-const loopRecordFrom = (value: unknown): Record<string, unknown> | null =>
-  value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
-
-function currentToolFromLoopRecord(record: Record<string, unknown> | null): string | undefined {
-  if (!record) {
-    return undefined
-  }
-
-  for (const key of ['current_tool', 'currentTool', 'current_tool_name', 'tool_name', 'active_tool', 'last_tool']) {
-    const value = loopTextValue(record[key])
-
-    if (value) {
-      return loopToolLabel(value)
-    }
-  }
-
-  return undefined
-}
-
-function loopWorkerCurrentTool(row: LoopRow): string | undefined {
-  const worker = row.workerActivity
-  const direct = currentToolFromLoopRecord(worker ? (worker as unknown as Record<string, unknown>) : null)
-
-  if (direct) {
-    return direct
-  }
-
-  for (const event of (worker?.recent_task_events || []).slice().reverse()) {
-    const fromPayload = currentToolFromLoopRecord(loopRecordFrom(event.payload))
-
-    if (fromPayload) {
-      return fromPayload
-    }
-  }
-
-  return currentToolFromLoopRecord(loopRecordFrom(row.latestRun?.metadata))
-}
-
 function loopAgentActivityLabel(row: LoopRow): string | undefined {
   const profile =
     loopTextValue(row.workerActivity?.profile) || loopTextValue(row.latestRun?.profile) || loopTextValue(row.assignee)
@@ -1619,14 +1539,14 @@ function loopOverviewItemState(row: LoopRow): StatusItemState {
 
   if (
     attentionScore(row) > 0 ||
-    FAILED_LOOP_STATUSES.has(status) ||
-    FAILED_LOOP_STATUSES.has(runStatus) ||
-    FAILED_LOOP_STATUSES.has(runOutcome)
+    LOOP_FAILED_STATUSES.has(status) ||
+    LOOP_FAILED_STATUSES.has(runStatus) ||
+    LOOP_FAILED_STATUSES.has(runOutcome)
   ) {
     return 'failed'
   }
 
-  if (isActiveLoopRow(row) || row.active) {
+  if (isPanelActiveLoopRow(row) || row.active) {
     return 'running'
   }
 

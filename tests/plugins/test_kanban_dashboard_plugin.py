@@ -7,9 +7,11 @@ REST surface without spinning up the whole dashboard.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -1363,6 +1365,137 @@ def test_decompose_submit_approves_loop_intake_before_decomposing(client, monkey
     }
 
 
+def test_manual_decompose_dispatches_only_root_and_children_immediately(
+    client,
+    monkeypatch,
+):
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="Manually decompose this task",
+            assignee="orchestrator",
+            triage=True,
+        )
+    finally:
+        conn.close()
+
+    child_ids = ["t_child_research", "t_child_build"]
+    dispatch_calls = []
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_decompose.decompose_task",
+        lambda decompose_task_id, *, author=None, loop_safe=False: SimpleNamespace(
+            ok=True,
+            task_id=decompose_task_id,
+            reason="decomposed into 2 children",
+            fanout=True,
+            child_ids=child_ids,
+            new_title="Coordinate the work",
+        ),
+    )
+
+    dispatch_metadata = {
+        "spawned": child_ids,
+        "skipped_locked": False,
+        "skipped_nonspawnable": [task_id],
+        "skipped_unassigned": [],
+        "skipped_per_profile_capped": [],
+        "auto_blocked": [],
+    }
+
+    def fake_dispatch_candidates(candidate_task_ids, *, board=None, conn=None):
+        dispatch_calls.append((list(candidate_task_ids), board, conn))
+        return {
+            "candidate_task_ids": list(candidate_task_ids),
+            "dispatch": dispatch_metadata,
+            "warnings": ["one candidate was already running"],
+        }
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_progress.dispatch_candidates",
+        fake_dispatch_candidates,
+    )
+
+    response = client.post(
+        f"/api/plugins/kanban/tasks/{task_id}/decompose",
+        json={"author": "dashboard-user"},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    expected_candidates = [task_id, *child_ids]
+    assert dispatch_calls == [
+        (expected_candidates, kb.DEFAULT_BOARD, None)
+    ]
+    assert payload["ok"] is True
+    assert payload["candidate_task_ids"] == expected_candidates
+    assert payload["dispatch"] == dispatch_metadata
+    assert payload["warnings"] == ["one candidate was already running"]
+
+
+def test_manual_decompose_without_board_uses_active_non_default_board(
+    client,
+    monkeypatch,
+):
+    kb.create_board("other")
+    with kb.connect(board="other") as conn:
+        task_id = kb.create_task(
+            conn,
+            title="Active-board decomposition",
+            triage=True,
+        )
+    kb.set_current_board("other")
+    seen = {}
+
+    def fake_decompose_task(
+        decompose_task_id,
+        *,
+        author=None,
+        loop_safe=False,
+    ):
+        with kb.connect() as conn:
+            seen["decompose_board_has_task"] = (
+                kb.get_task(conn, decompose_task_id) is not None
+            )
+        return SimpleNamespace(
+            ok=True,
+            task_id=decompose_task_id,
+            reason=None,
+            fanout=False,
+            child_ids=[],
+            new_title=None,
+        )
+
+    def fake_dispatch_candidates(candidate_task_ids, *, board=None, conn=None):
+        seen["dispatch"] = (list(candidate_task_ids), board, conn)
+        return {
+            "candidate_task_ids": list(candidate_task_ids),
+            "dispatch": {"spawned": []},
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_decompose.decompose_task",
+        fake_decompose_task,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.kanban_progress.dispatch_candidates",
+        fake_dispatch_candidates,
+    )
+
+    response = client.post(
+        f"/api/plugins/kanban/tasks/{task_id}/decompose",
+        json={},
+    )
+
+    assert response.status_code == 200, response.text
+    assert seen == {
+        "decompose_board_has_task": True,
+        "dispatch": ([task_id], "other", None),
+    }
+
+
 def test_activate_loop_plan_promotes_only_dependency_free_children(client, monkeypatch):
     created = client.post(
         "/api/plugins/kanban/loop-drafts",
@@ -1701,129 +1834,11 @@ def test_tenant_filter(client):
     assert total == 1
 
 
-def test_loop_handoff_plugin_routes_expose_detail_and_action():
-    routes = {
-        (route.path, tuple(sorted(method for method in route.methods if method not in {"HEAD", "OPTIONS"})))
-        for route in _load_plugin_router().routes
-        if "loop-handoffs" in route.path
-    }
+def test_removed_loop_handoff_plugin_routes_are_absent():
+    paths = {route.path for route in _load_plugin_router().routes}
 
-    assert ("/loop-handoffs", ("GET",)) in routes
-    assert ("/loop-handoffs/{handoff_id}", ("GET",)) in routes
-    assert ("/loop-handoffs/{handoff_id}/auto-action", ("POST",)) in routes
-
-
-def test_loop_handoff_plugin_list_is_empty_after_removal(client, tmp_path):
-    conn = kb.connect()
-    try:
-        task_id = _loop_node(conn)
-        assert kb.claim_task(conn, task_id, claimer="worker-host:123") is not None
-        assert kb.complete_task(
-            conn,
-            task_id,
-            summary="implementation complete",
-            metadata={
-                "worker_session_id": "worker-session-1",
-                "artifacts": [str(tmp_path / "proof.log")],
-                "changed_files": ["src/app.py"],
-                "tests_run": ["pytest -q"],
-            },
-        )
-        handoffs = kb.list_loop_handoffs(conn)
-    finally:
-        conn.close()
-
-    assert handoffs == []
-    listing = client.get("/api/plugins/kanban/loop-handoffs", params={"board": "default"})
-    assert listing.status_code == 200, listing.text
-    assert listing.json() == {"ok": True, "handoffs": []}
-
-    status = client.get(
-        "/api/plugins/kanban/loop-handoffs",
-        params={"tenant": "tenant-a", "root_task_id": "t_looproot", "status_only": True, "board": "default"},
-    )
-    assert status.status_code == 200, status.text
-    assert status.json()["quiet_green"] is False
-    assert status.json()["escalated_count"] == 0
-
-
-def test_session_source_attaches_orchestrator_fork_metadata(client):
-    conn = kb.connect()
-    try:
-        task_id = _loop_node(conn, session_id="sess-parent")
-        with kb.write_txn(conn):
-            conn.execute(
-                """
-                UPDATE tasks
-                   SET status = 'review',
-                       assignee = 'orchestrator',
-                       review_kind = 'blocker_triage',
-                       resume_mode = 'fork',
-                       review_subject_assignee = 'peacock',
-                       foreground_parent_session_id = 'sess-parent',
-                       foreground_fork_session_id = 'sess-fork'
-                 WHERE id = ?
-                """,
-                (task_id,),
-            )
-    finally:
-        conn.close()
-
-    source = client.get("/api/plugins/kanban/session-source", params={"session_id": "sess-parent", "board": "default"})
-    assert source.status_code == 200, source.text
-    task = next(item for item in source.json()["tasks"] if item["id"] == task_id)
-    assert task["review_kind"] == "blocker_triage"
-    assert task["resume_mode"] == "fork"
-    assert task["review_subject_assignee"] == "peacock"
-    assert task["foreground_parent_session_id"] == "sess-parent"
-    assert task["foreground_fork_session_id"] == "sess-fork"
-    assert "loop_handoffs" not in task
-
-    detail = client.get(f"/api/plugins/kanban/tasks/{task_id}", params={"board": "default"})
-    assert detail.status_code == 200, detail.text
-    detail_task = detail.json()["task"]
-    assert detail_task["review_kind"] == "blocker_triage"
-    assert detail_task["resume_mode"] == "fork"
-    assert detail_task["foreground_parent_session_id"] == "sess-parent"
-    assert detail_task["foreground_fork_session_id"] == "sess-fork"
-    assert "loop_handoffs" not in detail_task
-
-
-def test_loop_handoff_plugin_auto_action_410s_after_removal(client):
-    conn = kb.connect()
-    try:
-        task_id = _loop_node(conn)
-        assert kb.claim_task(conn, task_id, claimer="worker-host:123") is not None
-        assert kb.complete_task(conn, task_id, summary="needs review")
-        assert kb.list_loop_handoffs(conn) == []
-    finally:
-        conn.close()
-
-    r = client.post(
-        "/api/plugins/kanban/loop-handoffs/1/auto-action",
-        json={
-            "action": "approve_release",
-            "actor": "dashboard-reviewer",
-            "evidence_passed": True,
-            "prohibited_flags": ["push"],
-            "reason": "would push to remote",
-        },
-    )
-    assert r.status_code == 410, r.text
-
-
-def test_loop_handoff_plugin_detail_410s_after_removal(client):
-    conn = kb.connect()
-    try:
-        task_id = _loop_node(conn)
-        assert kb.claim_task(conn, task_id, claimer="worker-host:123") is not None
-        assert kb.complete_task(conn, task_id, summary="needs bounded repair")
-        assert kb.list_loop_handoffs(conn) == []
-    finally:
-        conn.close()
-
-    r = client.get("/api/plugins/kanban/loop-handoffs/1")
-    assert r.status_code == 410, r.text
+    assert not any("loop-handoffs" in path for path in paths)
+    assert not any(path.startswith("/handoffs/") for path in paths)
 
 
 def test_session_source_returns_non_archived_tenant_tasks_across_compression_lineage(client, kanban_home):
@@ -1925,13 +1940,13 @@ def test_session_source_includes_loop_tool_referenced_worker_rows(client, kanban
             tenant="custom-loop-tenant",
             session_id="worker-session",
         )
-        foreground_parent = kb.create_task(
+        source_owned = kb.create_task(
             conn,
-            title="foreground-parent delegated row",
+            title="foreground-session delegated row",
             assignee="reviewer-qa",
             created_by="loop_delegation:agent",
             tenant="other-loop-tenant",
-            session_id="reviewer-session",
+            session_id="foreground-session",
         )
         unrelated = kb.create_task(
             conn,
@@ -1941,11 +1956,6 @@ def test_session_source_includes_loop_tool_referenced_worker_rows(client, kanban
             tenant="custom-loop-tenant",
             session_id="worker-session",
         )
-        with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET foreground_parent_session_id = ? WHERE id = ?",
-                ("foreground-session", foreground_parent),
-            )
     finally:
         conn.close()
 
@@ -1969,7 +1979,7 @@ def test_session_source_includes_loop_tool_referenced_worker_rows(client, kanban
     data = r.json()
     task_ids = [task["id"] for task in data["tasks"]]
     assert referenced in task_ids
-    assert foreground_parent in task_ids
+    assert source_owned in task_ids
     assert unrelated not in task_ids
     referenced_payload = next(task for task in data["tasks"] if task["id"] == referenced)
     assert referenced_payload["session_id"] == "worker-session"
@@ -2003,13 +2013,13 @@ def test_session_source_includes_explicit_session_rows_when_legacy_tenant_row_ex
             tenant="custom-origin-metadata",
             session_id="source-session",
         )
-        foreground_parent = kb.create_task(
+        canonical_source = kb.create_task(
             conn,
-            title="foreground parent row",
+            title="canonical session source row",
             assignee="reviewer-qa",
             created_by="loop_delegation:planner",
             tenant="other-metadata",
-            session_id="worker-session",
+            session_id="source-session",
         )
         wrong_session = kb.create_task(
             conn,
@@ -2027,10 +2037,6 @@ def test_session_source_includes_explicit_session_rows_when_legacy_tenant_row_ex
             session_id="source-session",
         )
         with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET foreground_parent_session_id = ? WHERE id = ?",
-                ("source-session", foreground_parent),
-            )
             conn.execute("UPDATE tasks SET status = 'archived' WHERE id = ?", (archived,))
     finally:
         conn.close()
@@ -2045,7 +2051,7 @@ def test_session_source_includes_explicit_session_rows_when_legacy_tenant_row_ex
     task_ids = [task["id"] for task in data["tasks"]]
     assert legacy in task_ids
     assert delegated in task_ids
-    assert foreground_parent in task_ids
+    assert canonical_source in task_ids
     assert wrong_session not in task_ids
     assert archived not in task_ids
     delegated_payload = next(task for task in data["tasks"] if task["id"] == delegated)
@@ -2351,6 +2357,50 @@ def test_session_source_falls_back_to_board_containing_lineage_tenant(client, ka
     assert [item["id"] for item in data["tasks"]] == [task]
 
 
+def test_session_source_skips_corrupt_implicit_board_without_retry(
+    client,
+    monkeypatch,
+):
+    kb.create_board("developer")
+    corrupt_path = kb.kanban_db_path(board=kb.DEFAULT_BOARD)
+    corrupt_path.write_bytes(b"not a sqlite database")
+    kb._INITIALIZED_PATHS.discard(str(corrupt_path.resolve()))
+
+    connect_attempts = []
+    original_connect = kb.connect
+
+    def tracking_connect(*args, **kwargs):
+        connect_attempts.append(kwargs.get("board"))
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "connect", tracking_connect)
+
+    response = client.get(
+        "/api/plugins/kanban/session-source",
+        params={"session_id": "session-with-no-tasks"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["board"] == "developer"
+    assert response.json()["tasks"] == []
+    assert connect_attempts == [kb.DEFAULT_BOARD, "developer"]
+
+
+def test_session_source_preserves_explicit_corrupt_board_error(client):
+    corrupt_path = kb.kanban_db_path(board=kb.DEFAULT_BOARD)
+    corrupt_path.write_bytes(b"not a sqlite database")
+    kb._INITIALIZED_PATHS.discard(str(corrupt_path.resolve()))
+
+    with pytest.raises(sqlite3.DatabaseError, match="invalid SQLite header"):
+        client.get(
+            "/api/plugins/kanban/session-source",
+            params={
+                "session_id": "explicit-corrupt-board",
+                "board": kb.DEFAULT_BOARD,
+            },
+        )
+
+
 def test_session_source_defaults_to_hermes_session_id_when_query_omits_session_id(
     client,
     monkeypatch,
@@ -2654,6 +2704,44 @@ def test_patch_status_complete(client):
         if c["name"] == "done"
     )
     assert any(x["id"] == t["id"] for x in done["tasks"])
+
+
+def test_patch_completion_pins_active_board_for_inline_progress(
+    client,
+    monkeypatch,
+):
+    kb.create_board("other")
+    with kb.connect(board="other") as conn:
+        task_id = kb.create_task(conn, title="Complete on active board")
+    kb.set_current_board("other")
+    seen = {}
+
+    def fake_advance(
+        transitions,
+        *,
+        board=None,
+        conn=None,
+        author=None,
+        policy=None,
+        recovery_warnings=None,
+    ):
+        seen["board"] = board
+        seen["task_visible"] = kb.get_task(conn, task_id) is not None
+        kb.set_current_board(kb.DEFAULT_BOARD)
+        return {"candidate_task_ids": [], "dispatch": {"spawned": []}, "warnings": []}
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_progress.advance_transitions",
+        fake_advance,
+    )
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}",
+        json={"status": "done"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert seen == {"board": "other", "task_visible": True}
 
 
 def test_patch_block_then_unblock(client):
@@ -3497,7 +3585,36 @@ def test_board_auto_initializes_missing_db(tmp_path, monkeypatch):
     c = TestClient(app)
     r = c.get("/api/plugins/kanban/board")
     assert r.status_code == 200
-    assert (home / "kanban.db").exists(), "init_db wasn't invoked by /board"
+    assert (home / "kanban.db").exists(), "connect() did not auto-initialize /board"
+
+
+def test_concurrent_first_board_requests_use_connect_auto_init(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    def unexpected_init_db(*args, **kwargs):
+        raise AssertionError("dashboard requests must not call init_db()")
+
+    monkeypatch.setattr(kb, "init_db", unexpected_init_db)
+
+    app = FastAPI()
+    app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
+    with TestClient(app) as concurrent_client:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            responses = list(
+                pool.map(
+                    lambda _: concurrent_client.get("/api/plugins/kanban/board"),
+                    range(8),
+                )
+            )
+
+    assert all(response.status_code == 200 for response in responses)
+    assert (home / "kanban.db").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -3767,6 +3884,153 @@ def test_bulk_status_done_forwards_completion_summary(client):
             assert run.metadata == {"source": "dashboard"}
     finally:
         conn.close()
+
+
+def test_bulk_completion_pins_active_board_for_inline_progress(
+    client,
+    monkeypatch,
+):
+    kb.create_board("other")
+    with kb.connect(board="other") as conn:
+        task_id = kb.create_task(conn, title="Bulk complete on active board")
+    kb.set_current_board("other")
+    seen = []
+
+    def fake_advance(
+        transitions,
+        *,
+        board=None,
+        conn=None,
+        author=None,
+        policy=None,
+        recovery_warnings=None,
+    ):
+        seen.append((board, kb.get_task(conn, task_id) is not None))
+        kb.set_current_board(kb.DEFAULT_BOARD)
+        return {"candidate_task_ids": [], "dispatch": {"spawned": []}, "warnings": []}
+
+    monkeypatch.setattr(
+        "hermes_cli.kanban_progress.advance_transitions",
+        fake_advance,
+    )
+
+    response = client.post(
+        "/api/plugins/kanban/tasks/bulk",
+        json={"ids": [task_id], "status": "done"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert seen == [("other", True)]
+
+
+def test_bulk_parent_and_child_complete_before_one_dispatch(
+    client,
+    monkeypatch,
+):
+    with kb.connect() as conn:
+        parent_id = kb.create_task(
+            conn,
+            title="Parent selected in bulk",
+            assignee="worker",
+        )
+        child_id = kb.create_task(
+            conn,
+            title="Child selected in bulk",
+            assignee="worker",
+            parents=[parent_id],
+        )
+
+    spawned = []
+    monkeypatch.setattr(
+        kb,
+        "_default_spawn",
+        lambda task, workspace, board=None: spawned.append(task.id) or 4242,
+    )
+
+    response = client.post(
+        "/api/plugins/kanban/tasks/bulk",
+        json={"ids": [parent_id, child_id], "status": "done"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert all(item["ok"] for item in response.json()["results"])
+    assert response.json()["progress"]["dispatch"]["spawned"] == []
+    assert spawned == []
+    with kb.connect() as conn:
+        assert kb.get_task(conn, parent_id).status == "done"
+        assert kb.get_task(conn, child_id).status == "done"
+
+
+@pytest.mark.parametrize(
+    ("failure_limit", "expected_status"),
+    [(1, "blocked"), (3, "ready")],
+)
+def test_completion_causal_promotion_uses_dispatch_failure_limit(
+    client,
+    monkeypatch,
+    failure_limit,
+    expected_status,
+):
+    from hermes_cli import kanban_progress
+
+    with kb.connect() as conn:
+        parent_id = kb.create_task(conn, title="Complete parent")
+        child_id = kb.create_task(
+            conn,
+            title="Retry child",
+            parents=[parent_id],
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked', consecutive_failures = 1 "
+                "WHERE id = ?",
+                (child_id,),
+            )
+
+    monkeypatch.setattr(
+        kanban_progress,
+        "load_progress_policy",
+        lambda: kanban_progress.ProgressPolicy(
+            {"failure_limit": failure_limit}
+        ),
+    )
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{parent_id}",
+        json={"status": "done"},
+    )
+
+    assert response.status_code == 200, response.text
+    with kb.connect() as conn:
+        assert kb.get_task(conn, child_id).status == expected_status
+
+
+def test_post_completion_recompute_failure_is_recovery_warning(
+    client,
+    monkeypatch,
+):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="Completion stays durable")
+
+    monkeypatch.setattr(
+        kb,
+        "recompute_ready",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("recompute unavailable")
+        ),
+    )
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}",
+        json={"status": "done"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["task"]["status"] == "done"
+    assert any(
+        "recompute unavailable" in warning
+        for warning in response.json()["progress"]["warnings"]
+    )
 
 
 def test_bulk_status_running_rejected(client):

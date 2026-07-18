@@ -462,7 +462,6 @@ export function ChatView({
             onBranchInNewChat={onBranchInNewChat}
             onCancel={onCancel}
             onDismissError={onDismissError}
-            onOpenKanbanTask={onOpenKanbanTask}
             onRestoreToMessage={onRestoreToMessage}
             sessionId={activeSessionId}
             sessionKey={threadKey}

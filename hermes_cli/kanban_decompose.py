@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -154,6 +155,60 @@ class DecomposeOutcome:
     fanout: bool = False
     child_ids: list[str] | None = None
     new_title: Optional[str] = None
+
+
+class _DecomposePhaseTiming:
+    """Exclusive wall-clock phase timings for one specification attempt."""
+
+    _PHASES = ("preflight", "model", "parse", "apply")
+
+    def __init__(self, task_id: str) -> None:
+        self.task_id = task_id
+        self.started_at = time.perf_counter()
+        self.phase_started_at = self.started_at
+        self.phase = "preflight"
+        self.durations = {name: 0.0 for name in self._PHASES}
+        self.model_attempts = 0
+        self.json_valid: bool | None = None
+
+    def switch(self, phase: str) -> None:
+        now = time.perf_counter()
+        self.durations[self.phase] += now - self.phase_started_at
+        self.phase = phase
+        self.phase_started_at = now
+
+    def start_model_attempt(self) -> None:
+        self.model_attempts += 1
+        self.switch("model")
+
+    def emit(self, outcome: DecomposeOutcome | None) -> None:
+        finished_at = time.perf_counter()
+        self.durations[self.phase] += finished_at - self.phase_started_at
+        result = (
+            "error"
+            if outcome is None
+            else ("ok" if outcome.ok else "failed")
+        )
+        json_valid = (
+            "na"
+            if self.json_valid is None
+            else str(self.json_valid).lower()
+        )
+        logger.info(
+            "decompose timing: task_id=%s result=%s fanout=%s "
+            "model_attempts=%d json_valid=%s preflight_ms=%.3f "
+            "model_ms=%.3f parse_ms=%.3f apply_ms=%.3f total_ms=%.3f",
+            self.task_id,
+            result,
+            bool(outcome.fanout) if outcome is not None else False,
+            self.model_attempts,
+            json_valid,
+            self.durations["preflight"] * 1000,
+            self.durations["model"] * 1000,
+            self.durations["parse"] * 1000,
+            self.durations["apply"] * 1000,
+            (finished_at - self.started_at) * 1000,
+        )
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -479,6 +534,29 @@ def decompose_task(
     client configured, API error, malformed response, decomposer returned
     fanout=true with empty task list) — those surface via ``ok=False``.
     """
+    timing = _DecomposePhaseTiming(task_id)
+    outcome: DecomposeOutcome | None = None
+    try:
+        outcome = _decompose_task_impl(
+            task_id,
+            author=author,
+            timeout=timeout,
+            loop_safe=loop_safe,
+            timing=timing,
+        )
+        return outcome
+    finally:
+        timing.emit(outcome)
+
+
+def _decompose_task_impl(
+    task_id: str,
+    *,
+    author: Optional[str],
+    timeout: Optional[int],
+    loop_safe: bool,
+    timing: _DecomposePhaseTiming,
+) -> DecomposeOutcome:
     with kb.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
         workflow_id = task.workflow_id if task is not None else None
@@ -549,6 +627,7 @@ def decompose_task(
     )
 
     def failed(reason: str) -> DecomposeOutcome:
+        timing.switch("apply")
         return _failure_outcome(
             task_id,
             reason,
@@ -575,6 +654,7 @@ def decompose_task(
     raw = ""
     finish_reason: str | None = None
     for max_tokens in _max_token_attempts():
+        timing.start_model_attempt()
         try:
             # Route through call_llm so auxiliary.kanban_decomposer.* config
             # (provider/model/base_url, extra_body, reasoning_effort, retries)
@@ -596,9 +676,11 @@ def decompose_task(
             )
             return failed(f"LLM error: {type(exc).__name__}")
 
+        timing.switch("parse")
         raw, finish_reason = _response_content_and_finish_reason(resp)
         parsed = _extract_json_blob(raw)
         if parsed is not None:
+            timing.json_valid = True
             break
         if finish_reason != "length" and raw.strip():
             break
@@ -611,6 +693,7 @@ def decompose_task(
         )
 
     if parsed is None:
+        timing.json_valid = False
         if finish_reason == "length" or not raw.strip():
             return failed("LLM returned empty/truncated output before JSON")
         return failed("LLM returned malformed JSON")
@@ -641,6 +724,7 @@ def decompose_task(
             )
         if title_val is None and body_val is None:
             return failed("decomposer returned fanout=false with no title/body")
+        timing.switch("apply")
         with kb.connect_closing() as conn:
             ok = kb.specify_triage_task(
                 conn,
@@ -745,6 +829,7 @@ def decompose_task(
             "parents": clean_parents,
         })
 
+    timing.switch("apply")
     try:
         with kb.connect_closing() as conn:
             child_ids = kb.decompose_triage_task(

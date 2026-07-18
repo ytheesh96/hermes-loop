@@ -2573,6 +2573,8 @@ def _loop_skeleton_delegation_result(
         "items": items,
         "edges": edges,
         "workflow_id": created.get("workflow_id"),
+        "decomposition": created.get("decomposition") or [],
+        "candidate_task_ids": created.get("candidate_task_ids") or [],
         "dispatch": created.get("dispatch"),
         "subscribed": subscribed,
         "auto_reentry": subscribed,

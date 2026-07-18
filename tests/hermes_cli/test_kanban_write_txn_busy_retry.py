@@ -48,12 +48,6 @@ def _other():
     return sqlite3.OperationalError("no such table: tasks")
 
 
-@pytest.fixture(autouse=True)
-def _no_file_check(monkeypatch):
-    # Isolate the boundary behaviour from the post-commit invariant.
-    monkeypatch.setattr(kb, "_check_file_length_invariant", lambda conn: None)
-
-
 def test_retry_sleep_respects_floor(monkeypatch):
     # The jitter has a floor so a retry can't busy-spin back into the collision.
     slept = []

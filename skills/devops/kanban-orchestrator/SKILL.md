@@ -22,9 +22,11 @@ metadata:
 
 Hermes setups vary widely. Some users run a single profile that does everything; some run a small fleet (`docker-worker`, `cron-worker`); some run a curated specialist team they've named themselves. There is **no default specialist roster** — the orchestrator skill does not know what profiles exist on this machine.
 
-Before fanning out, you must ground the decomposition in the profiles that actually exist. The dispatcher silently fails to spawn unknown assignee names — it doesn't autocorrect, doesn't suggest, doesn't fall back. So a card assigned to `researcher` on a setup that only has `docker-worker` just sits in `ready` forever.
+Before fanning out, ground any assignees that you must choose in the profiles that actually exist. The dispatcher silently fails to spawn unknown assignee names — it doesn't autocorrect, doesn't suggest, doesn't fall back. So a card assigned to `researcher` on a setup that only has `docker-worker` just sits in `ready` forever.
 
-**Step 0: discover available profiles before planning.**
+An assignee/profile name that the user explicitly supplied for the requested task is already user-confirmed. Use it as-is; do not run `hermes profile list` or another discovery preflight for that name. Discovery is Step 0 only when the orchestrator must choose or guess an assignee.
+
+**Step 0: discover available profiles only for unassigned work.**
 
 Use one of these:
 

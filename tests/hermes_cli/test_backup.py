@@ -587,6 +587,124 @@ class TestImport:
         assert (hermes_home / "skills" / "my-skill" / "SKILL.md").read_text() == "# My Skill\n"
         assert (hermes_home / "profiles" / "coder" / "config.yaml").exists()
 
+    def test_sqlite_import_uses_consistent_atomic_restore(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        live_db = hermes_home / "state.db"
+        live_conn = sqlite3.connect(live_db)
+        live_conn.execute("CREATE TABLE values_before_restore (value TEXT)")
+        live_conn.execute("INSERT INTO values_before_restore VALUES ('live')")
+        live_conn.commit()
+        live_conn.close()
+        old_inode = live_db.stat().st_ino
+
+        archived_db = tmp_path / "archived.db"
+        archived_conn = sqlite3.connect(archived_db)
+        archived_conn.execute("CREATE TABLE restored_values (value TEXT)")
+        archived_conn.execute("INSERT INTO restored_values VALUES ('snapshot')")
+        archived_conn.commit()
+        archived_conn.close()
+
+        zip_path = tmp_path / "backup.zip"
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("config.yaml", "model: restored\n")
+            archive.write(archived_db, "state.db")
+            archive.writestr("state.db-wal", b"stale archived wal")
+
+        from hermes_cli.backup import run_import
+        run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        assert live_db.stat().st_ino != old_inode
+        restored_conn = sqlite3.connect(live_db)
+        rows = restored_conn.execute("SELECT value FROM restored_values").fetchall()
+        journal_mode = restored_conn.execute("PRAGMA journal_mode").fetchone()[0]
+        restored_conn.close()
+        assert rows == [("snapshot",)]
+        assert journal_mode == "wal"
+        assert not any(
+            Path(f"{live_db}{suffix}").exists()
+            for suffix in ("-wal", "-shm", "-journal")
+        )
+        assert (hermes_home / "config.yaml").read_text() == "model: restored\n"
+
+    def test_sqlite_import_refuses_active_sidecar_without_target_mutation(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        live_db = hermes_home / "state.db"
+        live_conn = sqlite3.connect(live_db)
+        live_conn.execute("PRAGMA journal_mode=WAL")
+        live_conn.execute("CREATE TABLE live_values (value TEXT)")
+        live_conn.execute("INSERT INTO live_values VALUES ('keep')")
+        live_conn.commit()
+        old_inode = live_db.stat().st_ino
+        assert Path(f"{live_db}-wal").exists()
+        assert Path(f"{live_db}-shm").exists()
+
+        archived_db = tmp_path / "archived.db"
+        archived_conn = sqlite3.connect(archived_db)
+        archived_conn.execute("CREATE TABLE restored_values (value TEXT)")
+        archived_conn.commit()
+        archived_conn.close()
+        zip_path = tmp_path / "backup.zip"
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("config.yaml", "model: restored\n")
+            archive.write(archived_db, "state.db")
+
+        from hermes_cli.backup import run_import
+        run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        assert live_db.stat().st_ino == old_inode
+        assert live_conn.execute("SELECT value FROM live_values").fetchall() == [
+            ("keep",)
+        ]
+        assert Path(f"{live_db}-shm").exists()
+        live_conn.close()
+        assert "Stop Hermes and retry" in caplog.text
+
+    def test_invalid_sqlite_import_leaves_live_database_untouched(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        live_db = hermes_home / "state.db"
+        live_conn = sqlite3.connect(live_db)
+        live_conn.execute("CREATE TABLE live_values (value TEXT)")
+        live_conn.execute("INSERT INTO live_values VALUES ('keep')")
+        live_conn.commit()
+        live_conn.close()
+        before = live_db.read_bytes()
+
+        zip_path = tmp_path / "backup.zip"
+        self._make_backup_zip(
+            zip_path,
+            {
+                "config.yaml": "model: restored\n",
+                "state.db": b"not a sqlite database",
+            },
+        )
+
+        from hermes_cli.backup import run_import
+        run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        assert live_db.read_bytes() == before
+        live_conn = sqlite3.connect(live_db)
+        rows = live_conn.execute("SELECT value FROM live_values").fetchall()
+        live_conn.close()
+        assert rows == [("keep",)]
+
     def test_strips_hermes_prefix(self, tmp_path, monkeypatch):
         """Import strips .hermes/ prefix if all entries share it."""
         hermes_home = tmp_path / ".hermes"
@@ -851,12 +969,18 @@ class TestImport:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
+        source_db = tmp_path / "source-state.db"
+        source_conn = sqlite3.connect(source_db)
+        source_conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY)")
+        source_conn.commit()
+        source_conn.close()
+
         zip_path = tmp_path / "backup.zip"
         self._make_backup_zip(zip_path, {
             "config.yaml": "model: openrouter\n",
             ".env": "OPENROUTER_API_KEY=sk-secret\n",
             "auth.json": '{"providers": {"nous": "token"}}',
-            "state.db": b"SQLite format 3\x00",
+            "state.db": source_db.read_bytes(),
             "profiles/coder/.env": "ANTHROPIC_API_KEY=sk-ant-secret\n",
         })
 
@@ -1813,6 +1937,39 @@ class TestQuickSnapshotProjectsKanban:
         copy = hermes_home / "state-snapshots" / snap_id / "kanban.db"
         assert copy.exists()
         conn = sqlite3.connect(str(copy))
+        rows = conn.execute("SELECT * FROM tasks").fetchall()
+        conn.close()
+        assert rows == [("t1", "todo")]
+
+    def test_kanban_restore_atomically_replaces_and_invalidates_caches(
+        self, hermes_home
+    ):
+        import hermes_cli.kanban_db as kb
+        from hermes_cli.backup import create_quick_snapshot, restore_quick_snapshot
+
+        db_path = hermes_home / "kanban.db"
+        snap_id = create_quick_snapshot(hermes_home=hermes_home)
+        old_inode = db_path.stat().st_ino
+        cache_key = str(db_path.resolve())
+        identity = kb._db_file_identity(db_path)
+        assert identity is not None
+        kb._INITIALIZED_PATHS.add(cache_key)
+        kb._QUARANTINED_DBS[cache_key] = kb._QuarantinedDb(
+            identity=identity,
+            backup_path=None,
+            reason="test quarantine",
+        )
+
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE tasks SET data = 'changed' WHERE id = 't1'")
+        conn.commit()
+        conn.close()
+
+        assert restore_quick_snapshot(snap_id, hermes_home=hermes_home) is True
+        assert db_path.stat().st_ino != old_inode
+        assert cache_key not in kb._INITIALIZED_PATHS
+        assert cache_key not in kb._QUARANTINED_DBS
+        conn = sqlite3.connect(db_path)
         rows = conn.execute("SELECT * FROM tasks").fetchall()
         conn.close()
         assert rows == [("t1", "todo")]

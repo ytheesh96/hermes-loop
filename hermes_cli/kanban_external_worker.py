@@ -152,20 +152,45 @@ def _finalize(
 
     summary = _summary(output, harness=harness, code=code)
     metadata = {"external_harness": harness, "exit_code": code}
-    with kb.connect(board=board) as conn:
+    with kb.connect_closing(board=board) as conn:
         task = kb.get_task(conn, task_id)
         if task is None or task.status != "running":
             return
         reason = _blocked_reason(summary.splitlines())
         if code == 0 and not reason:
-            kb.complete_task(
-                conn,
-                task_id,
-                result=summary,
-                summary=summary,
-                metadata=metadata,
-                expected_run_id=expected_run_id,
-            )
+            from hermes_cli import kanban_progress
+
+            policy = kanban_progress.load_progress_policy()
+            transitions = kb.ReadyTransitions()
+            with kb.scoped_current_board(board):
+                completed = kb.complete_task(
+                    conn,
+                    task_id,
+                    result=summary,
+                    summary=summary,
+                    metadata=metadata,
+                    expected_run_id=expected_run_id,
+                    transitions=transitions,
+                    recompute_dependents=False,
+                )
+            if completed:
+                recovery_warnings = (
+                    kanban_progress.capture_completion_transitions(
+                        [task_id],
+                        transitions=transitions,
+                        board=board,
+                        conn=conn,
+                        policy=policy,
+                    )
+                )
+                kanban_progress.advance_transitions(
+                    transitions,
+                    board=board,
+                    conn=conn,
+                    author="external-completion-auto-decomposer",
+                    policy=policy,
+                    recovery_warnings=recovery_warnings,
+                )
             return
         kb.block_task(
             conn,
@@ -191,7 +216,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     from hermes_cli import kanban_db as kb
 
     workspace = str(Path(args.workspace))
-    with kb.connect(board=args.board) as conn:
+    with kb.connect_closing(board=args.board) as conn:
         task_context = kb.build_worker_context(conn, args.task_id)
     prompt = _build_prompt(
         task_context,

@@ -283,6 +283,186 @@ def _safe_copy_db(src: Path, dst: Path) -> bool:
                     pass
 
 
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
+
+def _is_sqlite_sidecar(path: str | Path) -> bool:
+    value = str(path)
+    return any(value.endswith(f".db{suffix}") for suffix in _SQLITE_SIDECAR_SUFFIXES)
+
+
+def _sqlite_sidecars(path: Path) -> list[Path]:
+    return [
+        Path(f"{path}{suffix}")
+        for suffix in _SQLITE_SIDECAR_SUFFIXES
+        if Path(f"{path}{suffix}").exists()
+    ]
+
+
+def _reconcile_quiescent_sqlite_sidecars(path: Path) -> list[Path]:
+    """Ask SQLite to retire quiescent sidecars; return any that remain."""
+    sidecars = _sqlite_sidecars(path)
+    if not sidecars or not path.exists():
+        return sidecars
+    connection = None
+    try:
+        connection = sqlite3.connect(
+            f"file:{path}?mode=rw",
+            uri=True,
+            isolation_level=None,
+            timeout=0.25,
+        )
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    except (OSError, sqlite3.Error):
+        # A busy/live or malformed destination is handled by the existence
+        # check below. Do not manipulate its sidecars directly.
+        pass
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
+    return _sqlite_sidecars(path)
+
+
+def _invalidate_process_local_db_caches(path: Path) -> None:
+    """Invalidate caches only in modules already loaded by this process."""
+    kanban_db = sys.modules.get("hermes_cli.kanban_db")
+    invalidate = getattr(kanban_db, "invalidate_db_caches", None)
+    if callable(invalidate):
+        invalidate(path)
+
+
+def _atomic_restore_sqlite_db(src: Path, dst: Path) -> bool:
+    """Restore one SQLite snapshot through a consistent, atomic local replace.
+
+    The source is read through SQLite's backup API into a same-directory temp
+    DB, prepared for WAL before publication, checked, then installed with
+    ``os.replace``. Publishing the persistent WAL header avoids a first-open
+    race where multiple restarted services simultaneously execute
+    ``PRAGMA journal_mode=WAL`` and unlink sidecars another process holds open.
+    Existing sidecars are retired only through SQLite's checkpoint/recovery
+    path. If any WAL/SHM/journal remains, restore fails closed; renaming or
+    deleting a live sidecar directly is itself unsafe.
+
+    This is a process-local primitive, not a cross-process quiescence protocol.
+    Callers must stop external users of ``dst`` before restore; an unrelated
+    process can otherwise keep writing its already-open, unlinked generation.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{dst.name}.restore-",
+        suffix=".db",
+        dir=str(dst.parent),
+    )
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        if not _safe_copy_db(src, temp_path):
+            return False
+
+        # sqlite3.Connection.backup() creates its destination in DELETE mode
+        # even when the source was WAL. Hermes opens restored databases from
+        # multiple long-lived services, so persist WAL on the staged file while
+        # the destination is still quiescent. WAL-incompatible filesystems keep
+        # their existing fallback behavior: SQLite returns a non-WAL mode and
+        # the normal connection helper will fall back to DELETE later.
+        journal = sqlite3.connect(str(temp_path), isolation_level=None)
+        try:
+            journal_row = journal.execute("PRAGMA journal_mode=WAL").fetchone()
+        finally:
+            journal.close()
+        journal_mode = (
+            str(journal_row[0]).lower() if journal_row else ""
+        )
+        if journal_mode == "wal":
+            temp_sidecars = _reconcile_quiescent_sqlite_sidecars(temp_path)
+            if temp_sidecars:
+                logger.error(
+                    "Refusing to publish staged SQLite database %s while "
+                    "temporary sidecars remain (%s)",
+                    temp_path,
+                    ", ".join(sidecar.name for sidecar in temp_sidecars),
+                )
+                return False
+
+        check = sqlite3.connect(f"file:{temp_path}?mode=ro", uri=True)
+        try:
+            row = check.execute("PRAGMA integrity_check").fetchone()
+        finally:
+            check.close()
+        if not row or str(row[0]).lower() != "ok":
+            logger.error(
+                "Refusing to restore corrupt SQLite snapshot %s: %r",
+                src,
+                row[0] if row else None,
+            )
+            return False
+
+        try:
+            os.chmod(temp_path, src.stat().st_mode & 0o777)
+        except OSError:
+            pass
+
+        sidecars = _reconcile_quiescent_sqlite_sidecars(dst)
+        if sidecars:
+            logger.error(
+                "Refusing to restore SQLite database %s while sidecars exist "
+                "(%s). Stop Hermes and retry; live WAL/SHM files must not be "
+                "renamed or deleted.",
+                dst,
+                ", ".join(sidecar.name for sidecar in sidecars),
+            )
+            return False
+
+        os.replace(temp_path, dst)
+        _invalidate_process_local_db_caches(dst)
+        return True
+    except (OSError, PermissionError, sqlite3.DatabaseError) as exc:
+        logger.error("Failed to restore SQLite database %s: %s", dst, exc)
+        return False
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        for suffix in _SQLITE_SIDECAR_SUFFIXES:
+            try:
+                Path(f"{temp_path}{suffix}").unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _restore_sqlite_zip_member(
+    archive: zipfile.ZipFile,
+    member: str,
+    dst: Path,
+) -> bool:
+    """Stage a zipped DB beside its destination, then restore it atomically."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, stage_name = tempfile.mkstemp(
+        prefix=f".{dst.name}.import-",
+        suffix=".db",
+        dir=str(dst.parent),
+    )
+    stage = Path(stage_name)
+    try:
+        with os.fdopen(fd, "wb") as staged, archive.open(member) as source:
+            shutil.copyfileobj(source, staged)
+            staged.flush()
+            os.fsync(staged.fileno())
+        return _atomic_restore_sqlite_db(stage, dst)
+    except (OSError, PermissionError) as exc:
+        logger.error("Failed to stage SQLite database %s: %s", dst, exc)
+        return False
+    finally:
+        try:
+            stage.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Backup
 # ---------------------------------------------------------------------------
@@ -587,10 +767,18 @@ def run_import(args) -> None:
         restored = 0
         restored_external = 0
         skipped_runtime: list[str] = []
+        skipped_sqlite_sidecars: list[str] = []
         home_dir = Path.home().resolve()
         t0 = time.monotonic()
 
         for member in members:
+            # Backups created by current Hermes exclude SQLite runtime
+            # sidecars, but old or hand-edited archives may still contain
+            # them. Never pair those stale files with a restored snapshot.
+            if _is_sqlite_sidecar(member):
+                skipped_sqlite_sidecars.append(member)
+                continue
+
             # External memory-provider state captured under the reserved
             # ``_external/`` arc prefix restores to its original home-relative
             # location (e.g. ~/.honcho/config.json), NOT under HERMES_HOME.
@@ -607,8 +795,12 @@ def run_import(args) -> None:
                     continue
                 try:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    with zf.open(member) as src, open(target, "wb") as dst:
-                        dst.write(src.read())
+                    if target.suffix == ".db":
+                        if not _restore_sqlite_zip_member(zf, member, target):
+                            raise OSError("SQLite restore failed")
+                    else:
+                        with zf.open(member) as src, open(target, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
                     # External provider configs commonly hold credentials.
                     if target.suffix in {".json", ".env", ".conf"} or target.name in _SECRET_FILE_NAMES:
                         try:
@@ -653,8 +845,12 @@ def run_import(args) -> None:
 
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(member) as src, open(target, "wb") as dst:
-                    dst.write(src.read())
+                if target.suffix == ".db":
+                    if not _restore_sqlite_zip_member(zf, member, target):
+                        raise OSError("SQLite restore failed")
+                else:
+                    with zf.open(member) as src, open(target, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
                 if target.name in _SECRET_FILE_NAMES:
                     os.chmod(target, 0o600)
                 restored += 1
@@ -693,6 +889,13 @@ def run_import(args) -> None:
                 print(f"    {rel}")
             if len(skipped_runtime) > 10:
                 print(f"    ... and {len(skipped_runtime) - 10} more")
+
+        if skipped_sqlite_sidecars:
+            logger.warning(
+                "Skipped %d archived SQLite sidecar file(s); restored DB "
+                "snapshots must regenerate WAL/SHM/journal state",
+                len(skipped_sqlite_sidecars),
+            )
 
         # Post-import: restore profile wrapper scripts
         profiles_dir = hermes_root / "profiles"
@@ -1003,6 +1206,12 @@ def restore_quick_snapshot(
 
     restored = 0
     for rel in meta.get("files", {}):
+        if _is_sqlite_sidecar(rel):
+            logger.warning(
+                "Skipping archived SQLite sidecar during snapshot restore: %s",
+                rel,
+            )
+            continue
         # Security: reject absolute paths and traversals in manifest entries
         src = snap_dir / rel
         try:
@@ -1025,11 +1234,8 @@ def restore_quick_snapshot(
 
         try:
             if dst.suffix == ".db":
-                # Atomic-ish replace for databases
-                tmp = dst.parent / f".{dst.name}.snap_restore"
-                shutil.copy2(src, tmp)
-                dst.unlink(missing_ok=True)
-                shutil.move(str(tmp), str(dst))
+                if not _atomic_restore_sqlite_db(src, dst):
+                    raise OSError("SQLite restore failed")
             else:
                 shutil.copy2(src, dst)
             restored += 1

@@ -29,7 +29,6 @@ export const Thread: FC<{
   onBranchInNewChat?: (messageId: string) => void
   onCancel?: () => Promise<void> | void
   onDismissError?: (messageId: string) => void
-  onOpenKanbanTask?: (taskId: string) => void
   onRestoreToMessage?: (messageId: string, target?: RestoreMessageTarget) => Promise<void> | void
   sessionId?: string | null
   sessionKey?: string | null
@@ -42,7 +41,6 @@ export const Thread: FC<{
   onBranchInNewChat,
   onCancel,
   onDismissError,
-  onOpenKanbanTask,
   onRestoreToMessage,
   sessionId = null,
   sessionKey
@@ -83,7 +81,6 @@ export const Thread: FC<{
       UserMessage: () => (
         <UserMessage
           onCancel={onCancel}
-          onOpenKanbanTask={onOpenKanbanTask}
           onRequestRestoreConfirm={onRestoreToMessage ? requestRestoreConfirm : undefined}
         />
       )
@@ -94,7 +91,6 @@ export const Thread: FC<{
       onBranchInNewChat,
       onCancel,
       onDismissError,
-      onOpenKanbanTask,
       onRestoreToMessage,
       requestRestoreConfirm,
       sessionId

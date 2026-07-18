@@ -226,10 +226,12 @@ def test_loop_delegation_toolset_is_explicit_and_gated(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(home))
 
     import tools.loop_tools  # ensure registered
+    from model_tools import get_tool_definitions
     from tools.registry import invalidate_check_fn_cache, registry
     from toolsets import resolve_toolset
 
     expected = {
+        "loop_graph",
         "loop_create",
         "loop_status",
         "loop_update",
@@ -237,6 +239,8 @@ def test_loop_delegation_toolset_is_explicit_and_gated(monkeypatch, tmp_path):
         "loop_list_queue",
     }
     assert set(resolve_toolset("loop_delegation")) == expected
+    assert registry.get_toolset_for_tool("loop_graph") == "loop_delegation"
+    assert "loop" not in registry.get_registered_toolset_names()
 
     invalidate_check_fn_cache()
     schema = registry.get_definitions(
@@ -244,6 +248,19 @@ def test_loop_delegation_toolset_is_explicit_and_gated(monkeypatch, tmp_path):
     )
     names = {item["function"].get("name") for item in schema if "function" in item}
     assert names == expected
+
+    effective_schema = get_tool_definitions(
+        enabled_toolsets=["loop_delegation"],
+        quiet_mode=True,
+        skip_tool_search_assembly=True,
+    )
+    effective_names = {
+        item["function"].get("name")
+        for item in effective_schema
+        if "function" in item
+    }
+    assert expected <= effective_names
+
     loop_create_schema = next(
         item["function"]
         for item in schema
@@ -703,6 +720,106 @@ def test_loop_create_graph_has_no_synthetic_root_or_closure_edge(
         assert all(kb.list_notify_subs(conn, task_id) == [] for task_id in ids.values())
     finally:
         conn.close()
+
+
+def test_loop_create_graph_compiles_exact_initial_frontier_and_refreshes_items(
+    loop_env, monkeypatch
+):
+    from hermes_cli import kanban_progress
+
+    calls = []
+
+    def fake_decompose_and_dispatch(
+        specification_task_ids,
+        *,
+        ready_task_ids=None,
+        board=None,
+        conn=None,
+        author=None,
+    ):
+        specification_ids = list(specification_task_ids)
+        ready_ids = list(ready_task_ids or [])
+        calls.append(
+            {
+                "specification_ids": specification_ids,
+                "ready_ids": ready_ids,
+                "board": board,
+                "author": author,
+            }
+        )
+        conn.executemany(
+            "UPDATE tasks SET status = 'ready', needs_specification = 0, "
+            "assignee = 'compiled-worker' WHERE id = ?",
+            [(task_id,) for task_id in specification_ids],
+        )
+        conn.commit()
+        return {
+            "specification_task_ids": specification_ids,
+            "decomposition": [
+                {"task_id": task_id, "ok": True}
+                for task_id in specification_ids
+            ],
+            "candidate_task_ids": [*specification_ids, *ready_ids],
+            "dispatch": {"spawned": specification_ids},
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        kanban_progress,
+        "decompose_and_dispatch",
+        fake_decompose_and_dispatch,
+    )
+
+    result = _call_loop(
+        "loop_create_graph",
+        {
+            "activation": "explicit_user_request",
+            "proof_packet": {"source": "test"},
+            "tenant": loop_env,
+            "nodes": [
+                {
+                    "client_id": "entry-a",
+                    "title": "Specify entry A",
+                    "depends_on": [],
+                },
+                {
+                    "client_id": "dependent",
+                    "title": "Wait for entry A",
+                    "depends_on": ["entry-a"],
+                },
+                {
+                    "client_id": "entry-b",
+                    "title": "Specify entry B",
+                    "depends_on": [],
+                },
+            ],
+        },
+    )
+
+    ids = {item["client_id"]: item["task_id"] for item in result["items"]}
+    assert calls == [
+        {
+            "specification_ids": [ids["entry-a"], ids["entry-b"]],
+            "ready_ids": [],
+            "board": "default",
+            "author": "foreground-auto-decomposer",
+        }
+    ]
+    assert [
+        (
+            item["client_id"],
+            item["status"],
+            item["needs_specification"],
+            item["assignee"],
+        )
+        for item in result["items"]
+    ] == [
+        ("entry-a", "ready", False, "compiled-worker"),
+        ("dependent", "todo", True, None),
+        ("entry-b", "ready", False, "compiled-worker"),
+    ]
+    assert result["candidate_task_ids"] == [ids["entry-a"], ids["entry-b"]]
+    assert result["dispatch"]["spawned"] == [ids["entry-a"], ids["entry-b"]]
 
 
 def test_loop_create_graph_and_graph_read_inherit_ambient_workflow(

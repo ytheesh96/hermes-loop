@@ -1,5 +1,9 @@
 import asyncio
+import json
+import logging
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,6 +12,16 @@ from gateway.config import Platform
 from gateway.platforms.base import SendResult
 from gateway.run import GatewayRunner
 from hermes_cli import kanban_db as kb
+
+
+@pytest.fixture
+def kanban_home(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    return home
 
 
 class RecordingAdapter:
@@ -109,6 +123,731 @@ def _unseen_terminal_events(tid):
         conn.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subscription_count", [0, 100, 1000])
+async def test_idle_notifier_uses_one_closed_db_open_for_full_scan(
+    monkeypatch,
+    kanban_home,
+    subscription_count,
+):
+    """Idle polls reuse metadata, never a live SQLite connection."""
+    conn = kb.connect()
+    try:
+        rows = [
+            (
+                f"t_idle_{index}",
+                f"idle {index}",
+                "worker",
+                "todo",
+                1,
+            )
+            for index in range(subscription_count)
+        ]
+        with kb.write_txn(conn):
+            conn.executemany(
+                """
+                INSERT INTO tasks
+                    (id, title, assignee, status, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            conn.executemany(
+                """
+                INSERT INTO kanban_notify_subs
+                    (task_id, platform, chat_id, created_at)
+                VALUES (?, 'telegram', 'chat-idle', 1)
+                """,
+                [(row[0],) for row in rows],
+            )
+    finally:
+        conn.close()
+
+    calls = {
+        "connect": 0,
+        "list_task_subs": 0,
+        "list_workflow_subs": 0,
+        "claim_task_sub": 0,
+    }
+    opened_connections = []
+    real_connect = kb.connect
+    real_list_task_subs = kb.list_notify_subs
+    real_list_workflow_subs = kb.list_workflow_notify_subs
+    real_claim_task_sub = kb.claim_unseen_events_for_sub
+
+    class _TrackedConnection:
+        def __init__(self, inner):
+            self.inner = inner
+            self.closed = False
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def close(self):
+            self.closed = True
+            self.inner.close()
+
+    def _connect(*args, **kwargs):
+        calls["connect"] += 1
+        opened = _TrackedConnection(real_connect(*args, **kwargs))
+        opened_connections.append(opened)
+        return opened
+
+    def _list_task_subs(*args, **kwargs):
+        calls["list_task_subs"] += 1
+        return real_list_task_subs(*args, **kwargs)
+
+    def _list_workflow_subs(*args, **kwargs):
+        calls["list_workflow_subs"] += 1
+        return real_list_workflow_subs(*args, **kwargs)
+
+    def _claim_task_sub(*args, **kwargs):
+        calls["claim_task_sub"] += 1
+        return real_claim_task_sub(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "connect", _connect)
+    monkeypatch.setattr(kb, "list_notify_subs", _list_task_subs)
+    monkeypatch.setattr(
+        kb,
+        "list_workflow_notify_subs",
+        _list_workflow_subs,
+    )
+    monkeypatch.setattr(
+        kb,
+        "claim_unseen_events_for_sub",
+        _claim_task_sub,
+    )
+
+    runner = _make_runner(RecordingAdapter())
+    runner._kanban_notifier_profile = "default"
+    runner._kanban_notifier_full_scan_seconds = 3600
+    interval_sleeps = 0
+    real_sleep = asyncio.sleep
+
+    async def _sleep(delay):
+        nonlocal interval_sleeps
+        if delay != 5:
+            interval_sleeps += 1
+            if interval_sleeps == 1:
+                assert opened_connections
+                assert opened_connections[0].closed is True
+            if interval_sleeps >= 12:
+                runner._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    await asyncio.wait_for(
+        runner._kanban_notifier_watcher(interval=1),
+        timeout=20,
+    )
+
+    assert interval_sleeps == 12
+    assert calls == {
+        "connect": 1,
+        # The one full pass reads legacy rows for cutover, then task rows.
+        "list_task_subs": 2,
+        "list_workflow_subs": 1,
+        "claim_task_sub": subscription_count,
+    }
+    assert len(opened_connections) == 1
+    assert opened_connections[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_notifier_periodic_fallback_rescans_unchanged_board(
+    monkeypatch,
+    kanban_home,
+):
+    """The unchanged fast path still yields to bounded recovery scans."""
+    calls = 0
+    real_list = kb.list_workflow_notify_subs
+
+    def _list(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_list(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "list_workflow_notify_subs", _list)
+    runner = _make_runner(RecordingAdapter())
+    runner._kanban_notifier_profile = "default"
+    runner._kanban_notifier_full_scan_seconds = 0
+    interval_sleeps = 0
+    real_sleep = asyncio.sleep
+
+    async def _sleep(delay):
+        nonlocal interval_sleeps
+        if delay != 5:
+            interval_sleeps += 1
+            if interval_sleeps >= 2:
+                runner._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    await asyncio.wait_for(
+        runner._kanban_notifier_watcher(interval=1),
+        timeout=10,
+    )
+
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_notifier_fingerprint_delivers_external_event_next_tick(
+    monkeypatch,
+    kanban_home,
+):
+    """A commit from another connection bypasses the unchanged fast path."""
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="complete between ticks",
+            assignee="worker",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=task_id,
+            platform="telegram",
+            chat_id="chat-1",
+        )
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    runner._kanban_notifier_profile = "default"
+    runner._kanban_notifier_full_scan_seconds = 3600
+    interval_sleeps = 0
+    real_sleep = asyncio.sleep
+
+    async def _sleep(delay):
+        nonlocal interval_sleeps
+        if delay != 5:
+            interval_sleeps += 1
+            if interval_sleeps == 1:
+                external = kb.connect()
+                try:
+                    assert kb.complete_task(
+                        external,
+                        task_id,
+                        summary="committed between ticks",
+                    )
+                finally:
+                    external.close()
+            elif interval_sleeps >= 2:
+                runner._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    await asyncio.wait_for(
+        runner._kanban_notifier_watcher(interval=1),
+        timeout=10,
+    )
+
+    assert interval_sleeps == 2
+    assert len(adapter.sent) == 1
+    assert "committed between ticks" in adapter.sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_notifier_commit_after_scan_before_cache_store_forces_rescan(
+    monkeypatch,
+    kanban_home,
+):
+    """The cache stores the pre-scan fingerprint, preserving a late commit."""
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="complete at scan boundary",
+            assignee="worker",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=task_id,
+            platform="telegram",
+            chat_id="chat-1",
+        )
+    finally:
+        conn.close()
+
+    real_connect = kb.connect
+    real_list_workflow_subs = kb.list_workflow_notify_subs
+    scan_count = 0
+    commit_injected = False
+
+    class _CommitOnCloseConnection:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def close(self):
+            nonlocal commit_injected
+            if not commit_injected:
+                commit_injected = True
+                external = real_connect()
+                try:
+                    assert kb.complete_task(
+                        external,
+                        task_id,
+                        summary="committed after collection",
+                    )
+                finally:
+                    external.close()
+            self.inner.close()
+
+    def _connect(*args, **kwargs):
+        return _CommitOnCloseConnection(real_connect(*args, **kwargs))
+
+    def _list_workflow_subs(*args, **kwargs):
+        nonlocal scan_count
+        scan_count += 1
+        return real_list_workflow_subs(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "connect", _connect)
+    monkeypatch.setattr(kb, "list_workflow_notify_subs", _list_workflow_subs)
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    runner._kanban_notifier_profile = "default"
+    runner._kanban_notifier_full_scan_seconds = 3600
+    interval_sleeps = 0
+    real_sleep = asyncio.sleep
+
+    async def _sleep(delay):
+        nonlocal interval_sleeps
+        if delay != 5:
+            interval_sleeps += 1
+            if interval_sleeps >= 2:
+                runner._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    await asyncio.wait_for(
+        runner._kanban_notifier_watcher(interval=1),
+        timeout=10,
+    )
+
+    assert commit_injected is True
+    assert interval_sleeps == 2
+    assert scan_count == 2
+    assert len(adapter.sent) == 1
+    assert "committed after collection" in adapter.sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_notifier_scan_exception_closes_connection(
+    monkeypatch,
+    kanban_home,
+):
+    """A failed scan must release its per-tick SQLite connection."""
+    real_connect = kb.connect
+    opened_connections = []
+
+    class _TrackedConnection:
+        def __init__(self, inner):
+            self.inner = inner
+            self.closed = False
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def close(self):
+            self.closed = True
+            self.inner.close()
+
+    def _connect(*args, **kwargs):
+        opened = _TrackedConnection(real_connect(*args, **kwargs))
+        opened_connections.append(opened)
+        return opened
+
+    def _raise_scan_error(*args, **kwargs):
+        raise RuntimeError("forced notifier scan failure")
+
+    monkeypatch.setattr(kb, "connect", _connect)
+    monkeypatch.setattr(
+        kb,
+        "list_workflow_notify_subs",
+        _raise_scan_error,
+    )
+
+    runner = _make_runner(RecordingAdapter())
+    runner._kanban_notifier_profile = "default"
+    await _run_one_notifier_tick(monkeypatch, runner)
+
+    assert len(opened_connections) == 1
+    assert opened_connections[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_notifier_claim_expiry_forces_retry_without_data_change(
+    monkeypatch,
+    kanban_home,
+):
+    """An unchanged DB is rescanned exactly when an orphaned lease expires."""
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="orphaned notification lease",
+            assignee="worker",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=task_id,
+            platform="telegram",
+            chat_id="chat-1",
+        )
+        assert kb.complete_task(conn, task_id, summary="recover me")
+        event_id = int(
+            conn.execute(
+                "SELECT MAX(id) FROM task_events WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()[0]
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                """
+                UPDATE kanban_notify_subs
+                   SET pending_claim_token = 'orphaned',
+                       pending_event_id = ?,
+                       pending_expires_at = 1001
+                 WHERE task_id = ?
+                """,
+                (event_id, task_id),
+            )
+    finally:
+        conn.close()
+
+    clock = [1000]
+    monkeypatch.setattr(
+        "gateway.kanban_watchers.time.time",
+        lambda: clock[0],
+    )
+    claim_calls = 0
+    real_claim = kb.claim_unseen_events_for_sub
+
+    def _claim(*args, **kwargs):
+        nonlocal claim_calls
+        claim_calls += 1
+        return real_claim(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "claim_unseen_events_for_sub", _claim)
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    runner._kanban_notifier_profile = "default"
+    runner._kanban_notifier_full_scan_seconds = 3600
+    interval_sleeps = 0
+    real_sleep = asyncio.sleep
+
+    async def _sleep(delay):
+        nonlocal interval_sleeps
+        if delay != 5:
+            interval_sleeps += 1
+            if interval_sleeps == 1:
+                clock[0] = 1001
+            elif interval_sleeps >= 2:
+                runner._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    await asyncio.wait_for(
+        runner._kanban_notifier_watcher(interval=1),
+        timeout=10,
+    )
+
+    assert claim_calls == 2
+    assert len(adapter.sent) == 1
+    assert "recover me" in adapter.sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_enumerates_once_and_reuses_health_connection(
+    monkeypatch,
+    kanban_home,
+    tmp_path,
+    caplog,
+):
+    """Six stuck ticks use one board snapshot each and retain the warning."""
+    import hermes_cli.config as config
+
+    board_rows = [{"slug": f"board-{index}"} for index in range(3)]
+    for board in board_rows:
+        (tmp_path / f"{board['slug']}.db").touch()
+
+    calls = {
+        "list_boards": 0,
+        "connect": 0,
+        "dispatch": 0,
+        "ready": 0,
+        "review": 0,
+        "close": 0,
+    }
+
+    class _Connection:
+        def __init__(self, slug):
+            self.slug = slug
+
+        def close(self):
+            calls["close"] += 1
+
+    def _list_boards(*, include_archived=False):
+        assert include_archived is False
+        calls["list_boards"] += 1
+        return board_rows
+
+    def _connect(*, board):
+        calls["connect"] += 1
+        return _Connection(board)
+
+    def _dispatch(conn, **_kwargs):
+        calls["dispatch"] += 1
+        return SimpleNamespace(spawned=[])
+
+    def _ready(conn):
+        calls["ready"] += 1
+        return conn.slug == "board-0"
+
+    def _review(_conn):
+        calls["review"] += 1
+        return False
+
+    monkeypatch.setattr(
+        config,
+        "load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": True,
+                "dispatch_interval_seconds": 1,
+                "auto_decompose": False,
+            }
+        },
+    )
+    monkeypatch.setattr(kb, "list_boards", _list_boards)
+    monkeypatch.setattr(kb, "connect", _connect)
+    monkeypatch.setattr(kb, "dispatch_once", _dispatch)
+    monkeypatch.setattr(kb, "has_spawnable_ready", _ready)
+    monkeypatch.setattr(kb, "has_spawnable_review", _review)
+    monkeypatch.setattr(kb, "reap_worker_zombies", lambda: [])
+    monkeypatch.setattr(
+        kb,
+        "kanban_db_path",
+        lambda board=None: tmp_path / f"{board}.db",
+    )
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._running = True
+    interval_sleeps = 0
+    real_sleep = asyncio.sleep
+
+    async def _sleep(delay):
+        nonlocal interval_sleeps
+        if delay != 5:
+            interval_sleeps += 1
+            if interval_sleeps >= 6:
+                runner._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    with caplog.at_level(logging.WARNING, logger="gateway.run"):
+        await asyncio.wait_for(
+            runner._kanban_dispatcher_watcher(),
+            timeout=10,
+        )
+
+    assert interval_sleeps == 6
+    assert calls == {
+        "list_boards": 6,
+        "connect": 18,
+        "dispatch": 18,
+        "ready": 18,
+        # board-0 short-circuits after ready; the other two probe review.
+        "review": 12,
+        "close": 18,
+    }
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if "kanban dispatcher stuck" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_recovers_one_suppressed_inline_foreground_push(
+    monkeypatch,
+    kanban_home,
+):
+    """A missed foreground nudge is recovered once by the next board scan."""
+    from agent import auxiliary_client
+    import hermes_cli.config as config
+    from hermes_cli import kanban_progress, profiles
+    from tools import kanban_tools
+
+    board = "recovery"
+    kb.create_board(board)
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+    monkeypatch.setattr(
+        kanban_tools,
+        "get_current_workflow_id",
+        lambda _default="": "",
+    )
+
+    inline_calls = []
+
+    def suppress_inline_push(
+        specification_task_ids,
+        *,
+        ready_task_ids=None,
+        board=None,
+        conn=None,
+        author=None,
+    ):
+        inline_calls.append(
+            (
+                list(specification_task_ids),
+                list(ready_task_ids or ()),
+                board,
+                author,
+            )
+        )
+        return {
+            "specification_task_ids": list(specification_task_ids),
+            "decomposition": [],
+            "candidate_task_ids": [],
+            "dispatch": {"spawned": []},
+            "warnings": ["inline push suppressed by test"],
+        }
+
+    with monkeypatch.context() as inline_patch:
+        inline_patch.setattr(
+            kanban_progress,
+            "decompose_and_dispatch",
+            suppress_inline_push,
+        )
+        created = json.loads(
+            kanban_tools._handle_create(
+                {
+                    "title": "Recover this vague foreground task",
+                    "board": board,
+                    "idempotency_key": "suppressed-inline-recovery",
+                }
+            )
+        )
+
+    assert created["ok"] is True
+    task_id = created["task_id"]
+    assert inline_calls == [
+        ([task_id], [], board, "foreground-auto-decomposer")
+    ]
+    assert created["status"] == "triage"
+    assert created["dispatch"]["spawned"] == []
+
+    model_calls = []
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "fanout": False,
+                            "rationale": "one worker-ready unit",
+                            "title": "Recovered foreground task",
+                            "body": "Implement and verify the recovered task.",
+                            "assignee": "engineer",
+                        }
+                    )
+                ),
+                finish_reason="stop",
+            )
+        ]
+    )
+
+    def call_llm(*args, **kwargs):
+        assert os.environ.get("HERMES_KANBAN_BOARD") is None
+        assert kb.get_current_board() == board
+        model_calls.append((args, kwargs))
+        return response
+
+    profile = SimpleNamespace(
+        name="engineer",
+        is_default=True,
+        description="implementation",
+        description_auto=False,
+        model="test",
+        provider="test",
+        skill_count=0,
+    )
+    spawned = []
+
+    def spawn(task, _workspace, board=None):
+        spawned.append((task.id, board))
+        return os.getpid()
+
+    monkeypatch.setattr(auxiliary_client, "call_llm", call_llm)
+    monkeypatch.setattr(profiles, "list_profiles", lambda: [profile])
+    monkeypatch.setattr(profiles, "profile_exists", lambda _name: True)
+    monkeypatch.setattr(
+        profiles,
+        "get_active_profile_name",
+        lambda: "engineer",
+    )
+    monkeypatch.setattr(kb, "_default_spawn", spawn)
+    monkeypatch.setattr(kb, "reap_worker_zombies", lambda: [])
+    monkeypatch.setattr(
+        config,
+        "load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": True,
+                "dispatch_interval_seconds": 1,
+                "auto_decompose": True,
+                "auto_decompose_per_tick": 3,
+            }
+        },
+    )
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._running = True
+    interval_sleeps = 0
+    real_sleep = asyncio.sleep
+
+    async def run_without_real_interval(delay):
+        nonlocal interval_sleeps
+        if delay != 5:
+            interval_sleeps += 1
+            if interval_sleeps >= 2:
+                runner._running = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", run_without_real_interval)
+    await asyncio.wait_for(
+        runner._kanban_dispatcher_watcher(),
+        timeout=10,
+    )
+
+    with kb.connect(board=board) as conn:
+        tasks = kb.list_tasks(conn, limit=100)
+        recovered = kb.get_task(conn, task_id)
+        run_count = conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+
+    assert interval_sleeps == 2
+    assert len(model_calls) == 1
+    assert spawned == [(task_id, board)]
+    assert [task.id for task in tasks] == [task_id]
+    assert run_count == 1
+    assert recovered is not None
+    assert recovered.status == "running"
+    assert recovered.needs_specification is False
+
+
 def test_gateway_dispatcher_does_not_start_removed_loop_handoff_review_batch(tmp_path, monkeypatch):
     db_path = tmp_path / "dispatcher-loop-review.db"
     hermes_home = tmp_path / ".hermes"
@@ -140,10 +879,8 @@ def test_gateway_dispatcher_does_not_start_removed_loop_handoff_review_batch(tmp
     asyncio.run(_run_one_dispatcher_tick(monkeypatch, runner))
 
     with kb.connect() as conn:
-        handoffs = kb.list_loop_handoffs(conn, task_id=task_id)
         events = [event for event in kb.list_events(conn, task_id) if event.kind == "loop_handoff_review_session"]
 
-    assert handoffs == []
     assert events == []
 
 

@@ -540,13 +540,11 @@ def test_legacy_foreground_decomposed_root_completion_skips_loop_handoff(kanban_
         assert kb.claim_task(conn, root_id, claimer="worker-host:root") is not None
         assert kb.complete_task(conn, root_id, summary="root closeout complete")
 
-        handoffs = kb.list_loop_handoffs(conn, task_id=root_id)
         events = [
             event for event in kb.list_events(conn, root_id)
             if event.kind == "loop_foreground_handoff"
         ]
 
-    assert handoffs == []
     assert events == []
 
 
@@ -576,13 +574,11 @@ def test_legacy_foreground_decomposed_child_explicit_block_stays_plain_blocker(k
         assert kb.claim_task(conn, child_id, claimer="worker-host:child") is not None
         assert kb.block_task(conn, child_id, reason="review-required: inspect implementation")
 
-        handoffs = kb.list_loop_handoffs(conn, task_id=child_id)
         events = [
             event for event in kb.list_events(conn, child_id)
             if event.kind == "loop_foreground_handoff"
         ]
 
-    assert handoffs == []
     assert events == []
 
 

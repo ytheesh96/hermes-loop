@@ -82,8 +82,6 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "review_kind": t.review_kind,
         "resume_mode": t.resume_mode,
         "review_subject_assignee": t.review_subject_assignee,
-        "foreground_parent_session_id": t.foreground_parent_session_id,
-        "foreground_fork_session_id": t.foreground_fork_session_id,
         "workflow_template_id": t.workflow_template_id,
         "current_step_key": t.current_step_key,
     }
@@ -588,66 +586,6 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_block.add_argument("--metadata", default=None,
                          help='JSON dict of structured facts for the blocked handoff/run.')
 
-    # Compatibility-only: keep exact invocations parseable without advertising
-    # this retired workflow in the parent command's normal discovery surface.
-    # Omitting ``help=`` removes the description row; the generated metavar
-    # below removes it from the parent usage choices.
-    p_request_review = sub.add_parser("request-review")
-    p_request_review.add_argument("task_id")
-    p_request_review.add_argument(
-        "reason",
-        nargs="*",
-        help="Review request note (also appended as a comment)",
-    )
-    p_request_review.add_argument(
-        "--assignee",
-        default="reviewer-qa",
-        help="Reviewer profile to assign before dispatch (default: reviewer-qa)",
-    )
-    p_request_review.add_argument(
-        "--summary",
-        default=None,
-        help="Structured review handoff summary for the closing worker run.",
-    )
-    p_request_review.add_argument(
-        "--metadata",
-        default=None,
-        help="JSON dict of structured facts for the review handoff/run.",
-    )
-    p_request_review.add_argument(
-        "--review-kind",
-        default=None,
-        help=(
-            "Optional non-QA routing kind such as foreground_judgment. "
-            "Leave unset for ordinary QA; true blockers should use `kanban block`."
-        ),
-    )
-    p_request_review.add_argument(
-        "--resume-mode",
-        default=None,
-        help="Optional downstream session resume mode, for example fork.",
-    )
-    p_request_review.add_argument(
-        "--fork",
-        action="store_true",
-        help="Shortcut for --resume-mode fork.",
-    )
-    p_request_review.add_argument(
-        "--review-subject-assignee",
-        default=None,
-        help="Original worker/assignee whose work is being reviewed.",
-    )
-    p_request_review.add_argument(
-        "--foreground-parent-session-id",
-        default=None,
-        help="Foreground parent session id to persist on the review task.",
-    )
-    p_request_review.add_argument(
-        "--foreground-fork-session-id",
-        default=None,
-        help="Foreground fork session id to persist on the review task.",
-    )
-    p_request_review.add_argument("--json", action="store_true")
     p_block.add_argument(
         "--kind", default=None, choices=sorted(kb.VALID_BLOCK_KINDS),
         help=(
@@ -960,12 +898,6 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_gc.add_argument("--log-retention-days", type=int, default=30,
                       help="Delete worker log files older than N days (default: 30)")
 
-    hidden_compat_actions = {"request-review"}
-    visible_actions = [
-        name for name in sub.choices if name not in hidden_compat_actions
-    ]
-    sub.metavar = "{" + ",".join(visible_actions) + "}"
-
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser
 
@@ -1064,7 +996,6 @@ def kanban_command(args: argparse.Namespace) -> int:
             "complete": _cmd_complete,
             "edit":     _cmd_edit,
             "block":    _cmd_block,
-            "request-review": _cmd_request_review,
             "schedule": _cmd_schedule,
             "unblock":  _cmd_unblock,
             "promote":  _cmd_promote,
@@ -2081,8 +2012,18 @@ def _cmd_complete(args: argparse.Namespace) -> int:
         except (ValueError, json.JSONDecodeError) as exc:
             print(f"kanban: --metadata: {exc}", file=sys.stderr)
             return 2
+    from hermes_cli import kanban_progress
+
+    policy = kanban_progress.load_progress_policy()
+    transitions = kb.ReadyTransitions()
+    effective_board = kb.get_current_board()
     failed: list[str] = []
-    with kb.connect_closing() as conn:
+    completed: list[str] = []
+    recovery_warnings: list[str] = []
+    with (
+        kb.scoped_current_board(effective_board),
+        kb.connect_closing(board=effective_board) as conn,
+    ):
         for tid in ids:
             if not kb.complete_task(
                 conn, tid,
@@ -2090,11 +2031,37 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 summary=summary,
                 metadata=metadata,
                 expected_run_id=_worker_run_id_for(tid),
+                transitions=transitions,
+                recompute_dependents=False,
             ):
                 failed.append(tid)
-                print(f"cannot complete {tid} (unknown id or terminal state)", file=sys.stderr)
+                print(
+                    f"cannot complete {tid} (unknown id or terminal state)",
+                    file=sys.stderr,
+                )
             else:
+                completed.append(tid)
                 print(f"Completed {tid}")
+                recovery_warnings.extend(
+                    kanban_progress.capture_completion_transitions(
+                        [tid],
+                        transitions=transitions,
+                        board=effective_board,
+                        conn=conn,
+                        policy=policy,
+                    )
+                )
+        if completed:
+            progress = kanban_progress.advance_transitions(
+                transitions,
+                board=effective_board,
+                conn=conn,
+                author="cli-completion-auto-decomposer",
+                policy=policy,
+                recovery_warnings=recovery_warnings,
+            )
+            for warning in progress["warnings"]:
+                print(f"kanban: {warning}", file=sys.stderr)
     return 0 if not failed else 1
 
 
@@ -2182,58 +2149,6 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 else:
                     print(f"Blocked {tid}{suffix}")
     return 0 if not failed else 1
-
-
-def _cmd_request_review(args: argparse.Namespace) -> int:
-    reason = " ".join(args.reason).strip() if args.reason else None
-    summary = getattr(args, "summary", None)
-    raw_meta = getattr(args, "metadata", None)
-    reviewer = getattr(args, "assignee", None) or "reviewer-qa"
-    resume_mode = getattr(args, "resume_mode", None)
-    if getattr(args, "fork", False) and not str(resume_mode or "").strip():
-        resume_mode = "fork"
-    as_json = bool(getattr(args, "json", False))
-    author = _profile_author()
-    metadata = None
-    if raw_meta:
-        try:
-            metadata = json.loads(raw_meta)
-            if not isinstance(metadata, dict):
-                raise ValueError("must be a JSON object")
-        except (ValueError, json.JSONDecodeError) as exc:
-            print(f"kanban: --metadata: {exc}", file=sys.stderr)
-            return 2
-    with kb.connect_closing() as conn:
-        if reason or summary:
-            note = reason or summary or ""
-            kb.add_comment(conn, args.task_id, author, f"REQUEST REVIEW: {note}")
-        ok = kb.request_review_task(
-            conn,
-            args.task_id,
-            reviewer=reviewer,
-            review_kind=getattr(args, "review_kind", None),
-            resume_mode=resume_mode,
-            review_subject_assignee=getattr(args, "review_subject_assignee", None),
-            foreground_parent_session_id=getattr(args, "foreground_parent_session_id", None),
-            foreground_fork_session_id=getattr(args, "foreground_fork_session_id", None),
-            reason=reason,
-            summary=summary,
-            metadata=metadata,
-            expected_run_id=_worker_run_id_for(args.task_id),
-        )
-        if not ok:
-            print(
-                f"cannot request review for {args.task_id} "
-                "(unknown id, terminal state, or stale run)",
-                file=sys.stderr,
-            )
-            return 1
-        task = kb.get_task(conn, args.task_id)
-    if as_json:
-        print(json.dumps({"ok": True, "task": _task_to_dict(task)}, indent=2))
-    else:
-        print(f"Review requested for {args.task_id} -> {reviewer}")
-    return 0
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:

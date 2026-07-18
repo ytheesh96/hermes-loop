@@ -122,7 +122,7 @@ Availability has three levels. Dispatcher-spawned task workers
 (`HERMES_KANBAN_TASK` set) receive five scoped lifecycle/message tools. With
 Loop enabled, unscoped foreground sessions receive the bounded re-entry set
 (`show`, `complete`, `comment`, `create`, `unblock`). Profiles that explicitly
-enable `kanban` receive the full eleven-tool orchestrator surface. Workers never
+enable `kanban` receive the full ten-tool orchestrator surface. Workers never
 receive graph-control tools. See [Kanban Multi-Agent](/user-guide/features/kanban)
 for the full workflow.
 
@@ -138,8 +138,6 @@ for the full workflow.
 | `kanban_link` | Link tasks with a parent → child dependency edge. Foreground/orchestrator-only. | profile with `kanban` toolset |
 | `kanban_unblock` | Return a blocked task to `ready`. Hidden from dispatcher-spawned task workers. | enabled Loop foreground or `kanban` profile |
 | `kanban_decompose` | Canonically decompose a triage task into routed work. Hidden from dispatcher-spawned task workers and the bounded Loop foreground surface. | profile with `kanban` toolset |
-| `kanban_resolve_blocker` | Resolve blocker-triage state by completing, returning, or creating visible follow-ups. | profile with `kanban` toolset |
-
 ## `project` toolset
 
 Tools for driving desktop [Projects](../user-guide/cli.md) — named, multi-folder workspaces. Registered when the `project` toolset is enabled (primarily the desktop app / dashboard surfaces).

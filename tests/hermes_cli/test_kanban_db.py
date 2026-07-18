@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
+import json
 import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import types
-import unittest.mock
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -137,6 +140,145 @@ def test_cross_process_init_lock_uses_windows_byte_range_lock(tmp_path, monkeypa
     ]
 
 
+def test_cross_process_writer_keeps_shared_wal_generation_linked(tmp_path):
+    """A short-lived worker must join, not replace, a live WAL generation."""
+    db_path = tmp_path / "shared-kanban.db"
+    first = kb.connect(db_path)
+    try:
+        kb.create_task(first, title="gateway-owned generation")
+        wal_path = Path(f"{db_path}-wal")
+        shm_path = Path(f"{db_path}-shm")
+        assert wal_path.exists()
+        assert shm_path.exists()
+        wal_inode = wal_path.stat().st_ino
+        shm_inode = shm_path.stat().st_ino
+
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; from pathlib import Path; "
+                    "from hermes_cli import kanban_db as kb; "
+                    "conn = kb.connect(Path(sys.argv[1])); "
+                    "kb.create_task(conn, title='worker write'); "
+                    "conn.close()"
+                ),
+                str(db_path),
+            ],
+            cwd=Path(__file__).parents[2],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert child.returncode == 0, child.stderr
+        assert wal_path.exists()
+        assert shm_path.exists()
+        assert wal_path.stat().st_ino == wal_inode
+        assert shm_path.stat().st_ino == shm_inode
+        assert {task.title for task in kb.list_tasks(first)} == {
+            "gateway-owned generation",
+            "worker write",
+        }
+    finally:
+        first.close()
+
+
+def test_explicit_init_with_live_connection_keeps_shared_wal_generation_linked(
+    tmp_path,
+):
+    """Explicit init must not cancel a live connection's SQLite locks."""
+    db_path = tmp_path / "explicit-init-shared-kanban.db"
+    anchor = kb.connect(db_path)
+    try:
+        kb.create_task(anchor, title="anchor write")
+        wal_path = Path(f"{db_path}-wal")
+        shm_path = Path(f"{db_path}-shm")
+        assert wal_path.exists()
+        assert shm_path.exists()
+        wal_inode = wal_path.stat().st_ino
+        shm_inode = shm_path.stat().st_ino
+
+        kb.init_db(db_path)
+
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; from pathlib import Path; "
+                    "from hermes_cli import kanban_db as kb; "
+                    "conn = kb.connect(Path(sys.argv[1])); "
+                    "kb.create_task(conn, title='child write'); "
+                    "conn.close()"
+                ),
+                str(db_path),
+            ],
+            cwd=Path(__file__).parents[2],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert child.returncode == 0, child.stderr
+        assert wal_path.exists()
+        assert shm_path.exists()
+        assert wal_path.stat().st_ino == wal_inode
+        assert shm_path.stat().st_ino == shm_inode
+        assert {task.title for task in kb.list_tasks(anchor)} == {
+            "anchor write",
+            "child write",
+        }
+    finally:
+        anchor.close()
+
+
+def test_concurrent_first_connect_validates_header_once_after_init_lock(
+    tmp_path,
+    monkeypatch,
+):
+    """The second first-connect contender must recheck the initialized cache."""
+    db_path = tmp_path / "concurrent-first-connect.db"
+    real_init_lock = kb._cross_process_init_lock
+    real_validate = kb._validate_sqlite_header
+    contenders_at_lock = threading.Event()
+    contender_count = 0
+    validation_count = 0
+    count_lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def tracked_init_lock(path):
+        nonlocal contender_count
+        with count_lock:
+            contender_count += 1
+            if contender_count == 2:
+                contenders_at_lock.set()
+        with real_init_lock(path):
+            yield
+
+    def blocking_validate(path):
+        nonlocal validation_count
+        with count_lock:
+            validation_count += 1
+        assert contenders_at_lock.wait(timeout=5)
+        return real_validate(path)
+
+    monkeypatch.setattr(kb, "_cross_process_init_lock", tracked_init_lock)
+    monkeypatch.setattr(kb, "_validate_sqlite_header", blocking_validate)
+
+    def connect_and_close():
+        conn = kb.connect(db_path)
+        conn.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(connect_and_close) for _ in range(2)]
+        for future in futures:
+            future.result(timeout=15)
+
+    assert contender_count == 2
+    assert validation_count == 1
+
+
 def test_connect_rejects_tls_record_in_sqlite_header(tmp_path, monkeypatch):
     """Kanban should classify TLS-looking page-0 clobbers before WAL setup."""
     home = tmp_path / ".hermes"
@@ -260,6 +402,49 @@ def test_create_task_with_parent_is_todo_until_parent_done(kanban_home):
         assert kb.get_task(conn, c).status == "todo"
         kb.complete_task(conn, p, result="ok")
         assert kb.get_task(conn, c).status == "ready"
+
+
+def test_completion_transitions_are_causal_not_a_board_wide_sweep(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        causal_parent = kb.create_task(conn, title="causal parent")
+        causal_child = kb.create_task(
+            conn,
+            title="causal child",
+            assignee="worker",
+            parents=[causal_parent],
+        )
+        stale_parent = kb.create_task(conn, title="stale parent")
+        stale_child = kb.create_task(
+            conn,
+            title="unrelated stale child",
+            assignee="worker",
+            parents=[stale_parent],
+        )
+        # Simulate a missed historical recompute on unrelated work.
+        conn.execute(
+            "UPDATE tasks SET status = 'done' WHERE id = ?",
+            (stale_parent,),
+        )
+        conn.commit()
+
+        transitions = kb.ReadyTransitions()
+        assert kb.complete_task(
+            conn,
+            causal_parent,
+            summary="causal parent done",
+            transitions=transitions,
+        )
+
+        assert kb.get_task(conn, causal_child).status == "ready"
+        assert kb.get_task(conn, stale_child).status == "todo"
+        assert transitions.newly_ready == [causal_child]
+
+        # Whole-board reconciliation still repairs a missed historical
+        # promotion without attributing it to this completion.
+        assert kb.recompute_ready(conn) == 1
+        assert kb.get_task(conn, stale_child).status == "ready"
 
 
 def test_skeleton_routes_to_triage_only_after_dependencies_finish(kanban_home):
@@ -2729,164 +2914,29 @@ def test_dispatch_promotes_ready_and_spawns(kanban_home, all_assignees_spawnable
         assert kb.get_task(conn, c).status == "running"
 
 
-def test_dispatch_orchestrator_task_runs_in_foreground_session_fork(
+def test_dispatch_orchestrator_task_uses_canonical_session_identity(
     kanban_home, all_assignees_spawnable
 ):
-    """Ready orchestrator tasks must use a compact foreground-session ref.
-
-    The dispatcher should hand the spawned orchestrator worker an isolated
-    compact packet with a profile-qualified parent-session reference. It must
-    not copy the live foreground transcript into the fork or append the Kanban
-    proof packet into the live parent foreground session.
-    """
-    from hermes_state import SessionDB
-
-    parent_session_id = "foreground-parent"
-    session_db = SessionDB()
-    session_db.create_session(parent_session_id, "cli")
-    session_db.append_message(parent_session_id, "user", "original user message")
-    parent_before = session_db.get_messages(parent_session_id)
     spawns = []
 
     def fake_spawn(task, workspace):
-        spawns.append((task.id, task.foreground_parent_session_id, task.foreground_fork_session_id))
+        spawns.append(task)
 
     with kb.connect() as conn:
         task_id = kb.create_task(
             conn,
             title="orchestrate next work",
-            body="Split this into child tasks",
             assignee="orchestrator",
-            session_id=parent_session_id,
+            session_id="foreground-session",
         )
-
         kb.dispatch_once(conn, spawn_fn=fake_spawn)
-        task = kb.get_task(conn, task_id)
-        assert task is not None
         events = kb.list_events(conn, task_id)
 
     assert len(spawns) == 1
-    assert task.foreground_parent_session_id == parent_session_id
-    assert task.foreground_fork_session_id
-    assert spawns[0] == (task_id, parent_session_id, task.foreground_fork_session_id)
-
-    fork = session_db.get_session(task.foreground_fork_session_id)
-    assert fork is not None
-    assert fork["parent_session_id"] == parent_session_id
-    assert '\"_branched_from\": \"foreground-parent\"' in (fork["model_config"] or "")
-
-    fork_messages = session_db.get_messages(task.foreground_fork_session_id)
-    assert [m["role"] for m in fork_messages] == ["user"]
-    packet = fork_messages[0]["content"]
-    assert "original user message" not in packet
-    assert "kanban_orchestrator_dispatch" in packet
-    assert '"parent_session_ref": "default/foreground-parent"' in packet
-    assert task_id in packet
-
-    assert session_db.get_messages(parent_session_id) == parent_before
-    audit_events = [e for e in events if e.kind == "orchestrator_fork_session"]
-    assert len(audit_events) == 1
-    assert audit_events[0].payload["task_id"] == task_id
-    assert audit_events[0].payload["parent_foreground_session_id"] == parent_session_id
-    assert audit_events[0].payload["fork_session_id"] == task.foreground_fork_session_id
-
-
-def test_dispatch_orchestrator_task_forks_into_separate_profile_db(
-    kanban_home, all_assignees_spawnable
-):
-    """Cross-profile orchestrator forks must not violate session FK constraints."""
-    from hermes_state import SessionDB
-
-    orchestrator_home = kanban_home / "profiles" / "orchestrator"
-    orchestrator_home.mkdir(parents=True)
-    parent_session_id = "foreground-parent-cross-profile"
-    foreground_db = SessionDB()
-    foreground_db.create_session(parent_session_id, "cli")
-    foreground_db.append_message(parent_session_id, "user", "secret parent body")
-    parent_before = foreground_db.get_messages(parent_session_id)
-    orchestrator_db = SessionDB(db_path=orchestrator_home / "state.db")
-    spawns = []
-
-    def fake_spawn(task, workspace):
-        spawns.append((task.id, task.foreground_parent_session_id, task.foreground_fork_session_id))
-
-    with kb.connect() as conn:
-        task_id = kb.create_task(
-            conn,
-            title="orchestrate from another profile",
-            body="Dispatch safely across profiles",
-            assignee="orchestrator",
-            session_id=parent_session_id,
-        )
-
-        kb.dispatch_once(conn, spawn_fn=fake_spawn)
-        task = kb.get_task(conn, task_id)
-        assert task is not None
-        events = kb.list_events(conn, task_id)
-
-    assert len(spawns) == 1
-    assert task.foreground_parent_session_id == parent_session_id
-    assert task.foreground_fork_session_id
-    fork = orchestrator_db.get_session(task.foreground_fork_session_id)
-    assert fork is not None
-    assert fork["parent_session_id"] == parent_session_id
-    parent_stub = orchestrator_db.get_session(parent_session_id)
-    assert parent_stub is not None
-    assert parent_stub["source"] == "kanban-orchestrator-parent"
-    assert task_id in (parent_stub["model_config"] or "")
-    fork_messages = orchestrator_db.get_messages(task.foreground_fork_session_id)
-    assert [m["role"] for m in fork_messages] == ["user"]
-    packet = fork_messages[0]["content"]
-    assert "secret parent body" not in packet
-    assert "kanban_orchestrator_dispatch" in packet
-    assert '"parent_session_ref": "default/foreground-parent-cross-profile"' in packet
-    assert foreground_db.get_messages(parent_session_id) == parent_before
-    assert [e.kind for e in events].count("orchestrator_fork_session") == 1
-
-
-def test_dispatch_orchestrator_review_task_reuses_single_fork_for_claimed_run(
-    kanban_home, all_assignees_spawnable
-):
-    """Duplicate spawn invocations for one claimed run must not make forks.
-
-    This covers the review-lane orchestrator path and the idempotency guard:
-    calling the fork preparation helper twice with the same claimed run returns
-    the same fork session and writes one audit event.
-    """
-    from hermes_state import SessionDB
-
-    parent_session_id = "review-parent"
-    session_db = SessionDB()
-    session_db.create_session(parent_session_id, "cli")
-    session_db.append_message(parent_session_id, "user", "review this blocker")
-
-    with kb.connect() as conn:
-        task_id = kb.create_task(
-            conn,
-            title="needs orchestrator review",
-            assignee="implementer",
-            session_id=parent_session_id,
-        )
-        assert kb.request_review_task(
-            conn,
-            task_id,
-            reviewer="orchestrator",
-            review_kind="foreground_judgment",
-            resume_mode="fork",
-            foreground_parent_session_id=parent_session_id,
-        )
-        claimed = kb.claim_review_task(conn, task_id)
-        assert claimed is not None
-
-        first = kb.ensure_orchestrator_fork_for_dispatch(conn, claimed)
-        second = kb.ensure_orchestrator_fork_for_dispatch(conn, first)
-        refreshed = kb.get_task(conn, task_id)
-        events = kb.list_events(conn, task_id)
-
-    assert first.foreground_fork_session_id == second.foreground_fork_session_id
-    assert refreshed.foreground_fork_session_id == first.foreground_fork_session_id
-    assert session_db.get_session(first.foreground_fork_session_id)["parent_session_id"] == parent_session_id
-    assert [e.kind for e in events].count("orchestrator_fork_session") == 1
+    assert spawns[0].session_id == "foreground-session"
+    assert not hasattr(spawns[0], "foreground_parent_session_id")
+    assert not hasattr(spawns[0], "foreground_fork_session_id")
+    assert all(event.kind != "orchestrator_fork_session" for event in events)
 
 
 def test_dispatch_spawn_failure_releases_claim(kanban_home, all_assignees_spawnable):
@@ -2950,6 +3000,419 @@ def test_dispatch_max_spawn_fills_remaining_capacity(
         assert spawns == [ready_a]
         assert kb.get_task(conn, ready_a).status == "running"
         assert kb.get_task(conn, ready_b).status == "ready"
+
+
+def test_dispatch_candidate_scope_spawns_only_selected_ready_and_review(
+    kanban_home, all_assignees_spawnable
+):
+    """A targeted fast path must not consume unrelated board work."""
+    spawns = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawns.append(task.id)
+        return 42
+
+    with kb.connect() as conn:
+        unrelated_ready = kb.create_task(
+            conn,
+            title="older high-priority ready",
+            assignee="alice",
+            priority=100,
+        )
+        selected_ready = kb.create_task(
+            conn,
+            title="selected ready",
+            assignee="bob",
+            priority=0,
+        )
+        unrelated_review = kb.create_task(
+            conn,
+            title="older high-priority review",
+            assignee="carol",
+            priority=100,
+        )
+        selected_review = kb.create_task(
+            conn,
+            title="selected review",
+            assignee="dana",
+            priority=0,
+        )
+        _set_task_status(conn, unrelated_review, "review")
+        _set_task_status(conn, selected_review, "review")
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=fake_spawn,
+            candidate_task_ids=[selected_review, selected_ready],
+        )
+
+        assert [row[0] for row in result.spawned] == [
+            selected_ready,
+            selected_review,
+        ]
+        assert spawns == [selected_ready, selected_review]
+        assert kb.get_task(conn, selected_ready).status == "running"
+        assert kb.get_task(conn, selected_review).status == "running"
+        assert kb.get_task(conn, unrelated_ready).status == "ready"
+        assert kb.get_task(conn, unrelated_review).status == "review"
+
+
+def test_exact_candidate_dispatch_skips_recovery_maintenance(
+    kanban_home,
+    all_assignees_spawnable,
+    monkeypatch,
+):
+    """An inline nudge must not pay for any whole-board recovery pass."""
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("exact dispatch entered recovery maintenance")
+
+    for name in (
+        "reap_worker_zombies",
+        "release_stale_claims",
+        "detect_stale_running",
+        "detect_crashed_workers",
+        "enforce_max_runtime",
+        "recompute_ready",
+    ):
+        monkeypatch.setattr(kb, name, forbidden)
+
+    with kb.connect() as conn:
+        candidate = kb.create_task(
+            conn,
+            title="exact candidate",
+            assignee="alice",
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            dry_run=True,
+            candidate_task_ids=[candidate],
+        )
+
+    assert result.spawned == [(candidate, "alice", "")]
+    assert result.reclaimed == 0
+    assert result.stale == []
+    assert result.crashed == []
+    assert result.timed_out == []
+    assert result.promoted == 0
+
+
+def test_exact_candidate_spawn_failure_keeps_claim_and_retry_semantics(
+    kanban_home,
+    all_assignees_spawnable,
+):
+    """The fast path still releases a failed claim through the shared guard."""
+
+    def fail_spawn(_task, _workspace):
+        raise RuntimeError("candidate spawn failed")
+
+    with kb.connect() as conn:
+        candidate = kb.create_task(
+            conn,
+            title="failing exact candidate",
+            assignee="alice",
+        )
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=fail_spawn,
+            candidate_task_ids=[candidate],
+            failure_limit=3,
+        )
+        task = kb.get_task(conn, candidate)
+
+    assert result.spawned == []
+    assert result.auto_blocked == []
+    assert task is not None
+    assert task.status == "ready"
+    assert task.claim_lock is None
+    assert task.current_run_id is None
+    assert task.consecutive_failures == 1
+    assert task.last_failure_error == "candidate spawn failed"
+
+
+def test_full_dispatch_keeps_recovery_maintenance(
+    kanban_home,
+    monkeypatch,
+):
+    """The polling/recovery tick still runs the complete repair sequence."""
+    calls = []
+
+    def record(name, value):
+        def inner(*_args, **_kwargs):
+            calls.append(name)
+            return value
+
+        return inner
+
+    crash_detector = record("crashed", ["crashed-task"])
+    crash_detector._last_auto_blocked = ["auto-blocked-task"]
+    crash_detector._last_rate_limited = ["rate-limited-task"]
+    monkeypatch.setattr(kb, "reap_worker_zombies", record("reap", []))
+    monkeypatch.setattr(kb, "release_stale_claims", record("reclaimed", 2))
+    monkeypatch.setattr(
+        kb,
+        "detect_stale_running",
+        record("stale", ["stale-task"]),
+    )
+    monkeypatch.setattr(kb, "detect_crashed_workers", crash_detector)
+    monkeypatch.setattr(
+        kb,
+        "enforce_max_runtime",
+        record("timed_out", ["timed-out-task"]),
+    )
+    monkeypatch.setattr(kb, "recompute_ready", record("promoted", 3))
+
+    with kb.connect() as conn:
+        result = kb.dispatch_once(conn, dry_run=True)
+
+    assert calls == [
+        "reap",
+        "reclaimed",
+        "stale",
+        "crashed",
+        "timed_out",
+        "promoted",
+    ]
+    assert result.reclaimed == 2
+    assert result.stale == ["stale-task"]
+    assert result.crashed == ["crashed-task"]
+    assert result.auto_blocked == ["auto-blocked-task"]
+    assert result.rate_limited == ["rate-limited-task"]
+    assert result.timed_out == ["timed-out-task"]
+    assert result.promoted == 3
+
+
+def test_exact_and_full_dispatch_candidate_results_are_byte_equivalent(
+    kanban_home,
+    all_assignees_spawnable,
+):
+    """With no repair work, both paths expose the same candidate result."""
+    with kb.connect() as conn:
+        ready = kb.create_task(
+            conn,
+            title="ready candidate",
+            assignee="alice",
+        )
+        review = kb.create_task(
+            conn,
+            title="review candidate",
+            assignee="bob",
+        )
+        _set_task_status(conn, review, "review")
+
+        full = kb.dispatch_once(conn, dry_run=True)
+        exact = kb.dispatch_once(
+            conn,
+            dry_run=True,
+            candidate_task_ids=[ready, review],
+        )
+
+    full_bytes = json.dumps(
+        asdict(full),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    exact_bytes = json.dumps(
+        asdict(exact),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    assert exact_bytes == full_bytes
+
+
+def test_exact_candidate_lookup_stays_indexed_with_many_unrelated_todos(
+    kanban_home,
+    all_assignees_spawnable,
+):
+    """A large unrelated backlog must not turn exact dispatch into a scan."""
+    with kb.connect() as conn:
+        candidate = kb.create_task(
+            conn,
+            title="exact candidate",
+            assignee="alice",
+        )
+        conn.executemany(
+            "INSERT INTO tasks "
+            "(id, title, assignee, status, priority, created_at) "
+            "VALUES (?, ?, ?, 'todo', 0, ?)",
+            (
+                (
+                    f"unrelated-{index:05d}",
+                    f"unrelated task {index}",
+                    "bob",
+                    index,
+                )
+                for index in range(10_000)
+            ),
+        )
+        conn.commit()
+
+        statements = []
+        conn.set_trace_callback(statements.append)
+        try:
+            result = kb.dispatch_once(
+                conn,
+                dry_run=True,
+                candidate_task_ids=[candidate],
+            )
+        finally:
+            conn.set_trace_callback(None)
+
+        query_plan = conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT id, assignee FROM tasks "
+            "WHERE status = 'ready' AND claim_lock IS NULL AND id IN (?) "
+            "ORDER BY priority DESC, created_at ASC",
+            (candidate,),
+        ).fetchall()
+
+    candidate_selects = [
+        statement
+        for statement in statements
+        if statement.startswith("SELECT id, assignee FROM tasks")
+        and "status = 'ready'" in statement
+    ]
+    assert result.spawned == [(candidate, "alice", "")]
+    assert len(candidate_selects) == 1
+    assert "id IN (" in candidate_selects[0]
+    assert any(
+        "SEARCH tasks USING INDEX sqlite_autoindex_tasks_1 (id=?)"
+        in row["detail"]
+        for row in query_plan
+    )
+
+
+def test_candidate_review_uses_default_assignee(
+    kanban_home,
+    all_assignees_spawnable,
+):
+    spawned = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawned.append((task.id, task.assignee))
+        return 42
+
+    with kb.connect() as conn:
+        review = kb.create_task(conn, title="unassigned review")
+        conn.execute(
+            "UPDATE tasks SET status = 'review', assignee = NULL WHERE id = ?",
+            (review,),
+        )
+        conn.commit()
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=fake_spawn,
+            candidate_task_ids=[review],
+            default_assignee="reviewer",
+        )
+        task = kb.get_task(conn, review)
+
+    assert result.auto_assigned_default == [review]
+    assert [task_id for task_id, _assignee, _path in result.spawned] == [
+        review
+    ]
+    assert spawned == [(review, "reviewer")]
+    assert task is not None
+    assert task.status == "running"
+    assert task.assignee == "reviewer"
+
+
+def test_dispatch_empty_candidate_scope_spawns_nothing(
+    kanban_home, all_assignees_spawnable
+):
+    """An explicit empty scope is not the legacy whole-board scan."""
+    spawns = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawns.append(task.id)
+        return 42
+
+    with kb.connect() as conn:
+        ready = kb.create_task(conn, title="ready", assignee="alice")
+        review = kb.create_task(conn, title="review", assignee="bob")
+        _set_task_status(conn, review, "review")
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=fake_spawn,
+            candidate_task_ids=[],
+        )
+
+        assert result.spawned == []
+        assert spawns == []
+        assert kb.get_task(conn, ready).status == "ready"
+        assert kb.get_task(conn, review).status == "review"
+
+
+def test_dispatch_combined_caps_fill_tighter_remaining_capacity(
+    kanban_home, all_assignees_spawnable
+):
+    """Existing workers count once when max_spawn and max_in_progress coexist."""
+    spawns = []
+
+    def fake_spawn(task, workspace):
+        spawns.append(task.id)
+
+    with kb.connect() as conn:
+        running_a = kb.create_task(conn, title="running-a", assignee="alice")
+        running_b = kb.create_task(conn, title="running-b", assignee="bob")
+        ready_a = kb.create_task(
+            conn, title="ready-a", assignee="carol", priority=10
+        )
+        ready_b = kb.create_task(
+            conn, title="ready-b", assignee="dana", priority=0
+        )
+        kb.claim_task(conn, running_a)
+        kb.claim_task(conn, running_b)
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=fake_spawn,
+            max_spawn=8,
+            max_in_progress=3,
+            candidate_task_ids=[ready_a, ready_b],
+        )
+
+        assert [row[0] for row in result.spawned] == [ready_a]
+        assert spawns == [ready_a]
+        assert kb.get_task(conn, ready_a).status == "running"
+        assert kb.get_task(conn, ready_b).status == "ready"
+
+
+def test_dispatch_dry_run_counts_would_be_spawns_toward_cap(
+    kanban_home, all_assignees_spawnable
+):
+    """Dry-run predicts the bounded frontier instead of every candidate."""
+    with kb.connect() as conn:
+        running = kb.create_task(conn, title="running", assignee="alice")
+        kb.claim_task(conn, running)
+        candidates = [
+            kb.create_task(
+                conn,
+                title=f"ready-{index}",
+                assignee="bob",
+                priority=3 - index,
+            )
+            for index in range(3)
+        ]
+
+        result = kb.dispatch_once(
+            conn,
+            dry_run=True,
+            max_spawn=10,
+            max_in_progress=3,
+            candidate_task_ids=candidates,
+        )
+
+        assert [row[0] for row in result.spawned] == candidates[:2]
+        assert [kb.get_task(conn, task_id).status for task_id in candidates] == [
+            "ready",
+            "ready",
+            "ready",
+        ]
 
 
 def test_dispatch_reclaims_stale_before_spawning(kanban_home):
@@ -4296,8 +4759,6 @@ class TestSharedBoardPaths:
             review_kind="foreground_judgment",
             resume_mode="fork",
             review_subject_assignee="implementer",
-            foreground_parent_session_id="parent-sess",
-            foreground_fork_session_id="fork-sess",
         )
         kb._default_spawn(task, str(tmp_path / "ws"))
 
@@ -4308,11 +4769,11 @@ class TestSharedBoardPaths:
         )
         assert env["HERMES_KANBAN_TASK"] == "t_dispatch_env"
         assert env["HERMES_KANBAN_BRANCH"] == "wt/t_dispatch_env"
-        assert env["HERMES_KANBAN_REVIEW_KIND"] == "foreground_judgment"
-        assert env["HERMES_KANBAN_RESUME_MODE"] == "fork"
-        assert env["HERMES_KANBAN_REVIEW_SUBJECT_ASSIGNEE"] == "implementer"
-        assert env["HERMES_FOREGROUND_PARENT_SESSION_ID"] == "parent-sess"
-        assert env["HERMES_FOREGROUND_FORK_SESSION_ID"] == "fork-sess"
+        assert "HERMES_KANBAN_REVIEW_KIND" not in env
+        assert "HERMES_KANBAN_RESUME_MODE" not in env
+        assert "HERMES_KANBAN_REVIEW_SUBJECT_ASSIGNEE" not in env
+        assert "HERMES_FOREGROUND_PARENT_SESSION_ID" not in env
+        assert "HERMES_FOREGROUND_FORK_SESSION_ID" not in env
 
 
 # ---------------------------------------------------------------------------
@@ -5064,214 +5525,6 @@ def test_claim_review_task_fails_when_already_claimed(kanban_home):
     assert second is None
 
 
-def test_request_review_task_moves_same_row_to_review(kanban_home):
-    """Implementation workers request QA on the same task row."""
-    with kb.connect() as conn:
-        t = kb.create_task(conn, title="review me", assignee="alice")
-        claimed = kb.claim_task(conn, t)
-        assert claimed is not None
-        assert kb.request_review_task(
-            conn,
-            t,
-            reviewer="reviewer-qa",
-            summary="implementation complete; verify tests",
-            metadata={"tests_run": ["pytest -q"]},
-            expected_run_id=claimed.current_run_id,
-        )
-        task = kb.get_task(conn, t)
-        run = kb.latest_run(conn, t)
-        events = kb.list_events(conn, t)
-
-    assert task.status == "review"
-    assert task.assignee == "reviewer-qa"
-    assert task.claim_lock is None
-    assert task.current_run_id is None
-    assert run is not None
-    assert run.outcome == "review_requested"
-    assert run.summary == "implementation complete; verify tests"
-    assert run.metadata["tests_run"] == ["pytest -q"]
-    assert run.metadata["review_subject_assignee"] == "alice"
-    assert events[-1].kind == "review_requested"
-
-
-def test_request_review_task_preserves_legacy_blocker_triage_metadata(kanban_home):
-    """DB backcompat preserves existing blocker-triage review rows."""
-    with kb.connect() as conn:
-        t = kb.create_task(conn, title="triage blocker", assignee="worker-a")
-        claimed = kb.claim_task(conn, t)
-        assert claimed is not None
-        assert kb.request_review_task(
-            conn,
-            t,
-            reviewer="orchestrator",
-            review_kind="blocker_triage",
-            resume_mode="fork",
-            review_subject_assignee="worker-a",
-            foreground_parent_session_id="parent-sess",
-            foreground_fork_session_id="fork-sess",
-            summary="decide how to route blocker",
-            metadata={"risk": "medium"},
-            expected_run_id=claimed.current_run_id,
-        )
-        task = kb.get_task(conn, t)
-        run = kb.latest_run(conn, t)
-        event = kb.list_events(conn, t)[-1]
-
-    assert task.status == "review"
-    assert task.assignee == "orchestrator"
-    assert task.review_kind == "blocker_triage"
-    assert task.resume_mode == "fork"
-    assert task.review_subject_assignee == "worker-a"
-    assert task.foreground_parent_session_id == "parent-sess"
-    assert task.foreground_fork_session_id == "fork-sess"
-    assert run is not None
-    assert run.metadata["risk"] == "medium"
-    assert run.metadata["review_kind"] == "blocker_triage"
-    assert run.metadata["resume_mode"] == "fork"
-    assert run.metadata["foreground_parent_session_id"] == "parent-sess"
-    assert run.metadata["foreground_fork_session_id"] == "fork-sess"
-    assert event.payload["review_kind"] == "blocker_triage"
-    assert event.payload["resume_mode"] == "fork"
-
-
-def test_resolve_blocker_triage_returns_same_task_to_original_assignee(kanban_home):
-    with kb.connect() as conn:
-        t = kb.create_task(conn, title="blocked implementation", assignee="worker-a")
-        assert kb.request_review_task(
-            conn,
-            t,
-            reviewer="orchestrator",
-            review_kind="blocker_triage",
-            review_subject_assignee="worker-a",
-            reason="tests need a narrower repro",
-        )
-        claimed = kb.claim_review_task(conn, t)
-        assert claimed is not None
-        result = kb.resolve_blocker_triage_task(
-            conn,
-            t,
-            action="return_to_worker",
-            actor="orchestrator",
-            instructions="Add the missing regression test and rerun targeted suite.",
-            expected_run_id=claimed.current_run_id,
-        )
-        task = kb.get_task(conn, t)
-        run = kb.latest_run(conn, t)
-        event = kb.list_events(conn, t)[-1]
-        comments = kb.list_comments(conn, t)
-
-    assert result["ok"] is True
-    assert result["outcome"] == "returned_to_worker"
-    assert task.status == "ready"
-    assert task.assignee == "worker-a"
-    assert task.review_kind is None
-    assert task.review_subject_assignee is None
-    assert run.outcome == "blocker_triage_routed"
-    assert event.kind == "blocker_triage_resolved"
-    assert event.payload["action"] == "return_to_worker"
-    assert comments[-1].body.startswith("BLOCKER TRIAGE:")
-
-
-def test_resolve_blocker_triage_creates_followups_as_upstream_work(kanban_home):
-    with kb.connect() as conn:
-        t = kb.create_task(conn, title="blocked implementation", assignee="worker-a")
-        assert kb.request_review_task(
-            conn,
-            t,
-            reviewer="orchestrator",
-            review_kind="blocker_triage",
-            review_subject_assignee="worker-a",
-            reason="needs specialist check",
-        )
-        claimed = kb.claim_review_task(conn, t)
-        assert claimed is not None
-        result = kb.resolve_blocker_triage_task(
-            conn,
-            t,
-            action="create_followups",
-            actor="orchestrator",
-            followups=[{"title": "Add missing fixture", "assignee": "worker-b"}],
-            reason="fixture work should happen first",
-            expected_run_id=claimed.current_run_id,
-        )
-        task = kb.get_task(conn, t)
-        child = kb.get_task(conn, result["created_cards"][0])
-        links = conn.execute(
-            "SELECT parent_id, child_id FROM task_links WHERE child_id = ?",
-            (t,),
-        ).fetchall()
-
-    assert result["ok"] is True
-    assert result["outcome"] == "followups_created"
-    assert task.status == "todo"
-    assert task.assignee == "worker-a"
-    assert child.assignee == "worker-b"
-    assert any(row["parent_id"] == child.id and row["child_id"] == t for row in links)
-
-
-def test_resolve_blocker_triage_routes_to_reviewer_qa(kanban_home):
-    with kb.connect() as conn:
-        t = kb.create_task(conn, title="blocked implementation", assignee="worker-a")
-        assert kb.request_review_task(
-            conn,
-            t,
-            reviewer="orchestrator",
-            review_kind="blocker_triage",
-            review_subject_assignee="worker-a",
-            reason="needs QA judgment",
-        )
-        claimed = kb.claim_review_task(conn, t)
-        assert claimed is not None
-        result = kb.resolve_blocker_triage_task(
-            conn,
-            t,
-            action="route_reviewer_qa",
-            actor="orchestrator",
-            reason="QA should verify acceptance evidence",
-            expected_run_id=claimed.current_run_id,
-        )
-        task = kb.get_task(conn, t)
-        run = kb.latest_run(conn, t)
-
-    assert result["ok"] is True
-    assert task.status == "review"
-    assert task.assignee == "reviewer-qa"
-    assert task.review_kind is None
-    assert run.outcome == "review_requested"
-
-
-def test_resolve_blocker_triage_rejects_removed_foreground_handoff_action(kanban_home):
-    with kb.connect() as conn:
-        t = kb.create_task(conn, title="blocked implementation", assignee="worker-a")
-        assert kb.request_review_task(
-            conn,
-            t,
-            reviewer="orchestrator",
-            review_kind="blocker_triage",
-            review_subject_assignee="worker-a",
-            reason="needs orchestrator judgment",
-        )
-        claimed = kb.claim_review_task(conn, t)
-        assert claimed is not None
-        with pytest.raises(ValueError, match="unsupported blocker triage action 'foreground_handoff'"):
-            kb.resolve_blocker_triage_task(
-                conn,
-                t,
-                action="foreground_handoff",
-                actor="orchestrator",
-                reason="product priority decision required",
-                metadata={"handoff_kind": "product_decision"},
-                expected_run_id=claimed.current_run_id,
-            )
-        task = kb.get_task(conn, t)
-        run = kb.latest_run(conn, t)
-
-    assert task is not None
-    assert run is not None
-    assert task.status == "running"
-    assert run.ended_at is None
-
-
 def test_link_tasks_rejects_review_required_parent_to_reviewer_child(kanban_home):
     """Blocked-for-review task -> reviewer child is a dependency deadlock."""
     with kb.connect() as conn:
@@ -5330,11 +5583,10 @@ def test_dispatch_reviewer_qa_review_keeps_sdlc_review_path(
 
     with kb.connect() as conn:
         t = kb.create_task(conn, title="ordinary QA", assignee="implementer")
-        assert kb.request_review_task(
-            conn,
-            t,
-            reviewer="reviewer-qa",
-            summary="verify acceptance evidence",
+        conn.execute(
+            "UPDATE tasks SET status = 'review', assignee = 'reviewer-qa' "
+            "WHERE id = ?",
+            (t,),
         )
         res = kb.dispatch_once(conn, spawn_fn=capture_spawn)
         task = kb.get_task(conn, t)
@@ -5361,13 +5613,10 @@ def test_dispatch_orchestrator_review_kind_does_not_force_sdlc_review(
 
     with kb.connect() as conn:
         t = kb.create_task(conn, title="triage blocker", assignee="worker-a")
-        assert kb.request_review_task(
-            conn,
-            t,
-            reviewer="orchestrator",
-            review_kind=review_kind,
-            resume_mode="fork",
-            summary="foreground should judge next step",
+        conn.execute(
+            "UPDATE tasks SET status = 'review', assignee = 'orchestrator', "
+            "review_kind = ?, resume_mode = 'fork' WHERE id = ?",
+            (review_kind, t),
         )
         res = kb.dispatch_once(conn, spawn_fn=capture_spawn)
 
@@ -5821,6 +6070,72 @@ def test_repeated_corrupt_open_reuses_single_backup(tmp_path):
     assert second_backup.exists()
 
 
+def test_corrupt_quarantine_skips_repeat_probe_until_file_identity_changes(
+    tmp_path, monkeypatch
+):
+    """Watcher retries should be O(1), while repaired/replaced files are reprobed."""
+    db_path = tmp_path / "kanban.db"
+    _write_corrupt_db(db_path)
+    kb.invalidate_db_caches(db_path)
+
+    sqlite_opens = 0
+    backups = 0
+    real_sqlite_connect = kb._sqlite_connect
+    real_backup = kb._backup_corrupt_db
+
+    def counted_connect(path):
+        nonlocal sqlite_opens
+        sqlite_opens += 1
+        return real_sqlite_connect(path)
+
+    def counted_backup(path):
+        nonlocal backups
+        backups += 1
+        return real_backup(path)
+
+    monkeypatch.setattr(kb, "_sqlite_connect", counted_connect)
+    monkeypatch.setattr(kb, "_backup_corrupt_db", counted_backup)
+
+    with pytest.raises(kb.KanbanDbCorruptError) as first:
+        kb.connect(db_path=db_path)
+    with pytest.raises(kb.KanbanDbCorruptError) as second:
+        kb.connect(db_path=db_path)
+    # Explicit init clears only the healthy/schema cache. It must not defeat
+    # quarantine for the same corrupt file generation.
+    with pytest.raises(kb.KanbanDbCorruptError):
+        kb.init_db(db_path=db_path)
+
+    assert sqlite_opens == 1
+    assert backups == 1
+    assert second.value.backup_path == first.value.backup_path
+
+    # Same inode and size, but changed bytes/mtime: the cache must expire.
+    before = db_path.stat()
+    with db_path.open("r+b") as handle:
+        handle.seek(-1, os.SEEK_END)
+        handle.write(b"\xA5")
+    os.utime(
+        db_path,
+        ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000),
+    )
+    with pytest.raises(kb.KanbanDbCorruptError):
+        kb.connect(db_path=db_path)
+    assert sqlite_opens == 2
+    assert backups == 2
+
+    # A healthy atomic replacement changes the inode and is allowed through.
+    repaired = tmp_path / "repaired.db"
+    raw = sqlite3.connect(repaired)
+    raw.execute("CREATE TABLE repair_marker (value TEXT)")
+    raw.execute("INSERT INTO repair_marker VALUES ('ok')")
+    raw.commit()
+    raw.close()
+    os.replace(repaired, db_path)
+
+    with kb.connect(db_path=db_path) as conn:
+        assert conn.execute("SELECT value FROM repair_marker").fetchone()[0] == "ok"
+
+
 def test_locked_healthy_db_does_not_classify_as_corrupt(tmp_path, monkeypatch):
     """A transient lock during the probe must not produce a .corrupt backup
     and must not be reported as :class:`KanbanDbCorruptError`. Raw sqlite
@@ -6092,69 +6407,31 @@ def test_write_txn_preserves_original_exception_when_rollback_fails(kanban_home)
         f"write_txn surfaced the rollback failure instead of the original "
         f"OperationalError; got {msg!r}"
     )
-def test_write_txn_healthy_commit_no_exception(tmp_path):
-    """Normal commit does not trigger the torn-extend check."""
+def test_write_txn_does_not_raw_open_live_database(tmp_path, monkeypatch):
+    """Routine writes leave SQLite as the only owner of DB file handles."""
     from hermes_cli.kanban_db import connect, write_txn
+
     db = tmp_path / "test.db"
     conn = connect(db_path=db)
-    # Should not raise
-    with write_txn(conn) as c:
-        c.execute(
-            "INSERT INTO tasks (id, title, assignee, status, priority, created_at) "
-            "VALUES ('t_test01', 'test task', 'tester', 'todo', 0, 1234567890)"
-        )
-    row = conn.execute("SELECT title FROM tasks WHERE id='t_test01'").fetchone()
-    assert row["title"] == "test task"
-    conn.close()
+    real_open = open
 
+    def guard_open(path, *args, **kwargs):
+        if Path(path).resolve() == db.resolve():
+            raise AssertionError("write_txn raw-opened the live SQLite database")
+        return real_open(path, *args, **kwargs)
 
-def test_write_txn_raises_on_truncated_file(tmp_path):
-    """A mocked smaller file size triggers the torn-extend check."""
-    from hermes_cli.kanban_db import connect, write_txn
-    db = tmp_path / "test.db"
-    conn = connect(db_path=db)
-    # Get actual page size so we can fake a smaller file
-    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
-    original_getsize = os.path.getsize
-
-    def fake_getsize(path):
-        # Return a size that implies at least 1 fewer page than header claims
-        real_size = original_getsize(path)
-        return max(0, real_size - page_size)
-
-    with pytest.raises(sqlite3.DatabaseError, match="torn-extend|page count mismatch"):
-        with unittest.mock.patch("hermes_cli.kanban_db.os.path.getsize", side_effect=fake_getsize):
+    try:
+        monkeypatch.setattr("builtins.open", guard_open)
+        for i in range(2):
             with write_txn(conn) as c:
                 c.execute(
-                    "INSERT INTO tasks (id, title, assignee, status, priority, created_at) "
-                    "VALUES ('t_test02', 'test task 2', 'tester', 'todo', 0, 1234567890)"
-                )
-    conn.close()
-
-
-def test_write_txn_post_commit_check_fires_every_call(tmp_path):
-    """The invariant check runs on every write_txn call."""
-    from hermes_cli.kanban_db import connect, write_txn
-    import hermes_cli.kanban_db as kanban_db_module
-    db = tmp_path / "test.db"
-    conn = connect(db_path=db)
-    call_count = 0
-    real_check = kanban_db_module._check_file_length_invariant
-
-    def counting_check(c):
-        nonlocal call_count
-        call_count += 1
-        real_check(c)
-
-    with unittest.mock.patch.object(kanban_db_module, "_check_file_length_invariant", counting_check):
-        for i in range(3):
-            with write_txn(conn) as c:
-                c.execute(
-                    f"INSERT INTO tasks (id, title, assignee, status, priority, created_at) "
+                    "INSERT INTO tasks "
+                    "(id, title, assignee, status, priority, created_at) "
                     f"VALUES ('t_fire{i:02d}', 'task {i}', 'tester', 'todo', 0, 1234567890)"
                 )
-    assert call_count == 3
-    conn.close()
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 2
+    finally:
+        conn.close()
 
 
 def test_connect_sets_wal_autocheckpoint_100(tmp_path):
@@ -6165,34 +6442,6 @@ def test_connect_sets_wal_autocheckpoint_100(tmp_path):
     val = conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
     assert val == 100
     conn.close()
-
-
-def test_write_txn_check_reads_correct_header_fields(tmp_path):
-    """Synthetic DB file with mismatched header page_count triggers the check."""
-    import struct
-    from hermes_cli.kanban_db import connect, _check_file_length_invariant
-    db = tmp_path / "synthetic.db"
-    conn = connect(db_path=db)
-    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
-    conn.close()
-    # Now corrupt the file: claim N pages but truncate to N-1 pages
-    with open(db, "rb") as f:
-        data = bytearray(f.read())
-    # Read current page_count from header bytes 28-31
-    real_page_count = struct.unpack(">I", data[28:32])[0]
-    if real_page_count < 2:
-        # Need at least 2 pages to fake a truncation
-        pytest.skip("DB too small for synthetic truncation test")
-    # Truncate to N-1 pages
-    truncated = bytes(data[: (real_page_count - 1) * page_size])
-    with open(db, "wb") as f:
-        f.write(truncated)
-    # Now open and check — should raise
-    # We can't use connect() because _validate_sqlite_header may block; use a raw connection
-    raw_conn = sqlite3.connect(str(db), isolation_level=None)
-    with pytest.raises(sqlite3.DatabaseError, match="torn-extend|page count mismatch"):
-        _check_file_length_invariant(raw_conn)
-    raw_conn.close()
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,8 @@ and the assignee-fallback logic.
 from __future__ import annotations
 
 import json as jsonlib
+import logging
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -133,6 +135,68 @@ def test_decompose_with_fanout_creates_children(kanban_home):
     assert c1.status == "todo"
     assert c0.assignee == "researcher"
     assert c1.assignee == "engineer"
+
+
+def test_decompose_emits_exclusive_phase_timings(kanban_home, caplog):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="specify me", triage=True)
+
+    llm_payload = jsonlib.dumps({
+        "fanout": False,
+        "rationale": "single task",
+        "title": "Specified task",
+        "body": "A worker-ready task specification.",
+        "assignee": "engineer",
+    })
+    patches = _patch_list_profiles(["orchestrator", "engineer"])
+    for item in patches:
+        item.start()
+    try:
+        with (
+            caplog.at_level(logging.INFO, logger=decomp.__name__),
+            _patch_aux_client(llm_payload),
+            _patch_extra_body(),
+        ):
+            outcome = decomp.decompose_task(tid, author="timing-test")
+    finally:
+        for item in patches:
+            item.stop()
+
+    assert outcome.ok, outcome.reason
+    timing_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == decomp.__name__
+        and record.getMessage().startswith("decompose timing:")
+    ]
+    assert len(timing_messages) == 1
+    message = timing_messages[0]
+    assert f"task_id={tid}" in message
+    assert "result=ok" in message
+    assert "model_attempts=1" in message
+    assert "json_valid=true" in message
+    timings = {
+        name: float(value)
+        for name, value in re.findall(
+            r"(preflight_ms|model_ms|parse_ms|apply_ms|total_ms)=([0-9.]+)",
+            message,
+        )
+    }
+    assert set(timings) == {
+        "preflight_ms",
+        "model_ms",
+        "parse_ms",
+        "apply_ms",
+        "total_ms",
+    }
+    assert all(value >= 0 for value in timings.values())
+    assert abs(
+        timings["total_ms"]
+        - sum(
+            timings[name]
+            for name in ("preflight_ms", "model_ms", "parse_ms", "apply_ms")
+        )
+    ) < 0.02
 
 
 def test_loop_safe_decompose_keeps_planning_task_and_options_scheduled(kanban_home):

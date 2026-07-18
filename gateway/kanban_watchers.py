@@ -35,9 +35,10 @@ _WORKFLOW_BOUNDARY_KINDS = frozenset(
     {"completed", "blocked", "block_loop_detected", "gave_up"}
 )
 _BOUNDED_EVIDENCE_GUIDANCE = (
-    "Use the supplied bounded event evidence and comments first. Call "
-    "kanban_show only when evidence is missing or stale, or when a fresh "
-    "read is needed before mutating workflow state. "
+    "Treat the supplied bounded event evidence and comments as authoritative "
+    "for this boundary. Call kanban_show only when required evidence is missing "
+    "or stale, or you have a concrete reason to believe state changed after the "
+    "event; do not reread merely because mutation follows. "
 )
 
 
@@ -54,6 +55,21 @@ def _same_notification_route(left: dict[str, Any], right: dict[str, Any]) -> boo
         == str(right.get("thread_id") or "")
         and str(left.get("notifier_profile") or "")
         == str(right.get("notifier_profile") or "")
+    )
+
+
+def _workflow_notification_route(
+    sub: dict[str, Any],
+    *,
+    default_profile: Optional[str],
+) -> tuple[str, str, str, str]:
+    """Return the effective FIFO route for one workflow subscription."""
+
+    return (
+        str(sub.get("notifier_profile") or default_profile or ""),
+        str(sub.get("platform") or "").lower(),
+        str(sub.get("chat_id") or ""),
+        str(sub.get("thread_id") or ""),
     )
 
 
@@ -175,7 +191,12 @@ def _workflow_wake_message(
                 "You own workflow mutation: create any review or follow-up "
                 "task with kanban_create, ask the user, or call "
                 'loop_graph(action="close") when no further work remains. '
-                "Close is guarded and refuses unfinished workflow members."
+                "Close is guarded and refuses unfinished workflow members. "
+                "When this evidence is sufficient, make one decision and call "
+                "kanban_create or loop_graph directly in this turn. Durable "
+                "Loop tasks are the plan: do not call kanban_show, update a "
+                "session todo, inspect source, import private handlers, or use "
+                "terminal as preflight."
             ),
         ]
     )
@@ -353,6 +374,8 @@ class GatewayKanbanWatchersMixin:
 
     _workflow_receipt_renew_interval_seconds = 60.0
     _workflow_notify_lease_seconds = 30 * 60
+    _workflow_notifier_max_concurrency = 8
+    _kanban_notifier_full_scan_seconds = 60.0
 
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver terminal events to users.
@@ -364,9 +387,11 @@ class GatewayKanbanWatchersMixin:
         then advances the cursor. When a task reaches a terminal state
         (``completed`` / ``archived``), the subscription is removed.
 
-        Runs in the gateway event loop; all SQLite work is pushed to a
-        thread via ``asyncio.to_thread`` so the loop never blocks on the
-        WAL lock. Failures in one tick don't stop subsequent ticks.
+        Runs in the gateway event loop; all polling SQLite work is pushed to a
+        worker thread so the loop never blocks on the WAL lock. Connections
+        are closed before control returns to the event loop; only cheap file
+        fingerprints are retained between ticks. Failures in one tick don't
+        stop subsequent ticks.
 
         **Multi-board:** iterates every board discovered on disk per
         tick. Subscriptions live inside each board's own DB and cannot
@@ -439,6 +464,8 @@ class GatewayKanbanWatchersMixin:
             notifier_profile = self._active_profile_name()
             self._kanban_notifier_profile = notifier_profile
 
+        board_states: dict[str, dict[str, Any]] = {}
+
         # Initial delay so the gateway can finish wiring adapters.
         await asyncio.sleep(5)
 
@@ -452,7 +479,85 @@ class GatewayKanbanWatchersMixin:
                     }
                     if not active_platforms:
                         logger.debug("kanban notifier: no connected adapters; skipping tick")
+                        board_states.clear()
                         return deliveries
+                    profile_adapters = getattr(self, "_profile_adapters", {})
+                    adapter_signature = (
+                        tuple(
+                            sorted(
+                                (
+                                    getattr(platform, "value", str(platform)).lower(),
+                                    id(adapter),
+                                )
+                                for platform, adapter in self.adapters.items()
+                            )
+                        ),
+                        tuple(
+                            sorted(
+                                (
+                                    str(profile),
+                                    getattr(platform, "value", str(platform)).lower(),
+                                    id(adapter),
+                                )
+                                for profile, adapters in profile_adapters.items()
+                                if adapters
+                                for platform, adapter in adapters.items()
+                            )
+                        ),
+                    )
+                    now_monotonic = time.monotonic()
+                    now_epoch = int(time.time())
+
+                    def _file_fingerprint(
+                        path: Path,
+                    ) -> tuple[int, int, int, int] | None:
+                        try:
+                            stat = path.stat()
+                        except OSError:
+                            return None
+                        return (
+                            int(stat.st_dev),
+                            int(stat.st_ino),
+                            int(stat.st_mtime_ns),
+                            int(stat.st_size),
+                        )
+
+                    def _db_fingerprint(
+                        path: str,
+                    ) -> tuple[
+                        tuple[int, int, int, int] | None,
+                        tuple[int, int, int, int] | None,
+                    ]:
+                        main = Path(path)
+                        return (
+                            _file_fingerprint(main),
+                            _file_fingerprint(
+                                main.with_name(f"{main.name}-wal")
+                            ),
+                        )
+
+                    def _claim_retry_deadline(
+                        conn: sqlite3.Connection,
+                    ) -> int | None:
+                        row = conn.execute(
+                            """
+                            SELECT MIN(pending_expires_at)
+                              FROM (
+                                    SELECT pending_expires_at
+                                      FROM kanban_notify_subs
+                                     WHERE pending_claim_token IS NOT NULL
+                                       AND pending_expires_at IS NOT NULL
+                                    UNION ALL
+                                    SELECT pending_expires_at
+                                      FROM workflow_notify_subs
+                                     WHERE pending_claim_token IS NOT NULL
+                                       AND pending_expires_at IS NOT NULL
+                              )
+                            """
+                        ).fetchone()
+                        if row is None or row[0] is None:
+                            return None
+                        return int(row[0])
 
                     # Enumerate every board on disk, but poll each resolved DB
                     # path once. Multiple slugs can point at the same DB when
@@ -478,12 +583,36 @@ class GatewayKanbanWatchersMixin:
                             )
                             continue
                         seen_db_paths.add(resolved_db_path)
+                        cacheable = not resolved_db_path.startswith("slug:")
+                        fingerprint = (
+                            _db_fingerprint(resolved_db_path)
+                            if cacheable
+                            else None
+                        )
+                        state = board_states.get(resolved_db_path)
+                        next_claim_retry_at = (
+                            state.get("next_claim_retry_at")
+                            if state is not None
+                            else None
+                        )
+                        unchanged = (
+                            cacheable
+                            and state is not None
+                            and state.get("fingerprint") == fingerprint
+                            and state.get("adapter_signature")
+                            == adapter_signature
+                            and now_monotonic
+                            < float(state.get("next_full_scan_at") or 0.0)
+                            and (
+                                next_claim_retry_at is None
+                                or now_epoch < int(next_claim_retry_at)
+                            )
+                        )
+                        if unchanged:
+                            continue
+                        conn = None
                         try:
                             conn = _kb.connect(board=slug)
-                        except Exception as exc:
-                            logger.debug("kanban notifier: cannot open board %s: %s", slug, exc)
-                            continue
-                        try:
                             # `connect()` runs the schema + idempotent migration
                             # on first open per process, so an explicit
                             # `init_db()` here would be redundant. Worse:
@@ -714,12 +843,62 @@ class GatewayKanbanWatchersMixin:
                                         root_route_owned_event_ids
                                     ),
                                 })
+                            next_claim_retry_at = _claim_retry_deadline(conn)
+                        except Exception as exc:
+                            # A failed full pass must never poison the unchanged
+                            # cache. Retry it on the next notifier interval.
+                            board_states.pop(resolved_db_path, None)
+                            logger.debug(
+                                "kanban notifier: cannot scan board %s: %s",
+                                slug,
+                                exc,
+                            )
+                            continue
                         finally:
-                            conn.close()
+                            if conn is not None:
+                                try:
+                                    conn.close()
+                                except Exception:
+                                    pass
+                        if cacheable:
+                            # Store the generation observed before the scan.
+                            # If another writer commits during the scan, the
+                            # next tick sees the changed fingerprint and cannot
+                            # skip that new work.
+                            board_states[resolved_db_path] = {
+                                "fingerprint": fingerprint,
+                                "adapter_signature": adapter_signature,
+                                "next_full_scan_at": (
+                                    now_monotonic
+                                    + float(
+                                        self._kanban_notifier_full_scan_seconds
+                                    )
+                                ),
+                                "next_claim_retry_at": next_claim_retry_at,
+                            }
+                        else:
+                            board_states.pop(resolved_db_path, None)
+                    for stale_path in set(board_states) - seen_db_paths:
+                        board_states.pop(stale_path, None)
                     return deliveries
 
                 deliveries = await asyncio.to_thread(_collect)
+                workflow_deliveries = [
+                    delivery
+                    for delivery in deliveries
+                    if delivery.get("delivery_kind") == "workflow"
+                ]
+                if workflow_deliveries:
+                    await self._deliver_kanban_workflow_routes(
+                        deliveries=workflow_deliveries,
+                        platform_type=_Platform,
+                        notifier_profile=notifier_profile,
+                        fail_counts=sub_fail_counts,
+                        max_send_failures=MAX_SEND_FAILURES,
+                    )
                 for d in deliveries:
+                    if d.get("delivery_kind") == "workflow":
+                        continue
                     sub = d["sub"]
                     task = d["task"]
                     board_slug = d.get("board")
@@ -768,16 +947,6 @@ class GatewayKanbanWatchersMixin:
                             d.get("old_cursor", 0),
                             d.get("claim_token"),
                             board_slug,
-                        )
-                        continue
-                    if d.get("delivery_kind") == "workflow":
-                        await self._deliver_kanban_workflow_batch(
-                            delivery=d,
-                            adapter=adapter,
-                            platform=plat,
-                            route_profile=route_profile,
-                            fail_counts=sub_fail_counts,
-                            max_send_failures=MAX_SEND_FAILURES,
                         )
                         continue
                     title = (task.title if task else sub["task_id"])[:120]
@@ -1258,6 +1427,124 @@ class GatewayKanbanWatchersMixin:
                 if not self._running:
                     return
                 await asyncio.sleep(1)
+
+    async def _deliver_kanban_workflow_routes(
+        self,
+        *,
+        deliveries: list[dict[str, Any]],
+        platform_type: Any,
+        notifier_profile: Optional[str],
+        fail_counts: dict[tuple, int],
+        max_send_failures: int,
+    ) -> None:
+        """Deliver workflow batches concurrently while preserving route FIFO."""
+
+        route_groups: dict[
+            tuple[str, str, str, str],
+            list[dict[str, Any]],
+        ] = {}
+        for delivery in deliveries:
+            route = _workflow_notification_route(
+                delivery["sub"],
+                default_profile=notifier_profile,
+            )
+            route_groups.setdefault(route, []).append(delivery)
+
+        concurrency = max(
+            1,
+            int(
+                getattr(
+                    self,
+                    "_workflow_notifier_max_concurrency",
+                    8,
+                )
+            ),
+        )
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _deliver_one(delivery: dict[str, Any]) -> None:
+            sub = delivery["sub"]
+            board = delivery.get("board")
+            platform_str = str(sub.get("platform") or "").lower()
+            try:
+                platform = platform_type(platform_str)
+            except ValueError:
+                # Unknown persisted platform strings are non-retryable.
+                # ACK the exact lease so they do not replay forever.
+                await asyncio.to_thread(
+                    self._kanban_advance,
+                    sub,
+                    delivery["cursor"],
+                    delivery.get("claim_token"),
+                    board,
+                )
+                return
+
+            sub_profile = str(sub.get("notifier_profile") or "").strip()
+            route_profile = sub_profile or None
+            if (
+                route_profile
+                and route_profile == str(notifier_profile or "").strip()
+            ):
+                route_profile = None
+            adapter = self._authorization_adapter(
+                platform,
+                route_profile,
+            )
+            if adapter is None:
+                logger.debug(
+                    "kanban notifier: adapter %s disconnected before "
+                    "workflow delivery for %s; rewinding claim",
+                    platform_str,
+                    delivery.get("workflow_id"),
+                )
+                await asyncio.to_thread(
+                    self._kanban_rewind,
+                    sub,
+                    delivery["cursor"],
+                    delivery.get("old_cursor", 0),
+                    delivery.get("claim_token"),
+                    board,
+                )
+                return
+            await self._deliver_kanban_workflow_batch(
+                delivery=delivery,
+                adapter=adapter,
+                platform=platform,
+                route_profile=route_profile,
+                fail_counts=fail_counts,
+                max_send_failures=max_send_failures,
+            )
+
+        async def _deliver_route(
+            route: tuple[str, str, str, str],
+            route_deliveries: list[dict[str, Any]],
+        ) -> None:
+            async with semaphore:
+                for delivery in route_deliveries:
+                    try:
+                        await _deliver_one(delivery)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # Keep the exact lease held: an unexpected failure may
+                        # have happened after the wake was queued. Stop this
+                        # route so a later workflow cannot overtake it, while
+                        # independent routes continue.
+                        logger.exception(
+                            "kanban notifier: workflow route %s failed while "
+                            "delivering %s; retaining lease",
+                            route,
+                            delivery.get("workflow_id"),
+                        )
+                        break
+
+        await asyncio.gather(
+            *(
+                _deliver_route(route, route_deliveries)
+                for route, route_deliveries in route_groups.items()
+            )
+        )
 
     async def _deliver_kanban_workflow_batch(
         self,
@@ -2085,18 +2372,38 @@ class GatewayKanbanWatchersMixin:
                 or "database disk image is malformed" in msg
             )
 
-        def _tick_once_for_board(slug: str) -> "Optional[object]":
-            """Run one dispatch_once for a specific board.
+        def _tick_once_for_board(
+            slug: str,
+        ) -> "tuple[Optional[object], bool]":
+            """Run one dispatch and health probe for a specific board.
 
             Runs in a worker thread via `asyncio.to_thread`. `board=slug`
             is passed through `dispatch_once` so `resolve_workspace` and
-            `_default_spawn` see the right paths. The per-board DB is
-            opened explicitly so concurrent boards never share a
-            connection handle or accidentally claim across each other.
+            `_default_spawn` see the right paths. The spawnable-pending
+            health state is read before this same connection closes, avoiding
+            a second open and a second board enumeration each tick.
             """
             conn = None
             fingerprint = _board_db_fingerprint(slug)
             disabled_entry = disabled_corrupt_boards.get(slug)
+
+            def _spawnable_pending(
+                board_conn: sqlite3.Connection,
+            ) -> bool:
+                try:
+                    return bool(
+                        _kb.has_spawnable_ready(board_conn)
+                        or _kb.has_spawnable_review(board_conn)
+                    )
+                except Exception:
+                    # Health telemetry is best-effort and must not discard a
+                    # valid dispatch result.
+                    logger.debug(
+                        "kanban dispatcher: health probe failed on board %s",
+                        slug,
+                        exc_info=True,
+                    )
+                    return False
 
             def _foreground_session_busy(session_id: str) -> bool:
                 session_id = str(session_id or "")
@@ -2135,7 +2442,7 @@ class GatewayKanbanWatchersMixin:
                     disabled_fingerprint == fingerprint
                     and age < CORRUPT_BOARD_RETRY_AFTER_SECONDS
                 ):
-                    return None
+                    return None, False
                 if disabled_fingerprint == fingerprint:
                     logger.info(
                         "kanban dispatcher: board %s database fingerprint unchanged "
@@ -2167,7 +2474,8 @@ class GatewayKanbanWatchersMixin:
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
                 )
-                return result
+                ready_pending = _spawnable_pending(conn)
+                return result, ready_pending
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):
                     disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())
@@ -2180,9 +2488,9 @@ class GatewayKanbanWatchersMixin:
                         slug,
                         fingerprint[0],
                     )
-                    return None
+                    return None, False
                 logger.exception("kanban dispatcher: tick failed on board %s", slug)
-                return None
+                return None, False
             except Exception as exc:
                 if _is_corrupt_board_db_error(exc):
                     disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())
@@ -2195,9 +2503,9 @@ class GatewayKanbanWatchersMixin:
                         slug,
                         fingerprint[0],
                     )
-                    return None
+                    return None, False
                 logger.exception("kanban dispatcher: tick failed on board %s", slug)
-                return None
+                return None, False
             finally:
                 if conn is not None:
                     try:
@@ -2205,57 +2513,23 @@ class GatewayKanbanWatchersMixin:
                     except Exception:
                         pass
 
-        def _tick_once() -> "list[tuple[str, Optional[object]]]":
-            """Run one dispatch_once per board. Returns (slug, result) pairs.
-
-            Enumerating boards on every tick keeps the dispatcher honest
-            when users create a new board mid-run: no restart required,
-            the next tick picks it up automatically.
-            """
+        def _active_boards() -> list[dict[str, Any]]:
+            """Return the one authoritative board snapshot for this tick."""
             try:
-                boards = _kb.list_boards(include_archived=False)
+                return _kb.list_boards(include_archived=False)
             except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-            out: list[tuple[str, "Optional[object]"]] = []
+                return [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+
+        def _tick_once(
+            boards: list[dict[str, Any]],
+        ) -> "list[tuple[str, Optional[object], bool]]":
+            """Dispatch each board and return its already-probed health."""
+            out: list[tuple[str, "Optional[object]", bool]] = []
             for b in boards:
                 slug = b.get("slug") or _kb.DEFAULT_BOARD
-                out.append((slug, _tick_once_for_board(slug)))
+                result, ready_pending = _tick_once_for_board(slug)
+                out.append((slug, result, ready_pending))
             return out
-
-        def _ready_nonempty() -> bool:
-            """Cheap probe: is there at least one ready+assigned+unclaimed
-            task on ANY board whose assignee maps to a real Hermes profile
-            (i.e. one the dispatcher would actually spawn for)?
-
-            Tasks assigned to control-plane lanes (e.g. ``orion-cc``,
-            ``orion-research``) are pulled by terminals via
-            ``claim_task`` directly and never spawnable, so a queue full
-            of those is "correctly idle", not "stuck". Filtering them out
-            here keeps the stuck-warn fire only on real failures (broken
-            PATH, missing venv, credential loss for a real Hermes profile).
-            """
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-            for b in boards:
-                slug = b.get("slug") or _kb.DEFAULT_BOARD
-                conn = None
-                try:
-                    conn = _kb.connect(board=slug)
-                    if _kb.has_spawnable_ready(conn):
-                        return True
-                    if _kb.has_spawnable_review(conn):
-                        return True
-                except Exception:
-                    continue
-                finally:
-                    if conn is not None:
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
-            return False
 
         # Auto-decompose: turn fresh triage tasks into ready workgraphs
         # before the dispatcher fans out workers. Gated by
@@ -2276,7 +2550,10 @@ class GatewayKanbanWatchersMixin:
             """Re-resolve (enabled, per_tick) from current config each tick."""
             return _resolve_auto_decompose_settings(_load_config)
 
-        def _auto_decompose_tick(auto_decompose_per_tick: int) -> int:
+        def _auto_decompose_tick(
+            auto_decompose_per_tick: int,
+            boards: list[dict[str, Any]],
+        ) -> int:
             """Run the auto-decomposer for up to N triage tasks across all
             boards. Returns the number of triage tasks that were
             successfully decomposed or specified this tick.
@@ -2288,23 +2565,16 @@ class GatewayKanbanWatchersMixin:
                     "kanban auto-decompose: import failed (%s); skipping", exc,
                 )
                 return 0
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
             attempted = 0
             successes = 0
             for b in boards:
                 slug = b.get("slug") or _kb.DEFAULT_BOARD
                 if attempted >= auto_decompose_per_tick:
                     break
-                # Pin this board for the duration of the call — same
-                # pattern as the dashboard specify endpoint. The
-                # decomposer module connects with no board kwarg and
-                # relies on the env var.
-                prev_env = os.environ.get("HERMES_KANBAN_BOARD")
-                try:
-                    os.environ["HERMES_KANBAN_BOARD"] = slug
+                # Pin this board only in the current worker context. An LLM
+                # specification can take minutes; mutating the process-wide
+                # environment here would misroute unrelated gateway threads.
+                with _kb.scoped_current_board(slug):
                     try:
                         triage_ids = _decomp.list_triage_ids()
                     except Exception as exc:
@@ -2346,11 +2616,6 @@ class GatewayKanbanWatchersMixin:
                                 "kanban auto-decompose [%s]: %s skipped: %s",
                                 slug, tid, outcome.reason,
                             )
-                finally:
-                    if prev_env is None:
-                        os.environ.pop("HERMES_KANBAN_BOARD", None)
-                    else:
-                        os.environ["HERMES_KANBAN_BOARD"] = prev_env
             return successes
 
         logger.info(
@@ -2374,12 +2639,19 @@ class GatewayKanbanWatchersMixin:
                 # Re-read the auto-decompose toggle live each tick so a user
                 # flipping kanban.auto_decompose=false to STOP runaway fan-out
                 # takes effect on the next tick, not on gateway restart (#49638).
+                boards = await asyncio.to_thread(_active_boards)
                 _ad_enabled, _ad_per_tick = _read_auto_decompose_settings()
                 if _ad_enabled:
-                    await asyncio.to_thread(_auto_decompose_tick, _ad_per_tick)
-                results = await asyncio.to_thread(_tick_once)
+                    await asyncio.to_thread(
+                        _auto_decompose_tick,
+                        _ad_per_tick,
+                        boards,
+                    )
+                results = await asyncio.to_thread(_tick_once, boards)
                 any_spawned = False
-                for slug, res in (results or []):
+                ready_pending = False
+                for slug, res, board_ready_pending in (results or []):
+                    ready_pending = ready_pending or board_ready_pending
                     if res is not None and getattr(res, "spawned", None):
                         any_spawned = True
                         # Quiet by default — only log when something actually
@@ -2395,8 +2667,8 @@ class GatewayKanbanWatchersMixin:
                             res.promoted,
                             len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
                         )
-                # Health telemetry (aggregate across boards)
-                ready_pending = await asyncio.to_thread(_ready_nonempty)
+                # Health telemetry is aggregated from the connections that
+                # already performed dispatch above.
                 if ready_pending and not any_spawned:
                     bad_ticks += 1
                 else:

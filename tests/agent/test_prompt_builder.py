@@ -3,6 +3,7 @@
 import builtins
 import importlib
 import logging
+from pathlib import Path
 import re
 import sys
 
@@ -96,14 +97,39 @@ class TestGuidanceConstants:
     def test_kanban_foreground_guidance_owns_graph_mutation(self):
         assert "You own workflow decisions and graph mutation" in KANBAN_FOREGROUND_GUIDANCE
         assert "`kanban_show(task_id=...)`" in KANBAN_FOREGROUND_GUIDANCE
-        assert "only when evidence is missing, stale" in KANBAN_FOREGROUND_GUIDANCE
+        assert "authoritative for that boundary" in KANBAN_FOREGROUND_GUIDANCE
+        assert (
+            "only when required evidence is missing or stale"
+            in KANBAN_FOREGROUND_GUIDANCE
+        )
         assert "read every changed task" not in KANBAN_FOREGROUND_GUIDANCE
         assert "`kanban_create(...)`" in KANBAN_FOREGROUND_GUIDANCE
+        assert "directly in the first model round" in KANBAN_FOREGROUND_GUIDANCE
+        assert "built-in foreground contract is complete" in (
+            KANBAN_FOREGROUND_GUIDANCE
+        )
+        assert "do not load skills, related recipes" in KANBAN_FOREGROUND_GUIDANCE
+        assert "adjacent Kanban/Hermes guidance" in KANBAN_FOREGROUND_GUIDANCE
+        assert "unless the direct native call is blocked" in (
+            KANBAN_FOREGROUND_GUIDANCE
+        )
         assert "parents=[...]" in KANBAN_FOREGROUND_GUIDANCE
         assert "coalesced until automatic work reaches" in KANBAN_FOREGROUND_GUIDANCE
         assert "closure refuses unfinished members" in KANBAN_FOREGROUND_GUIDANCE
+        assert "Call `loop_graph` directly" in KANBAN_FOREGROUND_GUIDANCE
+        assert "never inspect source" in KANBAN_FOREGROUND_GUIDANCE
+        assert (
+            "never duplicate them in a session todo list"
+            in KANBAN_FOREGROUND_GUIDANCE
+        )
+        assert "same model round" in KANBAN_FOREGROUND_GUIDANCE
         assert "let its assigned worker execute it" in KANBAN_FOREGROUND_GUIDANCE
         assert "Unknown assignees remain ready and never dispatch" in KANBAN_FOREGROUND_GUIDANCE
+        assert (
+            "explicitly supplied by the user is already confirmed"
+            in KANBAN_FOREGROUND_GUIDANCE
+        )
+        assert "never run `hermes profile list` for it" in KANBAN_FOREGROUND_GUIDANCE
         assert "Never use a blocked task as a parent" in KANBAN_FOREGROUND_GUIDANCE
         assert "resolution/review work without parents" in KANBAN_FOREGROUND_GUIDANCE
 
@@ -113,6 +139,13 @@ class TestGuidanceConstants:
         assert "`kanban_decompose(task_id=...)`" in KANBAN_ORCHESTRATOR_GUIDANCE
         assert "`kanban_link(...)`" in KANBAN_ORCHESTRATOR_GUIDANCE
         assert "configured profile" in KANBAN_ORCHESTRATOR_GUIDANCE
+        assert "explicitly named by the user is already confirmed" in (
+            KANBAN_ORCHESTRATOR_GUIDANCE
+        )
+        assert "do not run `hermes profile list` for it" in (
+            KANBAN_ORCHESTRATOR_GUIDANCE
+        )
+        assert "Do not repeat those reads" in KANBAN_ORCHESTRATOR_GUIDANCE
         assert "`loop_graph(action=\"close\")`" in KANBAN_ORCHESTRATOR_GUIDANCE
         for retired in (
             "kanban_request_review",
@@ -121,6 +154,20 @@ class TestGuidanceConstants:
             "kanban_resolve_handoff",
         ):
             assert retired not in KANBAN_ORCHESTRATOR_GUIDANCE
+
+    def test_kanban_orchestrator_skill_trusts_user_supplied_assignee(self):
+        skill = (
+            Path(__file__).parents[2]
+            / "skills"
+            / "devops"
+            / "kanban-orchestrator"
+            / "SKILL.md"
+        ).read_text(encoding="utf-8")
+
+        assert "is already user-confirmed" in skill
+        assert "do not run `hermes profile list`" in skill
+        assert "discover available profiles only for unassigned work" in skill
+        assert "discover available profiles before planning" not in skill
 
     def test_memory_guidance_discourages_task_logs(self):
         assert "durable facts" in MEMORY_GUIDANCE
@@ -493,6 +540,26 @@ class TestBuildSkillsSystemPrompt:
         assert "python-debug" in result
         assert "Debug Python scripts" in result
         assert "available_skills" in result
+
+    def test_mandatory_skills_prompt_honors_declared_native_fast_path(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "general" / "example"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: example\ndescription: Example workflow\n---\n"
+        )
+
+        result = build_skills_system_prompt()
+
+        assert "If a skill matches or is even partially relevant" in result
+        assert "Narrow native-fast-path exception" in result
+        assert "another system guidance block explicitly declares" in result
+        assert "Do not load matching, partially related, or adjacent skills" in result
+        assert "unless the direct native call is blocked" in result
+        assert "otherwise every mandatory matching rule above still applies" in result
+        assert "Outside the explicit native-fast-path exception" in result
 
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))

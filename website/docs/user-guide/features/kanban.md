@@ -21,13 +21,14 @@ The board has two front doors, both backed by the same `~/.hermes/kanban.db`:
   session keeps five bounded re-entry controls: `kanban_show`,
   `kanban_complete`, `kanban_comment`, `kanban_create`, and `kanban_unblock`.
   Profiles that explicitly enable `kanban` receive the full orchestrator
-  surface, including listing, linking, decomposition, and blocker resolution.
+  surface, including listing, linking, decomposition, and committed follow-up
+  task creation.
   The model calls these tools directly, *not* by shelling out to
   `hermes kanban`. See
   [How workers interact with the board](#how-workers-interact-with-the-board).
 - **You (and scripts, and cron) drive the board through `hermes kanban …`** on the CLI, `/kanban …` as a slash command, or the dashboard. These are for humans and automation — the places without a tool-calling model behind them.
 
-Both surfaces route through the same `kanban_db` layer, so reads see a consistent view and writes can't drift. The rest of this page shows CLI examples because they're easy to copy-paste. The model-facing surface is intentionally smaller; compatibility CLI verbs such as `request-review` do not imply a corresponding model tool.
+Both surfaces route through the same `kanban_db` layer, so reads see a consistent view and writes can't drift. The rest of this page shows CLI examples because they're easy to copy-paste. The model-facing surface is intentionally smaller.
 
 This is the shape that covers the workloads `delegate_task` can't:
 
@@ -330,8 +331,8 @@ kanban_create(
 
 The foreground commits the graph, then the assigned workers execute it. The
 "(Orchestrators)" tools — `kanban_list`, `kanban_create`,
-`kanban_link`, `kanban_unblock`, `kanban_decompose`,
-`kanban_resolve_blocker`, and `kanban_comment` on foreign tasks — are
+`kanban_link`, `kanban_unblock`, `kanban_decompose`, and `kanban_comment` on
+foreign tasks — are
 available through the same toolset. Dispatcher-spawned workers do not receive
 graph-control tools, so the ownership split is enforced by the schema rather
 than being only a prompt convention.
@@ -584,6 +585,7 @@ Config knobs (all under `kanban:` in `~/.hermes/config.yaml`):
 |---|---|---|
 | `auto_decompose` | `true` | Dispatcher auto-runs the decomposer every tick. |
 | `auto_decompose_per_tick` | `3` | Cap on decompositions per dispatcher tick. Excess defers to the next tick. |
+| `specification_concurrency` | `2` | Maximum independent post-commit specification calls that overlap. Values are clamped to 1–3; result order and the final exact dispatch remain deterministic. |
 | `orchestrator_profile` | `""` | Profile assigned to the original decomposition-shell task after fan-out. Empty = fall back to active default profile. |
 | `default_assignee` | `""` | Where a child task lands when the LLM picks an unknown profile. Empty = fall back to active default. |
 | `auto_subscribe_on_create` | `true` | When foreground creates a Loop/Kanban workflow from a persistent gateway or TUI session, subscribe the originating route to that internal workflow. One cursor receives completion/non-dependency-block/give-up boundaries from present and future member tasks. Set to `false` to require explicit notification subscription management. |

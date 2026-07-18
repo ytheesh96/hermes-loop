@@ -149,8 +149,6 @@ export interface TenantLoopTask {
   review_kind?: null | string
   resume_mode?: null | string
   review_subject_assignee?: null | string
-  foreground_parent_session_id?: null | string
-  foreground_fork_session_id?: null | string
   started_at?: null | number
   status: string
   suggested_owner?: null | string
@@ -254,8 +252,6 @@ export interface LoopRow {
   reviewSubjectAssignee?: null | string
   result?: null | string
   sourceSessionId?: null | string
-  foregroundParentSessionId?: null | string
-  foregroundForkSessionId?: null | string
   status: string
   suggestedOwner?: null | string
   specificationFailure?: null | LoopSpecificationFailure
@@ -647,8 +643,6 @@ function tenantRowFromTask(
     reviewSubjectAssignee: task.review_subject_assignee,
     result: task.result,
     sourceSessionId: task.session_id,
-    foregroundParentSessionId: task.foreground_parent_session_id,
-    foregroundForkSessionId: task.foreground_fork_session_id,
     status,
     suggestedOwner: task.suggested_owner,
     specificationFailure: task.specification_failure || null,

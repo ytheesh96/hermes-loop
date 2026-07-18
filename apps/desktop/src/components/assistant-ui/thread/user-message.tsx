@@ -97,75 +97,10 @@ const ProcessNotificationNote: FC<{ text: string }> = ({ text }) => {
   )
 }
 
-interface LoopHandoffVisibleCard {
-  action?: string
-  payload_ref?: string
-  summary?: string
-  task_title?: string
-}
-
-interface LoopHandoffPayload {
-  kind?: string
-  root_task_id?: string
-  visible_cards?: LoopHandoffVisibleCard[]
-}
-
-// Read-only renderer for messages persisted by the removed Loop handoff
-// protocol. Current Desktop workflow actions never create this payload.
-function parseLoopHandoffPayload(text: string): LoopHandoffPayload | null {
-  try {
-    const parsed = JSON.parse(text.replace(/\u00a0/g, ' ')) as LoopHandoffPayload
-
-    return parsed?.kind === 'kanban_loop_handoff_review_batch' ? parsed : null
-  } catch {
-    return null
-  }
-}
-
-const LoopHandoffReviewCard: FC<{
-  onOpenKanbanTask?: (taskId: string) => void
-  payload: LoopHandoffPayload
-}> = ({ onOpenKanbanTask, payload }) => {
-  const cards = payload.visible_cards?.length ? payload.visible_cards : []
-
-  return (
-    <div
-      className="flex max-w-[min(86%,44rem)] flex-col gap-2 self-center rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-3 py-2 text-[0.75rem] leading-5 text-(--ui-text-secondary)"
-      data-testid="loop-handoff-review-batch"
-    >
-      <div className="flex items-center gap-2 font-medium text-foreground/90">
-        <Codicon aria-hidden className="text-muted-foreground/70" name="git-pull-request" size="0.85rem" />
-        <span>Loop handoff review</span>
-      </div>
-      {cards.map((card, index) => {
-        const title = card.task_title?.trim() || `Handoff ${index + 1}`
-
-        return (
-          <div className="flex flex-col gap-1 rounded-md bg-(--ui-bg-primary) px-2 py-1.5" key={`${title}:${index}`}>
-            <div className="font-medium text-foreground/85">{title}</div>
-            {card.summary && <div className="text-muted-foreground/80">{card.summary}</div>}
-            {card.payload_ref && <div className="font-mono text-[0.68rem] text-muted-foreground/65">{card.payload_ref}</div>}
-            {payload.root_task_id && onOpenKanbanTask && (
-              <button
-                className="mt-0.5 w-fit rounded-md border border-(--ui-stroke-secondary) px-2 py-0.5 text-[0.68rem] text-foreground/85 hover:bg-(--ui-control-hover-background)"
-                onClick={() => onOpenKanbanTask(payload.root_task_id!)}
-                type="button"
-              >
-                Open drawer for {title}
-              </button>
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
 export const UserMessage: FC<{
   onCancel?: () => Promise<void> | void
-  onOpenKanbanTask?: (taskId: string) => void
   onRequestRestoreConfirm?: (messageId: string, target: RestoreMessageTarget) => void
-}> = ({ onCancel, onOpenKanbanTask, onRequestRestoreConfirm }) => {
+}> = ({ onCancel, onRequestRestoreConfirm }) => {
   const { t } = useI18n()
   const copy = t.assistant.thread
   const messageId = useAuiState(s => s.message.id)
@@ -270,20 +205,6 @@ export const UserMessage: FC<{
         data-slot="aui_user-message-root"
       >
         <ProcessNotificationNote text={messageText.trim()} />
-      </MessagePrimitive.Root>
-    )
-  }
-
-  const loopHandoffPayload = parseLoopHandoffPayload(messageText.trim())
-
-  if (loopHandoffPayload) {
-    return (
-      <MessagePrimitive.Root
-        className="flex w-full min-w-0 flex-col items-stretch"
-        data-role="user"
-        data-slot="aui_user-message-root"
-      >
-        <LoopHandoffReviewCard onOpenKanbanTask={onOpenKanbanTask} payload={loopHandoffPayload} />
       </MessagePrimitive.Root>
     )
   }

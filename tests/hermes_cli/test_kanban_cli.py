@@ -73,22 +73,7 @@ def test_parse_branch_flag_rejects_empty_and_option_like():
         kc._parse_branch_flag("bad branch")
 
 
-def test_request_review_help_does_not_advertise_blocker_triage(capsys):
-    parser = argparse.ArgumentParser(prog="hermes")
-    subparsers = parser.add_subparsers(dest="command")
-    kc.build_parser(subparsers)
-
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["kanban", "request-review", "--help"])
-
-    assert exc.value.code == 0
-    help_text = capsys.readouterr().out
-    assert "usage: hermes kanban request-review" in help_text
-    assert "foreground_judgment" in help_text
-    assert "blocker_triage" not in help_text
-
-
-def test_kanban_help_hides_request_review_compatibility_command(capsys):
+def test_kanban_help_omits_removed_request_review_command(capsys):
     parser = argparse.ArgumentParser(prog="hermes")
     subparsers = parser.add_subparsers(dest="command")
     kc.build_parser(subparsers)
@@ -104,28 +89,15 @@ def test_kanban_help_hides_request_review_compatibility_command(capsys):
     assert "gc" in help_text
 
 
-def test_hidden_request_review_still_parses_and_dispatches(
-    kanban_home, monkeypatch,
-):
+def test_removed_request_review_command_is_rejected():
     parser = argparse.ArgumentParser(prog="hermes")
     subparsers = parser.add_subparsers(dest="command")
     kc.build_parser(subparsers)
-    args = parser.parse_args(
-        ["kanban", "request-review", "t_legacy", "please", "review"],
-    )
-    dispatched = []
 
-    def fake_request_review(parsed_args):
-        dispatched.append(parsed_args)
-        return 0
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["kanban", "request-review", "t_legacy"])
 
-    monkeypatch.setattr(kc, "_cmd_request_review", fake_request_review)
-
-    assert args.kanban_action == "request-review"
-    assert args.task_id == "t_legacy"
-    assert args.reason == ["please", "review"]
-    assert kc.kanban_command(args) == 0
-    assert dispatched == [args]
+    assert exc.value.code == 2
 
 
 # ---------------------------------------------------------------------------

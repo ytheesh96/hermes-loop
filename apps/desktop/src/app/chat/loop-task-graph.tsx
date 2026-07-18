@@ -19,68 +19,24 @@ import { cn } from '@/lib/utils'
 
 import type { LoopTaskAction, LoopTaskCreateOptions } from './loop-panel'
 import {
+  isDoneLoopRow,
+  isGraphActiveLoopRow,
+  LOOP_FAILED_STATUSES,
+  LOOP_TERMINAL_STATUSES,
+  loopAttentionText,
+  loopTextValue,
+  loopWorkerCurrentTool,
+  normalizedLoopValue
+} from './loop-selectors'
+import {
   type LoopRow,
   loopTaskAllowsDependencyEdits,
   loopTaskAllowsDependencySource,
   loopTaskPhaseLabel
 } from './loop-state'
 
-function normalizedLoopValue(value?: null | string): string {
-  return (value || '').trim().toLowerCase().replaceAll('-', '_')
-}
-
 function loopGraphTargetAllowsDependency(row: LoopRow): boolean {
   return loopTaskAllowsDependencyEdits(row)
-}
-
-const TERMINAL_LOOP_STATUSES = new Set(['archived', 'cancelled', 'complete', 'completed', 'done'])
-
-const FAILED_LOOP_STATUSES = new Set([
-  'blocked',
-  'crashed',
-  'error',
-  'failed',
-  'failure',
-  'stale',
-  'timed_out',
-  'timeout'
-])
-
-function isDoneLoopRow(row: LoopRow): boolean {
-  return TERMINAL_LOOP_STATUSES.has(normalizedLoopValue(row.status))
-}
-
-function isActiveLoopRow(row: LoopRow): boolean {
-  const status = normalizedLoopValue(row.status)
-  const runStatus = normalizedLoopValue(row.latestRun?.status)
-
-  return (
-    row.active ||
-    (row.activeDecompositionChildCount || 0) > 0 ||
-    status === 'running' ||
-    status === 'in_progress' ||
-    runStatus === 'running'
-  )
-}
-
-function attentionText(row: LoopRow): string {
-  return [
-    row.status,
-    row.title,
-    row.body,
-    row.result,
-    row.latestSummary,
-    row.latestRun?.error,
-    row.latestRun?.outcome,
-    row.latestRun?.status,
-    row.latestRun?.summary,
-    row.reviewKind,
-    row.resumeMode,
-    row.reviewSubjectAssignee
-  ]
-    .filter((value): value is string => Boolean(value))
-    .join(' ')
-    .toLowerCase()
 }
 
 function loopRowStatusIndicator(row: LoopRow): StatusIndicatorKind {
@@ -93,17 +49,21 @@ function loopRowStatusIndicator(row: LoopRow): StatusIndicatorKind {
   }
 
   const failed =
-    FAILED_LOOP_STATUSES.has(status) || FAILED_LOOP_STATUSES.has(runStatus) || FAILED_LOOP_STATUSES.has(runOutcome)
+    LOOP_FAILED_STATUSES.has(status) ||
+    LOOP_FAILED_STATUSES.has(runStatus) ||
+    LOOP_FAILED_STATUSES.has(runOutcome)
 
   if (failed) {
     return 'failed'
   }
 
-  if (attentionText(row).includes('review-required') || attentionText(row).includes('review required')) {
+  const attentionText = loopAttentionText(row)
+
+  if (attentionText.includes('review-required') || attentionText.includes('review required')) {
     return 'attention'
   }
 
-  if (isActiveLoopRow(row)) {
+  if (isGraphActiveLoopRow(row)) {
     return 'active'
   }
 
@@ -129,54 +89,6 @@ function LoopStatusIndicator({ row }: { row: LoopRow }) {
       kind={loopRowStatusIndicator(row)}
     />
   )
-}
-
-const loopTextValue = (value: unknown): string | undefined =>
-  typeof value === 'string' && value.trim() ? value.trim() : undefined
-
-const loopToolLabel = (name: string): string =>
-  name
-    .split('_')
-    .filter(Boolean)
-    .map(part => part[0]!.toUpperCase() + part.slice(1))
-    .join(' ') || name
-
-const loopRecordFrom = (value: unknown): Record<string, unknown> | null =>
-  value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
-
-function currentToolFromLoopRecord(record: Record<string, unknown> | null): string | undefined {
-  if (!record) {
-    return undefined
-  }
-
-  for (const key of ['current_tool', 'currentTool', 'current_tool_name', 'tool_name', 'active_tool', 'last_tool']) {
-    const value = loopTextValue(record[key])
-
-    if (value) {
-      return loopToolLabel(value)
-    }
-  }
-
-  return undefined
-}
-
-function loopWorkerCurrentTool(row: LoopRow): string | undefined {
-  const worker = row.workerActivity
-  const direct = currentToolFromLoopRecord(worker ? (worker as unknown as Record<string, unknown>) : null)
-
-  if (direct) {
-    return direct
-  }
-
-  for (const event of (worker?.recent_task_events || []).slice().reverse()) {
-    const fromPayload = currentToolFromLoopRecord(loopRecordFrom(event.payload))
-
-    if (fromPayload) {
-      return fromPayload
-    }
-  }
-
-  return currentToolFromLoopRecord(loopRecordFrom(row.latestRun?.metadata))
 }
 
 interface LoopTaskGraphEdge {
@@ -392,7 +304,7 @@ function loopTaskGraphNodeKind(row: LoopRow): LoopTaskGraphNodeKind {
     return 'review'
   }
 
-  if (row.workerActivity || isActiveLoopRow(row)) {
+  if (row.workerActivity || isGraphActiveLoopRow(row)) {
     return 'worker'
   }
 
@@ -895,7 +807,7 @@ function LoopTaskGraphActionTray({
   const { row, x, y } = layout
   const status = normalizedLoopValue(row.status)
   const blocked = normalizedLoopValue(row.status) === 'blocked'
-  const terminal = TERMINAL_LOOP_STATUSES.has(status)
+  const terminal = LOOP_TERMINAL_STATUSES.has(status)
 
   const statusAction: LoopTaskAction = blocked ? 'unblock' : 'block'
   const statusLabel = blocked ? 'Unblock' : 'Block'
@@ -984,7 +896,7 @@ function LoopTaskGraphNode({
   selected?: boolean
 }) {
   const { row, x, y } = layout
-  const currentTool = isActiveLoopRow(row) ? loopWorkerCurrentTool(row) : undefined
+  const currentTool = isGraphActiveLoopRow(row) ? loopWorkerCurrentTool(row) : undefined
   const assignee = loopTextValue(row.assignee)
   const nodeKind = loopTaskGraphNodeKind(row)
   const dependencyCount = loopTaskGraphDependencyCount(row)
@@ -1135,13 +1047,13 @@ function loopGraphCountLabel(count: number, singular: string, plural = `${singul
 }
 
 function loopGraphSummaryItems(rows: LoopRow[]): { key: string; label: string }[] {
-  const active = rows.filter(row => row.active || isActiveLoopRow(row)).length
+  const active = rows.filter(row => row.active || isGraphActiveLoopRow(row)).length
 
   const blockers = rows.filter(row => normalizedLoopValue(row.status) === 'blocked').length
 
   const reviews = rows.filter(row => {
     const status = normalizedLoopValue(row.status)
-    const text = attentionText(row)
+    const text = loopAttentionText(row)
 
     return (
       Boolean(row.reviewKind) ||

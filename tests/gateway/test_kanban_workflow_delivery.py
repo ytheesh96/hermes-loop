@@ -125,6 +125,16 @@ class _ForegroundAdapter(BasePlatformAdapter):
 
 
 class _WorkflowDeliveryRunner(GatewayKanbanWatchersMixin):
+    def __init__(self, adapter: Any | None = None):
+        self._adapter = adapter
+
+    def _authorization_adapter(
+        self,
+        _platform: Platform,
+        _profile: str | None,
+    ) -> Any | None:
+        return self._adapter
+
     async def _deliver_kanban_artifacts(self, **_kwargs: Any) -> None:
         return None
 
@@ -239,6 +249,22 @@ async def _deliver(
     )
 
 
+async def _deliver_routes(
+    deliveries: list[dict[str, Any]],
+    adapter: Any,
+    *,
+    runner: _WorkflowDeliveryRunner | None = None,
+) -> None:
+    runner = runner or _WorkflowDeliveryRunner(adapter)
+    await runner._deliver_kanban_workflow_routes(
+        deliveries=deliveries,
+        platform_type=Platform,
+        notifier_profile="orchestrator",
+        fail_counts={},
+        max_send_failures=3,
+    )
+
+
 @pytest.mark.asyncio
 async def test_two_member_boundaries_coalesce_into_one_workflow_wake_with_comments(
     workflow_delivery_db,
@@ -287,7 +313,16 @@ async def test_two_member_boundaries_coalesce_into_one_workflow_wake_with_commen
     assert 'loop_graph(action="close")' in wake.text
     assert "refuses unfinished workflow members" in wake.text
     assert "Read each changed task with kanban_show" not in wake.text
-    assert "Call kanban_show only when evidence is missing or stale" in wake.text
+    assert "authoritative for this boundary" in wake.text
+    assert "Call kanban_show only when required evidence is missing" in wake.text
+    assert (
+        "make one decision and call kanban_create or loop_graph directly"
+        in wake.text
+    )
+    assert "Durable Loop tasks are the plan" in wake.text
+    assert "update a session todo" in wake.text
+    assert "inspect source" in wake.text
+    assert "use terminal as preflight" in wake.text
 
     sub = kb.list_workflow_notify_subs(conn, workflow_id)[0]
     assert sub["last_event_id"] == delivery["cursor"]
@@ -456,7 +491,8 @@ def test_descendant_wake_uses_supplied_evidence_before_conditional_show():
     assert "Parser is ready" in wake_text
     assert "Please review the quoted-field case." in wake_text
     assert "Read each changed task with kanban_show" not in wake_text
-    assert "Call kanban_show only when evidence is missing or stale" in wake_text
+    assert "authoritative for this boundary" in wake_text
+    assert "Call kanban_show only when required evidence is missing" in wake_text
 
 
 def test_direct_boundary_context_uses_conditional_show_guidance():
@@ -482,7 +518,8 @@ def test_direct_boundary_context_uses_conditional_show_guidance():
     assert "Implementation is ready" in context
     assert "The edge-case evidence is attached." in context
     assert "Read the task with kanban_show before deciding" not in context
-    assert "Call kanban_show only when evidence is missing or stale" in context
+    assert "authoritative for this boundary" in context
+    assert "Call kanban_show only when required evidence is missing" in context
 
 
 @pytest.mark.asyncio
@@ -567,6 +604,213 @@ async def test_busy_workflow_wake_renews_lease_and_acks_only_after_exact_turn(
     completed = kb.list_workflow_notify_subs(conn, workflow_id)[0]
     assert completed["last_event_id"] == delivery["cursor"]
     assert completed["pending_claim_token"] is None
+    await adapter.cancel_background_tasks()
+
+
+@pytest.mark.asyncio
+async def test_blocked_workflow_route_does_not_delay_an_independent_route(
+    workflow_delivery_db,
+):
+    from hermes_cli import kanban_db as kb
+
+    conn = workflow_delivery_db
+    blocked_workflow = kb.create_workflow(conn, title="Blocked route")
+    independent_workflow = kb.create_workflow(conn, title="Independent route")
+    _completed_member(
+        conn,
+        workflow_id=blocked_workflow,
+        title="Wait on route A",
+        summary="Route A complete",
+    )
+    _completed_member(
+        conn,
+        workflow_id=independent_workflow,
+        title="Finish on route B",
+        summary="Route B complete",
+    )
+    _subscribe(conn, workflow_id=blocked_workflow, chat_id="route-a")
+    _subscribe(conn, workflow_id=independent_workflow, chat_id="route-b")
+    blocked_delivery = _claim_delivery(conn, workflow_id=blocked_workflow)
+    independent_delivery = _claim_delivery(
+        conn,
+        workflow_id=independent_workflow,
+    )
+
+    adapter = _ForegroundAdapter()
+    adapter.block_workflow(blocked_workflow)
+    route_task = asyncio.create_task(
+        _deliver_routes(
+            [blocked_delivery, independent_delivery],
+            adapter,
+        )
+    )
+
+    await asyncio.wait_for(
+        adapter.workflow_started[blocked_workflow].wait(),
+        timeout=1.0,
+    )
+    for _ in range(100):
+        independent_sub = kb.list_workflow_notify_subs(
+            conn,
+            independent_workflow,
+        )[0]
+        if (
+            independent_sub["last_event_id"]
+            == independent_delivery["cursor"]
+            and any(
+                workflow_id == independent_workflow
+                for workflow_id, _text in adapter.processed_workflows
+            )
+        ):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("independent route was delayed by the blocked route")
+
+    assert not route_task.done()
+    blocked_sub = kb.list_workflow_notify_subs(conn, blocked_workflow)[0]
+    assert blocked_sub["last_event_id"] == blocked_delivery["old_cursor"]
+    assert blocked_sub["pending_claim_token"] == blocked_delivery["claim_token"]
+    assert independent_sub["last_event_id"] == independent_delivery["cursor"]
+    assert independent_sub["pending_claim_token"] is None
+
+    adapter.workflow_release[blocked_workflow].set()
+    await asyncio.wait_for(route_task, timeout=1.0)
+    blocked_sub = kb.list_workflow_notify_subs(conn, blocked_workflow)[0]
+    assert blocked_sub["last_event_id"] == blocked_delivery["cursor"]
+    assert blocked_sub["pending_claim_token"] is None
+    await adapter.cancel_background_tasks()
+
+
+@pytest.mark.asyncio
+async def test_workflow_route_concurrency_is_bounded(workflow_delivery_db):
+    from hermes_cli import kanban_db as kb
+
+    conn = workflow_delivery_db
+    workflows = [
+        kb.create_workflow(conn, title=f"Concurrent route {index}")
+        for index in range(3)
+    ]
+    for index, workflow_id in enumerate(workflows):
+        _completed_member(
+            conn,
+            workflow_id=workflow_id,
+            title=f"Route {index}",
+            summary=f"Route {index} complete",
+        )
+        _subscribe(
+            conn,
+            workflow_id=workflow_id,
+            chat_id=f"bounded-route-{index}",
+        )
+    deliveries = [
+        _claim_delivery(conn, workflow_id=workflow_id)
+        for workflow_id in workflows
+    ]
+
+    adapter = _ForegroundAdapter()
+    for workflow_id in workflows:
+        adapter.block_workflow(workflow_id)
+    runner = _WorkflowDeliveryRunner(adapter)
+    runner._workflow_notifier_max_concurrency = 2
+    route_task = asyncio.create_task(
+        _deliver_routes(
+            deliveries,
+            adapter,
+            runner=runner,
+        )
+    )
+
+    for workflow_id in workflows[:2]:
+        await asyncio.wait_for(
+            adapter.workflow_started[workflow_id].wait(),
+            timeout=1.0,
+        )
+    assert not adapter.workflow_started[workflows[2]].is_set()
+
+    adapter.workflow_release[workflows[0]].set()
+    await asyncio.wait_for(
+        adapter.workflow_started[workflows[2]].wait(),
+        timeout=1.0,
+    )
+    for workflow_id in workflows[1:]:
+        adapter.workflow_release[workflow_id].set()
+    await asyncio.wait_for(route_task, timeout=1.0)
+
+    assert {item[0] for item in adapter.processed_workflows} == set(workflows)
+    await adapter.cancel_background_tasks()
+
+
+@pytest.mark.asyncio
+async def test_workflow_route_fifo_acks_each_lease_only_after_its_turn(
+    workflow_delivery_db,
+):
+    from hermes_cli import kanban_db as kb
+
+    conn = workflow_delivery_db
+    first_workflow = kb.create_workflow(conn, title="First on route")
+    second_workflow = kb.create_workflow(conn, title="Second on route")
+    _completed_member(
+        conn,
+        workflow_id=first_workflow,
+        title="First turn",
+        summary="First complete",
+    )
+    _completed_member(
+        conn,
+        workflow_id=second_workflow,
+        title="Second turn",
+        summary="Second complete",
+    )
+    _subscribe(conn, workflow_id=first_workflow, chat_id="ordered-route")
+    _subscribe(conn, workflow_id=second_workflow, chat_id="ordered-route")
+    first_delivery = _claim_delivery(conn, workflow_id=first_workflow)
+    second_delivery = _claim_delivery(conn, workflow_id=second_workflow)
+
+    adapter = _ForegroundAdapter()
+    adapter.block_workflow(first_workflow)
+    adapter.block_workflow(second_workflow)
+    route_task = asyncio.create_task(
+        _deliver_routes(
+            [first_delivery, second_delivery],
+            adapter,
+        )
+    )
+
+    await asyncio.wait_for(
+        adapter.workflow_started[first_workflow].wait(),
+        timeout=1.0,
+    )
+    assert not adapter.workflow_started[second_workflow].is_set()
+    for workflow_id, delivery in (
+        (first_workflow, first_delivery),
+        (second_workflow, second_delivery),
+    ):
+        sub = kb.list_workflow_notify_subs(conn, workflow_id)[0]
+        assert sub["last_event_id"] == delivery["old_cursor"]
+        assert sub["pending_claim_token"] == delivery["claim_token"]
+
+    adapter.workflow_release[first_workflow].set()
+    await asyncio.wait_for(
+        adapter.workflow_started[second_workflow].wait(),
+        timeout=1.0,
+    )
+    first_sub = kb.list_workflow_notify_subs(conn, first_workflow)[0]
+    second_sub = kb.list_workflow_notify_subs(conn, second_workflow)[0]
+    assert first_sub["last_event_id"] == first_delivery["cursor"]
+    assert first_sub["pending_claim_token"] is None
+    assert second_sub["last_event_id"] == second_delivery["old_cursor"]
+    assert second_sub["pending_claim_token"] == second_delivery["claim_token"]
+
+    adapter.workflow_release[second_workflow].set()
+    await asyncio.wait_for(route_task, timeout=1.0)
+    assert [item[0] for item in adapter.processed_workflows] == [
+        first_workflow,
+        second_workflow,
+    ]
+    second_sub = kb.list_workflow_notify_subs(conn, second_workflow)[0]
+    assert second_sub["last_event_id"] == second_delivery["cursor"]
+    assert second_sub["pending_claim_token"] is None
     await adapter.cancel_background_tasks()
 
 

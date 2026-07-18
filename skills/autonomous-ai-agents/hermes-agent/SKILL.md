@@ -786,10 +786,10 @@ the full `kanban` toolset.
 - **Enabled Loop foreground:** `kanban_show`, `kanban_complete`,
   `kanban_comment`, `kanban_create`, and `kanban_unblock` for bounded
   re-entry control.
-- **Configured orchestrator profile:** the full eleven-tool surface:
+- **Configured orchestrator profile:** the full ten-tool surface:
   `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_block`,
   `kanban_heartbeat`, `kanban_comment`, `kanban_create`, `kanban_link`,
-  `kanban_unblock`, `kanban_decompose`, and `kanban_resolve_blocker`.
+  `kanban_unblock`, and `kanban_decompose`.
 - **Dispatcher** runs inside the gateway by default
   (`kanban.dispatch_in_gateway: true`) — reclaims stale claims,
   promotes ready tasks, atomically claims, spawns assigned profiles.

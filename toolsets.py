@@ -72,7 +72,7 @@ _HERMES_CORE_TOOLS = [
     # full orchestrator profile.
     "kanban_show", "kanban_list",
     "kanban_complete", "kanban_block", "kanban_heartbeat",
-    "kanban_resolve_blocker", "kanban_comment",
+    "kanban_comment",
     "kanban_create", "kanban_link", "kanban_unblock",
     "kanban_decompose",
     "kanban_attach", "kanban_attach_url", "kanban_attachments",
@@ -271,7 +271,7 @@ TOOLSETS = {
         ),
         "tools": [
             "kanban_show", "kanban_list", "kanban_complete", "kanban_block",
-            "kanban_resolve_blocker", "kanban_heartbeat", "kanban_comment",
+            "kanban_heartbeat", "kanban_comment",
             "kanban_create", "kanban_link", "kanban_unblock",
             "kanban_decompose",
             "kanban_attach", "kanban_attach_url", "kanban_attachments",
@@ -286,7 +286,7 @@ TOOLSETS = {
             "handles; sync mode is a bounded wait over the same durable row."
         ),
         "tools": [
-            "loop_create", "loop_status", "loop_update", "loop_block",
+            "loop_graph", "loop_create", "loop_status", "loop_update", "loop_block",
             "loop_list_queue",
         ],
         "includes": [],

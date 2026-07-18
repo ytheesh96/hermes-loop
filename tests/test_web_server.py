@@ -257,6 +257,12 @@ def test_loop_graph_routes_name_workflow_and_deprecate_root_alias():
         assert aliases["root_task_id"].field_info.deprecated is True
 
 
+def test_removed_loop_handoff_routes_are_absent():
+    paths = {getattr(route, "path", "") for route in web_server.app.routes}
+
+    assert not any("loop-handoffs" in path for path in paths)
+
+
 @pytest.mark.asyncio
 async def test_loop_graph_endpoints_use_workflow_membership(monkeypatch, tmp_path):
     from pathlib import Path

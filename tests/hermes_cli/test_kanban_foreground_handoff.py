@@ -73,7 +73,6 @@ def test_loop_root_completion_does_not_create_foreground_handoff(kanban_home):
         assert task is not None
         assert task.status == "done"
         assert _handoff_events(conn, task_id) == []
-        assert kb.list_loop_handoffs(conn, task_id=task_id) == []
 
 
 def test_explicit_foreground_block_metadata_stays_plain_blocker(kanban_home):
@@ -99,10 +98,10 @@ def test_explicit_foreground_block_metadata_stays_plain_blocker(kanban_home):
         assert task is not None
         assert task.status == "blocked"
         assert _handoff_events(conn, child_id) == []
-        assert kb.list_loop_handoffs(conn, task_id=child_id) == []
 
 
 def test_legacy_loop_handoff_review_batching_helpers_are_removed():
     assert not hasattr(kb, "_record_loop_handoff")
+    assert not hasattr(kb, "list_loop_handoffs")
     assert not hasattr(kb, "claim_next_loop_handoff_review_batch")
     assert not hasattr(kb, "run_next_loop_handoff_review_batch")
