@@ -358,6 +358,27 @@ def test_create_task_unknown_parent_errors(kanban_home):
         kb.create_task(conn, title="orphan", parents=["t_ghost"])
 
 
+def test_followup_creation_contract_rejects_blocked_parent(kanban_home):
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="blocked source", assignee="worker")
+        kb.claim_task(conn, parent)
+        assert kb.block_task(conn, parent, reason="needs independent resolution")
+
+        with pytest.raises(
+            ValueError,
+            match="blocked task.*cannot be parents",
+        ):
+            kb.create_task(
+                conn,
+                title="resolution work",
+                assignee="reviewer",
+                parents=[parent],
+                reject_blocked_parents=True,
+            )
+
+        assert [task.id for task in kb.list_tasks(conn)] == [parent]
+
+
 def test_create_loop_skeleton_graph_is_atomic_and_dependency_ordered(kanban_home):
     with kb.connect() as conn:
         result = kb.create_loop_skeleton_graph(
@@ -374,27 +395,32 @@ def test_create_loop_skeleton_graph_is_atomic_and_dependency_ordered(kanban_home
             ],
             shared_context="Ship the requested feature.",
             session_id="session-graph",
+            created_by="foreground-agent",
             idempotency_scope="graph-1",
         )
         items = {item["client_id"]: item for item in result["items"]}
-        root = kb.get_task(conn, result["root_task_id"])
+        workflow = kb.get_workflow(conn, result["workflow_id"])
         research = kb.get_task(conn, items["research"]["task_id"])
         build = kb.get_task(conn, items["build"]["task_id"])
-        root_parents = kb.parent_ids(conn, root.id)
+        tasks = kb.list_tasks(conn)
 
-    assert root is not None
-    assert root.status == "todo" and root.assignee is None
-    assert root.needs_specification is False
+    assert workflow is not None
+    assert workflow.title == "Ship the requested feature."
+    assert workflow.origin_session_id == "session-graph"
+    assert workflow.shared_context == "Ship the requested feature."
     assert research is not None and build is not None
+    assert research.workflow_id == workflow.id
+    assert build.workflow_id == workflow.id
     assert research.status == "triage"
     assert build.status == "todo"
     assert research.needs_specification is True
     assert build.needs_specification is True
     assert research.assignee is None and build.assignee is None
-    assert research.created_by == f"loop:{root.id}"
-    assert build.created_by == f"loop:{root.id}"
+    assert research.created_by == "foreground-agent"
+    assert build.created_by == "foreground-agent"
     assert items["build"]["parents"] == [research.id]
-    assert root_parents == [build.id]
+    assert result["edges"] == [{"parent_id": research.id, "child_id": build.id}]
+    assert {task.id for task in tasks} == {research.id, build.id}
 
 
 def test_create_loop_skeleton_graph_replay_is_idempotent(kanban_home):
@@ -411,13 +437,13 @@ def test_create_loop_skeleton_graph_replay_is_idempotent(kanban_home):
     assert [item["task_id"] for item in second["items"]] == [
         item["task_id"] for item in first["items"]
     ]
-    assert second["root_task_id"] == first["root_task_id"]
+    assert second["workflow_id"] == first["workflow_id"]
     assert all(item["reused"] for item in second["items"])
-    assert len(tasks) == 3
-    assert len(links) == 2
+    assert len(tasks) == 2
+    assert len(links) == 1
 
 
-def test_no_root_graph_idempotency_is_scoped_to_the_origin_session(kanban_home):
+def test_new_workflow_graph_idempotency_is_scoped_to_origin_session(kanban_home):
     nodes = [{"client_id": "work", "title": "Same title"}]
     with kb.connect() as conn:
         first = kb.create_loop_skeleton_graph(
@@ -436,50 +462,41 @@ def test_no_root_graph_idempotency_is_scoped_to_the_origin_session(kanban_home):
             session_id="foreground-session-b",
         )
 
-    assert retry["root_task_id"] == first["root_task_id"]
+    assert retry["workflow_id"] == first["workflow_id"]
     assert retry["items"][0]["task_id"] == first["items"][0]["task_id"]
-    assert independent["root_task_id"] != first["root_task_id"]
+    assert independent["workflow_id"] != first["workflow_id"]
     assert independent["items"][0]["task_id"] != first["items"][0]["task_id"]
 
 
-def test_legacy_skeleton_idempotency_key_cannot_cross_loop_roots(kanban_home):
+def test_legacy_skeleton_idempotency_key_cannot_cross_workflows(kanban_home):
     with kb.connect() as conn:
-        roots = []
-        for title in ("Root A", "Root B"):
-            root_id = kb.create_task(
-                conn,
-                title=title,
-                assignee=None,
-                initial_status="scheduled",
-            )
-            conn.execute(
-                "UPDATE tasks SET created_by = ? WHERE id = ?",
-                (f"loop:{root_id}", root_id),
-            )
-            roots.append(root_id)
-        root_a, root_b = roots
+        workflow_a = kb.create_workflow(conn, title="Workflow A")
+        workflow_b = kb.create_workflow(conn, title="Workflow B")
         legacy_task = kb.create_task(
             conn,
             title="Legacy alias",
-            created_by=f"loop:{root_a}",
+            workflow_id=workflow_a,
+            created_by="legacy-foreground",
             idempotency_key="loop-skeleton:shared-scope:work",
             needs_specification=True,
         )
 
         result = kb.create_loop_skeleton_graph(
             conn,
-            root_task_id=root_b,
+            workflow_id=workflow_b,
             nodes=[{"client_id": "work", "title": "Root B work"}],
+            created_by="current-foreground",
             idempotency_scope="shared-scope",
         )
-        root_b_task = kb.get_task(conn, result["items"][0]["task_id"])
+        workflow_b_task = kb.get_task(conn, result["items"][0]["task_id"])
 
-    assert root_b_task is not None
-    assert root_b_task.id != legacy_task
-    assert root_b_task.created_by == f"loop:{root_b}"
+    assert workflow_b_task is not None
+    assert workflow_b_task.id != legacy_task
+    assert workflow_b_task.workflow_id == workflow_b
+    assert workflow_b_task.created_by == "current-foreground"
 
 
-def test_no_root_graph_reuses_canonical_root_and_rewires_later_fragment(kanban_home):
+def test_workflow_graph_adds_later_fragment_without_synthetic_closure(kanban_home):
     from hermes_cli import loop_graph
 
     with kb.connect() as conn:
@@ -491,49 +508,64 @@ def test_no_root_graph_reuses_canonical_root_and_rewires_later_fragment(kanban_h
             ],
             shared_context="Ship the live workflow\nwith durable control.",
             idempotency_scope="foreground-session-1",
+            created_by="foreground-agent",
         )
-        root_id = first["root_task_id"]
+        workflow_id = first["workflow_id"]
         item_ids = {item["client_id"]: item["task_id"] for item in first["items"]}
-        first_read = loop_graph.read_graph(conn, root_id, include_nodes=True)
+        first_read = loop_graph.read_graph(conn, workflow_id, include_nodes=True)
 
         second = kb.create_loop_skeleton_graph(
             conn,
+            workflow_id=workflow_id,
             nodes=[
                 {
                     "client_id": "c",
                     "title": "C",
                     "depends_on": [item_ids["b"]],
+                },
+                {
+                    "client_id": "d",
+                    "title": "D",
+                    "depends_on": [item_ids["b"]],
                 }
             ],
             idempotency_scope="foreground-session-1",
+            created_by="foreground-agent",
         )
-        c_id = second["items"][0]["task_id"]
-        second_read = loop_graph.read_graph(conn, root_id, include_nodes=True)
-        root = kb.get_task(conn, root_id)
+        later_ids = {
+            item["client_id"]: item["task_id"] for item in second["items"]
+        }
+        second_read = loop_graph.read_graph(conn, workflow_id, include_nodes=True)
+        workflow = kb.get_workflow(conn, workflow_id)
         loop_rows = conn.execute(
-            "SELECT id, created_by FROM tasks WHERE created_by = ? ORDER BY id",
-            (f"loop:{root_id}",),
+            "SELECT id, created_by FROM tasks WHERE workflow_id = ? ORDER BY id",
+            (workflow_id,),
         ).fetchall()
-        c_parents = kb.parent_ids(conn, c_id)
-        root_parents = kb.parent_ids(conn, root_id)
+        c_parents = kb.parent_ids(conn, later_ids["c"])
+        d_parents = kb.parent_ids(conn, later_ids["d"])
 
-    assert second["root_task_id"] == root_id
-    assert root is not None and root.title == "Ship the live workflow"
-    assert root.assignee is None and root.needs_specification is False
+    assert second["workflow_id"] == workflow_id
+    assert workflow is not None and workflow.title == "Ship the live workflow"
     assert {node["task_id"] for node in first_read["nodes"]} == {
-        root_id,
         item_ids["a"],
         item_ids["b"],
     }
     assert {node["task_id"] for node in second_read["nodes"]} == {
-        root_id,
         item_ids["a"],
         item_ids["b"],
-        c_id,
+        later_ids["c"],
+        later_ids["d"],
     }
-    assert all(row["created_by"] == f"loop:{root_id}" for row in loop_rows)
+    assert all(row["created_by"] == "foreground-agent" for row in loop_rows)
     assert c_parents == [item_ids["b"]]
-    assert root_parents == [c_id]
+    assert d_parents == [item_ids["b"]]
+    assert {
+        (edge["parent_id"], edge["child_id"])
+        for edge in second["edges"]
+    } == {
+        (item_ids["b"], later_ids["c"]),
+        (item_ids["b"], later_ids["d"]),
+    }
 
 
 @pytest.mark.parametrize(
@@ -608,39 +640,27 @@ def test_create_loop_skeleton_graph_default_node_bound_is_32(
         assert kb.list_tasks(conn) == []
 
 
-def test_create_loop_skeleton_graph_inherits_loop_root_boundary(kanban_home):
+def test_create_loop_skeleton_graph_inherits_workflow_boundary(kanban_home):
     with kb.connect() as conn:
-        root = kb.create_task(
+        workflow_id = kb.create_workflow(
             conn,
-            title="Loop root",
-            body="Original foreground request",
-            assignee="orchestrator",
+            title="Foreground workflow",
+            shared_context="Original foreground request",
             tenant="root-tenant",
-            session_id="root-session",
+            origin_session_id="root-session",
             workspace_kind="dir",
             workspace_path="/tmp/project",
-            initial_status="scheduled",
-            needs_specification=True,
-        )
-        conn.execute(
-            "UPDATE tasks SET created_by = ? WHERE id = ?",
-            (f"loop:{root}", root),
         )
         result = kb.create_loop_skeleton_graph(
             conn,
-            root_task_id=root,
+            workflow_id=workflow_id,
             nodes=[{"client_id": "work", "title": "Do the work"}],
             shared_context="Shared constraint",
+            created_by="foreground-agent",
             idempotency_scope="root-graph",
         )
         task = kb.get_task(conn, result["items"][0]["task_id"])
-        root_before_sink = kb.get_task(conn, root)
-        assert kb.claim_task(conn, root, claimer="orchestrator:early") is None
-        activation_events = [
-            event
-            for event in kb.list_events(conn, root)
-            if event.kind == "activated"
-        ]
+        assert kb.claim_task(conn, task.id, claimer="engineer:early") is None
         assert kb.specify_triage_task(
             conn,
             task.id,
@@ -649,56 +669,51 @@ def test_create_loop_skeleton_graph_inherits_loop_root_boundary(kanban_home):
         )
         assert kb.claim_task(conn, task.id, claimer="engineer:worker") is not None
         assert kb.complete_task(conn, task.id, summary="sink complete")
-        root_after_sink = kb.get_task(conn, root)
-        assert kb.claim_task(conn, root, claimer="worker:must-not-own-root") is None
+        completed_task = kb.get_task(conn, task.id)
+        open_workflow = kb.get_workflow(conn, workflow_id)
+        task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        assert kb.close_workflow(conn, workflow_id)
+        closed_workflow = kb.get_workflow(conn, workflow_id)
 
     assert task is not None
-    assert task.created_by == f"loop:{root}"
+    assert task.workflow_id == workflow_id
+    assert task.created_by == "foreground-agent"
     assert task.tenant == "root-tenant"
     assert task.session_id == "root-session"
     assert task.workspace_kind == "dir"
     assert task.workspace_path == "/tmp/project"
     assert task.body == "Original foreground request\n\nShared constraint"
-    assert root_before_sink is not None and root_before_sink.status == "todo"
-    assert root_before_sink.assignee is None
-    assert root_before_sink.needs_specification is False
-    assert activation_events[-1].payload == {"reason": "live_skeleton_graph_created"}
-    assert root_after_sink is not None and root_after_sink.status == "ready"
-    assert {tuple(edge.values()) for edge in result["edges"]} == {(task.id, root)}
+    assert completed_task is not None and completed_task.status == "done"
+    assert open_workflow is not None and open_workflow.status == "open"
+    assert closed_workflow is not None and closed_workflow.status == "closed"
+    assert task_count == 1
+    assert result["edges"] == []
 
 
-def test_unassigned_loop_root_accepts_later_fragment_then_foreground_completes(kanban_home):
+def test_open_workflow_accepts_follow_up_fragment_until_explicitly_closed(kanban_home):
     with kb.connect() as conn:
-        root = kb.create_task(
+        workflow_id = kb.create_workflow(
             conn,
             title="Foreground-controlled Loop",
-            assignee=None,
-            initial_status="scheduled",
         )
-        with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET created_by = ? WHERE id = ?",
-                (f"loop:{root}", root),
-            )
 
         first = kb.create_loop_skeleton_graph(
             conn,
-            root_task_id=root,
+            workflow_id=workflow_id,
             nodes=[{"client_id": "first", "title": "First sink"}],
         )
         first_id = first["items"][0]["task_id"]
         assert kb.specify_triage_task(conn, first_id, body="Complete first sink")
         assert kb.claim_task(conn, first_id, claimer="worker:first") is not None
         assert kb.complete_task(conn, first_id, summary="first result")
-        first_ready_root = kb.get_task(conn, root)
+        first_done = kb.get_task(conn, first_id)
 
         follow_up = kb.create_loop_skeleton_graph(
             conn,
-            root_task_id=root,
+            workflow_id=workflow_id,
             nodes=[{"client_id": "follow-up", "title": "Follow-up sink"}],
         )
         follow_up_id = follow_up["items"][0]["task_id"]
-        root_with_follow_up = kb.get_task(conn, root)
         assert kb.specify_triage_task(
             conn,
             follow_up_id,
@@ -706,15 +721,17 @@ def test_unassigned_loop_root_accepts_later_fragment_then_foreground_completes(k
         )
         assert kb.claim_task(conn, follow_up_id, claimer="worker:follow-up") is not None
         assert kb.complete_task(conn, follow_up_id, summary="follow-up result")
-        second_ready_root = kb.get_task(conn, root)
-        assert kb.complete_task(conn, root, summary="foreground accepted final graph")
-        completed_root = kb.get_task(conn, root)
+        follow_up_done = kb.get_task(conn, follow_up_id)
+        open_workflow = kb.get_workflow(conn, workflow_id)
+        assert kb.close_workflow(conn, workflow_id)
+        closed_workflow = kb.get_workflow(conn, workflow_id)
 
-    assert first_ready_root is not None
-    assert first_ready_root.status == "ready" and first_ready_root.assignee is None
-    assert root_with_follow_up is not None and root_with_follow_up.status == "todo"
-    assert second_ready_root is not None and second_ready_root.status == "ready"
-    assert completed_root is not None and completed_root.status == "done"
+    assert first_done is not None and first_done.status == "done"
+    assert follow_up_done is not None and follow_up_done.status == "done"
+    assert first_done.workflow_id == workflow_id
+    assert follow_up_done.workflow_id == workflow_id
+    assert open_workflow is not None and open_workflow.status == "open"
+    assert closed_workflow is not None and closed_workflow.status == "closed"
 
 
 @pytest.mark.parametrize("node_status", ["running", "done"])
@@ -723,21 +740,18 @@ def test_reused_alias_parent_change_rejected_even_after_dispatch(
     node_status,
 ):
     with kb.connect() as conn:
-        external_parent = kb.create_task(conn, title="Unexpected new prerequisite")
-        root = kb.create_task(
+        workflow_id = kb.create_workflow(
             conn,
-            title="root",
-            initial_status="scheduled",
-            assignee=None,
+            title="Stable workflow",
         )
-        with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET created_by = ? WHERE id = ?",
-                (f"loop:{root}", root),
-            )
+        external_parent = kb.create_task(
+            conn,
+            title="Unexpected new prerequisite",
+            workflow_id=workflow_id,
+        )
         first = kb.create_loop_skeleton_graph(
             conn,
-            root_task_id=root,
+            workflow_id=workflow_id,
             nodes=[{"client_id": "stable", "title": "Stable shell"}],
             idempotency_scope="stable-shell-revision",
         )
@@ -757,7 +771,7 @@ def test_reused_alias_parent_change_rejected_even_after_dispatch(
         with pytest.raises(ValueError, match="different durable parents"):
             kb.create_loop_skeleton_graph(
                 conn,
-                root_task_id=root,
+                workflow_id=workflow_id,
                 nodes=[
                     {
                         "client_id": "stable",
@@ -778,65 +792,62 @@ def test_reused_alias_parent_change_rejected_even_after_dispatch(
         ] == links_before
 
 
-@pytest.mark.parametrize("root_status", ["running", "done"])
-def test_loop_fragment_rejected_for_active_or_terminal_root(
+@pytest.mark.parametrize("workflow_status", ["closed", "archived"])
+def test_loop_fragment_rejected_for_closed_or_archived_workflow(
     kanban_home,
-    root_status,
+    workflow_status,
 ):
     with kb.connect() as conn:
-        root = kb.create_task(conn, title="closed root", assignee=None)
-        with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET created_by = ? WHERE id = ?",
-                (f"loop:{root}", root),
-            )
-        if root_status == "running":
-            # Canonical roots are foreground-owned and no longer claimable;
-            # simulate an already-active legacy root to verify mutation safety.
-            with kb.write_txn(conn):
-                conn.execute(
-                    "UPDATE tasks SET status = 'running' WHERE id = ?",
-                    (root,),
-                )
-        else:
-            assert kb.complete_task(conn, root, summary="already accepted")
+        workflow_id = kb.create_workflow(conn, title="Closed workflow")
+        existing_task = kb.create_task(
+            conn,
+            title="Already persisted work",
+            workflow_id=workflow_id,
+        )
+        assert kb.complete_task(
+            conn,
+            existing_task,
+            summary="settled before workflow closure",
+        )
+        assert kb.close_workflow(
+            conn,
+            workflow_id,
+            archive=workflow_status == "archived",
+        )
         task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
 
-        with pytest.raises(ValueError, match="not mutable"):
+        with pytest.raises(
+            ValueError,
+            match=rf"workflow {workflow_id} is {workflow_status}",
+        ):
             kb.create_loop_skeleton_graph(
                 conn,
-                root_task_id=root,
+                workflow_id=workflow_id,
                 nodes=[{"client_id": "late", "title": "Late fragment"}],
             )
 
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == task_count
-        assert kb.child_ids(conn, root) == []
+        assert kb.child_ids(conn, existing_task) == []
 
 
 def test_loop_fragment_aliases_are_local_and_exact_retries_are_idempotent(
     kanban_home,
 ):
     with kb.connect() as conn:
-        root = kb.create_task(
-            conn, title="root", initial_status="scheduled", assignee="orchestrator"
-        )
-        conn.execute(
-            "UPDATE tasks SET created_by = ? WHERE id = ?",
-            (f"loop:{root}", root),
-        )
+        workflow_id = kb.create_workflow(conn, title="Alias-local workflow")
         first = kb.create_loop_skeleton_graph(
             conn,
-            root_task_id=root,
+            workflow_id=workflow_id,
             nodes=[{"client_id": "research", "title": "Research"}],
         )
         replay = kb.create_loop_skeleton_graph(
             conn,
-            root_task_id=root,
+            workflow_id=workflow_id,
             nodes=[{"client_id": "research", "title": "Research"}],
         )
         evolved = kb.create_loop_skeleton_graph(
             conn,
-            root_task_id=root,
+            workflow_id=workflow_id,
             nodes=[
                 {"client_id": "research", "title": "Research"},
                 {
@@ -849,7 +860,7 @@ def test_loop_fragment_aliases_are_local_and_exact_retries_are_idempotent(
         old_research = first["items"][0]["task_id"]
         follow_up = kb.create_loop_skeleton_graph(
             conn,
-            root_task_id=root,
+            workflow_id=workflow_id,
             nodes=[
                 {
                     "client_id": "build",
@@ -866,7 +877,8 @@ def test_loop_fragment_aliases_are_local_and_exact_retries_are_idempotent(
     assert evolved["items"][0]["task_id"] != old_research
     assert evolved["items"][0]["reused"] is False
     assert follow_up["items"][0]["parents"] == [old_research]
-    assert len(tasks) == 5  # root + 1 first fragment + 2 evolved + 1 follow-up
+    assert len(tasks) == 4  # first fragment + 2 evolved + 1 follow-up
+    assert all(task.workflow_id == workflow_id for task in tasks)
 
 
 def test_workspace_kind_validation(kanban_home):

@@ -6,10 +6,12 @@ profile roster (with descriptions) and asks the auxiliary LLM to
 return a task graph in JSON. Then atomically creates the children,
 links them under the root, and flips the root ``triage -> todo``.
 
-The root task stays alive and becomes the parent of every leaf child,
-so when the whole graph completes the root wakes back up — its
-assignee (the orchestrator profile) gets a chance to judge completion
-and add more tasks if the work isn't done yet.
+For ordinary/manual triage, the root task stays alive and becomes the parent
+of every leaf child, then wakes its orchestrator after the graph completes.
+For a workflow-backed live Loop skeleton, the generated graph collectively
+owns the full objective: the stable source node auto-settles from its exits
+without a redundant orchestrator worker run. The foreground receives the
+workflow boundary batch and decides whether to add follow-up work.
 
 Design notes
 ------------
@@ -93,6 +95,10 @@ Rules:
   - When live Loop graph context is present, treat completed prerequisite
     summaries as input and keep this task distinct from its named downstream
     work. Do not recreate work already represented by adjacent graph nodes.
+  - When a live Loop task fans out, its generated child graph must collectively
+    complete the original objective because the source task will not run as a
+    second worker. If parallel outputs require synthesis, validation, or review,
+    include an explicit terminal child that depends on the relevant producers.
   - Pick assignees from the roster by matching the task to the profile's
     DESCRIPTION (not just the name). When nothing matches well, use null
     and the system will route to the default_assignee.
@@ -265,7 +271,7 @@ def _failure_outcome(
 
 
 def _resolve_orchestrator_profile(cfg: dict) -> str:
-    """Resolve which profile owns the root/orchestration task after fan-out.
+    """Resolve which profile owns the original decomposition shell after fan-out.
 
     Falls back to the active default profile when ``kanban.orchestrator_profile``
     is unset, so a task is never stranded for lack of an orchestrator.
@@ -355,17 +361,23 @@ def _normalize_assignee_choice(
     return chosen
 
 
-def _live_graph_context(conn: Any, task: Any, root_task_id: str | None) -> str:
+def _live_graph_context(conn: Any, task: Any, workflow_id: str | None) -> str:
     """Render only the nearby durable graph facts needed to compile a skeleton."""
     lines: list[str] = []
-    if root_task_id and root_task_id != task.id:
-        root = kb.get_task(conn, root_task_id)
-        if root:
+    remaining_parent_comments = 12
+    if workflow_id:
+        workflow = kb.get_workflow(conn, workflow_id)
+        if workflow:
             lines.extend(
                 [
-                    "Loop root request:",
-                    f"- {root.title}",
-                    *([_truncate(root.body.strip(), 2000)] if root.body and root.body.strip() else []),
+                    "Workflow context:",
+                    *([f"- {workflow.title}"] if workflow.title else []),
+                    *(
+                        [_truncate(workflow.shared_context.strip(), 2000)]
+                        if workflow.shared_context
+                        and workflow.shared_context.strip()
+                        else []
+                    ),
                 ]
             )
 
@@ -381,6 +393,18 @@ def _live_graph_context(conn: Any, task: Any, root_task_id: str | None) -> str:
             summary = kb.latest_summary(conn, parent["id"]) or parent["result"]
             detail = f" — result: {_truncate(str(summary).strip(), 1200)}" if summary else ""
             lines.append(f"- [{parent['status']}] {parent['title']}{detail}")
+            comments = kb.list_comments(conn, parent["id"])
+            take = min(3, remaining_parent_comments)
+            shown_comments = comments[-take:] if take else []
+            remaining_parent_comments -= len(shown_comments)
+            for comment in shown_comments:
+                author = str(comment.author or "worker").replace("`", "")[:80]
+                body = " ".join(str(comment.body or "").split())
+                if body:
+                    lines.append(
+                        f"  comment/review from `{author}`: "
+                        f"{_truncate(body, 800)}"
+                    )
 
     child_rows = conn.execute(
         "SELECT c.title, c.status FROM tasks c "
@@ -457,7 +481,7 @@ def decompose_task(
     """
     with kb.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
-        loop_root_id = kb._loop_root_for_task(conn, task_id) if task is not None else None
+        workflow_id = task.workflow_id if task is not None else None
         existing_plan = _existing_loop_plan(conn, task_id) if loop_safe and task is not None else None
     if task is None:
         return DecomposeOutcome(task_id, False, "unknown task id")
@@ -468,7 +492,7 @@ def decompose_task(
             return DecomposeOutcome(
                 task_id, False, f"task is not in Loop planning status (status={task.status!r})"
             )
-        if not loop_root_id:
+        if not workflow_id:
             return DecomposeOutcome(task_id, False, "loop_safe decomposition requires a Loop task")
     elif task.status != "triage":
         return DecomposeOutcome(
@@ -507,9 +531,9 @@ def decompose_task(
         )
         if specification_fingerprint is not None:
             task = kb.get_task(conn, task_id)
-            loop_root_id = kb._loop_root_for_task(conn, task_id)
+            workflow_id = task.workflow_id if task is not None else None
             graph_context = (
-                _live_graph_context(conn, task, loop_root_id)
+                _live_graph_context(conn, task, workflow_id)
                 if task is not None and bool(getattr(task, "needs_specification", False))
                 else ""
             )
@@ -521,7 +545,7 @@ def decompose_task(
         )
     is_live_loop_skeleton = bool(
         task.needs_specification
-        and str(task.created_by or "").startswith("loop:")
+        and task.workflow_id
     )
 
     def failed(reason: str) -> DecomposeOutcome:
@@ -726,12 +750,15 @@ def decompose_task(
             child_ids = kb.decompose_triage_task(
                 conn,
                 task_id,
-                root_assignee=orchestrator,
+                root_assignee=(
+                    None if is_live_loop_skeleton else orchestrator
+                ),
                 children=children,
                 author=audit_author,
                 auto_promote=auto_promote,
                 allowed_root_statuses=_LOOP_SAFE_STATUSES if loop_safe else None,
                 root_next_status="scheduled" if loop_safe else "todo",
+                auto_complete_shell=is_live_loop_skeleton,
                 loop_intake_payload=(
                     _loop_planned_payload(author=audit_author, fanout=True)
                     if loop_safe

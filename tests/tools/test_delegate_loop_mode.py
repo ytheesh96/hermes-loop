@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -18,9 +19,9 @@ def loop_delegate_env(monkeypatch, tmp_path):
     monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-    from gateway.session_context import _UNSET, _VAR_MAP
-    for var in _VAR_MAP.values():
-        var.set(_UNSET)
+    from gateway.session_context import reset_session_vars_for_tests
+
+    reset_session_vars_for_tests()
 
     from hermes_cli import kanban_db as kb
 
@@ -37,6 +38,61 @@ class DummyParent:
     provider = "test-provider"
 
 
+def test_kanban_worker_cannot_create_durable_loop_via_delegate_task(
+    loop_delegate_env, monkeypatch
+):
+    from tools import delegate_tool
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_worker")
+    result = delegate_tool.delegate_task(
+        goal="Create a review task",
+        mode="loop",
+        assignee="reviewer-qa",
+        parent_agent=DummyParent(),
+    )
+
+    assert "foreground/orchestrator-only" in result
+    assert "kanban_comment" in result
+
+
+@pytest.mark.parametrize("mode", ["loop", "durable"])
+def test_delegate_task_loop_refuses_disabled_auto_decompose_before_mutation(
+    loop_delegate_env, monkeypatch, mode
+):
+    (loop_delegate_env / "config.yaml").write_text(
+        "kanban:\n  auto_decompose: false\n",
+        encoding="utf-8",
+    )
+
+    from hermes_cli import kanban_db as kb
+    from tools import delegate_tool, loop_tools
+
+    monkeypatch.setattr(
+        loop_tools,
+        "_handle_loop_create_graph",
+        lambda *_args, **_kwargs: pytest.fail(
+            "disabled auto-decomposition must reject before graph creation"
+        ),
+    )
+
+    out = json.loads(
+        delegate_tool.delegate_task(
+            goal="Compile this vague objective",
+            mode=mode,
+            parent_agent=DummyParent(),
+        )
+    )
+
+    assert "kanban.auto_decompose: true" in out["error"]
+    assert "No durable work was created" in out["error"]
+    with kb.connect() as conn:
+        assert kb.list_tasks(conn) == []
+        assert (
+            conn.execute("SELECT COUNT(*) FROM workflows").fetchone()[0]
+            == 0
+        )
+
+
 def test_delegate_task_loop_skeleton_batch_uses_minimal_live_graph_contract(
     loop_delegate_env, monkeypatch
 ):
@@ -49,7 +105,7 @@ def test_delegate_task_loop_skeleton_batch_uses_minimal_live_graph_contract(
         return json.dumps(
             {
                 "ok": True,
-                "root_task_id": "t_root",
+                "workflow_id": "wf_existing",
                 "items": [
                     {
                         "client_id": "research",
@@ -88,8 +144,7 @@ def test_delegate_task_loop_skeleton_batch_uses_minimal_live_graph_contract(
     out = json.loads(
         delegate_tool.delegate_task(
             mode="loop",
-            decompose=True,
-            root_task_id="t_root",
+            workflow_id="wf_existing",
             tasks=[
                 {"id": "research", "title": "Research current behavior"},
                 {
@@ -110,12 +165,14 @@ def test_delegate_task_loop_skeleton_batch_uses_minimal_live_graph_contract(
 
     assert out["status"] == "dispatched"
     assert out["count"] == 3
-    assert out["root_task_id"] == "t_root"
+    assert out["workflow_id"] == "wf_existing"
+    assert "root_task_id" not in out
     assert out["edges"] == [["t_research", "t_build"], ["t_build", "t_verify"]]
     assert all(item["needs_specification"] for item in out["items"])
     assert "immediately" in out["note"]
     assert len(captured) == 1
-    assert captured[0]["root_task_id"] == "t_root"
+    assert captured[0]["workflow_id"] == "wf_existing"
+    assert "root_task_id" not in captured[0]
     assert captured[0]["shared_context"] is None
     assert captured[0]["nodes"] == [
         {
@@ -137,44 +194,177 @@ def test_delegate_task_loop_skeleton_batch_uses_minimal_live_graph_contract(
     assert all("assignee" not in node and "context" not in node for node in captured[0]["nodes"])
 
 
+def test_delegate_task_cached_root_resolves_to_task_workflow(loop_delegate_env):
+    from hermes_cli import kanban_db as kb
+    from tools import delegate_tool
+
+    with kb.connect() as conn:
+        workflow_id = kb.create_workflow(conn, title="Existing workflow")
+        cached_root_task_id = kb.create_task(
+            conn,
+            title="Former root",
+            workflow_id=workflow_id,
+        )
+
+    out = json.loads(
+        delegate_tool.delegate_task(
+            goal="Add a follow-up",
+            mode="loop",
+            root_task_id=cached_root_task_id,
+            parent_agent=DummyParent(),
+        )
+    )
+
+    assert out["workflow_id"] == workflow_id
+    assert "root_task_id" not in out
+    with kb.connect() as conn:
+        created = kb.get_task(conn, out["loop_item_id"])
+        assert created is not None
+        assert created.workflow_id == workflow_id
+
+
+def test_delegate_task_cached_legacy_root_uses_atomic_migration(loop_delegate_env):
+    from hermes_cli import kanban_db as kb
+    from tools import delegate_tool
+
+    with kb.connect() as conn:
+        cached_root_task_id = kb.create_task(conn, title="Legacy Loop root")
+        conn.execute(
+            "UPDATE tasks SET created_by = ? WHERE id = ?",
+            (f"loop:{cached_root_task_id}", cached_root_task_id),
+        )
+
+    out = json.loads(
+        delegate_tool.delegate_task(
+            goal="Add work under the legacy workflow",
+            mode="loop",
+            root_task_id=cached_root_task_id,
+            parent_agent=DummyParent(),
+        )
+    )
+
+    assert out["workflow_id"] == cached_root_task_id
+    with kb.connect() as conn:
+        workflow = kb.get_workflow(conn, cached_root_task_id)
+        legacy_root = kb.get_task(conn, cached_root_task_id)
+        created = kb.get_task(conn, out["loop_item_id"])
+        assert workflow is not None
+        assert workflow.legacy_root_task_id == cached_root_task_id
+        assert legacy_root is not None
+        assert legacy_root.workflow_id == cached_root_task_id
+        assert created is not None
+        assert created.workflow_id == cached_root_task_id
+
+
+def test_delegate_task_unknown_cached_root_is_ignored_safely(loop_delegate_env):
+    from hermes_cli import kanban_db as kb
+    from tools import delegate_tool
+
+    stale_root_task_id = "t_stale_cached_root"
+    out = json.loads(
+        delegate_tool.delegate_task(
+            goal="Start an independent workflow",
+            mode="loop",
+            root_task_id=stale_root_task_id,
+            parent_agent=DummyParent(),
+        )
+    )
+
+    assert out["status"] == "dispatched"
+    assert out["workflow_id"].startswith("wf_")
+    assert out["workflow_id"] != stale_root_task_id
+    with kb.connect() as conn:
+        assert kb.get_workflow(conn, stale_root_task_id) is None
+        assert kb.get_task(conn, stale_root_task_id) is None
+        created = kb.get_task(conn, out["loop_item_id"])
+        assert created is not None
+        assert created.workflow_id == out["workflow_id"]
+
+
 def test_delegate_task_loop_schema_and_prompt_explain_live_graph_ownership():
-    from agent.prompt_builder import KANBAN_GUIDANCE
-    from tools.delegate_tool import DELEGATE_TASK_SCHEMA, _build_tasks_param_description
+    from agent.prompt_builder import KANBAN_FOREGROUND_GUIDANCE
+    from tools.delegate_tool import (
+        DELEGATE_TASK_SCHEMA,
+        _build_tasks_param_description,
+        _build_top_level_description,
+    )
 
     properties = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
     task_properties = properties["tasks"]["items"]["properties"]
 
-    assert "root_task_id" in properties
-    assert "immediately-submitted skeleton" in properties["decompose"]["description"]
-    assert "auto-decomposer" in properties["decompose"]["description"]
+    assert "root_task_id" not in properties
+    assert "workflow_id" not in properties
+    assert "decompose" not in properties
+    assert "decompose" not in task_properties
+    assert "assignee" not in properties
+    assert "assignee" not in task_properties
+    assert "goal_mode" not in properties
+    assert "goal_mode" not in task_properties
+    assert "goal_max_turns" not in properties
+    assert "goal_max_turns" not in task_properties
     assert "title" in task_properties
-    assert "Ignored" in task_properties["assignee"]["description"]
-    assert "does not apply" in _build_tasks_param_description()
-    assert "Creating nodes submits them immediately" in KANBAN_GUIDANCE
-    assert "no separate Submit" in KANBAN_GUIDANCE
+    assert "auto-decomposer decides" in _build_top_level_description()
+    assert "ephemeral concurrency cap does not apply" in _build_tasks_param_description()
+    assert "tasks[].context" in _build_tasks_param_description()
+    assert "You own workflow decisions and graph mutation" in KANBAN_FOREGROUND_GUIDANCE
+    assert "`kanban_create(...)`" in KANBAN_FOREGROUND_GUIDANCE
 
 
-def test_delegate_task_loop_direct_batch_keeps_existing_concurrency_limit(
+def test_delegate_task_loop_batch_bypasses_ephemeral_concurrency_without_flag(
     loop_delegate_env, monkeypatch
 ):
-    from tools import delegate_tool
+    from tools import delegate_tool, loop_tools
 
     monkeypatch.setattr(delegate_tool, "_get_max_concurrent_children", lambda: 1)
+    captured = []
 
+    def fake_create_graph(args, **_kwargs):
+        captured.append(args)
+        return json.dumps(
+            {
+                "ok": True,
+                "workflow_id": "wf_implicit",
+                "items": [
+                    {
+                        "client_id": "first",
+                        "task_id": "t_first",
+                        "status": "triage",
+                        "needs_specification": True,
+                        "parents": [],
+                    },
+                    {
+                        "client_id": "second",
+                        "task_id": "t_second",
+                        "status": "triage",
+                        "needs_specification": True,
+                        "parents": [],
+                    },
+                ],
+                "edges": [],
+                "dispatch": {"spawned": []},
+                "subscribed": True,
+            }
+        )
+
+    monkeypatch.setattr(loop_tools, "_handle_loop_create_graph", fake_create_graph)
     out = json.loads(
         delegate_tool.delegate_task(
             mode="loop",
-            decompose=False,
             tasks=[
-                {"goal": "First direct task", "assignee": "worker-a"},
-                {"goal": "Second direct task", "assignee": "worker-b"},
+                {"id": "first", "title": "First task"},
+                {"id": "second", "title": "Second task"},
             ],
             parent_agent=DummyParent(),
         )
     )
 
-    assert "Too many tasks" in out["error"]
-    assert "max_concurrent_children is 1" in out["error"]
+    assert out["status"] == "dispatched"
+    assert out["count"] == 2
+    assert out["workflow_id"] == "wf_implicit"
+    assert [node["client_id"] for node in captured[0]["nodes"]] == [
+        "first",
+        "second",
+    ]
 
 
 def test_delegate_task_loop_mode_creates_durable_loop_item(loop_delegate_env, monkeypatch):
@@ -206,32 +396,42 @@ def test_delegate_task_loop_mode_creates_durable_loop_item(loop_delegate_env, mo
     assert out["status"] == "dispatched"
     assert out["mode"] == "loop"
     assert out["count"] == 1
-    assert out["assignee"] == "reviewer-qa"
+    assert out["assignee"] is None
+    assert out["loop_status"] == "triage"
+    assert out["needs_specification"] is True
     assert out["loop_item_id"].startswith("t_")
+    assert out["workflow_id"].startswith("wf_")
     assert out["subscribed"] is True
     assert out["auto_reentry"] is True
 
     conn = kb.connect()
     try:
         task = kb.get_task(conn, out["loop_item_id"])
-        subs = kb.list_notify_subs(conn, out["loop_item_id"])
+        subs = kb.list_workflow_notify_subs(conn, out["workflow_id"])
+        legacy_task_subs = kb.list_notify_subs(conn, out["loop_item_id"])
     finally:
         conn.close()
 
     assert task is not None
     assert task.title == "Review the Loop adapter"
-    assert task.assignee == "reviewer-qa"
+    assert task.assignee is None
+    assert task.status == "triage"
+    assert task.needs_specification is True
     assert task.session_id == "tui-session-123"
     assert task.tenant is None
+    assert task.created_by == "planner"
+    assert task.workflow_id == out["workflow_id"]
     assert "Repo: /tmp/hermes-agent" in (task.body or "")
-    assert "delegate_task_mode_loop" in (task.body or "")
     assert [
         (s["platform"], s["chat_id"], s["notifier_profile"])
         for s in subs
     ] == [("tui", "tui-session-123", "planner")]
+    assert legacy_task_subs == []
 
 
-def test_delegate_task_loop_mode_pokes_dispatcher(loop_delegate_env, monkeypatch):
+def test_delegate_task_loop_mode_does_not_preassign_or_spawn_worker(
+    loop_delegate_env, monkeypatch
+):
     from hermes_cli import kanban_db as kb
     from tools import delegate_tool
 
@@ -252,7 +452,8 @@ def test_delegate_task_loop_mode_pokes_dispatcher(loop_delegate_env, monkeypatch
     )
 
     assert out["status"] == "dispatched"
-    assert out["loop_status"] == "running"
+    assert out["loop_status"] == "triage"
+    assert out["assignee"] is None
 
     conn = kb.connect()
     try:
@@ -262,10 +463,12 @@ def test_delegate_task_loop_mode_pokes_dispatcher(loop_delegate_env, monkeypatch
         conn.close()
 
     assert task is not None
-    assert task.status == "running"
-    assert task.worker_pid == 5150
-    assert "claimed" in events
-    assert "spawned" in events
+    assert task.status == "triage"
+    assert task.needs_specification is True
+    assert task.worker_pid is None
+    assert "specification_requested" in events
+    assert "claimed" not in events
+    assert "spawned" not in events
 
 
 def test_delegate_task_loop_mode_uses_session_context_over_stale_env(
@@ -297,19 +500,21 @@ def test_delegate_task_loop_mode_uses_session_context_over_stale_env(
     conn = kb.connect()
     try:
         task = kb.get_task(conn, out["loop_item_id"])
-        subs = kb.list_notify_subs(conn, out["loop_item_id"])
+        workflow = kb.get_workflow(conn, out["workflow_id"])
+        subs = kb.list_workflow_notify_subs(conn, out["workflow_id"])
+        legacy_task_subs = kb.list_notify_subs(conn, out["loop_item_id"])
     finally:
         conn.close()
 
     assert task is not None
     assert task.session_id == "fresh-context-session"
     assert task.tenant is None
-    assert '"origin_session_id": "fresh-context-session"' in (task.body or "")
-    assert '"origin_session_id": "fresh-runtime-session"' not in (task.body or "")
-    assert '"origin_session_id": "stale-env-session"' not in (task.body or "")
+    assert workflow is not None
+    assert workflow.origin_session_id == "fresh-context-session"
     assert [(s["platform"], s["chat_id"]) for s in subs] == [
         ("tui", "fresh-context-session")
     ]
+    assert legacy_task_subs == []
 
 
 def test_delegate_task_loop_mode_keeps_custom_tenant_metadata_separate_from_source_session(
@@ -345,23 +550,25 @@ def test_delegate_task_loop_mode_keeps_custom_tenant_metadata_separate_from_sour
     conn = kb.connect()
     try:
         task = kb.get_task(conn, out["loop_item_id"])
-        subs = kb.list_notify_subs(conn, out["loop_item_id"])
+        workflow = kb.get_workflow(conn, out["workflow_id"])
+        subs = kb.list_workflow_notify_subs(conn, out["workflow_id"])
+        legacy_task_subs = kb.list_notify_subs(conn, out["loop_item_id"])
     finally:
         conn.close()
 
     assert task is not None
     assert task.session_id == "source-root-session"
     assert task.tenant == "custom-origin-metadata"
-    body = task.body or ""
-    assert '"origin_session_id": "source-root-session"' in body
-    assert '"origin_session_id": "runtime-tip-session"' not in body
-    assert '"origin_session_id": "legacy-context-tenant"' not in body
+    assert workflow is not None
+    assert workflow.origin_session_id == "source-root-session"
+    assert workflow.tenant == "custom-origin-metadata"
     assert [(s["platform"], s["chat_id"]) for s in subs] == [
         ("tui", "source-root-session")
     ]
+    assert legacy_task_subs == []
 
 
-def test_delegate_task_loop_single_decompose_preserves_legacy_goal_metadata(
+def test_delegate_task_loop_single_goal_is_implicit_skeleton(
     loop_delegate_env,
 ):
     from hermes_cli import kanban_db as kb
@@ -373,7 +580,6 @@ def test_delegate_task_loop_single_decompose_preserves_legacy_goal_metadata(
             context="Break the work into durable cards and keep going until done.",
             mode="loop",
             assignee="peacock",
-            decompose=True,
             goal_mode=True,
             goal_max_turns=7,
             parent_agent=DummyParent(),
@@ -391,13 +597,16 @@ def test_delegate_task_loop_single_decompose_preserves_legacy_goal_metadata(
 
     assert task is not None
     assert task.status == "triage"
-    assert task.assignee == "peacock"
-    assert task.goal_mode is True
-    assert task.goal_max_turns == 7
-    assert task.needs_specification is False
+    assert task.assignee is None
+    assert task.goal_mode is False
+    assert task.goal_max_turns is None
+    assert task.needs_specification is True
+    assert task.body == "Break the work into durable cards and keep going until done."
 
 
-def test_delegate_task_loop_decompose_preserves_loop_lineage(loop_delegate_env):
+def test_delegate_task_loop_skeleton_children_inherit_immutable_workflow_membership(
+    loop_delegate_env,
+):
     from hermes_cli import kanban_db as kb
     from tools import delegate_tool
 
@@ -406,17 +615,17 @@ def test_delegate_task_loop_decompose_preserves_loop_lineage(loop_delegate_env):
             goal="Coordinate a decomposed Loop graph",
             mode="loop",
             assignee="peacock",
-            decompose=True,
             parent_agent=DummyParent(),
         )
     )
-    root_id = out["loop_item_id"]
+    task_id = out["loop_item_id"]
+    workflow_id = out["workflow_id"]
 
     conn = kb.connect()
     try:
         child_ids = kb.decompose_triage_task(
             conn,
-            root_id,
+            task_id,
             root_assignee="peacock",
             children=[
                 {
@@ -429,21 +638,35 @@ def test_delegate_task_loop_decompose_preserves_loop_lineage(loop_delegate_env):
             author="test-decomposer",
         )
         assert child_ids is not None
-        root = kb.get_task(conn, root_id)
+        task = kb.get_task(conn, task_id)
         child = kb.get_task(conn, child_ids[0])
-        child_loop_root = kb._loop_root_for_task(conn, child_ids[0])
+        child_workflow = kb.workflow_id_for_task(conn, child_ids[0])
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="workflow membership is immutable",
+        ):
+            conn.execute(
+                "UPDATE tasks SET workflow_id = ? WHERE id = ?",
+                ("wf_other", child_ids[0]),
+            )
+        workflow_task_ids = kb.workflow_task_ids(conn, workflow_id)
     finally:
         conn.close()
 
-    assert root is not None
-    assert root.created_by == f"loop:{root_id}"
+    assert task is not None
+    assert task.created_by == "planner"
+    assert task.workflow_id == workflow_id
     assert child is not None
-    assert child.created_by == f"loop:{root_id}"
+    assert child.created_by == "test-decomposer"
     assert child.session_id == "tui-session-123"
-    assert child_loop_root == root_id
+    assert child.workflow_id == workflow_id
+    assert child_workflow == workflow_id
+    assert set(workflow_task_ids) == {task_id, child_ids[0]}
 
 
-def test_delegate_task_loop_mode_supports_per_task_goal_and_decompose(loop_delegate_env):
+def test_delegate_task_loop_mode_ignores_legacy_per_task_routing_fields(
+    loop_delegate_env,
+):
     from hermes_cli import kanban_db as kb
     from tools import delegate_tool
 
@@ -451,13 +674,18 @@ def test_delegate_task_loop_mode_supports_per_task_goal_and_decompose(loop_deleg
         delegate_tool.delegate_task(
             tasks=[
                 {
+                    "id": "plan",
                     "goal": "Plan a durable graph",
                     "assignee": "peacock",
                     "decompose": True,
                     "goal_mode": True,
                     "goal_max_turns": 5,
                 },
-                {"goal": "Quick review", "assignee": "reviewer-qa"},
+                {
+                    "id": "review",
+                    "goal": "Quick review",
+                    "assignee": "reviewer-qa",
+                },
             ],
             mode="loop",
             parent_agent=DummyParent(),
@@ -466,14 +694,18 @@ def test_delegate_task_loop_mode_supports_per_task_goal_and_decompose(loop_deleg
 
     assert out["status"] == "dispatched"
     assert out["count"] == 2
+    assert out["workflow_id"].startswith("wf_")
     assert out["edges"] == []
     first, second = out["items"]
-    assert first["decompose"] is True
-    assert first["goal_mode"] is True
+    assert first["client_id"] == "plan"
+    assert first["assignee"] is None
+    assert first["needs_specification"] is True
     assert first["parents"] == []
-    assert second["decompose"] is False
-    assert second["goal_mode"] is False
+    assert second["client_id"] == "review"
+    assert second["assignee"] is None
+    assert second["needs_specification"] is True
     assert second["parents"] == []
+    assert all("decompose" not in item for item in out["items"])
 
     conn = kb.connect()
     try:
@@ -484,10 +716,14 @@ def test_delegate_task_loop_mode_supports_per_task_goal_and_decompose(loop_deleg
 
     assert first_task is not None
     assert first_task.status == "triage"
-    assert first_task.goal_mode is True
-    assert first_task.goal_max_turns == 5
+    assert first_task.assignee is None
+    assert first_task.needs_specification is True
+    assert first_task.goal_mode is False
+    assert first_task.goal_max_turns is None
     assert second_task is not None
-    assert second_task.status == "ready"
+    assert second_task.status == "triage"
+    assert second_task.assignee is None
+    assert second_task.needs_specification is True
     assert second_task.goal_mode is False
 
 
@@ -540,15 +776,24 @@ def test_delegate_task_loop_mode_batch_dependencies_create_links(loop_delegate_e
         review_task = kb.get_task(conn, review["loop_item_id"])
         assert kb.parent_ids(conn, write["loop_item_id"]) == [research["loop_item_id"]]
         assert kb.parent_ids(conn, review["loop_item_id"]) == [write["loop_item_id"]]
+        assert set(kb.workflow_task_ids(conn, out["workflow_id"])) == {
+            research["loop_item_id"],
+            write["loop_item_id"],
+            review["loop_item_id"],
+        }
+        assert len(kb.list_tasks(conn)) == 3
     finally:
         conn.close()
 
     assert research_task is not None
-    assert research_task.status == "ready"
+    assert research_task.status == "triage"
+    assert research_task.assignee is None
+    assert research_task.needs_specification is True
     assert write_task is not None
     assert write_task.status == "todo"
     assert review_task is not None
     assert review_task.status == "todo"
+    assert "root_task_id" not in out
 
 
 def test_delegate_task_loop_mode_depends_on_existing_task_id(loop_delegate_env):
@@ -676,7 +921,9 @@ def test_delegate_task_loop_mode_duplicate_alias_creates_no_tasks(loop_delegate_
         conn.close()
 
 
-def test_delegate_task_loop_mode_uses_default_assignee(loop_delegate_env):
+def test_delegate_task_loop_mode_does_not_preassign_default_assignee(
+    loop_delegate_env,
+):
     (loop_delegate_env / "config.yaml").write_text(
         "kanban:\n  default_assignee: worker-a\n",
         encoding="utf-8",
@@ -693,10 +940,12 @@ def test_delegate_task_loop_mode_uses_default_assignee(loop_delegate_env):
     )
 
     assert out["status"] == "dispatched"
-    assert out["assignee"] == "worker-a"
+    assert out["loop_status"] == "triage"
+    assert out["assignee"] is None
+    assert out["needs_specification"] is True
 
 
-def test_delegate_task_loop_mode_requires_assignee_without_default(loop_delegate_env):
+def test_delegate_task_loop_mode_does_not_require_assignee(loop_delegate_env):
     from tools import delegate_tool
 
     out = json.loads(
@@ -707,5 +956,8 @@ def test_delegate_task_loop_mode_requires_assignee_without_default(loop_delegate
         )
     )
 
-    assert "error" in out
-    assert "assignee" in out["error"]
+    assert out["status"] == "dispatched"
+    assert out["loop_status"] == "triage"
+    assert out["assignee"] is None
+    assert out["client_id"] == "task"
+    assert out["needs_specification"] is True

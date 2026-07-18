@@ -82,19 +82,19 @@ def _patch_list_profiles(names: list[str]):
 
 def _create_live_skeleton(title: str = "Foreground-authored shell") -> tuple[str, str]:
     with kb.connect() as conn:
-        root = kb.create_task(conn, title="Live Loop root", initial_status="scheduled")
-        with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET created_by = ? WHERE id = ?",
-                (f"loop:{root}", root),
-            )
+        workflow_id = kb.create_workflow(
+            conn,
+            title="Live Loop workflow",
+            shared_context="Compile foreground-authored task shells.",
+        )
         skeleton = kb.create_task(
             conn,
             title=title,
-            created_by=f"loop:{root}",
+            created_by="foreground",
+            workflow_id=workflow_id,
             needs_specification=True,
         )
-    return root, skeleton
+    return workflow_id, skeleton
 
 
 def test_decompose_with_fanout_creates_children(kanban_home):
@@ -135,20 +135,27 @@ def test_decompose_with_fanout_creates_children(kanban_home):
     assert c1.assignee == "engineer"
 
 
-def test_loop_safe_decompose_keeps_root_and_options_scheduled(kanban_home):
+def test_loop_safe_decompose_keeps_planning_task_and_options_scheduled(kanban_home):
     with kb.connect() as conn:
+        workflow_id = kb.create_workflow(
+            conn,
+            title="Implementation strategy",
+            origin_session_id="origin-session",
+            tenant="origin-session",
+        )
         tid = kb.create_task(
             conn,
             title="choose implementation strategy",
-            created_by="loop:pending",
+            created_by="desktop-submit",
+            workflow_id=workflow_id,
             session_id="origin-session",
             tenant="origin-session",
             triage=True,
         )
         with kb.write_txn(conn):
             conn.execute(
-                "UPDATE tasks SET created_by = ?, status = 'scheduled' WHERE id = ?",
-                (f"loop:{tid}", tid),
+                "UPDATE tasks SET status = 'scheduled' WHERE id = ?",
+                (tid,),
             )
 
     llm_payload = jsonlib.dumps({
@@ -175,15 +182,15 @@ def test_loop_safe_decompose_keeps_root_and_options_scheduled(kanban_home):
     assert outcome.child_ids and len(outcome.child_ids) == 2
 
     with kb.connect() as conn:
-        root = kb.get_task(conn, tid)
+        planning_task = kb.get_task(conn, tid)
         children = [kb.get_task(conn, cid) for cid in outcome.child_ids]
         promoted = kb.recompute_ready(conn)
         after_recompute = [kb.get_task(conn, cid) for cid in outcome.child_ids]
         intake_events = [event for event in kb.list_events(conn, tid) if event.kind == "loop_intake_state"]
 
     assert promoted == 0
-    assert root is not None
-    assert root.status == "scheduled"
+    assert planning_task is not None
+    assert planning_task.status == "scheduled"
     assert [child.status for child in children if child is not None] == ["scheduled", "scheduled"]
     assert [child.status for child in after_recompute if child is not None] == ["scheduled", "scheduled"]
     assert [child.session_id for child in children if child is not None] == ["origin-session", "origin-session"]
@@ -194,17 +201,23 @@ def test_loop_safe_decompose_keeps_root_and_options_scheduled(kanban_home):
 
 def test_loop_safe_single_task_fallback_stays_scheduled_and_planned(kanban_home):
     with kb.connect() as conn:
+        workflow_id = kb.create_workflow(
+            conn,
+            title="Tighten task",
+            origin_session_id="origin-session",
+        )
         tid = kb.create_task(
             conn,
             title="tighten this task",
-            created_by="loop:pending",
+            created_by="foreground-triage",
+            workflow_id=workflow_id,
             session_id="origin-session",
             triage=True,
         )
         with kb.write_txn(conn):
             conn.execute(
-                "UPDATE tasks SET created_by = ?, status = 'scheduled' WHERE id = ?",
-                (f"loop:{tid}", tid),
+                "UPDATE tasks SET status = 'scheduled' WHERE id = ?",
+                (tid,),
             )
 
     llm_payload = jsonlib.dumps({
@@ -227,11 +240,11 @@ def test_loop_safe_single_task_fallback_stays_scheduled_and_planned(kanban_home)
     assert outcome.ok is True
     assert outcome.fanout is False
     with kb.connect() as conn:
-        root = kb.get_task(conn, tid)
+        planning_task = kb.get_task(conn, tid)
         intake_events = [event for event in kb.list_events(conn, tid) if event.kind == "loop_intake_state"]
-    assert root is not None
-    assert root.status == "scheduled"
-    assert root.title == "Tightened title"
+    assert planning_task is not None
+    assert planning_task.status == "scheduled"
+    assert planning_task.title == "Tightened title"
     assert intake_events[-1].payload == {
         "author": "foreground-triage",
         "child_ids": [],
@@ -245,20 +258,15 @@ def test_loop_safe_single_task_fallback_stays_scheduled_and_planned(kanban_home)
 
 def test_live_skeleton_single_task_spec_preserves_foreground_title(kanban_home):
     with kb.connect() as conn:
-        root = kb.create_task(
+        workflow_id = kb.create_workflow(
             conn,
-            title="Stable Loop root",
-            initial_status="scheduled",
+            title="Stable Loop workflow",
         )
-        with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET created_by = ? WHERE id = ?",
-                (f"loop:{root}", root),
-            )
         skeleton = kb.create_task(
             conn,
             title="Foreground-authored node title",
-            created_by=f"loop:{root}",
+            created_by="foreground",
+            workflow_id=workflow_id,
             needs_specification=True,
         )
 
@@ -648,15 +656,13 @@ def test_decompose_persists_api_failure_and_backoff(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="compile me", needs_specification=True)
 
-    client = MagicMock()
-    client.chat.completions.create = MagicMock(side_effect=RuntimeError("offline"))
     patches = _patch_list_profiles(["orchestrator"])
     for item in patches:
         item.start()
     try:
         with patch(
-            "agent.auxiliary_client.get_text_auxiliary_client",
-            return_value=(client, "test-model"),
+            "agent.auxiliary_client.call_llm",
+            side_effect=RuntimeError("offline"),
         ), _patch_extra_body():
             outcome = decomp.decompose_task(tid, author="auto-decomposer")
     finally:
@@ -713,15 +719,13 @@ def test_decompose_rejects_output_after_foreground_edit_during_llm_call(kanban_h
             )
         return _fake_aux_response(llm_payload)
 
-    client = MagicMock()
-    client.chat.completions.create = MagicMock(side_effect=edit_then_respond)
     patches = _patch_list_profiles(["orchestrator", "engineer"])
     for item in patches:
         item.start()
     try:
         with patch(
-            "agent.auxiliary_client.get_text_auxiliary_client",
-            return_value=(client, "test-model"),
+            "agent.auxiliary_client.call_llm",
+            side_effect=edit_then_respond,
         ), _patch_extra_body():
             outcome = decomp.decompose_task(tid, author="auto-decomposer")
     finally:
@@ -768,15 +772,13 @@ def test_failed_llm_call_does_not_backoff_a_concurrently_edited_revision(kanban_
             )
         raise RuntimeError("transient old-revision failure")
 
-    client = MagicMock()
-    client.chat.completions.create = MagicMock(side_effect=edit_then_fail)
     patches = _patch_list_profiles(["orchestrator"])
     for item in patches:
         item.start()
     try:
         with patch(
-            "agent.auxiliary_client.get_text_auxiliary_client",
-            return_value=(client, "test-model"),
+            "agent.auxiliary_client.call_llm",
+            side_effect=edit_then_fail,
         ), _patch_extra_body():
             outcome = decomp.decompose_task(tid, author="auto-decomposer")
     finally:
@@ -863,31 +865,39 @@ def test_decomposer_prompt_preserves_dynamic_loop_expansion():
     assert "delegate durable Loop subtasks" in decomp._SYSTEM_PROMPT
 
 
-def test_live_skeleton_prompt_uses_only_root_and_adjacent_graph_context(kanban_home):
+def test_live_skeleton_prompt_uses_only_workflow_and_adjacent_graph_context(kanban_home):
     with kb.connect() as conn:
-        root_id = kb.create_task(conn, title="Ship live graph", body="Keep the workflow dynamic", initial_status="scheduled")
-        with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET created_by = ? WHERE id = ?",
-                (f"loop:{root_id}", root_id),
-            )
+        workflow_id = kb.create_workflow(
+            conn,
+            title="Ship live graph",
+            shared_context="Keep the workflow dynamic",
+        )
         parent_id = kb.create_task(
             conn,
             title="Research constraints",
-            created_by=f"loop:{root_id}",
+            created_by="foreground",
+            workflow_id=workflow_id,
+        )
+        kb.add_comment(
+            conn,
+            parent_id,
+            "reviewer-qa",
+            "PARENT_REVIEW_MARKER: preserve settled wake coalescing.",
         )
         kb.complete_task(conn, parent_id, summary="The existing dispatcher is reusable.")
         skeleton_id = kb.create_task(
             conn,
             title="Implement the live compiler",
-            created_by=f"loop:{root_id}",
+            created_by="foreground",
+            workflow_id=workflow_id,
             parents=[parent_id],
             needs_specification=True,
         )
         downstream_id = kb.create_task(
             conn,
             title="Verify end to end",
-            created_by=f"loop:{root_id}",
+            created_by="foreground",
+            workflow_id=workflow_id,
             parents=[skeleton_id],
             needs_specification=True,
         )
@@ -903,14 +913,14 @@ def test_live_skeleton_prompt_uses_only_root_and_adjacent_graph_context(kanban_h
             "assignee": "engineer",
         }
     )
-    client = _mock_client_returning(response)
+    call_llm = MagicMock(return_value=_fake_aux_response(response))
     patches = _patch_list_profiles(["orchestrator", "engineer"])
     for item in patches:
         item.start()
     try:
         with patch(
-            "agent.auxiliary_client.get_text_auxiliary_client",
-            return_value=(client, "test-model"),
+            "agent.auxiliary_client.call_llm",
+            call_llm,
         ), _patch_extra_body():
             outcome = decomp.decompose_task(skeleton_id, author="auto-decomposer")
     finally:
@@ -918,10 +928,12 @@ def test_live_skeleton_prompt_uses_only_root_and_adjacent_graph_context(kanban_h
             item.stop()
 
     assert outcome.ok, outcome.reason
-    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
-    assert "Loop root request:" in prompt
+    prompt = call_llm.call_args.kwargs["messages"][1]["content"]
+    assert "Workflow context:" in prompt
     assert "Ship live graph" in prompt
     assert "The existing dispatcher is reusable." in prompt
+    assert "comment/review from `reviewer-qa`" in prompt
+    assert "PARENT_REVIEW_MARKER" in prompt
     assert "Immediate downstream work" in prompt
     assert "Verify end to end" in prompt
 

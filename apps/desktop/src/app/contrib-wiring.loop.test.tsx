@@ -1,6 +1,6 @@
 import { useStore } from '@nanostores/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => {
       message: string
       rawJson: string
       revision: number
-      rootTaskId: string
+      workflowId: string
       rows: unknown[]
       status: string
     }
@@ -50,7 +50,7 @@ const mocks = vi.hoisted(() => {
     selectedTaskDetail: null,
     selectedTaskDetailError: null,
     selectedTaskId: 't_delegated_loop',
-    state: { message: '', rawJson: '{}', revision: 1, rootTaskId: 't_delegated_loop', rows: [], status: 'ready' },
+    state: { message: '', rawJson: '{}', revision: 1, workflowId: 't_delegated_loop', rows: [], status: 'ready' },
     tabKey: 't_delegated_loop'
   })
 
@@ -241,7 +241,17 @@ vi.mock('./shell/use-group-registry', () => ({
 }))
 vi.mock('./updates-overlay', () => ({ UpdatesOverlay: () => null }))
 
-import { $activeSessionId, $freshDraftReady, $gatewayState, $selectedStoredSessionId } from '../store/session'
+import './contrib/controller'
+
+import { $collapsedTreeSides, $hiddenTreePanes } from '../components/pane-shell/tree/store'
+import { $fileBrowserOpen, setFileBrowserOpen } from '../store/layout'
+import {
+  $activeSessionId,
+  $currentCwd,
+  $freshDraftReady,
+  $gatewayState,
+  $selectedStoredSessionId
+} from '../store/session'
 
 import { WiredPane } from './contrib/context'
 import { $loopPanelController } from './contrib/panes'
@@ -253,7 +263,7 @@ function LoopWiringProbe() {
   return (
     <div>
       <WiredPane part="chatRoutes" />
-      <button onClick={() => void loop?.onCreateTask('Fix flaky auth test', 'peacock')} type="button">
+      <button onClick={() => void loop?.onCreateTask('Fix flaky auth test')} type="button">
         Add test Loop task
       </button>
       <output data-testid="loop-controller-open">{String(loop?.open ?? false)}</output>
@@ -281,6 +291,8 @@ describe('ContribWiring Loop session-source wiring', () => {
     $selectedStoredSessionId.set('logical-origin')
     $gatewayState.set('open')
     $freshDraftReady.set(false)
+    $currentCwd.set('/tmp/hermes-loop-project')
+    setFileBrowserOpen(true)
     mocks.selectLoopTask.mockClear()
     mocks.createLoopTask.mockClear()
     mocks.submitText.mockClear()
@@ -294,6 +306,8 @@ describe('ContribWiring Loop session-source wiring', () => {
     $selectedStoredSessionId.set(null)
     $gatewayState.set('closed')
     $freshDraftReady.set(true)
+    $currentCwd.set('')
+    setFileBrowserOpen(false)
   })
 
   it('uses the logical session key for Loop source while a runtime session is active', () => {
@@ -357,7 +371,37 @@ describe('ContribWiring Loop session-source wiring', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Add test Loop task' }))
 
-    expect(mocks.createLoopTask).toHaveBeenCalledWith('Fix flaky auth test', 'peacock')
+    expect(mocks.createLoopTask).toHaveBeenCalledWith('Fix flaky auth test')
     expect(mocks.submitText).not.toHaveBeenCalled()
+  })
+
+  it('keeps Files and Loop visibility independent in both directions', () => {
+    renderController()
+
+    expect($hiddenTreePanes.get().has('files')).toBe(false)
+    expect($hiddenTreePanes.get().has('loop')).toBe(false)
+
+    act(() => setFileBrowserOpen(false))
+
+    expect($fileBrowserOpen.get()).toBe(false)
+    expect($hiddenTreePanes.get().has('files')).toBe(true)
+    expect($hiddenTreePanes.get().has('loop')).toBe(false)
+    expect($collapsedTreeSides.get().has('right')).toBe(false)
+
+    act(() => {
+      setFileBrowserOpen(true)
+      const loop = $loopPanelController.get()
+
+      if (!loop) {
+        throw new Error('expected mounted Loop controller')
+      }
+
+      $loopPanelController.set({ ...loop, hidden: true })
+    })
+
+    expect($fileBrowserOpen.get()).toBe(true)
+    expect($hiddenTreePanes.get().has('files')).toBe(false)
+    expect($hiddenTreePanes.get().has('loop')).toBe(true)
+    expect($collapsedTreeSides.get().has('right')).toBe(false)
   })
 })

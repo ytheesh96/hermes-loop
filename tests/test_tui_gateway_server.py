@@ -1192,7 +1192,12 @@ def test_load_enabled_toolsets_folds_project_into_focus_posture(monkeypatch):
 
     monkeypatch.setattr(cc, "coding_selection", lambda **_: ["coding", "figma"])
 
-    assert server._load_enabled_toolsets() == ["coding", "figma", "project"]
+    assert server._load_enabled_toolsets() == [
+        "coding",
+        "figma",
+        "kanban",
+        "project",
+    ]
 
 
 def test_load_enabled_toolsets_rejects_disabled_mcp_env(monkeypatch, capsys):
@@ -2801,9 +2806,12 @@ def test_notification_poller_live_loop_requeues_foreign_completion_for_owner(
     monkeypatch.setattr(server, "_get_db", lambda: None)
     monkeypatch.setattr(server, "_emit", lambda *args, **_kwargs: emitted.append(args))
 
-    def _deliver(_rid, sid, session, text):
+    def _deliver(_rid, sid, session, text, **kwargs):
         delivered["a" if sid == "sid-a-live-handoff" else "b"].append(text)
         session["running"] = False
+        callback = kwargs.get("completion_callback")
+        if callback is not None:
+            callback(True)
 
     monkeypatch.setattr(server, "_run_prompt_submit", _deliver)
     server._sessions.update(
@@ -3014,11 +3022,15 @@ def test_notification_poller_delivers_owned_events(
     sess = _session(session_key="session-a")
     server._sessions["sid_a"] = sess
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: emitted.append(a))
-    monkeypatch.setattr(
-        server,
-        "_run_prompt_submit",
-        lambda _rid, _sid, _session, text: delivered.append(text),
-    )
+
+    def _deliver(_rid, _sid, session, text, **kwargs):
+        delivered.append(text)
+        session["running"] = False
+        callback = kwargs.get("completion_callback")
+        if callback is not None:
+            callback(True)
+
+    monkeypatch.setattr(server, "_run_prompt_submit", _deliver)
     monkeypatch.setattr(server, "_get_db", lambda: _CompressionDB())
 
     isolated_queue: _queue_mod.Queue = _queue_mod.Queue()
@@ -9585,6 +9597,88 @@ def test_notification_poller_delivers_tui_kanban_completion(monkeypatch, tmp_pat
         server._sessions.pop("sid_kanban", None)
 
 
+def test_tui_kanban_dispatch_failure_rewinds_then_success_cleans_subscription(
+    monkeypatch,
+    tmp_path,
+):
+    """A failed foreground turn keeps the terminal event retryable."""
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="retry TUI foreground delivery",
+            assignee="worker",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=task_id,
+            platform="tui",
+            chat_id="tui-retry-session",
+        )
+        assert kb.complete_task(
+            conn,
+            task_id,
+            summary="terminal result must survive dispatch failure",
+        )
+    finally:
+        conn.close()
+
+    sess = _session(session_key="tui-retry-session")
+    server._sessions["sid_kanban_retry"] = sess
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+
+    def _raise_on_submit(*args, **kwargs):
+        raise RuntimeError("foreground temporarily unavailable")
+
+    monkeypatch.setattr(server, "_run_prompt_submit", _raise_on_submit)
+
+    try:
+        server._dispatch_tui_kanban_notifications(
+            "sid_kanban_retry",
+            sess,
+        )
+
+        conn = kb.connect()
+        try:
+            subscriptions = kb.list_notify_subs(conn, task_id)
+            _cursor, retry_events = kb.unseen_events_for_sub(
+                conn,
+                task_id=task_id,
+                platform="tui",
+                chat_id="tui-retry-session",
+                kinds=("completed",),
+            )
+        finally:
+            conn.close()
+        assert len(subscriptions) == 1
+        assert int(subscriptions[0]["last_event_id"]) == 0
+        assert [event.kind for event in retry_events] == ["completed"]
+        assert sess["running"] is False
+
+        def _successful_submit(*args, **kwargs):
+            callback = kwargs.get("completion_callback")
+            if callback is not None:
+                callback(True)
+
+        monkeypatch.setattr(server, "_run_prompt_submit", _successful_submit)
+        server._dispatch_tui_kanban_notifications(
+            "sid_kanban_retry",
+            sess,
+        )
+
+        conn = kb.connect()
+        try:
+            assert kb.list_notify_subs(conn, task_id) == []
+        finally:
+            conn.close()
+    finally:
+        server._sessions.pop("sid_kanban_retry", None)
+
+
 def test_tui_kanban_collect_follows_session_lineage(monkeypatch, tmp_path):
     """A subscription on an origin session is collectible by its compression tip."""
     from hermes_state import SessionDB
@@ -9634,8 +9728,11 @@ def test_tui_kanban_collect_follows_session_lineage(monkeypatch, tmp_path):
         reset_hermes_home_override(token)
 
 
-def test_tui_kanban_collect_delivers_semantic_descendant_block_from_origin_lineage(monkeypatch, tmp_path):
-    """A root TUI subscription should re-enter the origin/tip for semantic child blocks."""
+def test_tui_kanban_collect_delivers_descendant_block_from_origin_lineage(
+    monkeypatch,
+    tmp_path,
+):
+    """A tree-scoped TUI subscription re-enters the origin/tip on child block."""
     from hermes_state import SessionDB
     from hermes_cli import kanban_db as kb
 
@@ -9669,7 +9766,13 @@ def test_tui_kanban_collect_delivers_semantic_descendant_block_from_origin_linea
             assignee="worker",
             created_by=f"loop:{root}",
         )
-        kb.add_notify_sub(conn, task_id=root, platform="tui", chat_id="origin-session")
+        kb.add_notify_sub(
+            conn,
+            task_id=root,
+            platform="tui",
+            chat_id="origin-session",
+            scope="descendants",
+        )
         assert kb.block_task(conn, child, reason="product-decision: pick option A or B")
     finally:
         conn.close()
@@ -9689,6 +9792,381 @@ def test_tui_kanban_collect_delivers_semantic_descendant_block_from_origin_linea
             conn.close()
     finally:
         reset_hermes_home_override(token)
+
+
+def test_tui_same_route_root_added_after_boundary_keeps_direct_wake(
+    monkeypatch,
+    tmp_path,
+):
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="root", assignee="orchestrator")
+        child = kb.create_task(
+            conn,
+            title="direct child",
+            assignee="worker",
+            created_by=f"loop:{root}",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=child,
+            platform="tui",
+            chat_id="same-route-session",
+        )
+        assert kb.complete_task(conn, child, summary="completed before root sub")
+        assert not [
+            event
+            for event in kb.list_events(conn, root)
+            if event.kind == "loop_descendant_completed"
+        ]
+        kb.add_notify_sub(
+            conn,
+            task_id=root,
+            platform="tui",
+            chat_id="same-route-session",
+            scope="descendants",
+        )
+    finally:
+        conn.close()
+
+    messages = server._collect_tui_kanban_notifications(
+        {"session_key": "same-route-session"}
+    )
+    assert len(messages) == 1
+    assert child in messages[0]
+    assert "completed before root sub" in messages[0]
+
+
+def test_tui_direct_root_boundary_keeps_comments_and_subscription(
+    monkeypatch,
+    tmp_path,
+):
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        root = kb.create_task(
+            conn,
+            title="single loop",
+            assignee="worker",
+            created_by="loop_delegation:tui-session",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=root,
+            platform="tui",
+            chat_id="direct-root-session",
+            scope="descendants",
+        )
+        kb.add_comment(
+            conn,
+            root,
+            author="worker",
+            body="Review the direct-root result before creating follow-up work.",
+        )
+        assert kb.complete_task(conn, root, summary="root done")
+    finally:
+        conn.close()
+
+    messages = server._collect_tui_kanban_notifications(
+        {"session_key": "direct-root-session"}
+    )
+    assert len(messages) == 1
+    assert "Review the direct-root result before creating follow-up work." in (
+        messages[0]
+    )
+    with kb.connect() as conn:
+        assert len(kb.list_notify_subs(conn, root)) == 1
+
+
+def test_tui_ordinary_descendant_subscription_cleans_up_after_completion(
+    monkeypatch,
+    tmp_path,
+):
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    kb.init_db()
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="ordinary task",
+            assignee="worker",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=task_id,
+            platform="tui",
+            chat_id="ordinary-session",
+            scope="descendants",
+        )
+        assert kb.complete_task(conn, task_id, summary="ordinary done")
+
+    messages = server._collect_tui_kanban_notifications(
+        {"session_key": "ordinary-session"}
+    )
+    assert len(messages) == 1
+    with kb.connect() as conn:
+        assert kb.list_notify_subs(conn, task_id) == []
+
+
+def test_tui_drained_cleanup_does_not_delete_another_watchers_live_claim(
+    monkeypatch,
+    tmp_path,
+):
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="leased ordinary task",
+            assignee="worker",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=task_id,
+            platform="tui",
+            chat_id="leased-session",
+            scope="descendants",
+        )
+        assert kb.complete_task(conn, task_id, summary="leased result")
+        _old, cursor, events, token = kb.claim_unseen_events_for_sub(
+            conn,
+            task_id=task_id,
+            platform="tui",
+            chat_id="leased-session",
+            kinds=server._TUI_KANBAN_TERMINAL_KINDS,
+        )
+        assert [event.kind for event in events] == ["completed"]
+        assert token
+    finally:
+        conn.close()
+
+    # A second poller sees no events because the first poller owns the lease.
+    # It must not confuse that with a fully-drained terminal row.
+    assert server._collect_tui_kanban_notifications(
+        {"session_key": "leased-session"}
+    ) == []
+    conn = kb.connect()
+    try:
+        assert len(kb.list_notify_subs(conn, task_id)) == 1
+        assert kb.complete_notify_claim(
+            conn,
+            task_id=task_id,
+            platform="tui",
+            chat_id="leased-session",
+            claimed_cursor=cursor,
+            claim_token=token,
+        )
+    finally:
+        conn.close()
+
+    # Once the owner ACKs, the same no-event path repairs the drained row.
+    assert server._collect_tui_kanban_notifications(
+        {"session_key": "leased-session"}
+    ) == []
+    with kb.connect() as conn:
+        assert kb.list_notify_subs(conn, task_id) == []
+
+
+def test_tui_archived_loop_root_subscription_closes_without_a_wake(
+    monkeypatch,
+    tmp_path,
+):
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    kb.init_db()
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="archived loop",
+            assignee="orchestrator",
+            created_by="loop_delegation:archived-session",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=root,
+            platform="tui",
+            chat_id="archived-session",
+            scope="descendants",
+        )
+        assert kb.archive_task(conn, root)
+
+    assert server._collect_tui_kanban_notifications(
+        {"session_key": "archived-session"}
+    ) == []
+    with kb.connect() as conn:
+        assert kb.list_notify_subs(conn, root) == []
+
+
+def test_notification_poller_batches_descendant_boundaries_into_one_tui_turn(
+    monkeypatch,
+    tmp_path,
+):
+    """TUI matches gateway: one poll-window batch produces one foreground turn."""
+    import queue as _queue_mod
+
+    from hermes_cli import kanban_db as kb
+    from tools.process_registry import process_registry
+
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        root = kb.create_task(
+            conn,
+            title="loop root",
+            assignee="orchestrator",
+        )
+        completed_child = kb.create_task(
+            conn,
+            title="implement parser",
+            assignee="worker",
+            created_by=f"loop:{root}",
+        )
+        blocked_child = kb.create_task(
+            conn,
+            title="verify compatibility",
+            assignee="reviewer",
+            created_by=f"loop:{root}",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=root,
+            platform="tui",
+            chat_id="tui-tree-session",
+            scope="descendants",
+        )
+        kb.add_comment(
+            conn,
+            completed_child,
+            author="worker",
+            body="Follow up with a focused review of the parser.",
+        )
+        kb.add_comment(
+            conn,
+            blocked_child,
+            author="reviewer",
+            body="Foreground must choose the supported compatibility target.",
+        )
+        assert kb.complete_task(
+            conn,
+            completed_child,
+            summary="parser is ready",
+        )
+        assert kb.block_task(
+            conn,
+            blocked_child,
+            reason="compatibility target is unresolved",
+        )
+    finally:
+        conn.close()
+
+    turns = []
+    emitted = []
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None):
+            turns.append(prompt)
+            return {
+                "final_response": "ok",
+                "messages": [{"role": "assistant", "content": "ok"}],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    sess = _session(agent=_Agent(), session_key="tui-tree-session")
+    server._sessions["sid_kanban_tree_batch"] = sess
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *a, **kw: emitted.append(a))
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_session_info", lambda *args, **kwargs: {})
+    monkeypatch.setattr(process_registry, "completion_queue", _queue_mod.Queue())
+
+    stop = threading.Event()
+    stop.set()
+
+    try:
+        server._notification_poller_loop(
+            stop,
+            "sid_kanban_tree_batch",
+            sess,
+        )
+
+        assert len(turns) == 1
+        prompt = turns[0]
+        assert completed_child in prompt
+        assert blocked_child in prompt
+        assert "parser is ready" in prompt
+        assert "compatibility target is unresolved" in prompt
+        assert "Follow up with a focused review of the parser." in prompt
+        assert "Foreground must choose the supported compatibility target." in prompt
+        assert "kanban_create" in prompt
+        status_calls = [args for args in emitted if args[0] == "status.update"]
+        assert len(status_calls) == 1
+        assert status_calls[0][2]["kind"] == "kanban"
+    finally:
+        server._sessions.pop("sid_kanban_tree_batch", None)
+
+
+def test_tui_task_scope_ignores_descendant_boundary(monkeypatch, tmp_path):
+    """Only scope=descendants can turn a child boundary into foreground input."""
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="loop root", assignee="orchestrator")
+        child = kb.create_task(
+            conn,
+            title="child",
+            assignee="worker",
+            created_by=f"loop:{root}",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=root,
+            platform="tui",
+            chat_id="task-session",
+            scope="task",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=root,
+            platform="tui",
+            chat_id="tree-session",
+            scope="descendants",
+        )
+        assert kb.complete_task(conn, child, summary="child complete")
+    finally:
+        conn.close()
+
+    assert server._collect_tui_kanban_notifications(
+        {"session_key": "task-session"}
+    ) == []
+    tree_messages = server._collect_tui_kanban_notifications(
+        {"session_key": "tree-session"}
+    )
+    assert len(tree_messages) == 1
+    assert child in tree_messages[0]
+    assert "child complete" in tree_messages[0]
 
 
 def test_tui_kanban_collect_respects_profile_for_descendant_block(monkeypatch, tmp_path):
@@ -9718,6 +10196,7 @@ def test_tui_kanban_collect_respects_profile_for_descendant_block(monkeypatch, t
             platform="tui",
             chat_id="profile-session",
             notifier_profile="elephant",
+            scope="descendants",
         )
         assert kb.block_task(conn, child, reason="needs-user: choose")
     finally:
@@ -9822,8 +10301,8 @@ def test_tui_kanban_dispatch_survives_busy_flip_after_claim(monkeypatch, tmp_pat
 
     original_collect = server._collect_tui_kanban_notifications
 
-    def collect_then_busy(session):
-        messages = original_collect(session)
+    def collect_then_busy(session, *, claims_out=None):
+        messages = original_collect(session, claims_out=claims_out)
         # Simulate the reviewer-reported race: something marks the session
         # running after DB claim but before dispatch. The fixed path has
         # already reserved this notification turn before collection, so this
@@ -9856,7 +10335,7 @@ def test_idle_tui_kanban_poll_does_not_publish_running(monkeypatch, tmp_path):
     sess = _session(session_key="tui-session")
     server._sessions["sid_kanban_idle"] = sess
 
-    def collect_no_messages(_session):
+    def collect_no_messages(_session, **_kwargs):
         entered.set()
         assert release.wait(5)
         return []
@@ -10004,10 +10483,14 @@ def test_notification_poller_emits_distinct_watch_matches_once(monkeypatch):
     turns = []
     emitted = []
 
-    def _fake_run_prompt_submit(rid, sid, session, text):
+    def _fake_run_prompt_submit(
+        rid, sid, session, text, *, completion_callback=None
+    ):
         turns.append(text)
         with session["history_lock"]:
             session["running"] = False
+        if completion_callback is not None:
+            completion_callback(True)
 
     sess = _session()
     server._sessions["sid_watch_dedup"] = sess

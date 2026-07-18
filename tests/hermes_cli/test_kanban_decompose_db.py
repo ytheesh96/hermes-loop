@@ -172,6 +172,133 @@ def test_decompose_parallel_entries_inherit_every_external_parent(kanban_home):
         assert entry_two not in kb.parent_ids(conn, shell)
 
 
+def test_live_fanout_shell_auto_settles_without_a_worker_run(kanban_home):
+    with kb.connect() as conn:
+        workflow_id = kb.create_workflow(
+            conn,
+            title="Live workflow",
+        )
+        shell = kb.create_task(
+            conn,
+            title="Build and verify the feature",
+            assignee="orchestrator",
+            triage=True,
+            needs_specification=True,
+            workflow_id=workflow_id,
+        )
+        downstream = kb.create_task(
+            conn,
+            title="Publish the result",
+            assignee="publisher",
+            parents=[shell],
+            workflow_id=workflow_id,
+        )
+        child_ids = kb.decompose_triage_task(
+            conn,
+            shell,
+            root_assignee="orchestrator",
+            children=[
+                {
+                    "title": "Implement the feature",
+                    "assignee": "engineer",
+                },
+                {
+                    "title": "Integrate and verify",
+                    "assignee": "reviewer",
+                    "parents": [0],
+                },
+            ],
+            author="auto-decomposer",
+            auto_complete_shell=True,
+        )
+        assert child_ids is not None
+        implementation, integration = child_ids
+
+        parked_shell = kb.get_task(conn, shell)
+        assert parked_shell is not None
+        assert parked_shell.status == "todo"
+        assert parked_shell.assignee is None
+        assert kb.get_task(conn, implementation).status == "ready"
+        assert kb.get_task(conn, integration).status == "todo"
+
+        assert kb.claim_task(conn, implementation, claimer="engineer") is not None
+        assert kb.complete_task(
+            conn,
+            implementation,
+            summary="Implementation complete",
+        )
+        assert kb.get_task(conn, integration).status == "ready"
+        assert kb.get_task(conn, shell).status == "todo"
+
+        assert kb.claim_task(conn, integration, claimer="reviewer") is not None
+        assert kb.complete_task(
+            conn,
+            integration,
+            summary="Integrated result passed verification",
+        )
+
+        settled_shell = kb.get_task(conn, shell)
+        shell_run = kb.latest_run(conn, shell)
+        shell_events = kb.list_events(conn, shell)
+        assert settled_shell is not None
+        assert settled_shell.status == "done"
+        assert settled_shell.assignee is None
+        assert settled_shell.result == "Integrated result passed verification"
+        assert shell_run is not None
+        assert shell_run.profile is None
+        assert shell_run.outcome == "completed"
+        assert shell_run.summary == "Integrated result passed verification"
+        assert any(
+            event.kind == "completed"
+            and event.payload.get("auto_completed") is True
+            for event in shell_events
+        )
+        assert not any(
+            event.kind == "promoted"
+            and event.id > next(
+                decomposed.id
+                for decomposed in shell_events
+                if decomposed.kind == "decomposed"
+            )
+            for event in shell_events
+        )
+        assert kb.get_task(conn, downstream).status == "ready"
+        assert kb.get_workflow(conn, workflow_id).status == "open"
+
+
+def test_live_fanout_shell_aggregates_multiple_exit_summaries(kanban_home):
+    with kb.connect() as conn:
+        workflow_id = kb.create_workflow(conn, title="Parallel workflow")
+        shell = kb.create_task(
+            conn,
+            title="Collect both reports",
+            triage=True,
+            needs_specification=True,
+            workflow_id=workflow_id,
+        )
+        child_ids = kb.decompose_triage_task(
+            conn,
+            shell,
+            root_assignee=None,
+            children=[
+                {"title": "Left report", "assignee": "left"},
+                {"title": "Right report", "assignee": "right"},
+            ],
+            auto_complete_shell=True,
+        )
+        assert child_ids is not None
+        left, right = child_ids
+
+        assert kb.complete_task(conn, left, summary="left complete")
+        assert kb.get_task(conn, shell).status == "todo"
+        assert kb.complete_task(conn, right, summary="right complete")
+
+        settled = kb.get_task(conn, shell)
+        assert settled is not None and settled.status == "done"
+        assert "Left report: left complete" in (settled.result or "")
+        assert "Right report: right complete" in (settled.result or "")
+
+
 def test_decompose_returns_none_when_task_missing(kanban_home):
     with kb.connect() as conn:
         result = kb.decompose_triage_task(
@@ -272,18 +399,30 @@ def test_decompose_records_audit_comment_and_event(kanban_home):
     assert any(ev.kind == "decomposed" for ev in events)
 
 
-def test_decompose_loop_root_children_keep_root_provenance_and_session(kanban_home):
-    """Loop fan-out children remain traceable to the real root/session."""
+def test_decompose_workflow_member_inherits_canonical_workflow_metadata(
+    kanban_home,
+):
+    """Fan-out uses workflow metadata while keeping actor provenance."""
     with kb.connect() as conn:
+        workflow_id = kb.create_workflow(
+            conn,
+            title="Foreground workflow",
+            origin_session_id="workflow-session",
+            tenant="workflow-tenant",
+            workspace_kind="dir",
+            workspace_path="/workflow/project",
+        )
         tid = kb.create_task(
             conn,
-            title="Loop root",
+            title="Aggregate shell",
             assignee="foreground",
-            tenant="loop-tenant",
+            created_by="initial-author",
+            tenant="stale-shell-tenant",
             triage=True,
-            session_id="logical-session-123",
+            session_id="stale-shell-session",
+            workspace_kind="scratch",
+            workflow_id=workflow_id,
         )
-        conn.execute("UPDATE tasks SET created_by = ? WHERE id = ?", (f"loop:{tid}", tid))
         child_ids = kb.decompose_triage_task(
             conn,
             tid,
@@ -297,10 +436,13 @@ def test_decompose_loop_root_children_keep_root_provenance_and_session(kanban_ho
         child = kb.get_task(conn, child_ids[0])
         events = kb.list_events(conn, child_ids[0])
         assert child is not None
-        assert child.created_by == f"loop:{tid}"
-        assert child.tenant == "loop-tenant"
-        assert child.session_id == "logical-session-123"
-        assert kb._loop_root_for_task(conn, child_ids[0]) == tid
+        assert child.created_by == "foreground"
+        assert child.workflow_id == workflow_id
+        assert child.tenant == "workflow-tenant"
+        assert child.session_id == "workflow-session"
+        assert child.workspace_kind == "dir"
+        assert child.workspace_path == "/workflow/project"
+        assert kb.workflow_id_for_task(conn, child_ids[0]) == workflow_id
 
     created_payloads = [ev.payload for ev in events if ev.kind == "created"]
     assert created_payloads == [
@@ -308,37 +450,36 @@ def test_decompose_loop_root_children_keep_root_provenance_and_session(kanban_ho
             "by": "foreground",
             "from_decompose_of": tid,
             "status": "todo",
-            "loop_root_task_id": tid,
+            "workflow_id": workflow_id,
         }
     ]
 
 
-def test_decompose_loop_child_triage_children_inherit_real_root_session(kanban_home):
-    """Nested Loop triage decompositions keep the real root logical session."""
+def test_decompose_nested_workflow_member_keeps_workflow_identity(kanban_home):
+    """Nested fan-out stays in the same workflow without root provenance."""
     with kb.connect() as conn:
-        root_id = kb.create_task(
+        workflow_id = kb.create_workflow(
             conn,
-            title="Loop root",
-            assignee="foreground",
-            tenant="loop-tenant",
-            session_id="session-root",
+            title="Nested workflow",
+            origin_session_id="workflow-origin-session",
+            tenant="workflow-tenant",
         )
-        conn.execute(
-            "UPDATE tasks SET created_by = ? WHERE id = ?",
-            (f"loop:{root_id}", root_id),
+        parent_id = kb.create_task(
+            conn,
+            title="Ordinary parent",
+            assignee="foreground",
+            created_by="foreground",
+            workflow_id=workflow_id,
         )
         triage_id = kb.create_task(
             conn,
-            title="triage under root",
+            title="Aggregate shell",
             assignee="planner",
-            tenant="loop-tenant",
+            created_by="planner",
+            tenant="stale-shell-tenant",
             triage=True,
-            parents=[root_id],
+            parents=[parent_id],
             session_id="triage-session-should-not-win",
-        )
-        conn.execute(
-            "UPDATE tasks SET created_by = ? WHERE id = ?",
-            (f"loop:{root_id}", triage_id),
         )
         child_ids = kb.decompose_triage_task(
             conn,
@@ -353,9 +494,11 @@ def test_decompose_loop_child_triage_children_inherit_real_root_session(kanban_h
         child = kb.get_task(conn, child_ids[0])
         events = kb.list_events(conn, child_ids[0])
         assert child is not None
-        assert child.created_by == f"loop:{root_id}"
-        assert child.session_id == "session-root"
-        assert kb._loop_root_for_task(conn, child_ids[0]) == root_id
+        assert child.created_by == "planner"
+        assert child.workflow_id == workflow_id
+        assert child.session_id == "workflow-origin-session"
+        assert child.tenant == "workflow-tenant"
+        assert kb.workflow_id_for_task(conn, child_ids[0]) == workflow_id
 
     created_payloads = [ev.payload for ev in events if ev.kind == "created"]
     assert created_payloads == [
@@ -363,7 +506,7 @@ def test_decompose_loop_child_triage_children_inherit_real_root_session(kanban_h
             "by": "planner",
             "from_decompose_of": triage_id,
             "status": "todo",
-            "loop_root_task_id": root_id,
+            "workflow_id": workflow_id,
         }
     ]
 
@@ -470,7 +613,14 @@ def test_decompose_non_loop_children_keep_author_provenance(kanban_home):
         assert kb._loop_root_for_task(conn, child_ids[0]) is None
 
     created_payloads = [ev.payload for ev in events if ev.kind == "created"]
-    assert created_payloads == [{"by": "alice", "from_decompose_of": tid, "status": "todo"}]
+    assert created_payloads == [
+        {
+            "by": "alice",
+            "from_decompose_of": tid,
+            "status": "todo",
+            "workflow_id": None,
+        }
+    ]
 
 
 def test_decompose_auto_promote_false_schedules_children(kanban_home):

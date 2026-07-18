@@ -16,7 +16,7 @@ import uuid
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 from hermes_constants import (
     get_hermes_home,
@@ -2393,6 +2393,7 @@ def _set_session_context(
     cwd: str | None = None,
     *,
     ui_session_id: str = "",
+    workflow_id: str = "",
 ) -> list:
     try:
         from gateway.session_context import set_session_vars
@@ -2418,6 +2419,7 @@ def _set_session_context(
             source=source,
             cwd=resolved,
             ui_session_id=ui_session_id,
+            workflow_id=workflow_id,
         )
     except Exception:
         return []
@@ -3180,7 +3182,11 @@ def _load_enabled_toolsets() -> list[str] | None:
                 # the focus-mode coding posture returns before the fallback path
                 # that normally adds it — without this the desktop loses the
                 # project tools exactly when sitting in a repo (see below).
-                return sorted({*selection, "project"})
+                # Loop can originate from the default delegate_task surface.
+                # Keep its compact foreground Kanban controls available in the
+                # same session when a descendant boundary later re-enters.
+                # Individual tools remain check_fn-gated when Loop is off.
+                return sorted({*selection, "kanban", "project"})
         except Exception:
             pass
 
@@ -3286,7 +3292,7 @@ def _load_enabled_toolsets() -> list[str] | None:
         # list without baking in implicit MCP defaults. Using the wrong
         # variant at agent creation time makes MCP tools silently missing
         # from the TUI. See PR #3252 for the original design split.
-        enabled = sorted(
+        enabled = set(
             _get_platform_tools(cfg, "cli", include_default_mcp_servers=True)
         )
         # Preserve the local Kanban/Loop lane contract: the TUI should keep the
@@ -3294,8 +3300,7 @@ def _load_enabled_toolsets() -> list[str] | None:
         # toolset list only names configurable user-facing sets. Individual
         # kanban tools are still schema-gated by tools/kanban_tools.py.
         if validate_toolset is not None and validate_toolset("kanban") and "kanban" not in enabled:
-            enabled = sorted([*enabled, "kanban"])
-        enabled = _get_platform_tools(cfg, "cli", include_default_mcp_servers=True)
+            enabled.add("kanban")
         if fallback_notice is not None:
             print(fallback_notice, file=sys.stderr, flush=True)
         if not enabled:
@@ -9519,12 +9524,57 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 _TUI_KANBAN_TERMINAL_KINDS = (
     "completed",
     "blocked",
+    "block_loop_detected",
     "gave_up",
     "crashed",
     "timed_out",
+    "loop_descendant_completed",
     "loop_descendant_blocked",
     "loop_descendant_gave_up",
 )
+
+_TUI_WORKFLOW_BOUNDARY_KINDS = (
+    "completed",
+    "blocked",
+    "block_loop_detected",
+    "gave_up",
+)
+
+_TUI_WORKFLOW_BOUNDARY_LABELS = {
+    "completed": "completed",
+    "blocked": "blocked",
+    "block_loop_detected": "blocked",
+    "gave_up": "gave up",
+}
+
+
+def _format_tui_workflow_resume_summary(
+    boundaries: list[tuple[str, str]],
+) -> str:
+    """One compact, human boundary for a workflow notification batch."""
+
+    if not boundaries:
+        return "Workflow updated · foreground resumed"
+    title, kind = boundaries[0]
+    summary = (
+        f"{title or 'Workflow task'} "
+        f"{_TUI_WORKFLOW_BOUNDARY_LABELS.get(kind, 'updated')}"
+    )
+    if len(boundaries) > 1:
+        summary += f" + {len(boundaries) - 1} more"
+    return f"{summary} · foreground resumed"
+
+
+def _format_descendant_comments(payload: dict) -> str:
+    lines = []
+    for comment in (payload.get("comments") or [])[-3:]:
+        if not isinstance(comment, dict):
+            continue
+        author = str(comment.get("author") or "worker")[:80]
+        body = " ".join(str(comment.get("body") or "").split())[:400]
+        if body:
+            lines.append(f"\ncomment from {author}: {body}")
+    return "".join(lines)
 
 
 def _format_tui_kanban_notification(sub: dict, task: Any, ev: Any) -> str | None:
@@ -9541,19 +9591,57 @@ def _format_tui_kanban_notification(sub: dict, task: Any, ev: Any) -> str | None
         if summary:
             lines = str(summary).strip().splitlines()
             handoff = f"\n{(lines[0] if lines else str(summary))[:200]}"
-        return f"[IMPORTANT: ✔ {tag}Kanban {task_id} done — {title}{handoff}]"
-    if kind == "blocked":
+        comments = _format_descendant_comments(payload)
+        return (
+            f"[IMPORTANT: ✔ {tag}Kanban {task_id} done — {title}"
+            f"{handoff}{comments}\nRead kanban_show(task_id=\"{task_id}\") "
+            "before deciding; comments are advisory and only foreground may "
+            "commit review/follow-up work with kanban_create.]"
+        )
+    if kind in {"blocked", "block_loop_detected"}:
         reason = f": {str(payload.get('reason'))[:160]}" if payload.get("reason") else ""
-        return f"[IMPORTANT: ⏸ {tag}Kanban {task_id} blocked{reason}]"
+        comments = _format_descendant_comments(payload)
+        return (
+            f"[IMPORTANT: ⏸ {tag}Kanban {task_id} blocked{reason}{comments}\n"
+            f"Read kanban_show(task_id=\"{task_id}\") before deciding; only "
+            "foreground may mutate the workflow.]"
+        )
+    if kind == "loop_descendant_completed":
+        source_id = payload.get("source_task_id") or task_id
+        source_assignee = payload.get("assignee")
+        source_tag = f"@{source_assignee} " if source_assignee else ""
+        source_title = str(payload.get("title") or source_id)[:120]
+        summary = ""
+        if payload.get("summary"):
+            summary_lines = str(payload["summary"]).strip().splitlines()
+            summary = f"\n{(summary_lines[0] if summary_lines else str(payload['summary']))[:200]}"
+        comments = _format_descendant_comments(payload)
+        return (
+            f"[IMPORTANT: ✔ {source_tag}Kanban {source_id} done — "
+            f"{source_title}{summary}{comments}\n"
+            f"Read kanban_show(task_id=\"{source_id}\") before deciding; "
+            "comments are advisory and only foreground may commit review/"
+            "follow-up work with kanban_create.]"
+        )
     if kind == "loop_descendant_blocked":
         source_id = payload.get("source_task_id") or task_id
         source_assignee = payload.get("assignee")
         source_tag = f"@{source_assignee} " if source_assignee else ""
         reason = f": {str(payload.get('reason'))[:160]}" if payload.get("reason") else ""
-        return f"[IMPORTANT: ⏸ {source_tag}Kanban {source_id} blocked{reason}]"
+        comments = _format_descendant_comments(payload)
+        return (
+            f"[IMPORTANT: ⏸ {source_tag}Kanban {source_id} blocked"
+            f"{reason}{comments}\nRead kanban_show(task_id=\"{source_id}\") "
+            "before deciding; only foreground may mutate the workflow.]"
+        )
     if kind == "gave_up":
         err = f"\n{str(payload.get('error'))[:200]}" if payload.get("error") else ""
-        return f"[IMPORTANT: ✖ {tag}Kanban {task_id} gave up after repeated spawn failures{err}]"
+        return (
+            f"[IMPORTANT: ✖ {tag}Kanban {task_id} gave up after a tripped "
+            f"failure breaker{err}{_format_descendant_comments(payload)}\n"
+            f"Read kanban_show(task_id=\"{task_id}\") before deciding; only "
+            "foreground may mutate the workflow.]"
+        )
     if kind == "loop_descendant_gave_up":
         source_id = payload.get("source_task_id") or task_id
         source_assignee = payload.get("assignee")
@@ -9562,7 +9650,10 @@ def _format_tui_kanban_notification(sub: dict, task: Any, ev: Any) -> str | None
         err = f"\n{str(payload.get('error'))[:200]}" if payload.get("error") else ""
         return (
             f"[IMPORTANT: ✖ {source_tag}Kanban {source_id} gave up "
-            f"after repeated {trigger} failures{err}]"
+            f"after repeated {trigger} failures{err}"
+            f"{_format_descendant_comments(payload)}\n"
+            f"Read kanban_show(task_id=\"{source_id}\") before deciding; "
+            "only foreground may mutate the workflow.]"
         )
     if kind == "crashed":
         return f"[IMPORTANT: ✖ {tag}Kanban {task_id} worker crashed; dispatcher will retry]"
@@ -9634,8 +9725,24 @@ def _tui_kanban_sub_key(sub: dict) -> tuple[str, str, str, str]:
     )
 
 
-def _remove_tui_kanban_sub(kb: Any, conn: Any, sub: dict) -> None:
-    kb.remove_notify_sub(
+def _tui_same_notification_route(left: dict, right: dict) -> bool:
+    return (
+        str(left.get("platform") or "").lower()
+        == str(right.get("platform") or "").lower()
+        and str(left.get("chat_id") or "") == str(right.get("chat_id") or "")
+        and str(left.get("chat_type") or "")
+        == str(right.get("chat_type") or "")
+        and str(left.get("thread_id") or "")
+        == str(right.get("thread_id") or "")
+        and str(left.get("notifier_profile") or "")
+        == str(right.get("notifier_profile") or "")
+    )
+
+
+def _remove_tui_kanban_sub(kb: Any, conn: Any, sub: dict) -> bool:
+    """Lease-safe terminal/duplicate subscription cleanup."""
+
+    return kb.remove_notify_sub_if_idle(
         conn,
         task_id=sub["task_id"],
         platform=sub["platform"],
@@ -9644,7 +9751,226 @@ def _remove_tui_kanban_sub(kb: Any, conn: Any, sub: dict) -> None:
     )
 
 
-def _collect_tui_kanban_notifications(session: dict) -> list[str]:
+def _tui_workflow_route_kwargs(sub: dict) -> dict[str, Any]:
+    return {
+        "workflow_id": str(sub.get("workflow_id") or ""),
+        "notifier_profile": sub.get("notifier_profile"),
+        "platform": sub.get("platform") or "",
+        "chat_id": sub.get("chat_id") or "",
+        "thread_id": sub.get("thread_id") or "",
+    }
+
+
+def _remove_tui_workflow_sub(kb: Any, conn: Any, sub: dict) -> bool:
+    """Lease-safe cleanup for a closed workflow subscription."""
+
+    return kb.remove_workflow_notify_sub_if_idle(
+        conn,
+        **_tui_workflow_route_kwargs(sub),
+    )
+
+
+def _collect_tui_workflow_notification(
+    session: dict,
+) -> Optional[dict[str, Any]]:
+    """Lease at most one workflow-isolated boundary batch for this TUI.
+
+    Workflow subscriptions consume ordinary task boundary rows directly in
+    global event order.  This path deliberately does not resolve a root task,
+    inspect descendant scope, or deduplicate mirrored events: workflow identity
+    is the delivery boundary.
+    """
+
+    session_key = str(session.get("session_key") or "")
+    if not session_key:
+        return None
+    try:
+        from hermes_cli import kanban_db as kb
+    except Exception:
+        return None
+
+    profile = _active_profile_name()
+    session_tip = _tui_resume_tip(session_key)
+    for board in _tui_kanban_board_slugs(kb):
+        try:
+            conn = kb.connect(board=board)
+        except Exception:
+            continue
+        try:
+            matching_subs = []
+            for sub in kb.list_workflow_notify_subs(conn):
+                if (sub.get("platform") or "").lower() != "tui":
+                    continue
+                if not _tui_kanban_sub_matches_session(
+                    sub,
+                    session_key,
+                    session_tip,
+                ):
+                    continue
+                owner_profile = sub.get("notifier_profile") or None
+                if owner_profile and owner_profile != profile:
+                    continue
+                matching_subs.append(sub)
+            matching_subs.sort(
+                key=lambda sub: (
+                    str(sub.get("chat_id") or "") == session_key,
+                    str(sub.get("chat_id") or "") == session_tip,
+                    int(sub.get("created_at") or 0),
+                    str(sub.get("workflow_id") or ""),
+                ),
+                reverse=True,
+            )
+
+            for sub in matching_subs:
+                workflow_id = str(sub.get("workflow_id") or "")
+                if not workflow_id:
+                    continue
+                route = _tui_workflow_route_kwargs(sub)
+                old_cursor, cursor, events, claim_token = (
+                    kb.claim_ready_workflow_events_for_sub(
+                        conn,
+                        **route,
+                        kinds=_TUI_WORKFLOW_BOUNDARY_KINDS,
+                        limit=20,
+                    )
+                )
+                workflow = kb.get_workflow(conn, workflow_id)
+                if not events:
+                    if (
+                        workflow is not None
+                        and workflow.status in {"closed", "archived"}
+                    ):
+                        _remove_tui_workflow_sub(kb, conn, sub)
+                    continue
+
+                messages: list[str] = []
+                boundaries: list[tuple[str, str]] = []
+                for event in events:
+                    try:
+                        task = kb.get_task(conn, event.task_id)
+                        message = _format_tui_kanban_notification(
+                            sub,
+                            task,
+                            event,
+                        )
+                    except Exception as exc:
+                        print(
+                            "[tui_gateway] TUI workflow notification format "
+                            f"failed: {type(exc).__name__}: {exc}",
+                            file=sys.stderr,
+                        )
+                        continue
+                    if message:
+                        messages.append(message)
+                        payload = getattr(event, "payload", None) or {}
+                        title = (
+                            getattr(task, "title", None)
+                            or payload.get("title")
+                            or "Workflow task"
+                        )
+                        boundaries.append(
+                            (
+                                " ".join(str(title).split())[:120],
+                                str(getattr(event, "kind", "") or ""),
+                            )
+                        )
+
+                if not messages:
+                    kb.release_workflow_notify_claim(
+                        conn,
+                        **route,
+                        claimed_cursor=cursor,
+                        old_cursor=old_cursor,
+                        claim_token=str(claim_token or ""),
+                    )
+                    continue
+
+                return {
+                    "board": board,
+                    "workflow_id": workflow_id,
+                    "sub": dict(sub),
+                    "old_cursor": old_cursor,
+                    "cursor": cursor,
+                    "claim_token": claim_token,
+                    "last_notified_event_id": int(
+                        sub.get("last_notified_event_id") or 0
+                    ),
+                    "messages": messages,
+                    "summary": _format_tui_workflow_resume_summary(boundaries),
+                    "cleanup": (
+                        workflow is not None
+                        and workflow.status in {"closed", "archived"}
+                    ),
+                }
+        finally:
+            conn.close()
+    return None
+
+
+def _mark_tui_workflow_claim_visible(claim: dict[str, Any]) -> None:
+    """Persist UI visibility without acknowledging the foreground turn."""
+
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect(board=claim.get("board"))
+    try:
+        kb.mark_workflow_notify_visible_through(
+            conn,
+            **_tui_workflow_route_kwargs(claim["sub"]),
+            event_id=int(claim["cursor"]),
+        )
+    finally:
+        conn.close()
+
+
+def _release_tui_workflow_claim(claim: dict[str, Any]) -> None:
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect(board=claim.get("board"))
+    try:
+        released = kb.release_workflow_notify_claim(
+            conn,
+            **_tui_workflow_route_kwargs(claim["sub"]),
+            claimed_cursor=int(claim["cursor"]),
+            old_cursor=int(claim["old_cursor"]),
+            claim_token=str(claim.get("claim_token") or ""),
+        )
+        if not released:
+            raise RuntimeError(
+                "workflow notification lease expired before failed TUI turn "
+                f"could release cursor {claim['cursor']}"
+            )
+    finally:
+        conn.close()
+
+
+def _finalize_tui_workflow_claim(claim: dict[str, Any]) -> None:
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect(board=claim.get("board"))
+    try:
+        completed = kb.complete_workflow_notify_claim(
+            conn,
+            **_tui_workflow_route_kwargs(claim["sub"]),
+            claimed_cursor=int(claim["cursor"]),
+            claim_token=str(claim.get("claim_token") or ""),
+        )
+        if not completed:
+            raise RuntimeError(
+                "workflow notification lease expired before successful TUI "
+                f"turn could ACK cursor {claim['cursor']}"
+            )
+        if claim.get("cleanup"):
+            _remove_tui_workflow_sub(kb, conn, claim["sub"])
+    finally:
+        conn.close()
+
+
+def _collect_tui_kanban_notifications(
+    session: dict,
+    *,
+    claims_out: Optional[list[dict[str, Any]]] = None,
+) -> list[str]:
     """Claim terminal kanban_notify_subs events for this TUI session."""
     session_key = str(session.get("session_key") or "")
     if not session_key:
@@ -9681,22 +10007,18 @@ def _collect_tui_kanban_notifications(session: dict) -> list[str]:
                 ),
                 reverse=True,
             )
+            descendant_routes_by_root: dict[str, list[dict[str, Any]]] = {}
+            for candidate in matching_subs:
+                if str(candidate.get("scope") or "task") == "descendants":
+                    descendant_routes_by_root.setdefault(
+                        str(candidate.get("task_id") or ""),
+                        [],
+                    ).append(candidate)
             delivered_tasks: set[str] = set()
             for sub in matching_subs:
                 task_id = str(sub.get("task_id") or "")
                 if not task_id or task_id in delivered_tasks:
                     continue
-                _old, _cursor, events = kb.claim_unseen_events_for_sub(
-                    conn,
-                    task_id=task_id,
-                    platform=sub["platform"],
-                    chat_id=sub["chat_id"],
-                    thread_id=sub.get("thread_id") or "",
-                    kinds=_TUI_KANBAN_TERMINAL_KINDS,
-                )
-                if not events:
-                    continue
-                delivered_tasks.add(task_id)
                 task = None
                 try:
                     task = kb.get_task(conn, task_id)
@@ -9706,6 +10028,94 @@ def _collect_tui_kanban_notifications(session: dict) -> list[str]:
                         f"{type(exc).__name__}: {exc}",
                         file=sys.stderr,
                     )
+                root_task_id = kb.loop_root_for_task(conn, task_id)
+                old_cursor, cursor, events, claim_token = (
+                    kb.claim_unseen_events_for_sub(
+                        conn,
+                        task_id=task_id,
+                        platform=sub["platform"],
+                        chat_id=sub["chat_id"],
+                        thread_id=sub.get("thread_id") or "",
+                        kinds=_TUI_KANBAN_TERMINAL_KINDS,
+                        limit=20,
+                    )
+                )
+                if not events:
+                    keep_workflow_subscription = (
+                        str(sub.get("scope") or "task") == "descendants"
+                        and str(root_task_id or "") == task_id
+                        and task is not None
+                        and task.status != "archived"
+                    )
+                    if (
+                        task
+                        and task.status in {"done", "archived"}
+                        and not keep_workflow_subscription
+                    ):
+                        _remove_tui_kanban_sub(kb, conn, sub)
+                    continue
+                if str(sub.get("scope") or "task") != "descendants":
+                    events = [
+                        event
+                        for event in events
+                        if not str(getattr(event, "kind", "")).startswith(
+                            "loop_descendant_"
+                        )
+                    ]
+                    if not events:
+                        kb.complete_notify_claim(
+                            conn,
+                            task_id=task_id,
+                            platform=sub["platform"],
+                            chat_id=sub["chat_id"],
+                            thread_id=sub.get("thread_id") or "",
+                            claimed_cursor=cursor,
+                            claim_token=str(claim_token or ""),
+                        )
+                        continue
+
+                matching_root_route = bool(
+                    root_task_id
+                    and root_task_id != task_id
+                    and any(
+                        _tui_same_notification_route(sub, root_sub)
+                        for root_sub in descendant_routes_by_root.get(
+                            root_task_id, []
+                        )
+                    )
+                )
+                if matching_root_route:
+                    mirrored_source_ids = kb.loop_root_mirrored_source_event_ids(
+                        conn,
+                        root_task_id,
+                        [event.id for event in events],
+                    )
+                    events = [
+                        event
+                        for event in events
+                        if int(event.id) not in mirrored_source_ids
+                    ]
+                if matching_root_route and not events:
+                    # The root mirror contains the worker comments and control
+                    # context for every suppressed source event. ACK the
+                    # direct child row without creating a second foreground
+                    # turn; a root subscription added after the boundary does
+                    # not suppress anything because no mirror exists.
+                    kb.complete_notify_claim(
+                        conn,
+                        task_id=task_id,
+                        platform=sub["platform"],
+                        chat_id=sub["chat_id"],
+                        thread_id=sub.get("thread_id") or "",
+                        claimed_cursor=cursor,
+                        claim_token=str(claim_token or ""),
+                    )
+                    direct_task = kb.get_task(conn, task_id)
+                    if direct_task and direct_task.status in {"done", "archived"}:
+                        _remove_tui_kanban_sub(kb, conn, sub)
+                    continue
+                delivered_tasks.add(task_id)
+                message_start = len(messages)
                 for ev in events:
                     try:
                         msg = _format_tui_kanban_notification(sub, task, ev)
@@ -9718,7 +10128,17 @@ def _collect_tui_kanban_notifications(session: dict) -> list[str]:
                         continue
                     if msg:
                         messages.append(msg)
-                if task and task.status in {"done", "archived"}:
+                keep_workflow_subscription = (
+                    str(sub.get("scope") or "task") == "descendants"
+                    and str(root_task_id or "") == task_id
+                    and task is not None
+                    and task.status != "archived"
+                )
+                if (
+                    task
+                    and task.status in {"done", "archived"}
+                    and not keep_workflow_subscription
+                ):
                     cleanup = [
                         candidate
                         for candidate in matching_subs
@@ -9731,18 +10151,116 @@ def _collect_tui_kanban_notifications(session: dict) -> list[str]:
                         if str(candidate.get("task_id") or "") == task_id
                         and _tui_kanban_sub_key(candidate) != _tui_kanban_sub_key(sub)
                     ]
-                for candidate in cleanup:
-                    try:
-                        _remove_tui_kanban_sub(kb, conn, candidate)
-                    except Exception as exc:
-                        print(
-                            f"[tui_gateway] TUI kanban subscription cleanup failed: "
-                            f"{type(exc).__name__}: {exc}",
-                            file=sys.stderr,
-                        )
+                if claims_out is not None and len(messages) > message_start:
+                    claims_out.append(
+                        {
+                            "board": board,
+                            "sub": dict(sub),
+                            "old_cursor": old_cursor,
+                            "cursor": cursor,
+                            "claim_token": claim_token,
+                            "cleanup": [dict(candidate) for candidate in cleanup],
+                        }
+                    )
+                elif len(messages) <= message_start:
+                    kb.rewind_notify_cursor(
+                        conn,
+                        task_id=task_id,
+                        platform=sub["platform"],
+                        chat_id=sub["chat_id"],
+                        thread_id=sub.get("thread_id") or "",
+                        claimed_cursor=cursor,
+                        old_cursor=old_cursor,
+                        claim_token=claim_token,
+                    )
+                else:
+                    kb.complete_notify_claim(
+                        conn,
+                        task_id=task_id,
+                        platform=sub["platform"],
+                        chat_id=sub["chat_id"],
+                        thread_id=sub.get("thread_id") or "",
+                        claimed_cursor=cursor,
+                        claim_token=str(claim_token or ""),
+                    )
+                    for candidate in cleanup:
+                        try:
+                            _remove_tui_kanban_sub(kb, conn, candidate)
+                        except Exception as exc:
+                            print(
+                                f"[tui_gateway] TUI kanban subscription cleanup failed: "
+                                f"{type(exc).__name__}: {exc}",
+                                file=sys.stderr,
+                            )
         finally:
             conn.close()
     return messages
+
+
+def _rewind_tui_kanban_claims(claims: list[dict[str, Any]]) -> None:
+    from hermes_cli import kanban_db as kb
+
+    first_error: Optional[Exception] = None
+    for claim in claims:
+        try:
+            conn = kb.connect(board=claim.get("board"))
+            try:
+                sub = claim["sub"]
+                released = kb.rewind_notify_cursor(
+                    conn,
+                    task_id=sub["task_id"],
+                    platform=sub["platform"],
+                    chat_id=sub["chat_id"],
+                    thread_id=sub.get("thread_id") or "",
+                    claimed_cursor=int(claim["cursor"]),
+                    old_cursor=int(claim["old_cursor"]),
+                    claim_token=claim.get("claim_token"),
+                )
+                if not released:
+                    raise RuntimeError(
+                        "notification lease expired before failed TUI turn "
+                        f"could release cursor {claim['cursor']}"
+                    )
+            finally:
+                conn.close()
+        except Exception as exc:
+            first_error = first_error or exc
+    if first_error is not None:
+        raise first_error
+
+
+def _finalize_tui_kanban_claims(claims: list[dict[str, Any]]) -> None:
+    from hermes_cli import kanban_db as kb
+
+    first_error: Optional[Exception] = None
+    for claim in claims:
+        try:
+            conn = kb.connect(board=claim.get("board"))
+            try:
+                sub = claim["sub"]
+                completed = kb.complete_notify_claim(
+                    conn,
+                    task_id=sub["task_id"],
+                    platform=sub["platform"],
+                    chat_id=sub["chat_id"],
+                    thread_id=sub.get("thread_id") or "",
+                    claimed_cursor=int(claim["cursor"]),
+                    claim_token=str(claim.get("claim_token") or ""),
+                )
+                if not completed:
+                    raise RuntimeError(
+                        "notification lease expired before successful TUI turn "
+                        f"could ACK cursor {claim['cursor']}"
+                    )
+                cleanup = claim.get("cleanup") or []
+                for candidate in cleanup:
+                    _remove_tui_kanban_sub(kb, conn, candidate)
+            finally:
+                conn.close()
+        except Exception as exc:
+            first_error = first_error or exc
+    if first_error is not None:
+        raise first_error
 
 
 def _dispatch_notification_text(
@@ -9755,6 +10273,8 @@ def _dispatch_notification_text(
     preclaimed: bool = False,
     event: Optional[dict] = None,
     delivery_consumer: str = "tui-poller",
+    completion_callback: Optional[Callable[[bool], None]] = None,
+    workflow_id: str = "",
 ) -> bool:
     if emit_status:
         _emit("status.update", sid, {"kind": status_kind, "text": text})
@@ -9776,12 +10296,36 @@ def _dispatch_notification_text(
 
     rid = f"__notif__{int(time.time() * 1000)}"
     try:
-        _emit("message.start", sid)
-        _run_prompt_submit(rid, sid, session, text)
-        if delivery_claim is not None:
-            from tools.async_delegation import complete_event_delivery
+        def _on_complete(succeeded: bool) -> None:
+            if delivery_claim is not None:
+                if succeeded:
+                    from tools.async_delegation import complete_event_delivery
 
-            complete_event_delivery(event, delivery_claim)
+                    complete_event_delivery(event, delivery_claim)
+                else:
+                    from tools.async_delegation import release_event_delivery
+
+                    release_event_delivery(event, delivery_claim)
+            if completion_callback is not None:
+                completion_callback(succeeded)
+
+        _emit("message.start", sid)
+        prompt_kwargs: dict[str, Any] = {
+            "completion_callback": (
+                _on_complete
+                if delivery_claim is not None or completion_callback is not None
+                else None
+            ),
+        }
+        if workflow_id:
+            prompt_kwargs["workflow_id"] = workflow_id
+        _run_prompt_submit(
+            rid,
+            sid,
+            session,
+            text,
+            **prompt_kwargs,
+        )
     except Exception as exc:
         if delivery_claim is not None:
             from tools.async_delegation import release_event_delivery
@@ -9794,19 +10338,103 @@ def _dispatch_notification_text(
         )
         with session["history_lock"]:
             _set_session_running(session, False)
+        return False
     return True
 
 
 def _dispatch_tui_kanban_notifications(sid: str, session: dict) -> None:
-    # Reserve the next agent turn before advancing kanban_notify_subs cursors,
-    # but keep that reservation private until there is an actual notification
-    # turn. Publishing session["running"] here makes idle pollers flicker as
-    # busy in active_sessions/session.resume every 0.5s.
+    # Reserve the next agent turn before leasing either workflow or legacy
+    # cursors, but keep that reservation private until there is an actual
+    # notification turn. Publishing session["running"] here makes idle pollers
+    # flicker as busy in active_sessions/session.resume every 0.5s.
     with session["history_lock"]:
         if not _reserve_notification_turn(session):
             return
+    claims: list[dict[str, Any]] = []
+    workflow_claim: Optional[dict[str, Any]] = None
+    workflow_claim_owned = False
     try:
-        messages = _collect_tui_kanban_notifications(session)
+        # Workflow delivery is the primary path. Stop after the first claimed
+        # workflow so one foreground turn never combines workflow identities,
+        # nor combines a workflow batch with legacy direct-task rows.
+        workflow_claim = _collect_tui_workflow_notification(session)
+        if workflow_claim is not None:
+            workflow_claim_owned = True
+            workflow_id = str(workflow_claim["workflow_id"])
+            workflow_text = (
+                "[IMPORTANT: A workflow produced a task-boundary batch. Handle "
+                "this workflow in isolation for this foreground turn.]\n\n"
+                + "\n\n".join(workflow_claim["messages"])
+            )
+            with session["history_lock"]:
+                _set_session_running(session, True)
+                _clear_notification_turn_reservation(session)
+
+            def _finish_workflow_claim(succeeded: bool) -> None:
+                try:
+                    if succeeded:
+                        _finalize_tui_workflow_claim(workflow_claim)
+                    else:
+                        _release_tui_workflow_claim(workflow_claim)
+                except Exception as claim_exc:
+                    action = "ACK" if succeeded else "release"
+                    print(
+                        f"[tui_gateway] TUI workflow claim {action} failed: "
+                        f"{type(claim_exc).__name__}: {claim_exc}",
+                        file=sys.stderr,
+                    )
+
+            # The status line is already externally visible before the agent
+            # turn finishes. Checkpoint that fact separately from the delivery
+            # cursor, which is ACKed only by the completion callback.
+            if int(workflow_claim["cursor"]) > int(
+                workflow_claim["last_notified_event_id"]
+            ):
+                _emit(
+                    "status.update",
+                    sid,
+                    {
+                        "kind": "workflow",
+                        "status": "foreground_resumed",
+                        "text": workflow_claim["summary"],
+                        "workflow_id": workflow_id,
+                        "event_id": int(workflow_claim["cursor"]),
+                    },
+                )
+                try:
+                    _mark_tui_workflow_claim_visible(workflow_claim)
+                except Exception as visible_exc:
+                    print(
+                        "[tui_gateway] TUI workflow visible checkpoint failed: "
+                        f"{type(visible_exc).__name__}: {visible_exc}",
+                        file=sys.stderr,
+                    )
+
+            delivered = _dispatch_notification_text(
+                sid,
+                session,
+                workflow_text,
+                status_kind="kanban",
+                emit_status=False,
+                preclaimed=True,
+                completion_callback=_finish_workflow_claim,
+                workflow_id=workflow_id,
+            )
+            if delivered:
+                # The asynchronous prompt completion callback now owns the
+                # lease, even if a test runner executes it synchronously.
+                workflow_claim_owned = False
+            else:
+                _release_tui_workflow_claim(workflow_claim)
+                workflow_claim_owned = False
+            return
+
+        # Migration compatibility only: a route that has not atomically cut
+        # over yet continues to use its legacy direct-task subscription.
+        messages = _collect_tui_kanban_notifications(
+            session,
+            claims_out=claims,
+        )
         if not messages:
             with session["history_lock"]:
                 _clear_notification_turn_reservation(session)
@@ -9814,21 +10442,57 @@ def _dispatch_tui_kanban_notifications(sid: str, session: dict) -> None:
         with session["history_lock"]:
             _set_session_running(session, True)
             _clear_notification_turn_reservation(session)
-        _dispatch_notification_text(
+
+        def _finish_claims(succeeded: bool) -> None:
+            try:
+                if succeeded:
+                    _finalize_tui_kanban_claims(claims)
+                else:
+                    _rewind_tui_kanban_claims(claims)
+            except Exception as claim_exc:
+                action = "ACK" if succeeded else "release"
+                print(
+                    f"[tui_gateway] TUI kanban claim {action} failed: "
+                    f"{type(claim_exc).__name__}: {claim_exc}",
+                    file=sys.stderr,
+                )
+
+        delivered = _dispatch_notification_text(
             sid,
             session,
             "\n\n".join(messages),
             status_kind="kanban",
             preclaimed=True,
+            completion_callback=_finish_claims,
         )
+        if not delivered:
+            _rewind_tui_kanban_claims(claims)
     except Exception as exc:
         print(
             f"[tui_gateway] TUI kanban notification poll failed: "
             f"{type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
+        if workflow_claim_owned and workflow_claim is not None:
+            try:
+                _release_tui_workflow_claim(workflow_claim)
+            except Exception as release_exc:
+                print(
+                    "[tui_gateway] TUI workflow claim release failed: "
+                    f"{type(release_exc).__name__}: {release_exc}",
+                    file=sys.stderr,
+                )
+        try:
+            _rewind_tui_kanban_claims(claims)
+        except Exception as rewind_exc:
+            print(
+                f"[tui_gateway] TUI kanban claim rewind failed: "
+                f"{type(rewind_exc).__name__}: {rewind_exc}",
+                file=sys.stderr,
+            )
         with session["history_lock"]:
             _clear_notification_turn_reservation(session)
+            _set_session_running(session, False)
 
 
 def _notification_poller_loop(
@@ -10037,7 +10701,15 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     return stop
 
 
-def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
+def _run_prompt_submit(
+    rid,
+    sid: str,
+    session: dict,
+    text: Any,
+    *,
+    completion_callback: Optional[Callable[[bool], None]] = None,
+    workflow_id: str = "",
+) -> None:
     with session["history_lock"]:
         history = list(session["history"])
         history_version = int(session.get("history_version", 0))
@@ -10058,6 +10730,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         session_tokens = []
         home_token = None  # per-turn HERMES_HOME override for a resumed remote profile
         goal_followup = None  # set by the post-turn goal hook below
+        turn_succeeded = False
         try:
             from tools.approval import (
                 reset_current_session_key,
@@ -10068,6 +10741,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             session_tokens = _set_session_context(
                 session["session_key"],
                 ui_session_id=sid,
+                workflow_id=workflow_id,
             )
             _profile_home_str = session.get("profile_home")
             if _profile_home_str:
@@ -10333,6 +11007,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             with session["history_lock"]:
                 _clear_inflight_turn(session)
             _emit("message.complete", sid, payload)
+            turn_succeeded = status == "complete"
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge
@@ -10507,6 +11182,15 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 session["last_active"] = time.time()
                 _clear_inflight_turn(session)
             _emit("session.info", sid, _session_info(agent, session))
+            if completion_callback is not None:
+                try:
+                    completion_callback(turn_succeeded)
+                except Exception as callback_exc:
+                    print(
+                        "[tui_gateway] prompt completion callback failed: "
+                        f"{type(callback_exc).__name__}: {callback_exc}",
+                        file=sys.stderr,
+                    )
 
         # A user prompt that arrived mid-turn (interrupt + queue) wins over
         # every auto follow-up below — drain it first and skip them this cycle;

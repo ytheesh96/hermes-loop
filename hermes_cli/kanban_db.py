@@ -101,6 +101,7 @@ _log = logging.getLogger(__name__)
 
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked", "scheduled"}
+VALID_WORKFLOW_STATUSES = {"open", "closed", "archived"}
 
 # Typed block reasons. Distinguishes the two fundamentally different things a
 # worker (or human) means by "blocked", so each can be routed differently
@@ -163,6 +164,26 @@ class TaskStatusConflictError(RuntimeError):
                 f"expected one of [{expected}]"
             )
         super().__init__(message)
+
+
+class WorkflowNotClosableError(RuntimeError):
+    """Raised when explicit workflow closure would strand unfinished work."""
+
+    def __init__(
+        self,
+        workflow_id: str,
+        *,
+        task_blockers: Iterable[dict[str, Any]] = (),
+        plan_blockers: Iterable[dict[str, Any]] = (),
+    ) -> None:
+        self.workflow_id = workflow_id
+        self.task_blockers = [dict(blocker) for blocker in task_blockers]
+        self.plan_blockers = [dict(blocker) for blocker in plan_blockers]
+        blocker_count = len(self.task_blockers) + len(self.plan_blockers)
+        super().__init__(
+            f"workflow {workflow_id} has {blocker_count} unfinished "
+            f"task or planning node(s)"
+        )
 
 
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:
@@ -334,6 +355,7 @@ def _resolve_rate_limit_cooldown_seconds() -> int:
 # who need to relax one don't have to relax all of them.
 _CTX_MAX_PRIOR_ATTEMPTS = 10      # most recent N prior runs shown in full
 _CTX_MAX_COMMENTS       = 30      # most recent N comments shown in full
+_CTX_MAX_PARENT_COMMENTS = 30     # most recent N comments across all parents
 _CTX_MAX_FIELD_BYTES    = 4 * 1024   # 4 KB per summary/error/metadata/result
 _CTX_MAX_BODY_BYTES     = 8 * 1024   # 8 KB per task.body (opening post)
 _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # 2 KB per comment
@@ -888,6 +910,52 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class Workflow:
+    """Internal coordination identity shared by otherwise ordinary tasks.
+
+    Workflows are intentionally not model-facing Kanban cards.  They own the
+    aggregate context and lifecycle that previously accumulated on a synthetic
+    Loop root task, while each task keeps an independent, uniform lifecycle.
+    """
+
+    id: str
+    title: Optional[str]
+    status: str
+    origin_session_id: Optional[str]
+    tenant: Optional[str]
+    shared_context: Optional[str]
+    workspace_kind: str
+    workspace_path: Optional[str]
+    revision: int
+    idempotency_key: Optional[str]
+    legacy_root_task_id: Optional[str]
+    created_at: int
+    updated_at: int
+    closed_at: Optional[int]
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "Workflow":
+        return cls(
+            id=row["id"],
+            title=row["title"],
+            status=row["status"],
+            origin_session_id=row["origin_session_id"],
+            tenant=row["tenant"],
+            shared_context=row["shared_context"],
+            workspace_kind=row["workspace_kind"] or "scratch",
+            workspace_path=row["workspace_path"],
+            revision=int(row["revision"]) if "revision" in row.keys() else 0,
+            idempotency_key=row["idempotency_key"],
+            legacy_root_task_id=row["legacy_root_task_id"],
+            created_at=int(row["created_at"]),
+            updated_at=int(row["updated_at"]),
+            closed_at=(
+                int(row["closed_at"]) if row["closed_at"] is not None else None
+            ),
+        )
+
+
+@dataclass
 class Task:
     """In-memory view of a row from the ``tasks`` table."""
 
@@ -925,6 +993,10 @@ class Task:
     max_runtime_seconds: Optional[int] = None
     last_heartbeat_at: Optional[int] = None
     current_run_id: Optional[int] = None
+    # Internal coordination identity. Tasks remain ordinary work items; this
+    # immutable key groups their events, notification route, and foreground
+    # follow-up context without making any task a special root.
+    workflow_id: Optional[str] = None
     workflow_template_id: Optional[str] = None
     current_step_key: Optional[str] = None
     # Force-loaded skills for the worker on this task (passed via
@@ -1032,6 +1104,9 @@ class Task:
             ),
             current_run_id=(
                 row["current_run_id"] if "current_run_id" in keys else None
+            ),
+            workflow_id=(
+                row["workflow_id"] if "workflow_id" in keys else None
             ),
             workflow_template_id=(
                 row["workflow_template_id"] if "workflow_template_id" in keys else None
@@ -1176,6 +1251,23 @@ class Event:
 # ---------------------------------------------------------------------------
 
 SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS workflows (
+    id                  TEXT PRIMARY KEY,
+    title               TEXT,
+    status              TEXT NOT NULL DEFAULT 'open',
+    origin_session_id   TEXT,
+    tenant              TEXT,
+    shared_context      TEXT,
+    workspace_kind      TEXT NOT NULL DEFAULT 'scratch',
+    workspace_path      TEXT,
+    revision            INTEGER NOT NULL DEFAULT 0,
+    idempotency_key     TEXT,
+    legacy_root_task_id TEXT,
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL,
+    closed_at           INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS tasks (
     id                   TEXT PRIMARY KEY,
     title                TEXT NOT NULL,
@@ -1212,6 +1304,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Pointer into task_runs for the currently-active run (NULL if no
     -- run is in-flight). Denormalised for cheap reads.
     current_run_id       INTEGER,
+    -- Internal aggregate identity for event delivery and dynamic follow-up
+    -- context. This is deliberately separate from both the task id and the
+    -- optional workflow template id below.
+    workflow_id          TEXT,
     -- Forward-compat for v2 workflow routing. In v1 the kernel writes
     -- these when the task is opted into a template but otherwise ignores
     -- them; the dispatcher doesn't consult them for routing yet.
@@ -1347,12 +1443,40 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     task_id       TEXT NOT NULL,
     platform      TEXT NOT NULL,
     chat_id       TEXT NOT NULL,
+    chat_type     TEXT NOT NULL DEFAULT '',
     thread_id     TEXT NOT NULL DEFAULT '',
     user_id       TEXT,
     notifier_profile TEXT,
+    scope         TEXT NOT NULL DEFAULT 'task',
     created_at    INTEGER NOT NULL,
     last_event_id INTEGER NOT NULL DEFAULT 0,
+    last_notified_event_id INTEGER NOT NULL DEFAULT 0,
+    pending_claim_token TEXT,
+    pending_event_id INTEGER,
+    pending_expires_at INTEGER,
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
+);
+
+-- One leased event cursor per workflow route. The board is implicit in the
+-- containing kanban.db; notifier_profile is part of the consumer identity so
+-- two profiles sharing one platform route cannot consume each other's wake.
+CREATE TABLE IF NOT EXISTS workflow_notify_subs (
+    workflow_id       TEXT NOT NULL,
+    platform          TEXT NOT NULL,
+    chat_id           TEXT NOT NULL,
+    chat_type         TEXT NOT NULL DEFAULT '',
+    thread_id         TEXT NOT NULL DEFAULT '',
+    user_id           TEXT,
+    notifier_profile  TEXT NOT NULL DEFAULT '',
+    created_at        INTEGER NOT NULL,
+    last_event_id     INTEGER NOT NULL DEFAULT 0,
+    last_notified_event_id INTEGER NOT NULL DEFAULT 0,
+    pending_claim_token TEXT,
+    pending_event_id  INTEGER,
+    pending_expires_at INTEGER,
+    PRIMARY KEY (
+        workflow_id, notifier_profile, platform, chat_id, thread_id
+    )
 );
 
 CREATE TABLE IF NOT EXISTS loop_handoffs (
@@ -1413,10 +1537,14 @@ CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_task_cursor    ON task_events(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_notify       ON workflow_notify_subs(workflow_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflows_idempotency
+    ON workflows(idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_loop_handoffs_root_state ON loop_handoffs(root_task_id, state, updated_at);
 CREATE INDEX IF NOT EXISTS idx_loop_handoffs_tenant_state ON loop_handoffs(tenant, state, updated_at);
 CREATE INDEX IF NOT EXISTS idx_loop_handoffs_task ON loop_handoffs(task_id, updated_at);
@@ -1997,11 +2125,199 @@ def init_db(
     return path
 
 
+def _backfill_legacy_workflow_membership(conn: sqlite3.Connection) -> None:
+    """Materialize unambiguous legacy Loop identity as typed workflow state.
+
+    Canonical Loop rows encode membership as ``created_by='loop:<root>'``.
+    Older decomposition records can be more indirect, so they are accepted
+    only when the existing lineage resolver proves exactly one root. Ambiguous
+    rows remain NULL and are deliberately quarantined instead of being guessed
+    into the wrong workflow.
+
+    Legacy workflow ids reuse the former root task id. That makes graph,
+    handoff, and notification cutover idempotent while decoupling the identity
+    from the task row for all new writes.
+    """
+
+    tables = {
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    if "workflows" not in tables or "tasks" not in tables:
+        return
+    task_cols = {
+        row["name"] for row in conn.execute("PRAGMA table_info(tasks)")
+    }
+    if "workflow_id" not in task_cols:
+        return
+
+    unresolved = conn.execute(
+        "SELECT id, created_by FROM tasks "
+        "WHERE workflow_id IS NULL ORDER BY created_at, id"
+    ).fetchall()
+    assignments: dict[str, str] = {}
+    for row in unresolved:
+        task_id = str(row["id"])
+        created_by = str(row["created_by"] or "")
+        workflow_id: Optional[str] = None
+        if created_by.startswith("loop:"):
+            candidate = created_by[len("loop:") :].strip()
+            if candidate:
+                workflow_id = candidate
+        elif created_by.startswith("loop_delegation:"):
+            # Historical single-item Loop delegations treated the task itself
+            # as the root identity. Preserve the identity, not the specialness.
+            workflow_id = task_id
+        else:
+            try:
+                workflow_id = _legacy_loop_root_from_decomposition_lineage(
+                    conn, task_id
+                )
+            except Exception:
+                workflow_id = None
+        if workflow_id:
+            assignments[task_id] = str(workflow_id)
+
+    if not assignments:
+        return
+
+    now = int(time.time())
+    for workflow_id in sorted(set(assignments.values())):
+        root = conn.execute(
+            "SELECT id, title, body, status, session_id, "
+            "foreground_parent_session_id, tenant, "
+            "workspace_kind, workspace_path, created_at "
+            "FROM tasks WHERE id = ?",
+            (workflow_id,),
+        ).fetchone()
+        if root is not None:
+            assignments.setdefault(workflow_id, workflow_id)
+            metadata_row = root
+        else:
+            # Some early Loop rows used an identity token for which no root
+            # task was ever materialized.  The canonical loop:<id> provenance
+            # still proves membership; retain that workflow and recover its
+            # metadata from the earliest unambiguous member.
+            member_ids = [
+                task_id
+                for task_id, assigned in assignments.items()
+                if assigned == workflow_id
+            ]
+            if not member_ids:
+                continue
+            placeholders = ",".join("?" for _ in member_ids)
+            metadata_row = conn.execute(
+                "SELECT id, title, body, status, session_id, "
+                "foreground_parent_session_id, tenant, workspace_kind, "
+                "workspace_path, created_at FROM tasks "
+                f"WHERE id IN ({placeholders}) ORDER BY created_at, id LIMIT 1",
+                tuple(member_ids),
+            ).fetchone()
+            if metadata_row is None:  # pragma: no cover - defensive corruption guard
+                continue
+        archived = str(root["status"] if root is not None else "") == "archived"
+        workflow_status = "archived" if archived else "open"
+        closed_at = now if archived else None
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO workflows (
+                id, title, status, origin_session_id, tenant, shared_context,
+                workspace_kind, workspace_path, idempotency_key,
+                legacy_root_task_id, created_at, updated_at, closed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                workflow_id,
+                metadata_row["title"],
+                workflow_status,
+                metadata_row["foreground_parent_session_id"]
+                or metadata_row["session_id"],
+                metadata_row["tenant"],
+                metadata_row["body"],
+                metadata_row["workspace_kind"] or "scratch",
+                metadata_row["workspace_path"],
+                f"legacy-loop:{workflow_id}",
+                workflow_id if root is not None else None,
+                int(metadata_row["created_at"] or now),
+                now,
+                closed_at,
+            ),
+        )
+
+    for task_id, workflow_id in assignments.items():
+        conn.execute(
+            "UPDATE tasks SET workflow_id = ? "
+            "WHERE id = ? AND workflow_id IS NULL",
+            (workflow_id, task_id),
+        )
+
+
+def _archive_identity_only_loop_roots(conn: sqlite3.Connection) -> None:
+    """Detach the unambiguous synthetic outer closure nodes from old graphs.
+
+    Only ``loop-root:*`` rows are classified automatically.  A self-marked
+    task without that implementation-owned idempotency key may be a meaningful
+    aggregate/decomposition shell and is deliberately preserved as an ordinary
+    task with ordinary dependency semantics.
+    """
+
+    columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(tasks)")
+    }
+    required = {
+        "id",
+        "created_by",
+        "idempotency_key",
+        "workflow_id",
+        "status",
+        "claim_lock",
+        "claim_expires",
+        "worker_pid",
+    }
+    if not required.issubset(columns):
+        return
+    rows = conn.execute(
+        "SELECT id, created_by FROM tasks "
+        "WHERE idempotency_key LIKE 'loop-root:%' "
+        "AND workflow_id IS NOT NULL"
+    ).fetchall()
+    for row in rows:
+        task_id = str(row["id"])
+        if _canonical_loop_created_by_root(row["created_by"]) != task_id:
+            continue
+        # These are the outer sink->identity edges synthesized by the old Loop
+        # graph constructor.  Local decomposition exit->shell edges have no
+        # loop-root idempotency marker and therefore never enter this branch.
+        conn.execute(
+            "DELETE FROM task_links WHERE child_id = ? "
+            "AND parent_id IN (SELECT id FROM tasks WHERE workflow_id = ?)",
+            (task_id, task_id),
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'archived', claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status != 'archived'",
+            (task_id,),
+        )
+
+
 def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     """Add columns that were introduced after v1 release to legacy DBs.
 
     Called by ``init_db`` so opening an old DB is always safe.
     """
+    workflow_cols = {
+        row["name"] for row in conn.execute("PRAGMA table_info(workflows)")
+    }
+    if workflow_cols and "revision" not in workflow_cols:
+        _add_column_if_missing(
+            conn,
+            "workflows",
+            "revision",
+            "revision INTEGER NOT NULL DEFAULT 0",
+        )
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
     if "tenant" not in cols:
         _add_column_if_missing(conn, "tasks", "tenant", "tenant TEXT")
@@ -2070,6 +2386,10 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     if "current_run_id" not in cols:
         _add_column_if_missing(
             conn, "tasks", "current_run_id", "current_run_id INTEGER"
+        )
+    if "workflow_id" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "workflow_id", "workflow_id TEXT"
         )
     if "workflow_template_id" not in cols:
         _add_column_if_missing(
@@ -2167,6 +2487,26 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_workflow ON tasks(workflow_id, id)"
+    )
+    _backfill_legacy_workflow_membership(conn)
+    _archive_identity_only_loop_roots(conn)
+    # Membership may be assigned once (including by the legacy backfill above)
+    # but cannot subsequently be moved to another workflow or cleared.  Keep
+    # the invariant in SQLite so CLI, plugin, and future API callers all share
+    # the same protection instead of relying on every call site to remember it.
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS tasks_workflow_id_immutable
+        BEFORE UPDATE OF workflow_id ON tasks
+        WHEN OLD.workflow_id IS NOT NULL
+         AND NEW.workflow_id IS NOT OLD.workflow_id
+        BEGIN
+            SELECT RAISE(ABORT, 'task workflow membership is immutable');
+        END
+        """
+    )
 
     # task_events gained a run_id column; back-fill it as NULL for
     # historical events (they predate runs and can't be attributed).
@@ -2192,6 +2532,51 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         if "notifier_profile" not in notify_cols:
             _add_column_if_missing(
                 conn, "kanban_notify_subs", "notifier_profile", "notifier_profile TEXT"
+            )
+        if "chat_type" not in notify_cols:
+            _add_column_if_missing(
+                conn,
+                "kanban_notify_subs",
+                "chat_type",
+                "chat_type TEXT NOT NULL DEFAULT ''",
+            )
+        if "scope" not in notify_cols:
+            # Existing subscriptions keep their historical direct-task
+            # behavior. New auto-subscriptions opt into descendant delivery
+            # explicitly through add_notify_sub(scope="descendants").
+            _add_column_if_missing(
+                conn,
+                "kanban_notify_subs",
+                "scope",
+                "scope TEXT NOT NULL DEFAULT 'task'",
+            )
+        if "last_notified_event_id" not in notify_cols:
+            _add_column_if_missing(
+                conn,
+                "kanban_notify_subs",
+                "last_notified_event_id",
+                "last_notified_event_id INTEGER NOT NULL DEFAULT 0",
+            )
+        if "pending_claim_token" not in notify_cols:
+            _add_column_if_missing(
+                conn,
+                "kanban_notify_subs",
+                "pending_claim_token",
+                "pending_claim_token TEXT",
+            )
+        if "pending_event_id" not in notify_cols:
+            _add_column_if_missing(
+                conn,
+                "kanban_notify_subs",
+                "pending_event_id",
+                "pending_event_id INTEGER",
+            )
+        if "pending_expires_at" not in notify_cols:
+            _add_column_if_missing(
+                conn,
+                "kanban_notify_subs",
+                "pending_expires_at",
+                "pending_expires_at INTEGER",
             )
 
     loop_handoffs_exist = conn.execute(
@@ -2312,6 +2697,7 @@ _REBUILD_SPECS = {
         " payload TEXT, created_at INTEGER NOT NULL)",
         (
             "CREATE INDEX idx_events_task ON task_events(task_id, created_at)",
+            "CREATE INDEX idx_events_task_cursor ON task_events(task_id, id)",
             "CREATE INDEX idx_events_run ON task_events(run_id, id)",
         ),
     ),
@@ -2339,9 +2725,14 @@ _REBUILD_SPECS = {
     "kanban_notify_subs": (
         "CREATE TABLE kanban_notify_subs ("
         " task_id TEXT NOT NULL, platform TEXT NOT NULL, chat_id TEXT NOT NULL,"
+        " chat_type TEXT NOT NULL DEFAULT '',"
         " thread_id TEXT NOT NULL DEFAULT '', user_id TEXT,"
-        " notifier_profile TEXT, created_at INTEGER NOT NULL,"
+        " notifier_profile TEXT, scope TEXT NOT NULL DEFAULT 'task',"
+        " created_at INTEGER NOT NULL,"
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
+        " last_notified_event_id INTEGER NOT NULL DEFAULT 0,"
+        " pending_claim_token TEXT, pending_event_id INTEGER,"
+        " pending_expires_at INTEGER,"
         " PRIMARY KEY (task_id, platform, chat_id, thread_id))",
         ("CREATE INDEX idx_notify_task ON kanban_notify_subs(task_id)",),
     ),
@@ -2551,6 +2942,12 @@ def _new_task_id() -> str:
     return "t_" + secrets.token_hex(4)
 
 
+def _new_workflow_id() -> str:
+    """Generate an opaque coordination id that is never a task id."""
+
+    return "wf_" + secrets.token_hex(8)
+
+
 def _claimer_id() -> str:
     """Return a ``host:pid`` string that identifies this claimer."""
     import socket
@@ -2562,8 +2959,255 @@ def _claimer_id() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Task creation / mutation
+# Workflow and task creation / mutation
 # ---------------------------------------------------------------------------
+
+def _insert_workflow(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: str,
+    title: Optional[str],
+    origin_session_id: Optional[str],
+    tenant: Optional[str],
+    shared_context: Optional[str],
+    workspace_kind: str,
+    workspace_path: Optional[str],
+    idempotency_key: Optional[str],
+    legacy_root_task_id: Optional[str] = None,
+    now: Optional[int] = None,
+) -> str:
+    """Insert one workflow row inside the caller's transaction."""
+
+    workflow_id = str(workflow_id or "").strip()
+    if not workflow_id:
+        raise ValueError("workflow_id is required")
+    if workspace_kind not in VALID_WORKSPACE_KINDS:
+        raise ValueError(
+            f"workspace_kind must be one of {sorted(VALID_WORKSPACE_KINDS)}, "
+            f"got {workspace_kind!r}"
+        )
+    timestamp = int(now if now is not None else time.time())
+    conn.execute(
+        """
+        INSERT INTO workflows (
+            id, title, status, origin_session_id, tenant, shared_context,
+            workspace_kind, workspace_path, idempotency_key,
+            legacy_root_task_id, created_at, updated_at
+        ) VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            workflow_id,
+            str(title).strip()[:200] if title and str(title).strip() else None,
+            str(origin_session_id).strip() if origin_session_id else None,
+            str(tenant).strip() if tenant else None,
+            str(shared_context).strip() if shared_context else None,
+            workspace_kind,
+            str(workspace_path).strip() if workspace_path else None,
+            str(idempotency_key).strip() if idempotency_key else None,
+            str(legacy_root_task_id).strip() if legacy_root_task_id else None,
+            timestamp,
+            timestamp,
+        ),
+    )
+    return workflow_id
+
+
+def create_workflow(
+    conn: sqlite3.Connection,
+    *,
+    title: Optional[str] = None,
+    origin_session_id: Optional[str] = None,
+    tenant: Optional[str] = None,
+    shared_context: Optional[str] = None,
+    workspace_kind: str = "scratch",
+    workspace_path: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+    workflow_id: Optional[str] = None,
+) -> str:
+    """Create an internal workflow identity, returning an idempotent id.
+
+    A workflow is coordination metadata, not a Kanban task.  It therefore has
+    no assignee, dependency state, or worker lifecycle of its own.
+    """
+
+    key = str(idempotency_key or "").strip() or None
+    requested_id = str(workflow_id or "").strip() or None
+    if key:
+        row = conn.execute(
+            "SELECT id FROM workflows WHERE idempotency_key = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (key,),
+        ).fetchone()
+        if row is not None:
+            existing_id = str(row["id"])
+            if requested_id and requested_id != existing_id:
+                raise ValueError(
+                    f"workflow idempotency key {key!r} already belongs to "
+                    f"{existing_id}, not {requested_id}"
+                )
+            return existing_id
+
+    allocated_id = requested_id or _new_workflow_id()
+    for attempt in range(2):
+        try:
+            with write_txn(conn):
+                if key:
+                    row = conn.execute(
+                        "SELECT id FROM workflows WHERE idempotency_key = ? "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        (key,),
+                    ).fetchone()
+                    if row is not None:
+                        existing_id = str(row["id"])
+                        if requested_id and requested_id != existing_id:
+                            raise ValueError(
+                                f"workflow idempotency key {key!r} already "
+                                f"belongs to {existing_id}, not {requested_id}"
+                            )
+                        return existing_id
+                _insert_workflow(
+                    conn,
+                    workflow_id=allocated_id,
+                    title=title,
+                    origin_session_id=origin_session_id,
+                    tenant=tenant,
+                    shared_context=shared_context,
+                    workspace_kind=workspace_kind,
+                    workspace_path=workspace_path,
+                    idempotency_key=key,
+                )
+            return allocated_id
+        except sqlite3.IntegrityError:
+            if requested_id or attempt == 1:
+                raise
+            allocated_id = _new_workflow_id()
+    raise RuntimeError("unreachable")
+
+
+def get_workflow(
+    conn: sqlite3.Connection,
+    workflow_id: str,
+) -> Optional[Workflow]:
+    row = conn.execute(
+        "SELECT * FROM workflows WHERE id = ?",
+        (str(workflow_id or "").strip(),),
+    ).fetchone()
+    return Workflow.from_row(row) if row is not None else None
+
+
+def close_workflow(
+    conn: sqlite3.Connection,
+    workflow_id: str,
+    *,
+    archive: bool = False,
+) -> bool:
+    """Explicitly close or archive a settled workflow.
+
+    Closure is guarded in the same write transaction as the status change:
+    every member task must be terminal and every planning-only node must have
+    been archived.  This keeps a foreground close from racing a concurrent
+    follow-up create and silently stranding work in a closed workflow.
+
+    Returns ``False`` for an unknown or already-closed workflow so existing
+    idempotent callers keep their historical behavior.
+    """
+
+    workflow_id = str(workflow_id or "").strip()
+    next_status = "archived" if archive else "closed"
+    now = int(time.time())
+    with write_txn(conn):
+        workflow_row = conn.execute(
+            "SELECT status FROM workflows WHERE id = ?",
+            (workflow_id,),
+        ).fetchone()
+        if workflow_row is None or str(workflow_row["status"]) != "open":
+            return False
+        task_blockers = [
+            {
+                "id": str(row["id"]),
+                "title": str(row["title"] or ""),
+                "status": str(row["status"]),
+            }
+            for row in conn.execute(
+                "SELECT id, title, status FROM tasks "
+                "WHERE workflow_id = ? AND status NOT IN ('done', 'archived') "
+                "ORDER BY created_at, id",
+                (workflow_id,),
+            ).fetchall()
+        ]
+        has_plan_table = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'loop_plan_nodes'"
+        ).fetchone() is not None
+        plan_rows = (
+            conn.execute(
+                "SELECT node_id, title, status FROM loop_plan_nodes "
+                "WHERE workflow_id = ? AND status != 'archived' "
+                "ORDER BY created_at, node_id",
+                (workflow_id,),
+            ).fetchall()
+            if has_plan_table
+            else []
+        )
+        plan_blockers = [
+            {
+                "node_id": str(row["node_id"]),
+                "title": str(row["title"] or ""),
+                "status": str(row["status"]),
+            }
+            for row in plan_rows
+        ]
+        if task_blockers or plan_blockers:
+            raise WorkflowNotClosableError(
+                workflow_id,
+                task_blockers=task_blockers,
+                plan_blockers=plan_blockers,
+            )
+        cur = conn.execute(
+            "UPDATE workflows SET status = ?, updated_at = ?, "
+            "revision = revision + 1, "
+            "closed_at = COALESCE(closed_at, ?) "
+            "WHERE id = ? AND status = 'open'",
+            (next_status, now, now, workflow_id),
+        )
+    return cur.rowcount == 1
+
+
+def workflow_id_for_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    include_legacy_fallback: bool = True,
+) -> Optional[str]:
+    """Return immutable workflow membership for an ordinary task."""
+
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return None
+    row = conn.execute(
+        "SELECT workflow_id FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    workflow_id = str(row["workflow_id"] or "").strip()
+    if workflow_id:
+        return workflow_id
+    if include_legacy_fallback:
+        return _loop_root_for_task(conn, task_id)
+    return None
+
+
+def workflow_task_ids(
+    conn: sqlite3.Connection,
+    workflow_id: str,
+) -> list[str]:
+    rows = conn.execute(
+        "SELECT id FROM tasks WHERE workflow_id = ? ORDER BY created_at, id",
+        (str(workflow_id or "").strip(),),
+    ).fetchall()
+    return [str(row["id"]) for row in rows]
+
 
 def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     """Lowercase-assignee normalization for Kanban rows (dashboard/CLI parity)."""
@@ -2596,9 +3240,11 @@ def create_task(
     goal_max_turns: Optional[int] = None,
     initial_status: str = "running",
     session_id: Optional[str] = None,
+    workflow_id: Optional[str] = None,
     board: Optional[str] = None,
     project_id: Optional[str] = None,
     needs_specification: bool = False,
+    reject_blocked_parents: bool = False,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -2623,6 +3269,11 @@ def create_task(
     each name to ``hermes --skills ...``. Use this to pin a task to a
     specialist skill (e.g. ``skills=["translation"]`` so the worker loads the
     translation skill regardless of the profile's default config).
+
+    ``reject_blocked_parents`` is used by foreground follow-up creation:
+    a blocked task cannot gate the resolution work needed to unblock itself.
+    The check is repeated under the write lock so a concurrent block cannot
+    slip a permanently waiting dependency into the graph.
     """
     assignee = _canonical_assignee(assignee)
     if not title or not title.strip():
@@ -2682,7 +3333,60 @@ def create_task(
                 # ``<repo>/.worktrees/<task-id>`` dir keyed on the new task id.
                 project_repo = str(project_obj.primary_path)
 
-    parents = tuple(p for p in parents if p)
+    parents = tuple(
+        dict.fromkeys(
+            str(parent).strip()
+            for parent in parents
+            if parent is not None and str(parent).strip()
+        )
+    )
+    workflow_id = str(workflow_id or "").strip() or None
+
+    # Resolve lineage before the idempotency fast path so a retried create
+    # cannot accidentally return a task from a different workflow.
+    parent_workflows: set[str] = set()
+    if parents:
+        placeholders = ",".join("?" for _ in parents)
+        parent_rows = conn.execute(
+            f"SELECT id, workflow_id, status FROM tasks "
+            f"WHERE id IN ({placeholders})",
+            parents,
+        ).fetchall()
+        by_parent = {str(row["id"]): row["workflow_id"] for row in parent_rows}
+        missing = [parent for parent in parents if parent not in by_parent]
+        if missing:
+            raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
+        if reject_blocked_parents:
+            blocked = [
+                str(row["id"])
+                for row in parent_rows
+                if str(row["status"]) == "blocked"
+            ]
+            if blocked:
+                raise ValueError(
+                    "blocked task(s) cannot be parents for new follow-up work: "
+                    + ", ".join(blocked)
+                )
+        parent_workflows = {
+            str(value).strip()
+            for value in by_parent.values()
+            if value is not None and str(value).strip()
+        }
+        if len(parent_workflows) > 1:
+            raise ValueError(
+                "parent tasks belong to different workflows: "
+                + ", ".join(sorted(parent_workflows))
+            )
+        if parent_workflows:
+            parent_workflow_id = next(iter(parent_workflows))
+            if workflow_id and workflow_id != parent_workflow_id:
+                raise ValueError(
+                    f"workflow {workflow_id} conflicts with parent workflow "
+                    f"{parent_workflow_id}"
+                )
+            workflow_id = parent_workflow_id
+    if workflow_id and get_workflow(conn, workflow_id) is None:
+        raise ValueError(f"unknown workflow: {workflow_id}")
 
     # Normalise + validate skills: strip whitespace, drop empties, dedupe
     # (preserving order). Refuse commas inside a single name so we don't
@@ -2736,12 +3440,18 @@ def create_task(
     # insert, at which point both rows exist but the next lookup stabilises.
     if idempotency_key:
         row = conn.execute(
-            "SELECT id FROM tasks WHERE idempotency_key = ? "
+            "SELECT id, workflow_id FROM tasks WHERE idempotency_key = ? "
             "AND status != 'archived' "
             "ORDER BY created_at DESC LIMIT 1",
             (idempotency_key,),
         ).fetchone()
         if row:
+            existing_workflow_id = str(row["workflow_id"] or "").strip() or None
+            if workflow_id and existing_workflow_id != workflow_id:
+                raise ValueError(
+                    f"idempotent task {row['id']} belongs to workflow "
+                    f"{existing_workflow_id or '<none>'}, not {workflow_id}"
+                )
             return row["id"]
 
     now = int(time.time())
@@ -2771,6 +3481,67 @@ def create_task(
         task_id = _new_task_id()
         try:
             with write_txn(conn):
+                # Repeat lineage checks under the write lock. A previously
+                # ungrouped parent is allowed to acquire its one immutable
+                # membership between the optimistic read above and this txn;
+                # if it did, inherit or reject it here.
+                if parents:
+                    placeholders = ",".join("?" for _ in parents)
+                    rows = conn.execute(
+                        f"SELECT id, workflow_id, status FROM tasks "
+                        f"WHERE id IN ({placeholders})",
+                        parents,
+                    ).fetchall()
+                    if len(rows) != len(parents):
+                        present = {str(row["id"]) for row in rows}
+                        missing = [parent for parent in parents if parent not in present]
+                        raise ValueError(
+                            f"unknown parent task(s): {', '.join(missing)}"
+                        )
+                    if reject_blocked_parents:
+                        blocked = [
+                            str(row["id"])
+                            for row in rows
+                            if str(row["status"]) == "blocked"
+                        ]
+                        if blocked:
+                            raise ValueError(
+                                "blocked task(s) cannot be parents for new "
+                                "follow-up work: "
+                                + ", ".join(blocked)
+                            )
+                    locked_parent_workflows = {
+                        str(row["workflow_id"]).strip()
+                        for row in rows
+                        if row["workflow_id"] is not None
+                        and str(row["workflow_id"]).strip()
+                    }
+                    if len(locked_parent_workflows) > 1:
+                        raise ValueError(
+                            "parent tasks belong to different workflows: "
+                            + ", ".join(sorted(locked_parent_workflows))
+                        )
+                    if locked_parent_workflows:
+                        locked_workflow_id = next(iter(locked_parent_workflows))
+                        if workflow_id and workflow_id != locked_workflow_id:
+                            raise ValueError(
+                                f"workflow {workflow_id} conflicts with parent "
+                                f"workflow {locked_workflow_id}"
+                            )
+                        workflow_id = locked_workflow_id
+                if workflow_id:
+                    locked_workflow = conn.execute(
+                        "SELECT status FROM workflows WHERE id = ?",
+                        (workflow_id,),
+                    ).fetchone()
+                    if locked_workflow is None:
+                        raise ValueError(f"unknown workflow: {workflow_id}")
+                    if str(locked_workflow["status"]) != "open":
+                        raise ValueError(
+                            f"workflow {workflow_id} is "
+                            f"{locked_workflow['status']}; new tasks require open"
+                        )
+
                 # Determine task status from parent status, unless the caller
                 # parks it directly in blocked/scheduled for human-ops or Loop
                 # planning, or in triage for a specifier.
@@ -2831,8 +3602,8 @@ def create_task(
                         branch_name, project_id, tenant, idempotency_key,
                         max_runtime_seconds,
                         skills, max_retries, goal_mode, goal_max_turns, session_id,
-                        needs_specification
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        workflow_id, needs_specification
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2855,6 +3626,7 @@ def create_task(
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
+                        workflow_id,
                         1 if needs_specification else 0,
                     ),
                 )
@@ -2872,6 +3644,7 @@ def create_task(
                         "status": task_status,
                         "parents": list(parents),
                         "tenant": tenant,
+                        "workflow_id": workflow_id,
                         "branch_name": branch_name,
                         "skills": list(skills_list) if skills_list else None,
                         "goal_mode": bool(goal_mode) or None,
@@ -2904,6 +3677,7 @@ def create_loop_skeleton_graph(
     conn: sqlite3.Connection,
     *,
     nodes: list[dict[str, Any]],
+    workflow_id: Optional[str] = None,
     root_task_id: Optional[str] = None,
     shared_context: Optional[str] = None,
     session_id: Optional[str] = None,
@@ -2918,12 +3692,13 @@ def create_loop_skeleton_graph(
 
     Every submitted node is a ``needs_specification`` skeleton. Entry rows
     move straight to ``triage``; rows with unfinished parents wait in ``todo``.
-    When no root is supplied, the same transaction synthesizes a stable,
-    unassigned Loop root and links the graph's sinks into it. Validation and
-    all task/link inserts share one write transaction, so a malformed final
-    node cannot leave a partial executable graph behind. When callers omit an
-    idempotency scope, one is derived from the normalized fragment: exact
-    retries reuse tasks, while aliases remain local to later graph fragments.
+    The workflow is coordination metadata, not a graph node: multiple sinks
+    are legal and no synthetic task or sink-to-root closure edge is created.
+    Validation, workflow creation, and all task/link inserts share one write
+    transaction, so a malformed final node cannot leave a partial executable
+    graph behind. ``root_task_id`` is a temporary read-compatibility alias for
+    legacy callers; it resolves that task's workflow and never restores root
+    semantics.
     """
     if not isinstance(nodes, list) or not nodes:
         raise ValueError("nodes must be a non-empty list")
@@ -3015,15 +3790,27 @@ def create_loop_skeleton_graph(
     if len(topological_order) != len(normalized):
         raise ValueError("dependency cycle detected in Loop skeleton graph")
 
-    root_task_id = str(root_task_id or "").strip() or None
-    requested_root_task_id = root_task_id
+    workflow_id = str(workflow_id or "").strip() or None
+    legacy_root_task_id = str(root_task_id or "").strip() or None
+    if legacy_root_task_id:
+        legacy_workflow_id = workflow_id_for_task(conn, legacy_root_task_id)
+        if legacy_workflow_id is None and get_workflow(conn, legacy_root_task_id):
+            legacy_workflow_id = legacy_root_task_id
+        if legacy_workflow_id is None:
+            raise ValueError(
+                f"legacy root task {legacy_root_task_id} has no workflow membership"
+            )
+        if workflow_id and workflow_id != legacy_workflow_id:
+            raise ValueError(
+                f"workflow {workflow_id} conflicts with legacy root workflow "
+                f"{legacy_workflow_id}"
+            )
+        workflow_id = legacy_workflow_id
     session_id = str(session_id or "").strip() or None
     tenant = str(tenant or "").strip() or None
     created_by = str(created_by or "").strip() or None
     shared_context = str(shared_context or "").strip() or None
     idempotency_scope = str(idempotency_scope or "").strip() or None
-    if root_task_id and root_task_id in external_parent_ids:
-        raise ValueError("a Loop root cannot also be a skeleton dependency")
 
     now = int(time.time())
     item_ids: dict[str, str] = {}
@@ -3043,11 +3830,11 @@ def create_loop_skeleton_graph(
             # under a long-lived root. Exact retries derive the same scope;
             # later fragments with different content may safely reuse aliases.
             digest_payload = {
-                "root_task_id": requested_root_task_id,
+                "workflow_id": workflow_id,
                 "shared_context": shared_context,
                 "nodes": normalized,
             }
-            if requested_root_task_id is None:
+            if workflow_id is None:
                 digest_payload.update(
                     {
                         "session_id": session_id,
@@ -3063,94 +3850,149 @@ def create_loop_skeleton_graph(
             ).hexdigest()[:20]
             idempotency_scope = f"auto:{digest}"
 
-        root_row = None
-        if requested_root_task_id:
-            root_row = conn.execute(
-                "SELECT id, body, tenant, session_id, workspace_kind, workspace_path, "
-                "status, assignee "
-                "FROM tasks WHERE id = ?",
-                (requested_root_task_id,),
+        external_workflows = {
+            str(row["workflow_id"]).strip()
+            for row in conn.execute(
+                "SELECT workflow_id FROM tasks WHERE id IN "
+                "(" + ",".join("?" for _ in external_parent_ids) + ")",
+                tuple(external_parent_ids),
+            ).fetchall()
+            if row["workflow_id"] is not None and str(row["workflow_id"]).strip()
+        } if external_parent_ids else set()
+        if len(external_workflows) > 1:
+            raise ValueError(
+                "external dependencies belong to different workflows: "
+                + ", ".join(sorted(external_workflows))
+            )
+        if external_workflows:
+            parent_workflow_id = next(iter(external_workflows))
+            if workflow_id and workflow_id != parent_workflow_id:
+                raise ValueError(
+                    f"workflow {workflow_id} conflicts with dependency workflow "
+                    f"{parent_workflow_id}"
+                )
+            workflow_id = parent_workflow_id
+
+        workflow_row = None
+        if workflow_id:
+            workflow_row = conn.execute(
+                "SELECT * FROM workflows WHERE id = ?",
+                (workflow_id,),
             ).fetchone()
-            if root_row is None:
-                raise ValueError(f"unknown Loop root task: {requested_root_task_id}")
-            root_task_id = requested_root_task_id
+            if workflow_row is None and legacy_root_task_id:
+                legacy_root = conn.execute(
+                    "SELECT * FROM tasks WHERE id = ?",
+                    (legacy_root_task_id,),
+                ).fetchone()
+                if legacy_root is not None:
+                    _insert_workflow(
+                        conn,
+                        workflow_id=workflow_id,
+                        title=legacy_root["title"],
+                        origin_session_id=(
+                            legacy_root["foreground_parent_session_id"]
+                            or legacy_root["session_id"]
+                        ),
+                        tenant=legacy_root["tenant"],
+                        shared_context=legacy_root["body"],
+                        workspace_kind=legacy_root["workspace_kind"] or "scratch",
+                        workspace_path=legacy_root["workspace_path"],
+                        idempotency_key=f"legacy-loop:{workflow_id}",
+                        legacy_root_task_id=legacy_root_task_id,
+                        now=int(legacy_root["created_at"] or now),
+                    )
+                    conn.execute(
+                        "UPDATE tasks SET workflow_id = ? "
+                        "WHERE id = ? AND workflow_id IS NULL",
+                        (workflow_id, legacy_root_task_id),
+                    )
+                    workflow_row = conn.execute(
+                        "SELECT * FROM workflows WHERE id = ?",
+                        (workflow_id,),
+                    ).fetchone()
+            if workflow_row is None:
+                raise ValueError(f"unknown workflow: {workflow_id}")
         else:
-            root_key = f"loop-root:{idempotency_scope}"
-            existing_root = conn.execute(
-                "SELECT id FROM tasks WHERE idempotency_key = ? "
-                "AND status != 'archived' ORDER BY created_at DESC LIMIT 1",
-                (root_key,),
+            workflow_key = f"loop-workflow:{idempotency_scope}"
+            workflow_row = conn.execute(
+                "SELECT * FROM workflows WHERE idempotency_key = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (workflow_key,),
             ).fetchone()
-            if existing_root is not None:
-                root_task_id = existing_root["id"]
-            else:
-                root_task_id = _new_task_id()
+            if workflow_row is None:
+                workflow_id = _new_workflow_id()
                 while conn.execute(
-                    "SELECT 1 FROM tasks WHERE id = ?",
-                    (root_task_id,),
+                    "SELECT 1 FROM workflows WHERE id = ?",
+                    (workflow_id,),
                 ).fetchone():  # pragma: no cover - cryptographic collision
-                    root_task_id = _new_task_id()
-                root_title = next(
+                    workflow_id = _new_workflow_id()
+                workflow_title = next(
                     (
                         line.strip()
                         for line in (shared_context or "").splitlines()
                         if line.strip()
                     ),
-                    "Loop graph",
+                    normalized[0]["title"],
                 )[:200]
-                conn.execute(
-                    "INSERT INTO tasks "
-                    "(id, title, body, assignee, status, created_by, created_at, "
-                    " workspace_kind, workspace_path, tenant, idempotency_key, "
-                    " session_id, needs_specification) "
-                    "VALUES (?, ?, ?, NULL, 'scheduled', ?, ?, ?, ?, ?, ?, ?, 0)",
-                    (
-                        root_task_id,
-                        root_title,
-                        shared_context,
-                        f"loop:{root_task_id}",
-                        now,
-                        workspace_kind,
-                        workspace_path,
-                        tenant,
-                        root_key,
-                        session_id,
-                    ),
-                )
-                _append_event(
+                _insert_workflow(
                     conn,
-                    root_task_id,
-                    "created",
-                    {
-                        "status": "scheduled",
-                        "loop_root_task_id": root_task_id,
-                        "board": board,
-                    },
+                    workflow_id=workflow_id,
+                    title=workflow_title,
+                    origin_session_id=session_id,
+                    tenant=tenant,
+                    shared_context=shared_context,
+                    workspace_kind=workspace_kind,
+                    workspace_path=workspace_path,
+                    idempotency_key=workflow_key,
+                    now=now,
                 )
-            root_row = conn.execute(
-                "SELECT id, body, tenant, session_id, workspace_kind, workspace_path, "
-                "status, assignee "
-                "FROM tasks WHERE id = ?",
-                (root_task_id,),
-            ).fetchone()
+                workflow_row = conn.execute(
+                    "SELECT * FROM workflows WHERE id = ?",
+                    (workflow_id,),
+                ).fetchone()
+            else:
+                workflow_id = str(workflow_row["id"])
 
-        if root_row is None or _loop_root_for_task(conn, root_task_id) != root_task_id:
-            raise ValueError(f"task {root_task_id} is not a Loop root")
-        root_status = root_row["status"]
-        root_is_mutable = root_status in {"scheduled", "todo"} or (
-            root_status == "ready" and not root_row["assignee"]
-        )
-        if not root_is_mutable:
+        if workflow_row is None:  # pragma: no cover - insert/read invariant
+            raise RuntimeError("workflow row missing after creation")
+        if str(workflow_row["status"]) != "open":
             raise ValueError(
-                f"Loop root {root_task_id} is not mutable in status {root_status!r}; "
-                "fragments require scheduled/todo or an unassigned ready root"
+                f"workflow {workflow_id} is {workflow_row['status']}; "
+                "graph fragments require an open workflow"
             )
-        session_id = session_id or root_row["session_id"]
-        tenant = tenant or root_row["tenant"]
+        existing_shared_context = str(
+            workflow_row["shared_context"] or ""
+        ).strip()
+        merged_shared_context = existing_shared_context
+        if (
+            shared_context
+            and shared_context not in existing_shared_context
+        ):
+            merged_shared_context = "\n\n".join(
+                part
+                for part in (existing_shared_context, shared_context)
+                if part
+            )
+        conn.execute(
+            "UPDATE workflows SET "
+            "origin_session_id = COALESCE(origin_session_id, ?), "
+            "tenant = COALESCE(tenant, ?), "
+            "shared_context = ?, updated_at = ? "
+            "WHERE id = ?",
+            (
+                session_id,
+                tenant,
+                merged_shared_context or None,
+                now,
+                workflow_id,
+            ),
+        )
+        session_id = session_id or workflow_row["origin_session_id"]
+        tenant = tenant or workflow_row["tenant"]
         if workspace_kind == "scratch" and workspace_path is None:
-            workspace_kind = root_row["workspace_kind"] or "scratch"
-            workspace_path = root_row["workspace_path"]
-        created_by = f"loop:{root_task_id}"
+            workspace_kind = workflow_row["workspace_kind"] or "scratch"
+            workspace_path = workflow_row["workspace_path"]
+        created_by = created_by or os.environ.get("HERMES_PROFILE") or "orchestrator"
 
         reserved_ids: set[str] = set()
         item_idempotency_keys: dict[str, str] = {}
@@ -3158,19 +4000,55 @@ def create_loop_skeleton_graph(
             node = normalized[index]
             client_id = node["client_id"]
             idempotency_key = (
-                f"loop-skeleton:{root_task_id}:{idempotency_scope}:{client_id}"
+                f"loop-skeleton:{workflow_id}:{idempotency_scope}:{client_id}"
             )
             legacy_idempotency_key = (
                 f"loop-skeleton:{idempotency_scope}:{client_id}"
             )
             item_idempotency_keys[client_id] = idempotency_key
-            existing = conn.execute(
-                "SELECT id FROM tasks WHERE idempotency_key IN (?, ?) "
-                "AND created_by = ? AND status != 'archived' "
-                "ORDER BY created_at DESC LIMIT 1",
-                (idempotency_key, legacy_idempotency_key, created_by),
-            ).fetchone()
+            candidates = conn.execute(
+                "SELECT id, workflow_id, created_by, idempotency_key FROM tasks "
+                "WHERE idempotency_key IN (?, ?) "
+                "AND status != 'archived' "
+                "ORDER BY created_at DESC",
+                (idempotency_key, legacy_idempotency_key),
+            ).fetchall()
+            existing = None
+            for candidate in candidates:
+                candidate_workflow_id = str(
+                    candidate["workflow_id"] or ""
+                ).strip()
+                if not candidate_workflow_id:
+                    candidate_workflow_id = str(
+                        _canonical_loop_created_by_root(candidate["created_by"])
+                        or ""
+                    ).strip()
+                if not candidate_workflow_id or candidate_workflow_id == workflow_id:
+                    existing = candidate
+                    break
+                if candidate["idempotency_key"] == idempotency_key:
+                    raise ValueError(
+                        f"canonical idempotent alias {client_id!r} belongs to "
+                        f"workflow {candidate_workflow_id}, not {workflow_id}"
+                    )
             if existing:
+                existing_workflow_id = str(existing["workflow_id"] or "").strip()
+                if not existing_workflow_id:
+                    existing_workflow_id = str(
+                        _canonical_loop_created_by_root(existing["created_by"])
+                        or ""
+                    ).strip()
+                if existing_workflow_id and existing_workflow_id != workflow_id:
+                    raise ValueError(
+                        f"reused alias {client_id!r} belongs to workflow "
+                        f"{existing_workflow_id}, not {workflow_id}"
+                    )
+                if not existing["workflow_id"]:
+                    conn.execute(
+                        "UPDATE tasks SET workflow_id = ? "
+                        "WHERE id = ? AND workflow_id IS NULL",
+                        (workflow_id, existing["id"]),
+                    )
                 task_id = existing["id"]
                 reused[client_id] = True
             else:
@@ -3218,7 +4096,7 @@ def create_loop_skeleton_graph(
             body_parts = [
                 part
                 for part in (
-                    root_row["body"] if root_row else None,
+                    workflow_row["shared_context"],
                     shared_context,
                     node["context"],
                 )
@@ -3229,8 +4107,8 @@ def create_loop_skeleton_graph(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, created_by, created_at, "
                 " workspace_kind, workspace_path, tenant, idempotency_key, "
-                " session_id, needs_specification) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                " session_id, workflow_id, needs_specification) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
                 (
                     task_id,
                     node["title"],
@@ -3244,6 +4122,7 @@ def create_loop_skeleton_graph(
                     tenant,
                     item_idempotency_keys[client_id],
                     session_id,
+                    workflow_id,
                 ),
             )
             _append_event(
@@ -3254,7 +4133,7 @@ def create_loop_skeleton_graph(
                     "status": status,
                     "client_id": client_id,
                     "needs_specification": True,
-                    "loop_root_task_id": root_task_id,
+                    "workflow_id": workflow_id,
                     "board": board,
                 },
             )
@@ -3272,43 +4151,6 @@ def create_loop_skeleton_graph(
                 (parent_id, child_id)
                 for parent_id in resolved_parents[node["client_id"]]
             )
-        if root_task_id:
-            dependency_aliases = {
-                dependency
-                for node in normalized
-                for dependency in node["depends_on"]
-                if dependency in alias_to_index
-            }
-            edge_pairs.extend(
-                (item_ids[node["client_id"]], root_task_id)
-                for node in normalized
-                if node["client_id"] not in dependency_aliases
-            )
-
-            # A later fragment may extend a node that was previously a sink.
-            # Remove that node's direct completion edge to the root before
-            # attaching the new downstream sink, keeping the stable root while
-            # evolving its frontier atomically.
-            rewired_parent_ids = {
-                item_ids[alias] for alias in dependency_aliases
-            }
-            rewired_parent_ids.update(
-                parent_id
-                for parent_id in external_parent_ids
-                if _loop_root_for_task(conn, parent_id) == root_task_id
-            )
-            for previous_sink_id in rewired_parent_ids:
-                removed = conn.execute(
-                    "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
-                    (previous_sink_id, root_task_id),
-                ).rowcount
-                if removed:
-                    _append_event(
-                        conn,
-                        root_task_id,
-                        "unlinked",
-                        {"parent": previous_sink_id, "child": root_task_id},
-                    )
 
         for parent_id, child_id in edge_pairs:
             if parent_id == child_id or _would_cycle(conn, parent_id, child_id):
@@ -3337,23 +4179,11 @@ def create_loop_skeleton_graph(
                     {"parent": parent_id, "child": child_id},
                 )
 
-        if root_task_id:
-            conn.execute(
-                "UPDATE tasks SET needs_specification = 0, assignee = NULL WHERE id = ?",
-                (root_task_id,),
-            )
-            activated = conn.execute(
-                "UPDATE tasks SET status = 'todo' "
-                "WHERE id = ? AND status = 'scheduled'",
-                (root_task_id,),
-            ).rowcount
-            if activated:
-                _append_event(
-                    conn,
-                    root_task_id,
-                    "activated",
-                    {"reason": "live_skeleton_graph_created"},
-                )
+        conn.execute(
+            "UPDATE workflows SET revision = revision + 1, updated_at = ? "
+            "WHERE id = ?",
+            (now, workflow_id),
+        )
 
     # The rows are already safely gated. Reuse the canonical promotion pass so
     # an external parent that completed just before commit routes its child to
@@ -3382,7 +4212,7 @@ def create_loop_skeleton_graph(
             {"parent_id": parent_id, "child_id": child_id}
             for parent_id, child_id in edge_pairs
         ],
-        "root_task_id": root_task_id,
+        "workflow_id": workflow_id,
         "idempotency_scope": idempotency_scope,
     }
 
@@ -3745,6 +4575,30 @@ def link_tasks(
         missing = _find_missing_parents(conn, [parent_id, child_id])
         if missing:
             raise ValueError(f"unknown task(s): {', '.join(missing)}")
+        memberships = {
+            str(row["id"]): str(row["workflow_id"] or "").strip() or None
+            for row in conn.execute(
+                "SELECT id, workflow_id FROM tasks WHERE id IN (?, ?)",
+                (parent_id, child_id),
+            ).fetchall()
+        }
+        parent_workflow = memberships.get(parent_id)
+        child_workflow = memberships.get(child_id)
+        if (
+            parent_workflow
+            and child_workflow
+            and parent_workflow != child_workflow
+        ):
+            raise ValueError(
+                f"cannot link tasks across workflows "
+                f"({parent_workflow} -> {child_workflow})"
+            )
+        if parent_workflow and child_workflow is None:
+            conn.execute(
+                "UPDATE tasks SET workflow_id = ? "
+                "WHERE id = ? AND workflow_id IS NULL",
+                (parent_workflow, child_id),
+            )
         _require_mutable_child_status(conn, child_id, mutable_statuses)
         if _would_cycle(conn, parent_id, child_id):
             raise ValueError(
@@ -4299,47 +5153,102 @@ def _legacy_loop_root_from_decomposition_lineage(
 
 
 def _loop_root_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
-    """Return the Loop root id for a Loop-created task, else ``None``."""
+    """Compatibility resolver: return workflow identity for a Loop task."""
     task_id = str(task_id or "").strip()
     if not task_id:
         return None
-    canonical_root = _canonical_loop_created_by_root(_task_created_by(conn, task_id))
+    row = conn.execute(
+        "SELECT workflow_id, created_by FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    workflow_id = str(row["workflow_id"] or "").strip()
+    if workflow_id:
+        return workflow_id
+    created_by = row["created_by"]
+    canonical_root = _canonical_loop_created_by_root(created_by)
     if canonical_root:
         return canonical_root
+    # Single-item durable Loop delegations predate the self-referential
+    # ``loop:<root>`` marker because desktop uses this prefix to identify their
+    # origin. Treat that row as its own root so foreground-created review and
+    # follow-up tasks can inherit stable tree membership without rewriting the
+    # UI-facing provenance field.
+    if str(created_by or "").startswith("loop_delegation:"):
+        return task_id
     return _legacy_loop_root_from_decomposition_lineage(conn, task_id)
 
 
-_LOOP_DESCENDANT_SEMANTIC_BLOCK_PREFIXES = (
-    "review-required:",
-    "needs-user:",
-    "foreground-required:",
-    "product-decision:",
-    "human-required:",
-    "human-review:",
-    "safety-boundary:",
-    "blocked-waiting:",
-    "orchestrator-required:",
-)
+def loop_root_for_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> Optional[str]:
+    """Deprecated compatibility alias for :func:`workflow_id_for_task`."""
+
+    return _loop_root_for_task(conn, task_id)
 
 
-def _is_semantic_loop_descendant_block(
-    reason: Optional[str],
-    metadata: Optional[dict[str, Any]] = None,
-) -> bool:
-    """Return True for child blockers that should wake the Loop origin."""
+def _notification_comments(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    """Snapshot recent durable comments into a boundary payload."""
 
-    candidates: list[str] = []
-    if reason:
-        candidates.append(str(reason))
-    if isinstance(metadata, dict):
-        for key in ("reason", "summary", "blocker", "handoff_reason"):
-            value = metadata.get(key)
-            if isinstance(value, str) and value.strip():
-                candidates.append(value)
-    return any(
-        text.strip().lower().startswith(_LOOP_DESCENDANT_SEMANTIC_BLOCK_PREFIXES)
-        for text in candidates
-    )
+    rows = conn.execute(
+        "SELECT author, body, created_at FROM task_comments "
+        "WHERE task_id = ? ORDER BY id DESC LIMIT ?",
+        (task_id, max(1, int(limit))),
+    ).fetchall()
+    return [
+        {
+            "author": str(row["author"] or "")[:80],
+            "body": str(row["body"] or "")[:600],
+            "created_at": int(row["created_at"]),
+        }
+        for row in reversed(rows)
+    ]
+
+
+def loop_root_mirrored_source_event_ids(
+    conn: sqlite3.Connection,
+    root_task_id: str,
+    source_event_ids: Iterable[int],
+) -> set[int]:
+    """Return source boundaries that have a durable mirror on ``root``.
+
+    A matching root subscription alone is insufficient proof: it may have
+    been added after the child boundary. Consumers use this evidence before
+    suppressing a legacy direct-child wake.
+    """
+
+    wanted = {int(event_id) for event_id in source_event_ids}
+    if not wanted:
+        return set()
+    rows = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind IN (?, ?, ?)",
+        (
+            root_task_id,
+            "loop_descendant_completed",
+            "loop_descendant_blocked",
+            "loop_descendant_gave_up",
+        ),
+    ).fetchall()
+    mirrored: set[int] = set()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"]) if row["payload"] else {}
+            source_event_id = int(payload.get("source_event_id"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if source_event_id in wanted:
+            mirrored.add(source_event_id)
+            if mirrored == wanted:
+                break
+    return mirrored
 
 
 def _append_loop_root_notification_event(
@@ -4352,13 +5261,13 @@ def _append_loop_root_notification_event(
     payload: Optional[dict[str, Any]] = None,
     source_run_id: Optional[int] = None,
 ) -> Optional[int]:
-    """Append a synthetic root-side notification event for a Loop child.
+    """Append a synthetic root-side boundary event for a Loop child.
 
     The root subscription/cursor machinery only tails events for the subscribed
-    task id.  Rather than duplicating subscription rows for every child, mirror
-    only semantic child boundary events onto the Loop root task stream.  The
-    notifier then claims the synthetic root event exactly like any direct root
-    completion/block.
+    task id. Rather than duplicating subscription rows for every child, a
+    ``scope='descendants'`` subscription mirrors child completion, blocking,
+    and give-up boundaries onto the Loop root stream. The notifier claims a
+    poll-window batch of those synthetic events and wakes the foreground once.
     """
 
     root_task_id = _loop_root_for_task(conn, source_task_id)
@@ -4374,6 +5283,13 @@ def _append_loop_root_notification_event(
     ).fetchone()
     if source_row is None or root_row is None:
         return None
+    descendant_subscribed = conn.execute(
+        "SELECT 1 FROM kanban_notify_subs "
+        "WHERE task_id = ? AND scope = 'descendants' LIMIT 1",
+        (root_task_id,),
+    ).fetchone()
+    if descendant_subscribed is None:
+        return None
 
     source_payload = payload if isinstance(payload, dict) else {}
     root_payload: dict[str, Any] = {
@@ -4385,7 +5301,7 @@ def _append_loop_root_notification_event(
         "assignee": source_row["assignee"],
     }
     direct_subscription_rows = conn.execute(
-        "SELECT platform, chat_id, thread_id, notifier_profile "
+        "SELECT platform, chat_id, chat_type, thread_id, notifier_profile "
         "FROM kanban_notify_subs "
         "WHERE task_id = ? ORDER BY platform, chat_id, thread_id",
         (source_task_id,),
@@ -4395,6 +5311,7 @@ def _append_loop_root_notification_event(
             {
                 "platform": row["platform"],
                 "chat_id": row["chat_id"],
+                "chat_type": row["chat_type"] or "",
                 "thread_id": row["thread_id"] or "",
                 "notifier_profile": row["notifier_profile"] or "",
             }
@@ -4403,6 +5320,9 @@ def _append_loop_root_notification_event(
     if source_run_id is not None:
         root_payload["source_run_id"] = int(source_run_id)
     for key in (
+        "kind",
+        "recurrences",
+        "limit",
         "reason",
         "summary",
         "error",
@@ -4413,9 +5333,14 @@ def _append_loop_root_notification_event(
         "worker_pid",
         "limit_seconds",
         "elapsed_seconds",
+        "artifacts",
+        "verified_cards",
     ):
         if key in source_payload:
             root_payload[key] = source_payload[key]
+    comments = _notification_comments(conn, source_task_id)
+    if comments:
+        root_payload["comments"] = comments
     return _append_event(conn, root_task_id, synthetic_kind, root_payload)
 
 
@@ -5894,6 +6819,136 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     return bool(row) and row["kind"] == "blocked"
 
 
+def _decomposed_shell_auto_completes(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> bool:
+    """Return whether the latest fan-out marked this task as an aggregate shell."""
+
+    row = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'decomposed' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None or not row["payload"]:
+        return False
+    try:
+        payload = json.loads(row["payload"])
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("auto_complete_shell") is True
+    )
+
+
+def _auto_complete_decomposed_shell(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> bool:
+    """Settle a fan-out shell from its exits without making it worker-ready."""
+
+    marker_row = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'decomposed' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    try:
+        marker = (
+            json.loads(marker_row["payload"])
+            if marker_row is not None and marker_row["payload"]
+            else {}
+        )
+    except (TypeError, ValueError):
+        marker = {}
+    generated_ids = {
+        str(child_id)
+        for child_id in (
+            marker.get("child_ids", [])
+            if isinstance(marker, dict)
+            else []
+        )
+    }
+    all_parent_rows = conn.execute(
+        "SELECT t.id, t.title, t.result FROM tasks t "
+        "JOIN task_links l ON l.parent_id = t.id "
+        "WHERE l.child_id = ? ORDER BY t.created_at, t.id",
+        (task_id,),
+    ).fetchall()
+    parent_rows = [
+        row for row in all_parent_rows if str(row["id"]) in generated_ids
+    ] or list(all_parent_rows)
+    exit_ids = [str(row["id"]) for row in parent_rows]
+    summaries: list[tuple[str, str]] = []
+    for row in parent_rows:
+        summary_row = conn.execute(
+            "SELECT summary FROM task_runs "
+            "WHERE task_id = ? AND summary IS NOT NULL "
+            "ORDER BY ended_at DESC, id DESC LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        summary = str(
+            (summary_row["summary"] if summary_row is not None else None)
+            or row["result"]
+            or ""
+        ).strip()
+        summaries.append((str(row["title"] or row["id"]), summary))
+
+    if len(summaries) == 1:
+        aggregate_summary = summaries[0][1] or (
+            f"Completed from decomposed exit {exit_ids[0]}."
+        )
+    else:
+        lines = [
+            f"{title}: {summary or 'completed'}"
+            for title, summary in summaries
+        ]
+        aggregate_summary = "Decomposed exits completed:\n" + "\n".join(lines)
+    aggregate_summary = aggregate_summary[:8000]
+    now = int(time.time())
+    cur = conn.execute(
+        "UPDATE tasks SET status = 'done', result = ?, completed_at = ?, "
+        "assignee = NULL, claim_lock = NULL, claim_expires = NULL, "
+        "worker_pid = NULL, current_run_id = NULL, block_kind = NULL, "
+        "block_recurrences = 0 "
+        "WHERE id = ? AND status = 'todo'",
+        (aggregate_summary, now, task_id),
+    )
+    if cur.rowcount != 1:
+        return False
+    run_id = _synthesize_ended_run(
+        conn,
+        task_id,
+        outcome="completed",
+        summary=aggregate_summary,
+        metadata={
+            "auto_completed": True,
+            "decomposed_shell": True,
+            "exit_task_ids": exit_ids,
+        },
+    )
+    completed_payload: dict[str, Any] = {
+        "result_len": len(aggregate_summary),
+        "summary": aggregate_summary.splitlines()[0][:400] or None,
+        "auto_completed": True,
+        "decomposed_shell": True,
+        "exit_task_ids": exit_ids,
+    }
+    comments = _notification_comments(conn, task_id)
+    if comments:
+        completed_payload["comments"] = comments
+    _append_event(
+        conn,
+        task_id,
+        "completed",
+        completed_payload,
+        run_id=run_id,
+    )
+    return True
+
+
 def recompute_ready(
     conn: sqlite3.Connection, failure_limit: int = None,
 ) -> int:
@@ -5902,7 +6957,12 @@ def recompute_ready(
     Ordinary tasks move to ``ready``. Foreground skeletons move to ``triage``
     so the existing decomposer can specify them before any worker claim.
 
-    Returns the number of tasks promoted.  Safe to call inside or outside
+    A workflow-backed task that fanned out into a complete child graph is an
+    aggregate shell, not another unit of work. Once all of its parents settle,
+    it transitions directly from ``todo`` to ``done`` and emits an ordinary
+    completion boundary; it is never visible to the dispatcher as ``ready``.
+
+    Returns the number of tasks transitioned. Safe to call inside or outside
     an existing transaction; it opens its own IMMEDIATE txn.
 
     ``blocked`` tasks are also considered for promotion (so a task
@@ -5931,27 +6991,48 @@ def recompute_ready(
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     promoted = 0
+    auto_completed: list[str] = []
     with write_txn(conn):
-        todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries, needs_specification "
-            "FROM tasks WHERE status IN ('todo', 'blocked')"
-        ).fetchall()
-        for row in todo_rows:
-            task_id = row["id"]
-            cur_status = row["status"]
-            if cur_status == "blocked" and _has_sticky_block(conn, task_id):
-                # Worker / operator asked for human review — do not
-                # silently auto-recover.  ``unblock_task`` is the only
-                # legitimate exit (it emits ``"unblocked"`` which flips
-                # this predicate back).
-                continue
-            parents = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?",
-                (task_id,),
+        # Iterate to a fixed point so auto-completing a shell can unlock its
+        # downstream node in this same dependency-resolution pass.
+        while True:
+            changed_this_pass = 0
+            todo_rows = conn.execute(
+                "SELECT id, status, consecutive_failures, max_retries, "
+                "needs_specification FROM tasks "
+                "WHERE status IN ('todo', 'blocked') "
+                "ORDER BY created_at, id"
             ).fetchall()
-            if all(p["status"] in ("done", "archived") for p in parents):
+            for row in todo_rows:
+                task_id = row["id"]
+                cur_status = row["status"]
+                if cur_status == "blocked" and _has_sticky_block(conn, task_id):
+                    # Worker / operator asked for human review — do not
+                    # silently auto-recover.  ``unblock_task`` is the only
+                    # legitimate exit (it emits ``"unblocked"`` which flips
+                    # this predicate back).
+                    continue
+                parents = conn.execute(
+                    "SELECT t.status FROM tasks t "
+                    "JOIN task_links l ON l.parent_id = t.id "
+                    "WHERE l.child_id = ?",
+                    (task_id,),
+                ).fetchall()
+                if not all(
+                    parent["status"] in ("done", "archived")
+                    for parent in parents
+                ):
+                    continue
+                if (
+                    cur_status == "todo"
+                    and not row["needs_specification"]
+                    and _decomposed_shell_auto_completes(conn, task_id)
+                ):
+                    if _auto_complete_decomposed_shell(conn, task_id):
+                        promoted += 1
+                        changed_this_pass += 1
+                        auto_completed.append(str(task_id))
+                    continue
                 next_status = "triage" if row["needs_specification"] else "ready"
                 if cur_status == "blocked":
                     # Don't auto-recover tasks that have hit the
@@ -5970,16 +7051,19 @@ def recompute_ready(
                     )
                     if failures >= effective_limit:
                         continue
-                    conn.execute(
+                    cur = conn.execute(
                         "UPDATE tasks SET status = ? "
                         "WHERE id = ? AND status = 'blocked'",
                         (next_status, task_id),
                     )
                 else:
-                    conn.execute(
-                        "UPDATE tasks SET status = ? WHERE id = ? AND status = 'todo'",
+                    cur = conn.execute(
+                        "UPDATE tasks SET status = ? "
+                        "WHERE id = ? AND status = 'todo'",
                         (next_status, task_id),
                     )
+                if cur.rowcount != 1:
+                    continue
                 if row["needs_specification"]:
                     _append_event(
                         conn,
@@ -5990,6 +7074,22 @@ def recompute_ready(
                 else:
                     _append_event(conn, task_id, "promoted", None)
                 promoted += 1
+                changed_this_pass += 1
+            if changed_this_pass == 0:
+                break
+    for task_id in auto_completed:
+        _fire_kanban_lifecycle_hook(
+            "kanban_task_completed",
+            task_id,
+            board=get_current_board(),
+            assignee=None,
+            run_id=(
+                latest_run(conn, task_id).id
+                if latest_run(conn, task_id) is not None
+                else None
+            ),
+            summary=latest_summary(conn, task_id),
+        )
     return promoted
 
 
@@ -6013,17 +7113,6 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
-        foreground_root = conn.execute(
-            "SELECT status, assignee, created_by FROM tasks WHERE id = ?",
-            (task_id,),
-        ).fetchone()
-        if (
-            foreground_root is not None
-            and foreground_root["status"] == "ready"
-            and not foreground_root["assignee"]
-            and foreground_root["created_by"] == f"loop:{task_id}"
-        ):
-            return None
         skeleton = conn.execute(
             "SELECT status FROM tasks WHERE id = ? AND needs_specification = 1",
             (task_id,),
@@ -6789,6 +7878,9 @@ def complete_task(
             "result_len": len(result) if result else 0,
             "summary": ev_summary or None,
         }
+        comments = _notification_comments(conn, task_id)
+        if comments:
+            completed_payload["comments"] = comments
         if verified_cards:
             completed_payload["verified_cards"] = verified_cards
         # Carry artifact paths in the event payload so the gateway
@@ -6805,10 +7897,19 @@ def complete_task(
                 ]
                 if cleaned_artifacts:
                     completed_payload["artifacts"] = cleaned_artifacts
-        _append_event(
+        source_event_id = _append_event(
             conn, task_id, "completed",
             completed_payload,
             run_id=run_id,
+        )
+        _append_loop_root_notification_event(
+            conn,
+            task_id,
+            source_event_id=source_event_id,
+            source_kind="completed",
+            synthetic_kind="loop_descendant_completed",
+            payload=completed_payload,
+            source_run_id=run_id,
         )
     # Prose-scan the summary + result for t_<hex> references that do
     # not resolve. Advisory — does not block the completion. Runs in
@@ -7575,7 +8676,7 @@ def block_task(
                     conn, task_id, outcome="blocked", summary=summary if summary is not None else reason,
                 metadata=metadata,
                 )
-            _append_event(
+            source_event_id = _append_event(
                 conn, task_id, "block_loop_detected",
                 {
                     "reason": reason,
@@ -7584,8 +8685,26 @@ def block_task(
                     "kind": kind,
                     "recurrences": recurrences,
                     "limit": BLOCK_RECURRENCE_LIMIT,
+                    "comments": _notification_comments(conn, task_id),
                 },
                 run_id=run_id,
+            )
+            _append_loop_root_notification_event(
+                conn,
+                task_id,
+                source_event_id=source_event_id,
+                source_kind="block_loop_detected",
+                synthetic_kind="loop_descendant_blocked",
+                payload={
+                    "reason": reason,
+                    "summary": summary,
+                    "metadata": metadata,
+                    "kind": kind,
+                    "recurrences": recurrences,
+                    "limit": BLOCK_RECURRENCE_LIMIT,
+                    "comments": _notification_comments(conn, task_id),
+                },
+                source_run_id=run_id,
             )
             routed_to = "triage"
         else:
@@ -7645,25 +8764,26 @@ def block_task(
                     "metadata": metadata,
                     "kind": kind,
                     "recurrences": recurrences,
+                    "comments": _notification_comments(conn, task_id),
                 },
                 run_id=run_id,
             )
-            if _is_semantic_loop_descendant_block(reason, metadata):
-                _append_loop_root_notification_event(
-                    conn,
-                    task_id,
-                    source_event_id=source_event_id,
-                    source_kind="blocked",
-                    synthetic_kind="loop_descendant_blocked",
-                    payload={
-                        "reason": reason,
-                        "summary": summary,
-                        "metadata": metadata,
-                        "kind": kind,
-                        "recurrences": recurrences,
-                    },
-                    source_run_id=run_id,
-                )
+            _append_loop_root_notification_event(
+                conn,
+                task_id,
+                source_event_id=source_event_id,
+                source_kind="blocked",
+                synthetic_kind="loop_descendant_blocked",
+                payload={
+                    "reason": reason,
+                    "summary": summary,
+                    "metadata": metadata,
+                    "kind": kind,
+                    "recurrences": recurrences,
+                    "comments": _notification_comments(conn, task_id),
+                },
+                source_run_id=run_id,
+            )
         _blocked_task = get_task(conn, task_id)
     _fire_kanban_lifecycle_hook(
         "kanban_task_blocked",
@@ -8429,15 +9549,18 @@ def decompose_triage_task(
     auto_promote: bool = True,
     allowed_root_statuses: Optional[set[str]] = None,
     root_next_status: str = "todo",
+    auto_complete_shell: bool = False,
     loop_intake_payload: Optional[dict[str, Any]] = None,
     expected_specification_fingerprint: Optional[str] = None,
 ) -> Optional[list[str]]:
-    """Fan a planning task out into child tasks and park/promote the root.
+    """Fan a real aggregate task out into child tasks and park/promote it.
 
-    The root task stays alive and becomes the parent of every child —
-    when all children reach ``done``, the root promotes to ``ready`` and
-    its assignee (typically the orchestrator profile) wakes back up to
-    judge completion or spawn more work.
+    The aggregate shell stays alive and becomes dependent on graph exits.
+    Historical/manual callers promote it to ``ready`` after those exits.
+    Live Loop skeleton callers pass ``auto_complete_shell=True``: their
+    children collectively own the full objective, so the stable shell settles
+    directly from ``todo`` to ``done`` and never consumes a redundant worker
+    run. The workflow itself remains open for foreground follow-up work.
 
     ``children`` is a list of dicts, each shaped like::
 
@@ -8541,7 +9664,8 @@ def decompose_triage_task(
         ):
             return None
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path, session_id "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, "
+            "session_id, workflow_id "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -8549,24 +9673,41 @@ def decompose_triage_task(
             return None
         if root_row["status"] not in allowed_root_statuses:
             return None
+        workflow_id = str(root_row["workflow_id"] or "").strip() or None
+        if workflow_id is None:
+            workflow_id = _loop_root_for_task(conn, task_id)
+        child_created_by = author or "decomposer"
         tenant = root_row["tenant"]
-        root_loop_task_id = _loop_root_for_task(conn, task_id)
-        child_created_by = (
-            f"loop:{root_loop_task_id}"
-            if root_loop_task_id
-            else (author or "decomposer")
-        )
-        child_session_id = None
-        if root_loop_task_id:
-            child_session_id = _lineage_session_id(conn, root_loop_task_id, root_task_id=root_loop_task_id)
-            if child_session_id is None:
-                child_session_id = _lineage_session_id(conn, task_id, root_task_id=root_loop_task_id)
+        child_session_id = root_row["session_id"]
+        root_ws_kind = root_row["workspace_kind"] or "scratch"
+        root_ws_path = root_row["workspace_path"]
+        if workflow_id:
+            workflow_row = conn.execute(
+                "SELECT origin_session_id, tenant, workspace_kind, "
+                "workspace_path FROM workflows WHERE id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if workflow_row is not None:
+                # Workflow metadata is the canonical shared boundary. A member
+                # shell may carry stale or task-local copies from before it
+                # joined the workflow, so only fall back to those copies when
+                # the workflow has no corresponding value.
+                child_session_id = (
+                    workflow_row["origin_session_id"]
+                    if workflow_row["origin_session_id"] is not None
+                    else child_session_id
+                )
+                tenant = (
+                    workflow_row["tenant"]
+                    if workflow_row["tenant"] is not None
+                    else tenant
+                )
+                root_ws_kind = workflow_row["workspace_kind"] or "scratch"
+                root_ws_path = workflow_row["workspace_path"]
         # Children inherit the root's workspace by default so a fan-out
         # of a code-gen task lands in the parent's project dir/worktree
         # rather than throwaway scratch tmp dirs. A child dict can still
         # override with its own 'workspace_kind' / 'workspace_path'.
-        root_ws_kind = root_row["workspace_kind"] or "scratch"
-        root_ws_path = root_row["workspace_path"]
         external_parent_ids = parent_ids(conn, task_id)
         entry_indices = [
             idx for idx, child in enumerate(children)
@@ -8608,8 +9749,9 @@ def decompose_triage_task(
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
-                " workspace_path, tenant, created_at, created_by, session_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " workspace_path, tenant, created_at, created_by, session_id, "
+                " workflow_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -8622,15 +9764,15 @@ def decompose_triage_task(
                     now,
                     child_created_by,
                     child_session_id,
+                    workflow_id,
                 ),
             )
             created_payload = {
                 "by": author or "decomposer",
                 "from_decompose_of": task_id,
                 "status": child_initial_status,
+                "workflow_id": workflow_id,
             }
-            if root_loop_task_id:
-                created_payload["loop_root_task_id"] = root_loop_task_id
             _append_event(
                 conn, new_id, "created",
                 created_payload,
@@ -8693,9 +9835,14 @@ def decompose_triage_task(
             )
 
         # Flip/park the root and optionally set the orchestrator assignee.
+        # A live fan-out shell is a stable graph node, not another worker job;
+        # clear its assignee defensively because kanban.default_assignee would
+        # otherwise claim any unassigned row that ever reached ready.
         sets = ["status = ?", "needs_specification = 0"]
         params: list[Any] = [root_next_status]
-        if root_assignee is not None:
+        if auto_complete_shell:
+            sets.append("assignee = NULL")
+        elif root_assignee is not None:
             sets.append("assignee = ?")
             params.append(root_assignee)
         params.append(task_id)
@@ -8716,7 +9863,12 @@ def decompose_triage_task(
                         "Decomposed into "
                         + ", ".join(child_ids)
                         + (
-                            ". Root will wake when all children complete."
+                            (
+                                ". Aggregate shell will settle when all "
+                                "generated exits complete."
+                            )
+                            if auto_complete_shell
+                            else ". Root will wake when all children complete."
                             if auto_promote
                             else ". Children are scheduled for explicit origin activation."
                         )
@@ -8732,6 +9884,7 @@ def decompose_triage_task(
                 "root_status": root_next_status,
                 "child_status": child_initial_status,
                 "auto_promote": auto_promote,
+                "auto_complete_shell": bool(auto_complete_shell),
             },
         )
         if loop_intake_payload:
@@ -10398,6 +11551,7 @@ def _record_task_failure(
                 "limit_source": limit_source,
                 "error": error[:500],
                 "trigger_outcome": outcome,
+                "comments": _notification_comments(conn, task_id),
             }
             if event_payload_extra:
                 payload.update(event_payload_extra)
@@ -11784,10 +12938,10 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
          shown; older attempts collapsed into a one-line summary).
          Each attempt's ``summary`` / ``error`` / ``metadata`` capped at
          ``_CTX_MAX_FIELD_BYTES`` each.
-      4. Structured handoff results of every done parent task. Prefers
-         ``run.summary`` / ``run.metadata`` when the parent was executed
-         via a run; falls back to ``task.result`` for older data. Same
-         per-field cap.
+      4. Structured handoff results plus bounded comment/review context from
+         every terminal parent task. Prefers ``run.summary`` / ``run.metadata``
+         when the parent was executed via a run; falls back to ``task.result``
+         for older data. Same per-field cap.
       5. Cross-task role history for the assignee (most recent 5
          completed runs on other tasks).
       6. Comment thread (most recent ``_CTX_MAX_COMMENTS`` shown, older
@@ -11912,10 +13066,31 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     parent_ids = [r["parent_id"] for r in parent_rows]
 
     if parent_ids:
+        # Parent comments often carry the review recommendation or caveat that
+        # motivated this child. Keep one global cap across all direct parents
+        # so wide fan-in graphs cannot multiply the prompt budget per parent.
+        all_parent_comments: list[Comment] = []
+        eligible_parent_tasks: dict[str, Task] = {}
+        for pid in parent_ids:
+            parent_task = get_task(conn, pid)
+            if parent_task and parent_task.status in {"done", "archived"}:
+                eligible_parent_tasks[pid] = parent_task
+                all_parent_comments.extend(list_comments(conn, pid))
+        all_parent_comments.sort(key=lambda comment: (comment.created_at, comment.id))
+        shown_parent_comments = all_parent_comments[-_CTX_MAX_PARENT_COMMENTS:]
+        parent_comments_by_task: dict[str, list[Comment]] = {}
+        for comment in shown_parent_comments:
+            parent_comments_by_task.setdefault(comment.task_id, []).append(comment)
+        parent_comment_counts: dict[str, int] = {}
+        for comment in all_parent_comments:
+            parent_comment_counts[comment.task_id] = (
+                parent_comment_counts.get(comment.task_id, 0) + 1
+            )
+
         wrote_header = False
         for pid in parent_ids:
-            pt = get_task(conn, pid)
-            if not pt or pt.status != "done":
+            pt = eligible_parent_tasks.get(pid)
+            if pt is None:
                 continue
             runs = [r for r in list_runs(conn, pid) if r.outcome == "completed"]
             runs.sort(key=lambda r: r.started_at, reverse=True)
@@ -11957,6 +13132,31 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
                 except Exception:
                     pass
             lines.extend(body_lines)
+
+            parent_comments = parent_comments_by_task.get(pid, [])
+            omitted_parent_comments = (
+                parent_comment_counts.get(pid, 0) - len(parent_comments)
+            )
+            if parent_comments or omitted_parent_comments:
+                lines.append("_Parent comment/review context:_")
+                if omitted_parent_comments:
+                    lines.append(
+                        f"_({omitted_parent_comments} earlier parent "
+                        f"comment{'s' if omitted_parent_comments != 1 else ''} "
+                        "omitted)_"
+                    )
+                for comment in parent_comments:
+                    ts = time.strftime(
+                        "%Y-%m-%d %H:%M",
+                        time.localtime(comment.created_at),
+                    )
+                    age = _relative_age(comment.created_at, _now)
+                    ts_disp = f"{ts}, {age}" if age else ts
+                    safe_author = (comment.author or "").replace("`", "")
+                    lines.append(
+                        f"comment from parent worker `{safe_author}` at {ts_disp}:"
+                    )
+                    lines.append(_cap(comment.body, _CTX_MAX_COMMENT_BYTES))
             lines.append("")
 
     # Cross-task role history: what else has THIS assignee completed
@@ -12112,28 +13312,830 @@ def task_age(task: Task) -> dict:
 # Notification subscriptions (used by the gateway kanban-notifier)
 # ---------------------------------------------------------------------------
 
+WORKFLOW_NOTIFICATION_KINDS = (
+    "completed",
+    "blocked",
+    "block_loop_detected",
+    "gave_up",
+)
+_WORKFLOW_SETTLED_BATCH_KINDS = frozenset({"completed"})
+
+# The legacy watcher claimed these kinds.  Cutover must prove that every
+# matching source row through its transaction high-water has been ACKed before
+# deleting the old route, including retry/status noise and root mirrors that
+# the new workflow stream intentionally stops delivering.
+_LEGACY_NOTIFICATION_KINDS = (
+    "completed",
+    "blocked",
+    "block_loop_detected",
+    "gave_up",
+    "crashed",
+    "timed_out",
+    "status",
+    "archived",
+    "unblocked",
+    "loop_descendant_completed",
+    "loop_descendant_blocked",
+    "loop_descendant_gave_up",
+)
+
+
+def _workflow_sub_route(
+    *,
+    workflow_id: str,
+    notifier_profile: Optional[str],
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str],
+) -> tuple[str, str, str, str, str]:
+    workflow_id = str(workflow_id or "").strip()
+    platform = str(platform or "").strip().lower()
+    chat_id = str(chat_id or "").strip()
+    if not workflow_id:
+        raise ValueError("workflow_id is required")
+    if not platform:
+        raise ValueError("platform is required")
+    if not chat_id:
+        raise ValueError("chat_id is required")
+    return (
+        workflow_id,
+        str(notifier_profile or "").strip(),
+        platform,
+        chat_id,
+        str(thread_id or "").strip(),
+    )
+
+
+def _insert_or_refresh_workflow_notify_sub(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: str,
+    notifier_profile: str,
+    platform: str,
+    chat_id: str,
+    chat_type: Optional[str],
+    thread_id: str,
+    user_id: Optional[str],
+    cursor: int,
+    notified_cursor: Optional[int] = None,
+) -> None:
+    now = int(time.time())
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO workflow_notify_subs (
+            workflow_id, notifier_profile, platform, chat_id, chat_type,
+            thread_id, user_id, created_at, last_event_id,
+            last_notified_event_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            workflow_id,
+            notifier_profile,
+            platform,
+            chat_id,
+            str(chat_type or ""),
+            thread_id,
+            str(user_id).strip() if user_id else None,
+            now,
+            int(cursor),
+            int(cursor if notified_cursor is None else notified_cursor),
+        ),
+    )
+    # Route identity is immutable; sparse metadata may be safely repaired.
+    if chat_type:
+        conn.execute(
+            "UPDATE workflow_notify_subs SET chat_type = ? "
+            "WHERE workflow_id = ? AND notifier_profile = ? "
+            "AND platform = ? AND chat_id = ? AND thread_id = ? "
+            "AND (chat_type IS NULL OR chat_type = '')",
+            (
+                str(chat_type),
+                workflow_id,
+                notifier_profile,
+                platform,
+                chat_id,
+                thread_id,
+            ),
+        )
+    if user_id:
+        conn.execute(
+            "UPDATE workflow_notify_subs SET user_id = ? "
+            "WHERE workflow_id = ? AND notifier_profile = ? "
+            "AND platform = ? AND chat_id = ? AND thread_id = ? "
+            "AND (user_id IS NULL OR user_id = '')",
+            (
+                str(user_id),
+                workflow_id,
+                notifier_profile,
+                platform,
+                chat_id,
+                thread_id,
+            ),
+        )
+
+
+def add_workflow_notify_sub(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: str,
+    platform: str,
+    chat_id: str,
+    chat_type: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    notifier_profile: Optional[str] = None,
+    start_cursor: int = 0,
+) -> None:
+    """Subscribe one exact foreground route to ordinary workflow boundaries."""
+
+    route = _workflow_sub_route(
+        workflow_id=workflow_id,
+        notifier_profile=notifier_profile,
+        platform=platform,
+        chat_id=chat_id,
+        thread_id=thread_id,
+    )
+    workflow = get_workflow(conn, route[0])
+    if workflow is None:
+        raise ValueError(f"unknown workflow: {route[0]}")
+    if workflow.status != "open":
+        raise ValueError(
+            f"workflow {route[0]} is {workflow.status}; new subscriptions require open"
+        )
+    with write_txn(conn):
+        locked_workflow = conn.execute(
+            "SELECT status FROM workflows WHERE id = ?",
+            (route[0],),
+        ).fetchone()
+        if locked_workflow is None:
+            raise ValueError(f"unknown workflow: {route[0]}")
+        if str(locked_workflow["status"]) != "open":
+            raise ValueError(
+                f"workflow {route[0]} is {locked_workflow['status']}; "
+                "new subscriptions require open"
+            )
+        _insert_or_refresh_workflow_notify_sub(
+            conn,
+            workflow_id=route[0],
+            notifier_profile=route[1],
+            platform=route[2],
+            chat_id=route[3],
+            chat_type=chat_type,
+            thread_id=route[4],
+            user_id=user_id,
+            cursor=max(0, int(start_cursor)),
+        )
+
+
+def list_workflow_notify_subs(
+    conn: sqlite3.Connection,
+    workflow_id: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    if workflow_id is None:
+        rows = conn.execute(
+            "SELECT * FROM workflow_notify_subs "
+            "ORDER BY workflow_id, notifier_profile, platform, chat_id, thread_id"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM workflow_notify_subs WHERE workflow_id = ? "
+            "ORDER BY notifier_profile, platform, chat_id, thread_id",
+            (str(workflow_id or "").strip(),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _workflow_events_after_cursor(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: str,
+    cursor: int,
+    kinds: Optional[Iterable[str]],
+    limit: Optional[int],
+) -> tuple[int, list[Event]]:
+    kind_list = tuple(str(kind) for kind in (kinds or WORKFLOW_NOTIFICATION_KINDS))
+    if not kind_list:
+        return int(cursor), []
+    query = (
+        "SELECT e.* FROM task_events e "
+        "JOIN tasks t ON t.id = e.task_id "
+        "WHERE t.workflow_id = ? AND e.id > ? "
+        "AND e.kind IN (" + ",".join("?" for _ in kind_list) + ") "
+        "ORDER BY e.id"
+        + (" LIMIT ?" if limit is not None else "")
+    )
+    params: list[Any] = [workflow_id, int(cursor), *kind_list]
+    if limit is not None:
+        params.append(max(1, int(limit)))
+    rows = conn.execute(query, params).fetchall()
+    events: list[Event] = []
+    high_water = int(cursor)
+    for row in rows:
+        event_id = int(row["id"])
+        high_water = max(high_water, event_id)
+        try:
+            payload = json.loads(row["payload"]) if row["payload"] else None
+        except Exception:
+            payload = None
+        events.append(
+            Event(
+                id=event_id,
+                task_id=row["task_id"],
+                kind=row["kind"],
+                payload=payload,
+                created_at=row["created_at"],
+                run_id=(
+                    int(row["run_id"])
+                    if "run_id" in row.keys() and row["run_id"] is not None
+                    else None
+                ),
+            )
+        )
+    return high_water, events
+
+
+def claim_unseen_events_for_workflow_sub(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: str,
+    notifier_profile: Optional[str],
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+    kinds: Optional[Iterable[str]] = None,
+    limit: Optional[int] = 20,
+    lease_seconds: int = 30 * 60,
+) -> tuple[int, int, list[Event], Optional[str]]:
+    """Lease one globally ordered batch from all tasks in a workflow."""
+
+    return _claim_workflow_events_for_sub(
+        conn,
+        workflow_id=workflow_id,
+        notifier_profile=notifier_profile,
+        platform=platform,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        kinds=kinds,
+        limit=limit,
+        lease_seconds=lease_seconds,
+        defer_until_settled=False,
+    )
+
+
+def _workflow_has_autonomous_progress(
+    conn: sqlite3.Connection,
+    workflow_id: str,
+) -> bool:
+    """Return whether a workflow still has work that can advance by itself.
+
+    Scheduled work is deliberately excluded because it is held for an
+    explicit foreground submission. Blocked and dependency-waiting rows are
+    also settled boundaries. A dependency-ready ``todo`` row is included to
+    cover the short complete→recompute window without leaking an early wake.
+    """
+
+    return conn.execute(
+        """
+        SELECT 1
+          FROM tasks AS t
+         WHERE t.workflow_id = ?
+           AND (
+                t.status IN ('triage', 'ready', 'running', 'review')
+                OR (
+                    t.status = 'todo'
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM task_links AS l
+                          JOIN tasks AS parent ON parent.id = l.parent_id
+                         WHERE l.child_id = t.id
+                           AND parent.status NOT IN ('done', 'archived')
+                    )
+                )
+           )
+         LIMIT 1
+        """,
+        (workflow_id,),
+    ).fetchone() is not None
+
+
+def claim_ready_workflow_events_for_sub(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: str,
+    notifier_profile: Optional[str],
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+    kinds: Optional[Iterable[str]] = None,
+    limit: Optional[int] = 20,
+    lease_seconds: int = 30 * 60,
+) -> tuple[int, int, list[Event], Optional[str]]:
+    """Lease one foreground-worthy workflow batch.
+
+    Ordinary completions remain unseen until autonomous work reaches a
+    quiescent frontier. A blocker or any future non-completion boundary
+    bypasses that deferral immediately. Deferred rows acquire no lease and do
+    not advance either cursor, so the eventual wake receives the whole ordered
+    batch exactly once.
+
+    ``limit`` is retained for API compatibility, but a settled claim drains
+    the complete unseen boundary range. Otherwise a workflow with more than
+    one display page would immediately generate another foreground turn and
+    recreate the wake storm this helper exists to prevent.
+    """
+
+    return _claim_workflow_events_for_sub(
+        conn,
+        workflow_id=workflow_id,
+        notifier_profile=notifier_profile,
+        platform=platform,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        kinds=kinds,
+        limit=limit,
+        lease_seconds=lease_seconds,
+        defer_until_settled=True,
+    )
+
+
+def _claim_workflow_events_for_sub(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: str,
+    notifier_profile: Optional[str],
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str],
+    kinds: Optional[Iterable[str]],
+    limit: Optional[int],
+    lease_seconds: int,
+    defer_until_settled: bool,
+) -> tuple[int, int, list[Event], Optional[str]]:
+    """Shared transaction-safe workflow claim implementation."""
+
+    route = _workflow_sub_route(
+        workflow_id=workflow_id,
+        notifier_profile=notifier_profile,
+        platform=platform,
+        chat_id=chat_id,
+        thread_id=thread_id,
+    )
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT last_event_id, pending_claim_token, pending_expires_at "
+            "FROM workflow_notify_subs WHERE workflow_id = ? "
+            "AND notifier_profile = ? AND platform = ? AND chat_id = ? "
+            "AND thread_id = ?",
+            route,
+        ).fetchone()
+        if row is None:
+            return 0, 0, [], None
+        old_cursor = int(row["last_event_id"])
+        now = int(time.time())
+        pending_token = str(row["pending_claim_token"] or "")
+        pending_expires_at = int(row["pending_expires_at"] or 0)
+        if pending_token and pending_expires_at > now:
+            return old_cursor, old_cursor, [], None
+        new_cursor, events = _workflow_events_after_cursor(
+            conn,
+            workflow_id=route[0],
+            cursor=old_cursor,
+            kinds=kinds,
+            limit=None if defer_until_settled else limit,
+        )
+        if new_cursor <= old_cursor or not events:
+            if pending_token:
+                conn.execute(
+                    "UPDATE workflow_notify_subs "
+                    "SET pending_claim_token = NULL, pending_event_id = NULL, "
+                    "pending_expires_at = NULL WHERE workflow_id = ? "
+                    "AND notifier_profile = ? AND platform = ? AND chat_id = ? "
+                    "AND thread_id = ? AND pending_claim_token = ?",
+                    (*route, pending_token),
+                )
+            return old_cursor, old_cursor, [], None
+        if defer_until_settled:
+            workflow_row = conn.execute(
+                "SELECT status FROM workflows WHERE id = ?",
+                (route[0],),
+            ).fetchone()
+            workflow_open = bool(
+                workflow_row is not None
+                and str(workflow_row["status"]) == "open"
+            )
+            completion_only = all(
+                event.kind in _WORKFLOW_SETTLED_BATCH_KINDS
+                for event in events
+            )
+            if (
+                workflow_open
+                and completion_only
+                and _workflow_has_autonomous_progress(conn, route[0])
+            ):
+                # An expired claim may be present from a crashed watcher.
+                # Clear it, but leave both durable cursors untouched.
+                if pending_token:
+                    conn.execute(
+                        "UPDATE workflow_notify_subs "
+                        "SET pending_claim_token = NULL, "
+                        "pending_event_id = NULL, pending_expires_at = NULL "
+                        "WHERE workflow_id = ? AND notifier_profile = ? "
+                        "AND platform = ? AND chat_id = ? AND thread_id = ? "
+                        "AND pending_claim_token = ?",
+                        (*route, pending_token),
+                    )
+                return old_cursor, old_cursor, [], None
+        claim_token = secrets.token_hex(16)
+        cur = conn.execute(
+            "UPDATE workflow_notify_subs SET pending_claim_token = ?, "
+            "pending_event_id = ?, pending_expires_at = ? "
+            "WHERE workflow_id = ? AND notifier_profile = ? AND platform = ? "
+            "AND chat_id = ? AND thread_id = ? AND last_event_id = ? "
+            "AND (pending_claim_token IS NULL OR pending_expires_at <= ?)",
+            (
+                claim_token,
+                int(new_cursor),
+                now + max(1, int(lease_seconds)),
+                *route,
+                old_cursor,
+                now,
+            ),
+        )
+        if cur.rowcount != 1:
+            return old_cursor, old_cursor, [], None
+        return old_cursor, new_cursor, events, claim_token
+
+
+def complete_workflow_notify_claim(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: str,
+    notifier_profile: Optional[str],
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str],
+    claimed_cursor: int,
+    claim_token: str,
+) -> bool:
+    if not claim_token:
+        return False
+    route = _workflow_sub_route(
+        workflow_id=workflow_id,
+        notifier_profile=notifier_profile,
+        platform=platform,
+        chat_id=chat_id,
+        thread_id=thread_id,
+    )
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE workflow_notify_subs SET last_event_id = ?, "
+            "pending_claim_token = NULL, pending_event_id = NULL, "
+            "pending_expires_at = NULL WHERE workflow_id = ? "
+            "AND notifier_profile = ? AND platform = ? AND chat_id = ? "
+            "AND thread_id = ? AND pending_claim_token = ? "
+            "AND pending_event_id = ?",
+            (int(claimed_cursor), *route, claim_token, int(claimed_cursor)),
+        )
+    return cur.rowcount == 1
+
+
+def renew_workflow_notify_claim(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: str,
+    notifier_profile: Optional[str],
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str],
+    claimed_cursor: int,
+    claim_token: str,
+    lease_seconds: int = 30 * 60,
+) -> bool:
+    """Extend an exact workflow notification lease without moving cursors.
+
+    A workflow wake can wait behind a busy foreground turn. The notifier keeps
+    ownership alive while waiting for that event's processing receipt, using
+    the same route + token + cursor compare-and-set as completion/release.
+    """
+
+    if not claim_token:
+        return False
+    route = _workflow_sub_route(
+        workflow_id=workflow_id,
+        notifier_profile=notifier_profile,
+        platform=platform,
+        chat_id=chat_id,
+        thread_id=thread_id,
+    )
+    expires_at = int(time.time()) + max(1, int(lease_seconds))
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE workflow_notify_subs SET pending_expires_at = ? "
+            "WHERE workflow_id = ? AND notifier_profile = ? "
+            "AND platform = ? AND chat_id = ? AND thread_id = ? "
+            "AND pending_claim_token = ? AND pending_event_id = ?",
+            (
+                expires_at,
+                *route,
+                claim_token,
+                int(claimed_cursor),
+            ),
+        )
+    return cur.rowcount == 1
+
+
+def release_workflow_notify_claim(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: str,
+    notifier_profile: Optional[str],
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str],
+    claimed_cursor: int,
+    old_cursor: int,
+    claim_token: str,
+) -> bool:
+    if not claim_token:
+        return False
+    route = _workflow_sub_route(
+        workflow_id=workflow_id,
+        notifier_profile=notifier_profile,
+        platform=platform,
+        chat_id=chat_id,
+        thread_id=thread_id,
+    )
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE workflow_notify_subs SET pending_claim_token = NULL, "
+            "pending_event_id = NULL, pending_expires_at = NULL "
+            "WHERE workflow_id = ? AND notifier_profile = ? AND platform = ? "
+            "AND chat_id = ? AND thread_id = ? AND last_event_id = ? "
+            "AND pending_claim_token = ? AND pending_event_id = ?",
+            (*route, int(old_cursor), claim_token, int(claimed_cursor)),
+        )
+    return cur.rowcount == 1
+
+
+def mark_workflow_notify_visible_through(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: str,
+    notifier_profile: Optional[str],
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str],
+    event_id: int,
+) -> None:
+    route = _workflow_sub_route(
+        workflow_id=workflow_id,
+        notifier_profile=notifier_profile,
+        platform=platform,
+        chat_id=chat_id,
+        thread_id=thread_id,
+    )
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE workflow_notify_subs SET last_notified_event_id = "
+            "CASE WHEN last_notified_event_id < ? THEN ? "
+            "ELSE last_notified_event_id END WHERE workflow_id = ? "
+            "AND notifier_profile = ? AND platform = ? AND chat_id = ? "
+            "AND thread_id = ?",
+            (int(event_id), int(event_id), *route),
+        )
+
+
+def remove_workflow_notify_sub_if_idle(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: str,
+    notifier_profile: Optional[str],
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str],
+) -> bool:
+    route = _workflow_sub_route(
+        workflow_id=workflow_id,
+        notifier_profile=notifier_profile,
+        platform=platform,
+        chat_id=chat_id,
+        thread_id=thread_id,
+    )
+    now = int(time.time())
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM workflow_notify_subs WHERE workflow_id = ? "
+            "AND notifier_profile = ? AND platform = ? AND chat_id = ? "
+            "AND thread_id = ? AND (COALESCE(pending_claim_token, '') = '' "
+            "OR COALESCE(pending_expires_at, 0) <= ?)",
+            (*route, now),
+        )
+    return cur.rowcount == 1
+
+
+def cutover_legacy_workflow_route(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: str,
+    platform: str,
+    chat_id: str,
+    chat_type: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    notifier_profile: Optional[str] = None,
+) -> bool:
+    """Atomically replace one fully-drained legacy route with a workflow route.
+
+    Returns ``False`` while a legacy lease is live or any relevant legacy
+    event through the transaction high-water remains unacknowledged.  No new
+    workflow row is activated until that proof succeeds, which prevents both
+    mirror replay and a source-event gap.
+    """
+
+    route = _workflow_sub_route(
+        workflow_id=workflow_id,
+        notifier_profile=notifier_profile,
+        platform=platform,
+        chat_id=chat_id,
+        thread_id=thread_id,
+    )
+    if get_workflow(conn, route[0]) is None:
+        raise ValueError(f"unknown workflow: {route[0]}")
+    now = int(time.time())
+    with write_txn(conn):
+        existing = conn.execute(
+            "SELECT last_event_id, pending_claim_token, pending_expires_at "
+            "FROM workflow_notify_subs WHERE workflow_id = ? "
+            "AND notifier_profile = ? AND platform = ? AND chat_id = ? "
+            "AND thread_id = ?",
+            route,
+        ).fetchone()
+        legacy_rows = conn.execute(
+            """
+            SELECT s.*
+              FROM kanban_notify_subs s
+              LEFT JOIN tasks t ON t.id = s.task_id
+             WHERE (t.workflow_id = ? OR s.task_id = ?)
+               AND LOWER(s.platform) = ?
+               AND s.chat_id = ?
+               AND COALESCE(s.thread_id, '') = ?
+               AND COALESCE(s.notifier_profile, '') = ?
+             ORDER BY s.task_id
+            """,
+            (route[0], route[0], route[2], route[3], route[4], route[1]),
+        ).fetchall()
+        if not legacy_rows:
+            if existing is None:
+                _insert_or_refresh_workflow_notify_sub(
+                    conn,
+                    workflow_id=route[0],
+                    notifier_profile=route[1],
+                    platform=route[2],
+                    chat_id=route[3],
+                    chat_type=chat_type,
+                    thread_id=route[4],
+                    user_id=user_id,
+                    cursor=0,
+                )
+            return True
+
+        high_water_row = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) AS high_water FROM task_events"
+        ).fetchone()
+        high_water = int(high_water_row["high_water"] if high_water_row else 0)
+        if existing is not None:
+            pending = str(existing["pending_claim_token"] or "")
+            expires = int(existing["pending_expires_at"] or 0)
+            workflow_placeholders = ",".join(
+                "?" for _ in WORKFLOW_NOTIFICATION_KINDS
+            )
+            required_row = conn.execute(
+                "SELECT COALESCE(MAX(e.id), 0) AS required "
+                "FROM task_events e JOIN tasks t ON t.id = e.task_id "
+                "WHERE t.workflow_id = ? AND e.id <= ? AND e.kind IN "
+                f"({workflow_placeholders})",
+                (route[0], high_water, *WORKFLOW_NOTIFICATION_KINDS),
+            ).fetchone()
+            required = int(required_row["required"] if required_row else 0)
+            if (
+                (pending and expires > now)
+                or int(existing["last_event_id"]) < required
+            ):
+                return False
+
+        placeholders = ",".join("?" for _ in _LEGACY_NOTIFICATION_KINDS)
+        for legacy in legacy_rows:
+            pending = str(legacy["pending_claim_token"] or "")
+            expires = int(legacy["pending_expires_at"] or 0)
+            if pending and expires > now:
+                return False
+            required_row = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) AS required FROM task_events "
+                "WHERE task_id = ? AND id <= ? AND kind IN "
+                f"({placeholders})",
+                (
+                    legacy["task_id"],
+                    high_water,
+                    *_LEGACY_NOTIFICATION_KINDS,
+                ),
+            ).fetchone()
+            required = int(required_row["required"] if required_row else 0)
+            if int(legacy["last_event_id"] or 0) < required:
+                return False
+
+        if existing is None:
+            first = legacy_rows[0]
+            _insert_or_refresh_workflow_notify_sub(
+                conn,
+                workflow_id=route[0],
+                notifier_profile=route[1],
+                platform=route[2],
+                chat_id=route[3],
+                chat_type=chat_type or first["chat_type"],
+                thread_id=route[4],
+                user_id=user_id or first["user_id"],
+                cursor=high_water,
+                notified_cursor=high_water,
+            )
+        for legacy in legacy_rows:
+            conn.execute(
+                "DELETE FROM kanban_notify_subs WHERE task_id = ? "
+                "AND platform = ? AND chat_id = ? AND thread_id = ?",
+                (
+                    legacy["task_id"],
+                    legacy["platform"],
+                    legacy["chat_id"],
+                    legacy["thread_id"] or "",
+                ),
+            )
+    return True
+
+
 def add_notify_sub(
     conn: sqlite3.Connection,
     *,
     task_id: str,
     platform: str,
     chat_id: str,
+    chat_type: Optional[str] = None,
     thread_id: Optional[str] = None,
     user_id: Optional[str] = None,
     notifier_profile: Optional[str] = None,
+    scope: str = "task",
 ) -> None:
-    """Register a gateway source that wants terminal-state notifications
-    for ``task_id``. Idempotent on (task, platform, chat, thread)."""
+    """Register a gateway source for task-boundary notifications.
+
+    ``scope="task"`` preserves the direct-task subscription contract.
+    ``scope="descendants"`` also delivers mirrored boundary events from Loop
+    descendants through this single root row. Re-registering an existing
+    route with descendant scope upgrades it; an ordinary direct subscribe
+    never downgrades a descendant subscription.
+    """
+    scope = str(scope or "task").strip().lower()
+    if scope not in {"task", "descendants"}:
+        raise ValueError("notification scope must be 'task' or 'descendants'")
     now = int(time.time())
     with write_txn(conn):
         conn.execute(
             """
             INSERT OR IGNORE INTO kanban_notify_subs
-                (task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (task_id, platform, chat_id, chat_type, thread_id, user_id,
+                 notifier_profile, scope, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (task_id, platform, chat_id, thread_id or "", user_id, notifier_profile, now),
+            (
+                task_id,
+                platform,
+                chat_id,
+                chat_type or "",
+                thread_id or "",
+                user_id,
+                notifier_profile,
+                scope,
+                now,
+            ),
         )
+        if scope == "descendants":
+            conn.execute(
+                """
+                UPDATE kanban_notify_subs
+                   SET scope = 'descendants'
+                 WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
+                """,
+                (task_id, platform, chat_id, thread_id or ""),
+            )
+        if chat_type:
+            # Backfill rows created before exact session routing was persisted.
+            # Do not overwrite a known route type on an idempotent subscribe.
+            conn.execute(
+                """
+                UPDATE kanban_notify_subs
+                   SET chat_type = ?
+                 WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
+                   AND (chat_type IS NULL OR chat_type = '')
+                """,
+                (chat_type, task_id, platform, chat_id, thread_id or ""),
+            )
         if notifier_profile:
             # Self-heal legacy rows that predate notifier ownership by
             # backfilling only when the existing value is unset.
@@ -12177,6 +14179,37 @@ def remove_notify_sub(
     return cur.rowcount > 0
 
 
+def remove_notify_sub_if_idle(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+) -> bool:
+    """Remove a subscription only when no unexpired delivery lease owns it.
+
+    Terminal cleanup runs independently from claim ACKs so a crashed watcher
+    can leave a fully-drained row behind. A second watcher may also observe
+    that row while the first watcher is still delivering its leased event
+    range. This delete is the CAS boundary between those cases: drained rows
+    are repairable, while a live claimant keeps ownership until it ACKs,
+    rewinds, or its lease expires.
+    """
+
+    now = int(time.time())
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM kanban_notify_subs "
+            "WHERE task_id = ? AND platform = ? AND chat_id = ? "
+            "  AND thread_id = ? "
+            "  AND (COALESCE(pending_claim_token, '') = '' "
+            "       OR COALESCE(pending_expires_at, 0) <= ?)",
+            (task_id, platform, chat_id, thread_id or "", now),
+        )
+    return cur.rowcount > 0
+
+
 def unseen_events_for_sub(
     conn: sqlite3.Connection,
     *,
@@ -12185,6 +14218,7 @@ def unseen_events_for_sub(
     chat_id: str,
     thread_id: Optional[str] = None,
     kinds: Optional[Iterable[str]] = None,
+    limit: Optional[int] = None,
 ) -> tuple[int, list[Event]]:
     """Return ``(new_cursor, events)`` for a given subscription.
 
@@ -12193,26 +14227,40 @@ def unseen_events_for_sub(
     the gateway has successfully delivered the notifications.
     """
     row = conn.execute(
-        "SELECT last_event_id FROM kanban_notify_subs "
+        "SELECT last_event_id, scope FROM kanban_notify_subs "
         "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?",
         (task_id, platform, chat_id, thread_id or ""),
     ).fetchone()
     if row is None:
         return 0, []
     cursor = int(row["last_event_id"])
+    descendant_scope = str(row["scope"] or "task") == "descendants"
     kind_list = list(kinds) if kinds else None
     q = (
         "SELECT * FROM task_events WHERE task_id = ? AND id > ? "
         + ("AND kind IN (" + ",".join("?" * len(kind_list)) + ") " if kind_list else "")
         + "ORDER BY id ASC"
+        + (" LIMIT ?" if limit is not None else "")
     )
     params: list[Any] = [task_id, cursor]
     if kind_list:
         params.extend(kind_list)
+    if limit is not None:
+        params.append(max(1, int(limit)))
     rows = conn.execute(q, params).fetchall()
     out: list[Event] = []
     max_id = cursor
     for r in rows:
+        max_id = max(max_id, int(r["id"]))
+        # Scope is a storage-level contract. Consumers must never be able to
+        # accidentally expose mirrored descendant events through a legacy
+        # direct-task subscription merely because they requested broad kinds.
+        # We still advance over ignored rows so they are not rescanned forever.
+        if (
+            not descendant_scope
+            and str(r["kind"]).startswith("loop_descendant_")
+        ):
+            continue
         try:
             payload = json.loads(r["payload"]) if r["payload"] else None
         except Exception:
@@ -12222,8 +14270,10 @@ def unseen_events_for_sub(
             payload=payload, created_at=r["created_at"],
             run_id=(int(r["run_id"]) if "run_id" in r.keys() and r["run_id"] is not None else None),
         ))
-        max_id = max(max_id, int(r["id"]))
     return max_id, out
+
+
+_NOTIFY_CLAIM_LEASE_SECONDS = 30 * 60
 
 
 def claim_unseen_events_for_sub(
@@ -12234,30 +14284,33 @@ def claim_unseen_events_for_sub(
     chat_id: str,
     thread_id: Optional[str] = None,
     kinds: Optional[Iterable[str]] = None,
-) -> tuple[int, int, list[Event]]:
+    limit: Optional[int] = None,
+    lease_seconds: int = _NOTIFY_CLAIM_LEASE_SECONDS,
+) -> tuple[int, int, list[Event], Optional[str]]:
     """Atomically claim unseen notification events for one subscription.
 
-    Returns ``(old_cursor, new_cursor, events)``. When events are returned,
-    ``kanban_notify_subs.last_event_id`` has already been advanced to
-    ``new_cursor`` inside a ``BEGIN IMMEDIATE`` transaction. That makes the
-    notifier's read/claim step single-owner across multiple gateway watcher
-    processes pointed at the same board DB: concurrent watchers serialize on
-    SQLite's writer lock, and only the first process sees and claims a given
-    event range.
-
-    Callers should send the claimed events, then either leave the cursor at
-    ``new_cursor`` on success or call :func:`rewind_notify_cursor` if delivery
-    failed before any terminal unsubscribe removed the row.
+    Returns ``(old_cursor, new_cursor, events, claim_token)``. A durable lease
+    prevents another watcher from overtaking the claimed range while delivery
+    is in flight. The committed cursor advances only when
+    :func:`complete_notify_claim` acknowledges the exact token; failures call
+    :func:`rewind_notify_cursor` to release it. An expired lease is reclaimable,
+    so a crashed notifier cannot wedge the subscription forever.
     """
     with write_txn(conn):
         row = conn.execute(
-            "SELECT last_event_id FROM kanban_notify_subs "
+            "SELECT last_event_id, pending_claim_token, pending_expires_at "
+            "FROM kanban_notify_subs "
             "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?",
             (task_id, platform, chat_id, thread_id or ""),
         ).fetchone()
         if row is None:
-            return 0, 0, []
+            return 0, 0, [], None
         old_cursor = int(row["last_event_id"])
+        now = int(time.time())
+        pending_token = str(row["pending_claim_token"] or "")
+        pending_expires_at = int(row["pending_expires_at"] or 0)
+        if pending_token and pending_expires_at > now:
+            return old_cursor, old_cursor, [], None
         new_cursor, events = unseen_events_for_sub(
             conn,
             task_id=task_id,
@@ -12265,16 +14318,137 @@ def claim_unseen_events_for_sub(
             chat_id=chat_id,
             thread_id=thread_id,
             kinds=kinds,
+            limit=limit,
         )
+        if new_cursor <= old_cursor:
+            if pending_token:
+                conn.execute(
+                    "UPDATE kanban_notify_subs "
+                    "SET pending_claim_token = NULL, pending_event_id = NULL, "
+                    "    pending_expires_at = NULL "
+                    "WHERE task_id = ? AND platform = ? AND chat_id = ? "
+                    "  AND thread_id = ? AND pending_claim_token = ?",
+                    (
+                        task_id,
+                        platform,
+                        chat_id,
+                        thread_id or "",
+                        pending_token,
+                    ),
+                )
+            return old_cursor, old_cursor, [], None
         if not events:
-            return old_cursor, old_cursor, []
-        conn.execute(
-            "UPDATE kanban_notify_subs SET last_event_id = ? "
+            # Storage-level scope filtering can intentionally consume only
+            # descendant mirror rows for a legacy task-scoped subscription.
+            # Nothing requires delivery, so commit that skip immediately.
+            conn.execute(
+                "UPDATE kanban_notify_subs "
+                "SET last_event_id = ?, pending_claim_token = NULL, "
+                "    pending_event_id = NULL, pending_expires_at = NULL "
+                "WHERE task_id = ? AND platform = ? AND chat_id = ? "
+                "  AND thread_id = ? AND last_event_id = ?",
+                (
+                    int(new_cursor),
+                    task_id,
+                    platform,
+                    chat_id,
+                    thread_id or "",
+                    int(old_cursor),
+                ),
+            )
+            return old_cursor, new_cursor, [], None
+        claim_token = secrets.token_hex(16)
+        cur = conn.execute(
+            "UPDATE kanban_notify_subs "
+            "SET pending_claim_token = ?, pending_event_id = ?, "
+            "    pending_expires_at = ? "
             "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ? "
-            "AND last_event_id = ?",
-            (int(new_cursor), task_id, platform, chat_id, thread_id or "", int(old_cursor)),
+            "AND last_event_id = ? "
+            "AND (pending_claim_token IS NULL OR pending_expires_at <= ?)",
+            (
+                claim_token,
+                int(new_cursor),
+                now + max(1, int(lease_seconds)),
+                task_id,
+                platform,
+                chat_id,
+                thread_id or "",
+                int(old_cursor),
+                now,
+            ),
         )
-        return old_cursor, new_cursor, events
+        if cur.rowcount != 1:
+            return old_cursor, old_cursor, [], None
+        return old_cursor, new_cursor, events, claim_token
+
+
+def complete_notify_claim(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+    claimed_cursor: int,
+    claim_token: str,
+) -> bool:
+    """Commit one exact notification lease after successful foreground delivery."""
+
+    if not claim_token:
+        return False
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE kanban_notify_subs "
+            "SET last_event_id = ?, pending_claim_token = NULL, "
+            "    pending_event_id = NULL, pending_expires_at = NULL "
+            "WHERE task_id = ? AND platform = ? AND chat_id = ? "
+            "  AND thread_id = ? AND pending_claim_token = ? "
+            "  AND pending_event_id = ?",
+            (
+                int(claimed_cursor),
+                task_id,
+                platform,
+                chat_id,
+                thread_id or "",
+                claim_token,
+                int(claimed_cursor),
+            ),
+        )
+    return cur.rowcount > 0
+
+
+def mark_notify_visible_through(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+    event_id: int,
+) -> None:
+    """Remember externally visible pings separately from foreground delivery.
+
+    If the internal wake fails after a text notification or artifact upload
+    succeeds, retry only the foreground turn instead of replaying the visible
+    side effect on every poll.
+    """
+
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE kanban_notify_subs "
+            "SET last_notified_event_id = CASE "
+            "    WHEN last_notified_event_id < ? THEN ? "
+            "    ELSE last_notified_event_id END "
+            "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?",
+            (
+                int(event_id),
+                int(event_id),
+                task_id,
+                platform,
+                chat_id,
+                thread_id or "",
+            ),
+        )
 
 
 def advance_notify_cursor(
@@ -12288,9 +14462,27 @@ def advance_notify_cursor(
 ) -> None:
     with write_txn(conn):
         conn.execute(
-            "UPDATE kanban_notify_subs SET last_event_id = ? "
+            "UPDATE kanban_notify_subs "
+            "SET last_event_id = CASE "
+            "    WHEN last_event_id < ? THEN ? ELSE last_event_id END, "
+            "pending_claim_token = CASE "
+            "    WHEN pending_event_id <= ? THEN NULL ELSE pending_claim_token END, "
+            "pending_event_id = CASE "
+            "    WHEN pending_event_id <= ? THEN NULL ELSE pending_event_id END, "
+            "pending_expires_at = CASE "
+            "    WHEN pending_event_id <= ? THEN NULL ELSE pending_expires_at END "
             "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?",
-            (int(new_cursor), task_id, platform, chat_id, thread_id or ""),
+            (
+                int(new_cursor),
+                int(new_cursor),
+                int(new_cursor),
+                int(new_cursor),
+                int(new_cursor),
+                task_id,
+                platform,
+                chat_id,
+                thread_id or "",
+            ),
         )
 
 
@@ -12303,23 +14495,46 @@ def rewind_notify_cursor(
     thread_id: Optional[str] = None,
     claimed_cursor: int,
     old_cursor: int,
+    claim_token: Optional[str] = None,
 ) -> bool:
-    """Undo a notification claim when delivery fails.
+    """Release an exact notification lease when delivery fails.
 
-    The CAS guard only rewinds if no later notifier advanced the row after our
-    claim. This keeps retry behavior for transient send failures without
-    clobbering newer progress.
+    ``claim_token`` is the safe current contract. The cursor-CAS fallback is
+    retained for older callers that claimed under the pre-lease implementation.
     """
     with write_txn(conn):
-        cur = conn.execute(
-            "UPDATE kanban_notify_subs SET last_event_id = ? "
-            "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ? "
-            "AND last_event_id = ?",
-            (
-                int(old_cursor), task_id, platform, chat_id, thread_id or "",
-                int(claimed_cursor),
-            ),
-        )
+        if claim_token:
+            cur = conn.execute(
+                "UPDATE kanban_notify_subs "
+                "SET pending_claim_token = NULL, pending_event_id = NULL, "
+                "    pending_expires_at = NULL "
+                "WHERE task_id = ? AND platform = ? AND chat_id = ? "
+                "  AND thread_id = ? AND last_event_id = ? "
+                "  AND pending_claim_token = ? AND pending_event_id = ?",
+                (
+                    task_id,
+                    platform,
+                    chat_id,
+                    thread_id or "",
+                    int(old_cursor),
+                    claim_token,
+                    int(claimed_cursor),
+                ),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE kanban_notify_subs SET last_event_id = ? "
+                "WHERE task_id = ? AND platform = ? AND chat_id = ? "
+                "  AND thread_id = ? AND last_event_id = ?",
+                (
+                    int(old_cursor),
+                    task_id,
+                    platform,
+                    chat_id,
+                    thread_id or "",
+                    int(claimed_cursor),
+                ),
+            )
     return cur.rowcount > 0
 
 

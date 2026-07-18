@@ -15,10 +15,11 @@ after a skeleton's dependencies are complete.
 
 - SQLite is authoritative for tasks, links, state, events, and graph ownership.
 - Desktop is a live view and editor over that durable graph.
-- `delegate_task(mode="loop", decompose=true, tasks=[...])` is the foreground
+- `delegate_task(mode="loop", tasks=[...])` is the foreground
   graph-construction contract. Each row needs only an `id`/`client_id`, a brief
   `title`/`goal`, and optional `depends_on` aliases. Aliases are local to one
   fragment; later fragments reference existing nodes by durable task id.
+  Decomposition is implicit in Loop mode.
 - A dependency-ready skeleton enters `triage` with
   `needs_specification=true`; a blocked skeleton waits in `todo`.
 - The auto-decomposer specifies a skeleton in place or expands it into a child
@@ -31,8 +32,6 @@ after a skeleton's dependencies are complete.
 ```python
 delegate_task(
     mode="loop",
-    decompose=True,
-    root_task_id="t_existing_root",
     tasks=[
         {"id": "research", "title": "Research current behavior"},
         {
@@ -53,9 +52,14 @@ The foreground owns topology and timing: it decides which graph fragment to
 create next and can add new pending work after observing results. It does not
 choose worker profiles or write worker-ready task bodies.
 
-Legacy single-goal Loop calls with `decompose=true` retain their previous
-direct-decomposition and goal-mode behavior. Non-decomposed Loop delegation and
-ordinary manually created Kanban cards are unchanged.
+Single-goal Loop calls normalize to the same one-node skeleton contract. Cached
+callers may still send the retired `decompose` field, which is ignored rather
+than reopening a second execution path. A cached `root_task_id` is resolved to
+its workflow only when board state proves the relationship; proven pre-workflow
+roots use the atomic compatibility migration, and unknown stale values are
+ignored. Because every Loop skeleton requires JIT compilation,
+`kanban.auto_decompose: false` rejects Loop delegation before any rows are
+created. Ordinary manually created Kanban cards are unchanged.
 
 ## Required invariants
 
@@ -75,18 +79,19 @@ ordinary manually created Kanban cards are unchanged.
 7. Specification failures remain visible and retry with backoff instead of
    spending an LLM call every dispatcher tick.
 8. Link/unlink/archive controls cannot mutate running or terminal graph nodes.
-9. Explicit Loop roots become unassigned `ready` rows after their sink nodes
-   finish. The foreground either extends the graph (which returns the root to
-   `todo`) or completes the root when the objective is satisfied; no worker can
-   race that decision.
+9. A live skeleton that fans out becomes an aggregate completion alias. Its
+   generated exits remain linked through the stable node, but when they finish
+   the shell transitions directly from `todo` to `done`, emits an ordinary
+   completion boundary, and never becomes worker-ready. The workflow remains
+   open until the foreground explicitly closes it.
 10. `loop.max_graph_nodes` bounds durable fragment size independently of
     `delegation.max_concurrent_children`.
 
 ## Desktop behavior
 
-- The first empty-canvas action creates the scheduled Loop root and immediately
-  asks the foreground session to triage the request. The root is explicitly
-  unassigned so only the foreground decides whether to extend or finalize it.
+- The first empty-canvas action creates an ordinary scheduled Loop task and
+  immediately asks the foreground session to triage the request. Workflow
+  identity is internal metadata, not a root card.
 - Adding a canvas node creates its title and initial incoming/outgoing edges in
   one request. There is no assignee picker and no follow-up link race.
 - Nodes show plain-language phases: Planning, Specifying, Waiting for
@@ -98,11 +103,13 @@ ordinary manually created Kanban cards are unchanged.
 ## Verification targets
 
 - Atomic chain, fan-out/fan-in, rollback, cycle, external-parent, idempotency,
-  root wake-up, configured graph-limit, and claim-guard tests.
+  shell auto-settlement, configured graph-limit, and claim-guard tests.
 - Specification/decomposition boundary, failure backoff, and stale-revision
   tests.
 - Scoped link mutation races and running/completed immutability tests.
 - Desktop creation, capability fallback, pending-only controls, live phases,
   and absence of a graph Submit action.
+- Settled-frontier notification batching, immediate blocker delivery, guarded
+  workflow closure, and close-versus-create race tests.
 - Focused Python tests, Desktop Vitest, TypeScript typecheck, Ruff, compilation,
   and `git diff --check`.

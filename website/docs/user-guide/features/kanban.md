@@ -14,10 +14,20 @@ Hermes Kanban is a durable task board, shared across all your Hermes profiles, t
 
 The board has two front doors, both backed by the same `~/.hermes/kanban.db`:
 
-- **Agents drive the board through a dedicated `kanban_*` toolset** — `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_block`, `kanban_heartbeat`, `kanban_comment`, `kanban_create`, `kanban_link`, `kanban_unblock`. The dispatcher spawns each worker with these tools already in its schema; orchestrator profiles can also enable the `kanban` toolset explicitly. The model reads and routes tasks by calling tools directly, *not* by shelling out to `hermes kanban`. See [How workers interact with the board](#how-workers-interact-with-the-board) below.
+- **Agents drive the board through a dedicated `kanban_*` toolset.** The
+  dispatcher gives a leaf worker exactly five tools:
+  `kanban_show`, `kanban_complete`, `kanban_block`, `kanban_heartbeat`, and
+  `kanban_comment`. With Loop enabled (the default), an unscoped foreground
+  session keeps five bounded re-entry controls: `kanban_show`,
+  `kanban_complete`, `kanban_comment`, `kanban_create`, and `kanban_unblock`.
+  Profiles that explicitly enable `kanban` receive the full orchestrator
+  surface, including listing, linking, decomposition, and blocker resolution.
+  The model calls these tools directly, *not* by shelling out to
+  `hermes kanban`. See
+  [How workers interact with the board](#how-workers-interact-with-the-board).
 - **You (and scripts, and cron) drive the board through `hermes kanban …`** on the CLI, `/kanban …` as a slash command, or the dashboard. These are for humans and automation — the places without a tool-calling model behind them.
 
-Both surfaces route through the same `kanban_db` layer, so reads see a consistent view and writes can't drift. The rest of this page shows CLI examples because they're easy to copy-paste, but every CLI verb has a tool-call equivalent the model uses.
+Both surfaces route through the same `kanban_db` layer, so reads see a consistent view and writes can't drift. The rest of this page shows CLI examples because they're easy to copy-paste. The model-facing surface is intentionally smaller; compatibility CLI verbs such as `request-review` do not imply a corresponding model tool.
 
 This is the shape that covers the workloads `delegate_task` can't:
 
@@ -267,7 +277,7 @@ hermes kanban block    t_abc "need input" --ids t_def t_hij
 
 ## How workers interact with the board
 
-**Workers do not shell out to `hermes kanban`.** When the dispatcher spawns a worker it sets `HERMES_KANBAN_TASK=t_abcd` in the child's env, and that env var flips on a dedicated **kanban toolset** in the model's schema. The same toolset is also available to orchestrator profiles that enable `kanban` in their toolsets config. These tools read and mutate the board directly via the Python `kanban_db` layer, same as the CLI does. A running worker calls these like any other tool; it never sees or needs the `hermes kanban` CLI.
+**Workers do not shell out to `hermes kanban`.** When the dispatcher spawns a worker it sets `HERMES_KANBAN_TASK=t_abcd` in the child's env, and that env var flips on a dedicated **kanban toolset** in the model's schema. Enabled Loop foreground sessions keep the bounded controls needed for re-entry (`show`, `complete`, `comment`, `create`, and `unblock`); profiles that explicitly enable `kanban` receive the full orchestrator surface. These tools read and mutate the board directly via the Python `kanban_db` layer, same as the CLI does. A running worker calls these like any other tool; it never sees or needs the `hermes kanban` CLI.
 
 | Tool | Purpose | Required params |
 |---|---|---|
@@ -276,7 +286,7 @@ hermes kanban block    t_abc "need input" --ids t_def t_hij
 | `kanban_complete` | Finish with `summary` + `metadata` structured handoff. | at least one of `summary` / `result` |
 | `kanban_block` | Stop work and route by why: `kind=dependency` (waits in `todo`, auto-resumes), `needs_input`/`capability`/`transient` (surface to a human). Repeated same-kind re-blocks auto-escalate to `triage`. | `reason` |
 | `kanban_heartbeat` | Signal liveness during long operations. Pure side-effect. | — |
-| `kanban_comment` | Append a durable note to the task thread. | `task_id`, `body` |
+| `kanban_comment` | Append a durable, non-waking message to the task thread. The current worker task id is the default. | `body` |
 | `kanban_create` | (Orchestrators) fan out into child tasks with an `assignee`, optional `parents`, `skills`, etc. | `title`, `assignee` |
 | `kanban_link` | (Orchestrators) add a `parent_id → child_id` dependency edge after the fact. | `parent_id`, `child_id` |
 | `kanban_unblock` | (Orchestrators) move a blocked task back to `ready`. | `task_id` |
@@ -289,16 +299,19 @@ kanban_show()                                     # no args — uses HERMES_KANB
 # (model reads the returned worker_context, does the work via terminal/file tools)
 kanban_heartbeat(note="halfway through — 4 of 8 files transformed")
 # (more work)
+kanban_comment(
+    body="Please review the limiter edge cases. Evidence: 14 tests pass; changed limiter.py and tests/test_limiter.py."
+)
 kanban_complete(
     summary="migrated limiter.py to token-bucket; added 14 tests, all pass",
     metadata={"changed_files": ["limiter.py", "tests/test_limiter.py"], "tests_run": 14},
 )
 ```
 
-An **orchestrator** worker fans out instead:
+An unscoped **foreground/orchestrator** session fans out instead:
 
 ```
-kanban_show()
+kanban_show(task_id="<changed-child-id>")
 kanban_create(
     title="research ICP funding 2024-2026",
     assignee="researcher-a",
@@ -313,10 +326,47 @@ kanban_create(
     parents=["t_r1", "t_r2"],                     # promotes to ready when both complete
     body="one-pager, 300 words, neutral tone",
 )
-kanban_complete(summary="decomposed into 2 research tasks + 1 writer; linked dependencies")
 ```
 
-The "(Orchestrators)" tools — `kanban_list`, `kanban_create`, `kanban_link`, `kanban_unblock`, and `kanban_comment` on foreign tasks — are available through the same toolset; the convention (encoded in the auto-injected kanban guidance) is that worker profiles don't fan out or route unrelated work, and orchestrator profiles don't execute implementation work. Dispatcher-spawned workers are still task-scoped for destructive lifecycle operations and cannot mutate unrelated tasks.
+The foreground commits the graph, then the assigned workers execute it. The
+"(Orchestrators)" tools — `kanban_list`, `kanban_create`,
+`kanban_link`, `kanban_unblock`, `kanban_decompose`,
+`kanban_resolve_blocker`, and `kanban_comment` on foreign tasks — are
+available through the same toolset. Dispatcher-spawned workers do not receive
+graph-control tools, so the ownership split is enforced by the schema rather
+than being only a prompt convention.
+
+### Foreground re-entry: comment, boundary, decision
+
+A worker comment is a message, not an interrupt and not a scheduling command.
+Writing it does not poll the model, wake the foreground, or live-push text into
+an already-running worker. The worker must then cross a lifecycle boundary:
+
+```text
+worker: kanban_comment(body="review suggested; tests and risks …")
+worker: kanban_complete(summary="implementation finished")
+        # or kanban_block(reason="cannot proceed without …")
+
+Loop task boundary
+  → selected directly through tasks.workflow_id
+  → claimed with any sibling boundaries from the same poll
+  → one internal foreground turn
+  → foreground reads each task and decides
+  → optional kanban_create(..., parents=[source_task_id])
+```
+
+Loop creation assigns an immutable internal `workflow_id` to every member task
+and installs one workflow-scoped subscription for the originating route.
+Completion, genuine blocking, and give-up events are read directly from the
+ordinary member-task streams; no child event is mirrored to a special task.
+The notifier claims the whole poll window and re-enters foreground once with a
+bounded batch, including each worker's recent comments. The workflow ID is
+restored only for that foreground turn, so a review or follow-up created there
+inherits the same workflow, workspace, project, tenant, and session without a
+new subscription or a model-facing workflow argument.
+
+This is intentionally a control-plane boundary: workers report facts and
+finish or block; foreground alone commits the next workflow mutation.
 
 ### Why tools instead of shelling to `hermes kanban`
 
@@ -326,7 +376,14 @@ Three reasons:
 2. **No shell-quoting fragility.** Passing `--metadata '{"files": [...]}'` through shlex + argparse is a latent footgun. Structured tool args skip it entirely.
 3. **Better errors.** Tool results are structured JSON the model can reason about, not stderr strings it has to parse.
 
-**Zero schema footprint on normal sessions.** A regular `hermes chat` session has zero `kanban_*` tools in its schema unless the active profile explicitly enables the `kanban` toolset for orchestrator work. Dispatcher-spawned task workers get task-scoped tools because `HERMES_KANBAN_TASK` is set; orchestrator profiles get the broader routing surface through config. No tool bloat for users who never touch kanban.
+**Bounded foreground footprint.** With Loop enabled (the default), a regular
+foreground session carries only the five controls needed to act on a workflow
+wake: `show`, `complete`, `comment`, `create`, and `unblock`. Setting
+`loop.enabled: false` removes that bounded surface unless the active profile
+explicitly enables the full `kanban` toolset. Dispatcher-spawned task workers
+receive their separate five-tool lifecycle surface because
+`HERMES_KANBAN_TASK` is set; configured orchestrator profiles receive all
+eleven Kanban tools.
 
 The auto-injected kanban guidance teaches the model which tool to call when and in what order.
 
@@ -396,7 +453,7 @@ streak — and a per-task `max_retries` overrides the bound. This usually means
 the model wrote a plain-text answer and exited without using the Kanban tool
 surface.
 
-The lifecycle plus the load-bearing reference details (workspace kinds, deliverable `artifacts`, claiming created cards) ship in that system-prompt block, so every worker has them regardless of which profile it runs under — no per-profile skill setup required.
+The lifecycle plus the load-bearing reference details (workspace kinds and deliverable `artifacts`) ship in that system-prompt block, so every worker has them regardless of which profile it runs under — no per-profile skill setup required. Workers suggest review or follow-up work in comments; they do not create or claim child cards.
 
 ### Pinning extra skills to a specific task
 
@@ -451,7 +508,7 @@ Use it for open-ended, multi-step, or "keep going until X is true" cards. Skip i
 
 ### How the orchestrator behaves
 
-A **well-behaved orchestrator does not do the work itself.** It decomposes the user's goal into tasks, links them, assigns each to one of the profiles you've set up, and steps back. The orchestrator guidance — anti-temptation rules, a Step-0 profile-discovery prompt (the dispatcher silently fails on unknown assignee names, so the orchestrator must ground every card in profiles that actually exist on your machine), and a decomposition playbook keyed on `kanban_create` / `kanban_link` / `kanban_comment` — is injected into the worker's system prompt automatically; there is nothing to install.
+A **well-behaved orchestrator does not do the delegated work itself.** It decomposes the user's goal into tasks, links them, assigns each to one of the profiles you've set up, and steps back. The foreground guidance — including a Step-0 profile-discovery rule (unknown assignee names leave cards stranded in `ready`) and the `kanban_create` / `kanban_link` ownership contract — is injected into the foreground/orchestrator system prompt automatically. Leaf workers receive a separate, smaller lifecycle prompt.
 
 A canonical orchestrator turn (two parallel researchers handing off to a writer):
 
@@ -467,12 +524,11 @@ kanban_create(
 )                                     # → t_w1
 # Optional: add cross-cutting deps discovered later without re-creating tasks
 kanban_link(parent_id="t_r1", child_id="t_followup")
-kanban_complete(
-    summary="decomposed into 2 parallel research tasks → 1 synthesis task; writer starts when both researchers finish",
-)
+# The foreground ends its turn after committing the graph. Workers report back
+# through comments plus completion/genuine-block boundaries.
 ```
 
-The orchestrator guidance ships in the worker's system prompt automatically — there is nothing to install or sync per profile.
+The foreground guidance ships in the orchestrator's system prompt automatically; the worker lifecycle guidance is injected separately into task-scoped workers.
 
 For best results, pair it with a profile whose toolsets are restricted to board operations (`kanban`, `gateway`, `memory`) so the orchestrator literally cannot execute implementation tasks even if it tries.
 
@@ -490,7 +546,7 @@ hermes dashboard        # "Kanban" tab appears in the nav, after "Skills"
 ### What the plugin gives you
 
 - A **Kanban** tab showing one column per status: `triage`, `todo`, `ready`, `running`, `blocked`, `done` (plus `archived` when the toggle is on).
-  - `triage` is the parking column for rough ideas. By default (`kanban.auto_decompose: true`), the dispatcher auto-runs the **decomposer** on tasks that land here. The built-in decomposer uses the `auxiliary.kanban_decomposer` model path, reads your profile roster (with descriptions), and fans the task out into a small graph of child tasks routed to the best-fit specialists. The original task stays alive as the parent of every child so its assignee (`kanban.orchestrator_profile`, or the active default profile when unset) wakes back up to judge completion when everything finishes. Flip the **Orchestration: Auto/Manual** pill at the top of the page (emerald = Auto, muted gray = Manual), or by editing `config.yaml` directly. Both modes coexist with `hermes kanban specify` - that's still available as a single-task spec rewrite when you don't want fan-out.
+  - `triage` is the parking column for rough ideas. By default (`kanban.auto_decompose: true`), the dispatcher auto-runs the **decomposer** on tasks that land here. The built-in decomposer uses the `auxiliary.kanban_decomposer` model path, reads your profile roster (with descriptions), and fans the task out into a small graph of child tasks routed to the best-fit specialists. An ordinary/manual triage task stays alive as the parent of every child so its assignee (`kanban.orchestrator_profile`, or the active default profile when unset) wakes back up to judge completion. A workflow-backed live Loop shell instead auto-settles from its generated exits and lets the workflow wake the foreground once automatic work settles. Flip the **Orchestration: Auto/Manual** pill at the top of the page (emerald = Auto, muted gray = Manual), or by editing `config.yaml` directly. Both modes coexist with `hermes kanban specify` - that's still available as a single-task spec rewrite when you don't want fan-out.
 - Cards show the task id, title, priority badge, tenant tag, assigned profile, comment/link counts, a **progress pill** (`N/M` children done when the task has dependents), and "created N ago". A per-card checkbox enables multi-select.
 - **Per-profile lanes inside Running** — toolbar checkbox toggles sub-grouping of the Running column by assignee.
 - **Live updates via WebSocket** — the plugin tails the append-only `task_events` table on a short poll interval; the board reflects changes the instant any profile (CLI, gateway, or another dashboard tab) acts. Reloads are debounced so a burst of events triggers a single refetch.
@@ -512,7 +568,7 @@ Visually the target is the familiar Linear / Fusion layout: dark theme, column h
 
 The kanban board has two ways to handle a task you drop into the Triage column:
 
-**Auto (default)** — `kanban.auto_decompose: true`. The gateway-embedded dispatcher runs the **decomposer** on each tick, capped by `kanban.auto_decompose_per_tick` (default 3 tasks per tick) so a bulk-load of triage tasks doesn't burst-spend the auxiliary LLM. The decomposer uses the built-in decomposition prompt plus the `auxiliary.kanban_decomposer` model path, reads your installed profiles + their descriptions, and asks the LLM to produce a JSON task graph: which tasks to spawn, who they go to, and which depend on which. The original triage task becomes the parent of every leaf in the graph, so it stays alive until the whole graph completes - and then promotes back to `ready` so its assignee (`kanban.orchestrator_profile`, or the active default profile when unset) can judge completion and add more tasks if the work isn't done. This is the "drop a one-liner, walk away" flow.
+**Auto (default)** — `kanban.auto_decompose: true`. The gateway-embedded dispatcher runs the **decomposer** on each tick, capped by `kanban.auto_decompose_per_tick` (default 3 tasks per tick) so a bulk-load of triage tasks doesn't burst-spend the auxiliary LLM. The decomposer uses the built-in decomposition prompt plus the `auxiliary.kanban_decomposer` model path, reads your installed profiles + their descriptions, and asks the LLM to produce a JSON task graph: which tasks to spawn, who they go to, and which depend on which. An ordinary triage task becomes the parent of every leaf, then promotes back to `ready` for its assignee (`kanban.orchestrator_profile`, or the active default profile when unset) to judge completion. In a workflow-backed live Loop graph, the shell instead auto-settles from its terminal generated children and never consumes a second worker run; the workflow remains open for foreground follow-ups. This is the "drop a one-liner, walk away" flow.
 
 **Manual** — `kanban.auto_decompose: false`. Triage tasks stay in triage until you act. Click the **⚗ Decompose** button on a card, run `hermes kanban decompose <id>` (or `--all`), or use `/kanban decompose <id>` from a chat. This matches the pre-decomposer behavior of the board, useful when you want full control over what runs when.
 
@@ -520,7 +576,7 @@ Flip between the two modes from the **Orchestration: Auto/Manual** pill at the t
 
 The decomposer's routing decisions depend on profile descriptions, which is a per-profile labeling primitive you set with `hermes profile create --description "..."`, `hermes profile describe <name> --text "..."`, `hermes profile describe <name> --auto` (LLM-generates from the profile's installed skills + model), or the dashboard's per-profile editor in the expanded **Orchestration settings** panel. Profiles without a description still appear in the roster — they're routable by name, just less precisely. The decomposer NEVER lands a child task with `assignee=None`: when the LLM picks an unknown profile, the child gets routed to `kanban.default_assignee` (or the active default profile if that's unset).
 
-`kanban.orchestrator_profile` does not load that profile's prompt, skills, or custom logic into the decomposition call. It controls who owns the root/orchestration task after fan-out. To change the decomposer's model/provider, configure `auxiliary.kanban_decomposer`. To use a profile's custom task-splitting logic instead of the built-in decomposer, switch to Manual mode and have that profile create or decompose tasks explicitly.
+`kanban.orchestrator_profile` does not load that profile's prompt, skills, or custom logic into the decomposition call. It controls who owns the original decomposition-shell task after fan-out. That shell remains an ordinary task; it is not the workflow identity. To change the decomposer's model/provider, configure `auxiliary.kanban_decomposer`. To use a profile's custom task-splitting logic instead of the built-in decomposer, switch to Manual mode and have that profile create or decompose tasks explicitly.
 
 Config knobs (all under `kanban:` in `~/.hermes/config.yaml`):
 
@@ -528,9 +584,9 @@ Config knobs (all under `kanban:` in `~/.hermes/config.yaml`):
 |---|---|---|
 | `auto_decompose` | `true` | Dispatcher auto-runs the decomposer every tick. |
 | `auto_decompose_per_tick` | `3` | Cap on decompositions per dispatcher tick. Excess defers to the next tick. |
-| `orchestrator_profile` | `""` | Profile assigned to the root/orchestration task after decomposition. Empty = fall back to active default profile. |
+| `orchestrator_profile` | `""` | Profile assigned to the original decomposition-shell task after fan-out. Empty = fall back to active default profile. |
 | `default_assignee` | `""` | Where a child task lands when the LLM picks an unknown profile. Empty = fall back to active default. |
-| `auto_subscribe_on_create` | `true` | When a worker calls `kanban_create` from inside a session with a persistent delivery channel (messaging gateway or TUI), the originating session is auto-subscribed to the new task's completion/block events. The dispatcher still drives the delivery — this only changes whether the caller's chat/key shows up in the notify-sub table. Set to `false` to require explicit `kanban_notify-subscribe` calls per task. |
+| `auto_subscribe_on_create` | `true` | When foreground creates a Loop/Kanban workflow from a persistent gateway or TUI session, subscribe the originating route to that internal workflow. One cursor receives completion/non-dependency-block/give-up boundaries from present and future member tasks. Set to `false` to require explicit notification subscription management. |
 
 And the two auxiliary LLM slots:
 
@@ -683,7 +739,8 @@ hermes kanban daemon --force                           # DEPRECATED — standalo
 hermes kanban stats [--json]                           # per-status + per-assignee counts
 hermes kanban log <id> [--tail BYTES]                  # worker log from ~/.hermes/kanban/logs/
 hermes kanban notify-subscribe <id>                    # gateway bridge hook (used by /kanban in the gateway)
-        --platform <name> --chat-id <id> [--thread-id <id>] [--user-id <id>]
+        --platform <name> --chat-id <id> [--chat-type dm|group|channel|thread]
+        [--thread-id <id>] [--user-id <id>] [--scope task|descendants]
 hermes kanban notify-list [<id>] [--json]
 hermes kanban notify-unsubscribe <id>
         --platform <name> --chat-id <id> [--thread-id <id>]
@@ -693,6 +750,10 @@ hermes kanban specify [<id> | --all] [--tenant T]      # flesh out a triage-colu
 hermes kanban gc [--event-retention-days N]            # workspaces + old events + old logs
         [--log-retention-days N]
 ```
+
+`--scope descendants` is retained for legacy root subscriptions during
+upgrade. New foreground-created Loop work uses the workflow-scoped subscription
+path automatically.
 
 All commands are also available as a slash command in the interactive CLI and in the messaging gateway (see [`/kanban` slash command](#kanban-slash-command) below).
 
@@ -746,7 +807,7 @@ All of these are gated by the same dashboard plugin auth as the rest of the kanb
 
 ### Kanban Swarm topology helper
 
-`hermes kanban swarm` creates a durable **Kanban Swarm v1** graph in one shot: a completed root/blackboard card, N parallel worker cards, a verifier card gated on all workers, and a synthesizer card gated on the verifier. Shared swarm context (the "blackboard") is stored as structured JSON comments on the root card so any worker can read it.
+`hermes kanban swarm` creates a durable **Kanban Swarm v1** graph in one shot: a completed blackboard card, N parallel worker cards, a verifier card gated on all workers, and a synthesizer card gated on the verifier. Shared swarm context is stored as structured JSON comments on that ordinary blackboard card so any worker can read it.
 
 ```bash
 hermes kanban swarm "Design a multi-region failover plan" \
@@ -785,7 +846,12 @@ This is the whole point of the separation:
 
 ### Auto-subscribe on `/kanban create` (gateway only)
 
-When you create a task from the gateway with `/kanban create "…"`, the originating chat (platform + chat id + thread id) is automatically subscribed to that task's terminal events (`completed`, `blocked`, `gave_up`, `crashed`, `timed_out`). You'll get one message back per terminal event — including the first line of the worker's result summary on `completed` — without having to poll or remember the task id.
+When you create a task from the gateway with `/kanban create "…"`, Hermes
+creates an internal workflow and automatically subscribes the originating route
+(platform + chat type + chat id + thread id) to it. Completion,
+non-dependency-block, and give-up boundaries from any present or future member
+task are selected directly from their ordinary event streams. Events claimed
+in the same poll are shown as a batch and produce one internal foreground turn.
 
 ```
 you> /kanban create "transcribe today's podcast" --assignee transcriber
@@ -798,7 +864,11 @@ bot> ✓ t_9fc1a3 completed by transcriber
      transcribed 42 minutes, saved to podcast/2026-05-04.md
 ```
 
-Subscriptions auto-remove themselves once the task reaches `done` or `archived`. If you script a create with `--json` (machine output) the auto-subscribe is skipped — the assumption is that scripted callers want to manage subscriptions explicitly via `/kanban notify-subscribe`.
+Workflow subscriptions remain active across individual task completion and
+auto-remove only after the workflow is explicitly closed or archived and its
+leased events are drained. If you script a create with `--json` (machine
+output), auto-subscribe is skipped; scripted callers manage subscriptions
+explicitly via `/kanban notify-subscribe`.
 
 ### Output truncation in messaging
 
@@ -841,19 +911,26 @@ Workers receive `$HERMES_TENANT` and namespace their memory writes by prefix. Th
 
 ## Gateway notifications
 
-When you run `/kanban create …` from the gateway (Telegram, Discord, Slack, etc.), the originating chat is automatically subscribed to the new task. The gateway's background notifier polls `task_events` every few seconds and delivers one message per terminal event (`completed`, `blocked`, `gave_up`, `crashed`, `timed_out`) to that chat. Completed tasks also send the first line of the worker's `--result` so you see the outcome without having to `/kanban show`.
+When you run `/kanban create …` from the gateway (Telegram, Discord, Slack,
+etc.), the exact originating route is automatically subscribed to the new
+workflow. The background notifier polls `task_events` every few seconds, joins
+them to `tasks.workflow_id`, batches eligible boundaries claimed in the same
+poll, and injects one internal foreground turn with recent worker comments.
+Visible chat notifications still identify each changed task.
 
 You can manage subscriptions explicitly from the CLI — useful when a script / cron job wants to notify a chat it didn't originate from:
 
 ```bash
 hermes kanban notify-subscribe t_abcd \
-    --platform telegram --chat-id 12345678 --thread-id 7
+    --platform telegram --chat-type thread --chat-id 12345678 --thread-id 7
 hermes kanban notify-list
 hermes kanban notify-unsubscribe t_abcd \
     --platform telegram --chat-id 12345678 --thread-id 7
 ```
 
-A subscription removes itself automatically once the task reaches `done` or `archived`; no cleanup needed.
+Direct task subscriptions remove themselves after that task reaches a terminal
+state. Workflow subscriptions live until explicit workflow closure or archive,
+then remove themselves after pending delivery is drained.
 
 ## Runs — one row per attempt
 

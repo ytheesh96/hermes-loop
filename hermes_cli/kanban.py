@@ -588,10 +588,11 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_block.add_argument("--metadata", default=None,
                          help='JSON dict of structured facts for the blocked handoff/run.')
 
-    p_request_review = sub.add_parser(
-        "request-review",
-        help="Move the same task into the review lane for reviewer dispatch",
-    )
+    # Compatibility-only: keep exact invocations parseable without advertising
+    # this retired workflow in the parent command's normal discovery surface.
+    # Omitting ``help=`` removes the description row; the generated metavar
+    # below removes it from the parent usage choices.
+    p_request_review = sub.add_parser("request-review")
     p_request_review.add_argument("task_id")
     p_request_review.add_argument(
         "reason",
@@ -787,8 +788,20 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_nsub.add_argument("task_id")
     p_nsub.add_argument("--platform", required=True)
     p_nsub.add_argument("--chat-id", required=True)
+    p_nsub.add_argument(
+        "--chat-type",
+        choices=("dm", "group", "channel", "thread"),
+        default=None,
+        help="Exact gateway session route type used for foreground wakeup",
+    )
     p_nsub.add_argument("--thread-id", default=None)
     p_nsub.add_argument("--user-id", default=None)
+    p_nsub.add_argument(
+        "--scope",
+        choices=("task", "descendants"),
+        default="task",
+        help="Deliver only this task (default) or this Loop root plus descendant boundaries",
+    )
     p_nsub.add_argument(
         "--notifier-profile", default=None,
         help="Profile gateway that owns/delivers this subscription (default: active profile)",
@@ -946,6 +959,12 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                       help="Delete task_events older than N days for terminal tasks (default: 30)")
     p_gc.add_argument("--log-retention-days", type=int, default=30,
                       help="Delete worker log files older than N days (default: 30)")
+
+    hidden_compat_actions = {"request-review"}
+    visible_actions = [
+        name for name in sub.choices if name not in hidden_compat_actions
+    ]
+    sub.metavar = "{" + ",".join(visible_actions) + "}"
 
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser
@@ -2683,8 +2702,10 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
         kb.add_notify_sub(
             conn, task_id=args.task_id,
             platform=args.platform, chat_id=args.chat_id,
+            chat_type=getattr(args, "chat_type", None),
             thread_id=args.thread_id, user_id=args.user_id,
             notifier_profile=args.notifier_profile or _profile_author(),
+            scope=getattr(args, "scope", "task"),
         )
     print(f"Subscribed {args.platform}:{args.chat_id}"
           + (f":{args.thread_id}" if args.thread_id else "")
@@ -2704,8 +2725,10 @@ def _cmd_notify_list(args: argparse.Namespace) -> int:
     for s in subs:
         thr = f":{s['thread_id']}" if s.get("thread_id") else ""
         owner = f"  owner={s['notifier_profile']}" if s.get("notifier_profile") else ""
+        scope = f"  scope={s.get('scope') or 'task'}"
+        route = f"  route={s.get('chat_type')}" if s.get("chat_type") else ""
         print(f"  {s['task_id']:10s}  {s['platform']}:{s['chat_id']}{thr}"
-              f"  (since event {s['last_event_id']}){owner}")
+              f"  (since event {s['last_event_id']}){scope}{route}{owner}")
     return 0
 
 

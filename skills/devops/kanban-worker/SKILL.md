@@ -1,7 +1,7 @@
 ---
 name: kanban-worker
 description: Pitfalls, examples, and edge cases for Hermes Kanban workers. The lifecycle itself is auto-injected into every worker's system prompt as KANBAN_GUIDANCE (from agent/prompt_builder.py); this skill is what you load when you want deeper detail on specific scenarios.
-version: 2.0.0
+version: 2.1.0
 platforms: [linux, macos, windows]
 environments: [kanban]
 metadata:
@@ -48,11 +48,11 @@ kanban_complete(
 )
 ```
 
-**Coding task that needs review (review lane):**
+**Coding task that should be reviewed:**
 
-For most code-changing tasks, the work isn't truly *done* until a reviewer has eyes on it. When the implementation/artifact is ready for ordinary QA, move the same task into the review lane with `kanban_request_review(...)` instead of creating a dependent reviewer child or blocking with `review-required:`. The dispatcher will claim that same row, assign/run the reviewer profile, and force-load `sdlc-review`.
+When your scoped implementation is finished, leave a review recommendation as a comment and complete the task. The completion boundary wakes the workflow-subscribed foreground, which reads the comment and decides whether to create a real reviewer task. Workers do not route their own task into review and do not create the reviewer card.
 
-Use `kanban_block(reason="...")` for true unresolved blockers, but keep the reason neutral: the tool directly transitions the same task to `blocked` and emits the terminal `blocked` event that origin subscriptions already receive. Do not create a reviewer card as a child of a blocked task; that can deadlock because the reviewer waits for the reviewed task to finish while the reviewed task waits for review.
+Use `kanban_block(reason="...")` only when your own work cannot finish. Keep the reason neutral: a genuine non-dependency block delivers the latest comments to the foreground; a dependency wait returns to `todo` without waking it.
 
 ```python
 import json
@@ -66,8 +66,8 @@ kanban_comment(
         "decisions": ["user_id primary, IP fallback for unauthenticated requests"],
     }, indent=2),
 )
-kanban_request_review(
-    summary="rate limiter shipped; 14/14 tests pass; needs QA on user_id/IP fallback choice before merging",
+kanban_complete(
+    summary="rate limiter shipped; 14/14 tests pass; review recommended for the user_id/IP fallback choice",
     metadata={
         "changed_files": ["rate_limiter.py", "tests/test_rate_limiter.py"],
         "tests_run": 14,
@@ -77,7 +77,7 @@ kanban_request_review(
 )
 ```
 
-Use `kanban_complete` only when the task is genuinely terminal — e.g. a one-line typo fix, a docs change with no functional consequences, or a research task where the artifact IS the writeup itself.
+Completion means the worker's scoped implementation is terminal. It does not mean the workflow is approved or closed; that decision belongs to the foreground.
 
 **Research task:**
 ```python
@@ -129,32 +129,6 @@ Images and video embed inline; PDFs, docx, csv/xlsx/json/yaml, pptx, zip/tar/gz,
 
 Same primitive works outside kanban: any agent surface delivers a file just by writing its absolute path into the response, and Slack/Discord/Telegram/etc. upload it natively — the `artifacts` param is the structured kanban entry point.
 
-## Claiming cards you actually created
-
-If your run produced new kanban tasks (via `kanban_create`), pass the ids in `created_cards` on `kanban_complete`. The kernel verifies each id exists and was created by your profile; any phantom id blocks the completion with an error listing what went wrong, and the rejected attempt is permanently recorded on the task's event log. **Only list ids you captured from a successful `kanban_create` return value — never invent ids from prose, never paste ids from earlier runs, never claim cards another worker created.**
-
-```python
-# GOOD — capture return values, then claim them.
-c1 = kanban_create(title="remediate SQL injection", assignee="security-worker")
-c2 = kanban_create(title="fix CSRF middleware", assignee="web-worker")
-
-kanban_complete(
-    summary="Review done; spawned remediations for both findings.",
-    metadata={"pr_number": 123, "approved": False},
-    created_cards=[c1["task_id"], c2["task_id"]],
-)
-```
-
-```python
-# BAD — claiming ids you don't have captured return values for.
-kanban_complete(
-    summary="Created remediation cards t_a1b2c3d4, t_deadbeef",  # hallucinated
-    created_cards=["t_a1b2c3d4", "t_deadbeef"],                   # → gate rejects
-)
-```
-
-If a `kanban_create` call fails (exception, tool_error), the card was NOT created — do not include a phantom id for it. Retry the create, or omit the id and mention the failure in your summary. The prose-scan pass also catches `t_<hex>` references in your free-form summary that don't resolve; these don't block the completion but show up as advisory warnings on the task in the dashboard.
-
 ## Block reasons that route cleanly
 
 Bad: `"stuck"` — the reviewer/orchestrator has no context.
@@ -196,10 +170,12 @@ You can configure the gateway to receive cross-profile Kanban task notifications
 
 ## Do NOT
 
-- Call `delegate_task` as a substitute for `kanban_create`. `delegate_task` is for short reasoning subtasks inside YOUR run; `kanban_create` is for cross-agent handoffs that outlive one API loop.
+- Create or link follow-up/review tasks. Describe the suggested work in `kanban_comment`, then complete or cross a genuine non-dependency block so the foreground can decide and call `kanban_create`.
+- Call `delegate_task` as a substitute for foreground workflow mutation. Short reasoning subtasks inside your run must not become hidden durable work.
 - Call `clarify` to ask the human a question. You are running headless — there is no live user to answer. The call will time out (default ~120s) and the task will sit silently in `running` with no signal that it is blocked. Use `kanban_comment` (context) + `kanban_block(reason=...)` (concrete blocker) instead — the task surfaces on the board as blocked, and the orchestrator/operator decides whether it can resolve, route follow-up work, or escalate to the user.
 - Modify files outside `$HERMES_KANBAN_WORKSPACE` unless the task body says to.
-- Create follow-up tasks assigned to yourself — assign to the right specialist.
+- Recommend follow-up work as if a different specialist will execute it; never
+  create or self-assign that task from a task-scoped worker.
 - Complete a task you didn't actually finish. Block it instead.
 
 ## Pitfalls
@@ -216,8 +192,8 @@ Every tool has a CLI equivalent for human operators and scripts:
 - `kanban_show` ↔ `hermes kanban show <id> --json`
 - `kanban_complete` ↔ `hermes kanban complete <id> --summary "..." --metadata '{...}'`
 - `kanban_block` ↔ `hermes kanban block <id> "reason"`
-- `kanban_request_review` ↔ `hermes kanban request-review <id> "reason" --summary "..."`
-- `kanban_create` ↔ `hermes kanban create "title" --assignee <profile> [--parent <id>]`
 - etc.
 
-Use the tools from inside an agent; the CLI exists for the human at the terminal.
+Use the worker tools from inside an agent; graph creation and the retained
+`hermes kanban request-review` compatibility command are human/foreground
+surfaces, not worker actions.

@@ -73,7 +73,11 @@ def _tui_notification_session_key(conn: Any, task_id: str, fallback: str) -> str
 
 
 def maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
-    """Auto-subscribe the current gateway/TUI session to a Kanban task."""
+    """Auto-subscribe the current gateway/TUI session to task coordination.
+
+    Workflow members share one route/cursor keyed by ``workflow_id``. Ordinary
+    ungrouped tasks retain the direct-task compatibility subscription.
+    """
     try:
         cfg = load_config()
         if not cfg_get(cfg, "kanban", "auto_subscribe_on_create", default=True):
@@ -103,15 +107,33 @@ def maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
 
         from hermes_cli import kanban_db as kb
 
-        kb.add_notify_sub(
-            conn,
-            task_id=task_id,
-            platform=platform,
-            chat_id=chat_id,
-            thread_id=get_session_env("HERMES_SESSION_THREAD_ID", "") or None,
-            user_id=get_session_env("HERMES_SESSION_USER_ID", "") or None,
-            notifier_profile=_active_profile_name(),
-        )
+        task = kb.get_task(conn, task_id)
+        if task is None:
+            return False
+        route = {
+            "platform": platform,
+            "chat_id": chat_id,
+            "chat_type": get_session_env("HERMES_SESSION_CHAT_TYPE", "") or None,
+            "thread_id": get_session_env("HERMES_SESSION_THREAD_ID", "") or None,
+            "user_id": get_session_env("HERMES_SESSION_USER_ID", "") or None,
+            "notifier_profile": _active_profile_name(),
+        }
+        if task.workflow_id:
+            # New workflows have no legacy rows, so this creates a cursor at
+            # zero. Legacy workflows cut over only after the exact old route is
+            # fully ACKed; until then the old row remains the sole consumer.
+            kb.cutover_legacy_workflow_route(
+                conn,
+                workflow_id=task.workflow_id,
+                **route,
+            )
+        else:
+            kb.add_notify_sub(
+                conn,
+                task_id=task_id,
+                scope="task",
+                **route,
+            )
         return True
     except Exception as exc:
         logger.warning(

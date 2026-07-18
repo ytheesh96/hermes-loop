@@ -43,6 +43,7 @@ describe('loopagent store', () => {
         summary_preview: 'building the patch',
         task_id: 't_loop',
         task_title: 'Wire Loop activity',
+        workflow_id: 'wf_loop',
         worker_session_id: 'worker-session-7'
       },
       'loopagent.worker.upsert'
@@ -74,7 +75,8 @@ describe('loopagent store', () => {
       summaryPreview: 'building the patch',
       taskId: 't_loop',
       title: 'Wire Loop activity',
-      workerSessionId: 'worker-session-7'
+      workerSessionId: 'worker-session-7',
+      workflowId: 'wf_loop'
     })
   })
 
@@ -107,16 +109,16 @@ describe('loopagent store', () => {
     expect($loopagentsBySession.get().s1?.[0]?.status).toBe('running')
   })
 
-  it('keeps task rows separate from worker rows for the same task', () => {
+  it('keeps task rows separate from worker rows and records their canonical workflow', () => {
     upsertLoopagent(
       ['s1'],
       {
         event: 'loopagent.task.upsert',
-        is_root_task: true,
         revision: 1,
         task_id: 't_loop',
         task_status: 'running',
-        task_title: 'Loop root'
+        task_title: 'Loop task',
+        workflow_id: 'wf_loop'
       },
       'loopagent.task.upsert'
     )
@@ -130,7 +132,8 @@ describe('loopagent store', () => {
         run_id: 7,
         run_status: 'running',
         task_id: 't_loop',
-        task_title: 'Loop root'
+        task_title: 'Loop task',
+        workflow_id: 'wf_loop'
       },
       'loopagent.worker.upsert'
     )
@@ -139,5 +142,27 @@ describe('loopagent store', () => {
       ['loopagent:task:t_loop', 'task'],
       ['loopagent:worker:t_loop:7', 'worker']
     ])
+    expect($loopagentsBySession.get().s1?.map(item => item.workflowId)).toEqual(['wf_loop', 'wf_loop'])
+    expect($loopagentsBySession.get().s1?.map(item => item.isRootTask)).toEqual([undefined, undefined])
+  })
+
+  it('keeps is_root_task only as a legacy fallback when workflow_id is absent', () => {
+    upsertLoopagent(
+      ['s1'],
+      {
+        event: 'loopagent.task.upsert',
+        is_root_task: false,
+        parent_task_ids: ['t_parent'],
+        task_id: 't_child',
+        task_status: 'running'
+      },
+      'loopagent.task.upsert'
+    )
+
+    expect($loopagentsBySession.get().s1?.[0]).toMatchObject({
+      isRootTask: false,
+      taskId: 't_child',
+      workflowId: undefined
+    })
   })
 })

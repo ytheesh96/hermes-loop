@@ -19,7 +19,7 @@ vi.mock('@/hermes', () => ({
   getProfiles: vi.fn(async () => ({ profiles: [] })),
   loopSourceFromDraftResult: (sessionId: string, result: { source?: unknown; task?: null | { id: string } }) =>
     result.source ||
-    (result.task ? { root_task_id: result.task.id, session_id: sessionId, tasks: [result.task] } : null),
+    (result.task ? { workflow_id: result.task.id, session_id: sessionId, tasks: [result.task] } : null),
   mergeLoopDraftSource: (_current: unknown, incoming: unknown) => incoming,
   PROMPT_SUBMIT_REQUEST_TIMEOUT_MS: 1_800_000,
   setApiRequestProfile: vi.fn(),
@@ -584,7 +584,7 @@ describe('usePromptActions /loop', () => {
 
     const requestGateway = vi.fn(
       async (method: string) =>
-        (method === 'slash.exec' ? { type: 'send', message: 'Triage the new Loop root' } : {}) as never
+        (method === 'slash.exec' ? { type: 'send', message: 'Triage the new Loop workflow' } : {}) as never
     )
 
     let handle: HarnessHandle | null = null
@@ -618,18 +618,18 @@ describe('usePromptActions /loop', () => {
     expect(onOpenLoop).toHaveBeenNthCalledWith(1, 't_loop_1')
     expect(onOpenLoop).toHaveBeenNthCalledWith(2, 't_loop_2')
     expect(requestGateway).toHaveBeenCalledWith('slash.exec', {
-      command: 'loop-triage Triage Loop root t_loop_1 on Kanban board default: Fix flaky auth test',
+      command: 'loop-triage Triage Loop workflow task t_loop_1 on Kanban board default: Fix flaky auth test',
       session_id: RUNTIME_SESSION_ID
     })
     expect(requestGateway).toHaveBeenCalledWith('slash.exec', {
-      command: 'loop-triage Triage Loop root t_loop_2 on Kanban board developer: Second idea',
+      command: 'loop-triage Triage Loop workflow task t_loop_2 on Kanban board developer: Second idea',
       session_id: RUNTIME_SESSION_ID
     })
     expect(requestGateway).toHaveBeenCalledWith(
       'prompt.submit',
       {
         session_id: RUNTIME_SESSION_ID,
-        text: 'Triage the new Loop root'
+        text: 'Triage the new Loop workflow'
       },
       1_800_000
     )
@@ -651,7 +651,7 @@ describe('usePromptActions /loop', () => {
 
     const requestGateway = vi.fn(
       async (method: string) =>
-        (method === 'slash.exec' ? { type: 'send', message: 'Triage the first Loop root' } : {}) as never
+        (method === 'slash.exec' ? { type: 'send', message: 'Triage the first Loop workflow' } : {}) as never
     )
 
     let handle: HarnessHandle | null = null
@@ -675,14 +675,14 @@ describe('usePromptActions /loop', () => {
       expect.objectContaining({ sessionId: 'stored-new-session', title: 'First task' })
     )
     expect(requestGateway).toHaveBeenCalledWith('slash.exec', {
-      command: 'loop-triage Triage Loop root t_loop_new_session: First task',
+      command: 'loop-triage Triage Loop workflow task t_loop_new_session: First task',
       session_id: 'rt-new-session'
     })
     expect(requestGateway).toHaveBeenCalledWith(
       'prompt.submit',
       {
         session_id: 'rt-new-session',
-        text: 'Triage the first Loop root'
+        text: 'Triage the first Loop workflow'
       },
       1_800_000
     )

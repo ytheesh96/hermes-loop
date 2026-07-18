@@ -104,6 +104,49 @@ class TestCodingContextBlock:
         assert "coding agent" not in _stable_prompt(agent)
 
 
+class TestKanbanGuidanceSelection:
+    def test_leaf_fallback_gets_worker_protocol(self):
+        agent = _make_agent(valid_tool_names=["kanban_show"])
+        delattr(agent, "_kanban_worker_guidance")
+        stable = _stable_prompt(agent)
+        assert "# Kanban task execution protocol" in stable
+        assert "## Kanban foreground control" not in stable
+
+    def test_bounded_graph_control_fallback_gets_foreground_protocol(self):
+        agent = _make_agent(
+            valid_tool_names=[
+                "kanban_show",
+                "kanban_complete",
+                "kanban_comment",
+                "kanban_create",
+                "kanban_unblock",
+            ]
+        )
+        delattr(agent, "_kanban_worker_guidance")
+        stable = _stable_prompt(agent)
+        assert "## Kanban foreground control" in stable
+        assert "## Full Kanban orchestrator control" not in stable
+        assert "# Kanban task execution protocol" not in stable
+
+    def test_full_surface_fallback_gets_orchestrator_protocol(self):
+        agent = _make_agent(
+            valid_tool_names=[
+                "kanban_show",
+                "kanban_list",
+                "kanban_create",
+                "kanban_link",
+                "kanban_decompose",
+            ]
+        )
+        delattr(agent, "_kanban_worker_guidance")
+        stable = _stable_prompt(agent)
+        assert "## Kanban foreground control" in stable
+        assert "## Full Kanban orchestrator control" in stable
+        assert "`kanban_list(...)`" in stable
+        assert "`kanban_decompose(task_id=...)`" in stable
+        assert "# Kanban task execution protocol" not in stable
+
+
 class TestTelegramRichMessagesHint:
     """Verify that TELEGRAM_RICH_MESSAGES_HINT is conditionally included."""
 

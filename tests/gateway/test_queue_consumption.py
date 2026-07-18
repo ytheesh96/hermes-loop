@@ -8,6 +8,7 @@ after the agent finishes its current task — not silently dropped.
 import asyncio
 from unittest.mock import MagicMock
 
+import pytest
 
 from gateway.run import _dequeue_pending_event
 from gateway.platforms.base import (
@@ -16,6 +17,7 @@ from gateway.platforms.base import (
     MessageType,
     PlatformConfig,
     Platform,
+    attach_processing_receipt,
 )
 
 
@@ -245,6 +247,46 @@ class TestQueueConsumptionAfterCompletion:
         pending_event = _dequeue_pending_event(adapter, session_key)
         pending_event = runner._promote_queued_event(session_key, adapter, pending_event)
         assert pending_event is None
+
+    @pytest.mark.asyncio
+    async def test_unresolved_receipt_reserves_head_and_blocks_overflow_promotion(
+        self,
+    ):
+        """The runner cannot reclaim a queued workflow as part of this turn."""
+        from gateway.run import GatewayRunner
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner._queued_events = {}
+        adapter = _StubAdapter()
+        session_key = "telegram:user:workflow"
+        workflow_event = MessageEvent(
+            text="[Internal workflow update]",
+            message_type=MessageType.TEXT,
+            source=MagicMock(),
+            internal=True,
+            metadata={"workflow_id": "wf-1"},
+        )
+        receipt = asyncio.get_running_loop().create_future()
+        attach_processing_receipt(workflow_event, receipt)
+        adapter._pending_messages[session_key] = workflow_event
+        runner._queued_events[session_key] = [
+            MessageEvent(
+                text="later /queue turn",
+                message_type=MessageType.TEXT,
+                source=MagicMock(),
+            )
+        ]
+
+        pending_event = _dequeue_pending_event(adapter, session_key)
+        pending_event = runner._promote_queued_event(
+            session_key, adapter, pending_event
+        )
+
+        assert pending_event is None
+        assert adapter._pending_messages[session_key] is workflow_event
+        assert [event.text for event in runner._queued_events[session_key]] == [
+            "later /queue turn"
+        ]
 
     def test_promote_stages_overflow_when_slot_already_populated(self):
         """If the slot was re-populated (e.g. by an interrupt follow-up),

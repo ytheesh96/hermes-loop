@@ -1,10 +1,9 @@
 """Kanban tools — structured tool-call surface for worker + orchestrator agents.
 
 These tools are registered into the model's schema when the agent is
-running under the dispatcher (env var ``HERMES_KANBAN_TASK`` set) or when
-the active profile explicitly enables the ``kanban`` toolset for
-orchestrator work. A normal ``hermes chat`` session still sees **zero**
-kanban tools in its schema unless configured.
+running under the dispatcher (env var ``HERMES_KANBAN_TASK`` set), when
+the active profile explicitly enables the ``kanban`` toolset, or for the
+small foreground control surface needed by enabled Loop sessions.
 
 Why tools instead of just shelling out to ``hermes kanban``?
 
@@ -23,8 +22,8 @@ Why tools instead of just shelling out to ``hermes kanban``?
 Humans continue to use the CLI (``hermes kanban …``), the dashboard
 (``hermes dashboard``), and the slash command (``/kanban …``) — all
 three bypass the agent entirely. The tools are for dispatcher-spawned
-worker handoffs and for configured orchestrator profiles that route work
-through the board.
+worker handoffs, enabled Loop foreground re-entry, and configured
+orchestrator profiles that route work through the board.
 """
 from __future__ import annotations
 
@@ -34,7 +33,11 @@ import os
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
-from gateway.session_context import get_logical_session_id, get_session_env
+from gateway.session_context import (
+    get_current_workflow_id,
+    get_logical_session_id,
+    get_session_env,
+)
 from hermes_cli.goals import judge_goal
 from tools.registry import registry, tool_error
 
@@ -62,17 +65,45 @@ def _profile_has_kanban_toolset() -> bool:
         return False
 
 
+def _loop_foreground_enabled() -> bool:
+    """Whether a non-worker session can originate and resume Loop work."""
+
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        return False
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+        return bool((cfg.get("loop") or {}).get("enabled", True))
+    except Exception:
+        return True
+
+
+def _check_kanban_foreground_mode() -> bool:
+    """Foreground controls needed to act on an internal Loop wake."""
+
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        return False
+    return _profile_has_kanban_toolset() or _loop_foreground_enabled()
+
+
+def _check_kanban_reentry_mode() -> bool:
+    """Task lifecycle for workers plus the bounded foreground re-entry set."""
+
+    return bool(os.environ.get("HERMES_KANBAN_TASK")) or _check_kanban_foreground_mode()
+
+
 def _check_kanban_mode() -> bool:
-    """Task-lifecycle tools are available when:
+    """Worker lifecycle-only controls are available when:
 
     1. ``HERMES_KANBAN_TASK`` is set (dispatcher-spawned worker), OR
     2. The current profile has ``kanban`` in its toolsets config
        (orchestrator profiles like techlead that route work via Kanban).
 
-    Humans running ``hermes chat`` without the kanban toolset see zero
-    kanban tools. Workers spawned by the kanban dispatcher (gateway-
-    embedded by default) and orchestrator profiles with the kanban
-    toolset enabled see the Kanban lifecycle tool surface.
+    This gate is used for ``kanban_block`` and ``kanban_heartbeat``.
+    Enabled Loop foreground sessions receive their separate bounded
+    re-entry set through ``_check_kanban_reentry_mode`` and
+    ``_check_kanban_foreground_mode``.
     """
     if os.environ.get("HERMES_KANBAN_TASK"):
         return True
@@ -166,7 +197,8 @@ def _enforce_worker_task_ownership(tid: str) -> Optional[str]:
         return tool_error(
             f"worker is scoped to task {env_tid}; refusing to mutate "
             f"{tid}. Use kanban_comment to hand off information to other "
-            f"tasks, or kanban_create to spawn follow-up work."
+            "tasks. Suggest follow-up work in a comment, then complete or "
+            "block so the foreground can decide whether to create it."
         )
     return None
 
@@ -371,6 +403,7 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
         "status": task.status,
         "priority": task.priority,
         "tenant": task.tenant,
+        "workflow_id": task.workflow_id,
         "workspace_kind": task.workspace_kind,
         "workspace_path": task.workspace_path,
         "project_id": task.project_id,
@@ -417,6 +450,7 @@ def _handle_show(args: dict, **kw) -> str:
                     "id": t.id, "title": t.title, "body": t.body,
                     "assignee": t.assignee, "status": t.status,
                     "tenant": t.tenant, "priority": t.priority,
+                    "workflow_id": t.workflow_id,
                     "workspace_kind": t.workspace_kind,
                     "workspace_path": t.workspace_path,
                     "created_by": t.created_by, "created_at": t.created_at,
@@ -451,7 +485,6 @@ def _handle_show(args: dict, **kw) -> str:
                     for e in events[-50:]   # cap; full log via CLI
                 ],
                 "runs": [_run_dict(r) for r in runs],
-                "loop_handoffs": kb.list_loop_handoffs(conn, task_id=tid),
                 # Also surface the worker's own context block so the
                 # agent can include it directly if it wants. This is
                 # the same string build_worker_context returns to the
@@ -645,10 +678,12 @@ def _handle_complete(args: dict, **kw) -> str:
                 if verdict != "done":
                     return tool_error(
                         f"Goal completion rejected by judge: {reason}. "
-                        f"To proceed, either: (1) provide explicit acceptance "
-                        f"evidence in your summary matching the task's criteria, "
-                        f"or (2) create continuation tasks with parents=[{tid}] "
-                        f"and keep this task alive."
+                        "Continue working on this assigned task, address the "
+                        "unmet criteria, then retry kanban_complete with explicit "
+                        "acceptance evidence. If genuinely blocked, put the "
+                        "evidence or decision options in kanban_comment, then "
+                        "call kanban_block; task-scoped workers must not create "
+                        "continuation tasks."
                     )
 
             try:
@@ -789,226 +824,6 @@ def _handle_block(args: dict, **kw) -> str:
         return tool_error(f"kanban_block: {e}")
 
 
-def _handle_request_review(args: dict, **kw) -> str:
-    """Move the current task into the review lane for QA dispatch."""
-    tid = _default_task_id(args.get("task_id"))
-    if not tid:
-        return tool_error(
-            "task_id is required (or set HERMES_KANBAN_TASK in the env)"
-        )
-    ownership_err = _enforce_worker_task_ownership(tid)
-    if ownership_err:
-        return ownership_err
-    reason = args.get("reason")
-    summary = args.get("summary")
-    if not (str(reason or "").strip() or str(summary or "").strip()):
-        return tool_error(
-            "provide a reason or summary so the reviewer knows what to verify"
-        )
-    reviewer = args.get("reviewer") or "reviewer-qa"
-    review_kind = str(args.get("review_kind") or "").strip() or None
-    if review_kind == "blocker_triage":
-        return tool_error(
-            "kanban_request_review: blocker_triage is legacy-only; use "
-            "kanban_block for true blockers, kanban_complete for approvals, "
-            "or kanban_request_orchestrator_handoff for graph/scope issues"
-        )
-    resume_mode = args.get("resume_mode")
-    if args.get("fork") is True and not str(resume_mode or "").strip():
-        resume_mode = "fork"
-    review_subject_assignee = args.get("review_subject_assignee")
-    foreground_parent_session_id = args.get("foreground_parent_session_id")
-    foreground_fork_session_id = args.get("foreground_fork_session_id")
-    metadata = args.get("metadata")
-    if metadata is not None and not isinstance(metadata, dict):
-        return tool_error(
-            f"metadata must be an object/dict, got {type(metadata).__name__}"
-        )
-    metadata = _stamp_worker_session_metadata(tid, metadata)
-    board = args.get("board")
-    try:
-        kb, conn = _connect(board=board)
-        try:
-            ok = kb.request_review_task(
-                conn,
-                tid,
-                reviewer=reviewer,
-                review_kind=review_kind,
-                resume_mode=resume_mode,
-                review_subject_assignee=review_subject_assignee,
-                foreground_parent_session_id=foreground_parent_session_id,
-                foreground_fork_session_id=foreground_fork_session_id,
-                reason=reason,
-                summary=summary,
-                metadata=metadata,
-                expected_run_id=_worker_run_id(tid),
-            )
-            if not ok:
-                return tool_error(
-                    f"could not request review for {tid} "
-                    f"(unknown id, terminal state, or stale run)"
-                )
-            note = str(summary or reason or "").strip()
-            if note:
-                author = (
-                    os.environ.get("HERMES_PROFILE")
-                    or os.environ.get("HERMES_PROFILE_NAME")
-                    or "kanban-worker"
-                )
-                kb.add_comment(conn, tid, author, f"REQUEST REVIEW: {note}")
-            run = kb.latest_run(conn, tid)
-            return _ok(task_id=tid, run_id=run.id if run else None)
-        finally:
-            conn.close()
-    except ValueError as e:
-        return tool_error(f"kanban_request_review: {e}")
-    except Exception as e:
-        logger.exception("kanban_request_review failed")
-        return tool_error(f"kanban_request_review: {e}")
-
-
-def _handle_request_decision(args: dict, **kw) -> str:
-    """Request an orchestrator decision without blocking the worker."""
-    tid = _default_task_id(args.get("task_id"))
-    if not tid:
-        return tool_error("task_id is required (or set HERMES_KANBAN_TASK in the env)")
-    ownership_err = _enforce_worker_task_ownership(tid)
-    if ownership_err:
-        return ownership_err
-    question = str(args.get("question") or "").strip()
-    if not question:
-        return tool_error("question is required")
-    options = args.get("options")
-    if not isinstance(options, list) or len(options) < 2:
-        return tool_error("options must be a list with at least two choices")
-    metadata = args.get("metadata")
-    if metadata is not None and not isinstance(metadata, dict):
-        return tool_error(f"metadata must be an object/dict, got {type(metadata).__name__}")
-    metadata = _stamp_worker_session_metadata(tid, metadata)
-    board = args.get("board")
-    try:
-        kb, conn = _connect(board=board)
-        try:
-            result = kb.request_loop_foreground_decision(
-                conn,
-                tid,
-                question=question,
-                options=options,
-                recommendation=args.get("recommendation"),
-                summary=args.get("summary"),
-                reason=args.get("reason"),
-                metadata=metadata,
-                expected_run_id=_worker_run_id(tid),
-            )
-            return _ok(
-                task_id=tid,
-                root_task_id=result.get("root_task_id"),
-                run_id=result.get("run_id"),
-                source_event_id=result.get("source_event_id"),
-                state="decision_requested",
-                instruction=(
-                    "Orchestrator decision requested. Continue only with reversible prep; "
-                    "escalate with kanban_request_review if the decision must "
-                    "block this worker."
-                ),
-            )
-        finally:
-            conn.close()
-    except ValueError as e:
-        return tool_error(f"kanban_request_decision: {e}")
-    except Exception as e:
-        logger.exception("kanban_request_decision failed")
-        return tool_error(f"kanban_request_decision: {e}")
-
-
-def _request_orchestrator_review_exit(
-    args: dict,
-    *,
-    review_kind: str,
-    exit_kind: str,
-    required_fields: tuple[str, ...],
-) -> str:
-    """Route a scoped worker to orchestrator review with typed exit metadata."""
-    tid = _default_task_id(args.get("task_id"))
-    if not tid:
-        return tool_error("task_id is required (or set HERMES_KANBAN_TASK in the env)")
-    ownership_err = _enforce_worker_task_ownership(tid)
-    if ownership_err:
-        return ownership_err
-    missing = [field for field in required_fields if not str(args.get(field) or "").strip()]
-    if missing:
-        return tool_error(f"missing required field(s): {', '.join(missing)}")
-    metadata = args.get("metadata")
-    if metadata is not None and not isinstance(metadata, dict):
-        return tool_error(f"metadata must be an object/dict, got {type(metadata).__name__}")
-    metadata = _stamp_worker_session_metadata(tid, metadata)
-    routed_metadata = dict(metadata or {})
-    routed_metadata.update({
-        "exit_kind": exit_kind,
-        "handoff_kind": exit_kind,
-        "orchestrator_handoff": True,
-    })
-    for key in (
-        "question", "facts", "alternatives", "criteria",
-        "consequence_of_guessing_wrong", "affected_task_ids",
-        "requested_output_schema", "resume_contract",
-        "why_worker_cannot_finish", "recommended_orchestrator_action",
-        "safe_next_actions", "unsafe_actions_requiring_approval",
-    ):
-        if key in args and args.get(key) is not None:
-            routed_metadata[key] = args.get(key)
-    summary = str(args.get("summary") or args.get("question") or args.get("reason") or "").strip()
-    reason = str(args.get("reason") or args.get("question") or summary).strip()
-    board = args.get("board")
-    try:
-        kb, conn = _connect(board=board)
-        try:
-            task = kb.get_task(conn, tid)
-            ok = kb.request_review_task(
-                conn,
-                tid,
-                reviewer=str(args.get("reviewer") or "orchestrator"),
-                review_kind=review_kind,
-                resume_mode=args.get("resume_mode") or "same-task",
-                review_subject_assignee=(task.assignee if task else None),
-                reason=reason,
-                summary=summary or reason,
-                metadata=routed_metadata,
-                expected_run_id=_worker_run_id(tid),
-            )
-            if not ok:
-                return tool_error(
-                    f"could not request {review_kind} for {tid} "
-                    "(unknown id, terminal state, or stale run)"
-                )
-            run = kb.latest_run(conn, tid)
-            return _ok(
-                task_id=tid,
-                status="review",
-                routed_to="orchestrator",
-                review_kind=review_kind,
-                run_id=run.id if run else None,
-                instruction="Task routed to orchestrator control-plane review; stop this worker lane.",
-            )
-        finally:
-            conn.close()
-    except ValueError as e:
-        return tool_error(f"kanban_{review_kind}: {e}")
-    except Exception as e:
-        logger.exception("%s failed", review_kind)
-        return tool_error(f"kanban_{review_kind}: {e}")
-
-
-def _handle_request_orchestrator_handoff(args: dict, **kw) -> str:
-    """Typed worker exit for graph/scope/routing control-plane handoff."""
-    return _request_orchestrator_review_exit(
-        args,
-        review_kind="orchestrator_handoff",
-        exit_kind="orchestrator_handoff",
-        required_fields=("summary", "why_worker_cannot_finish"),
-    )
-
-
 def _require_graph_control_contract(args: dict) -> str | None:
     activation = args.get("activation")
     allowed = {"explicit_user_request", "approved", "dispatch_approved", "planning_only", "test"}
@@ -1026,6 +841,9 @@ def _require_graph_control_contract(args: dict) -> str | None:
 
 def _handle_decompose(args: dict, **kw) -> str:
     """Orchestrator-only wrapper around canonical kanban decompose."""
+    orchestrator_guard = _require_orchestrator_tool("kanban_decompose")
+    if orchestrator_guard:
+        return orchestrator_guard
     guard = _require_graph_control_contract(args)
     if guard:
         return guard
@@ -1051,6 +869,9 @@ def _handle_decompose(args: dict, **kw) -> str:
 
 def _handle_resolve_blocker(args: dict, **kw) -> str:
     """Resolve the current blocker-triage review with an explicit outcome."""
+    guard = _require_orchestrator_tool("kanban_resolve_blocker")
+    if guard:
+        return guard
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         return tool_error("task_id is required (or set HERMES_KANBAN_TASK in the env)")
@@ -1093,49 +914,6 @@ def _handle_resolve_blocker(args: dict, **kw) -> str:
     except Exception as e:
         logger.exception("kanban_resolve_blocker failed")
         return tool_error(f"kanban_resolve_blocker: {e}")
-
-
-def _handle_resolve_handoff(args: dict, **kw) -> str:
-    """Resolve a durable handoff through the generic handoff queue."""
-    raw_handoff_id = args.get("handoff_id")
-    try:
-        handoff_id = int(raw_handoff_id)
-    except (TypeError, ValueError):
-        return tool_error("handoff_id is required and must be an integer")
-    action = str(args.get("action") or "").strip()
-    if not action:
-        return tool_error("action is required")
-    payload = args.get("payload")
-    if payload is not None and not isinstance(payload, dict):
-        return tool_error(f"payload must be an object/dict, got {type(payload).__name__}")
-    actor = (
-        args.get("actor")
-        or os.environ.get("HERMES_PROFILE")
-        or os.environ.get("HERMES_PROFILE_NAME")
-        or "kanban-worker"
-    )
-    board = args.get("board")
-    try:
-        kb, conn = _connect(board=board)
-        try:
-            result = kb.resolve_handoff(
-                conn,
-                handoff_id,
-                action=action,
-                actor=actor,
-                resolution_summary=args.get("resolution_summary"),
-                payload=payload,
-            )
-            if not result.get("ok"):
-                return tool_error(f"kanban_resolve_handoff failed: {result}")
-            return _ok(handoff_id=handoff_id, **result)
-        finally:
-            conn.close()
-    except ValueError as e:
-        return tool_error(f"kanban_resolve_handoff: {e}")
-    except Exception as e:
-        logger.exception("kanban_resolve_handoff failed")
-        return tool_error(f"kanban_resolve_handoff: {e}")
 
 
 def _handle_heartbeat(args: dict, **kw) -> str:
@@ -1191,12 +969,11 @@ def _handle_heartbeat(args: dict, **kw) -> str:
 
 
 def _handle_comment(args: dict, **kw) -> str:
-    """Append a comment to a task's thread."""
-    tid = args.get("task_id")
+    """Append a non-waking message to a task's thread."""
+    tid = _default_task_id(args.get("task_id"))
     if not tid:
         return tool_error(
-            "task_id is required (use the current task id if that's what "
-            "you mean — pulls from env but kept explicit here)"
+            "task_id is required outside a dispatcher-spawned worker"
         )
     body = args.get("body")
     if not body or not str(body).strip():
@@ -1447,11 +1224,14 @@ def _handle_attachments(args: dict, **kw) -> str:
 
 
 def _handle_create(args: dict, **kw) -> str:
-    """Create a child task. Orchestrator workers use this to fan out.
+    """Create committed follow-up work from a foreground/orchestrator session.
 
     ``parents`` can be a list of task ids; dependency-gated promotion
     works as usual.
     """
+    guard = _require_orchestrator_tool("kanban_create")
+    if guard:
+        return guard
     title = args.get("title")
     if not title or not str(title).strip():
         return tool_error("title is required")
@@ -1470,12 +1250,9 @@ def _handle_create(args: dict, **kw) -> str:
     session_id = args.get("session_id") or get_logical_session_id(None)
     priority = args.get("priority")
     # Resolve workspace. If the caller passed one explicitly, honor it.
-    # Otherwise, a dispatcher-spawned worker (HERMES_KANBAN_TASK set)
-    # inherits its own running task's workspace, so a worker editing a
-    # dir:/worktree project that spawns a follow-up child keeps the child
-    # in that project instead of a throwaway scratch dir. Orchestrators
-    # (kanban toolset, no HERMES_KANBAN_TASK) and CLI/dashboard callers
-    # fall back to scratch as before. Explicit None path stays None.
+    # Otherwise committed follow-up/review work inherits the first parent
+    # task's workspace below, so the foreground keeps the workflow in one
+    # project without copying paths out of a worker comment.
     workspace_kind = args.get("workspace_kind")
     workspace_path = args.get("workspace_path")
     project_id = args.get("project") or args.get("project_id")
@@ -1506,23 +1283,121 @@ def _handle_create(args: dict, **kw) -> str:
         return tool_error(
             f"parents must be a list of task ids, got {type(parents).__name__}"
         )
+    parents = tuple(
+        dict.fromkeys(
+            str(parent).strip()
+            for parent in parents
+            if parent is not None and str(parent).strip()
+        )
+    )
+    ambient_workflow_id = (
+        str(get_current_workflow_id("") or "").strip() or None
+    )
     board = args.get("board")
     try:
         kb, conn = _connect(board=board)
         try:
-            # Inherit the spawning worker's own task workspace when the
-            # caller didn't specify one (see resolution note above).
-            if _inherit_workspace:
-                _self_tid = os.environ.get("HERMES_KANBAN_TASK")
-                if _self_tid:
-                    _self_task = kb.get_task(conn, _self_tid)
-                    if _self_task is not None and _self_task.workspace_kind:
-                        workspace_kind = _self_task.workspace_kind
-                        workspace_path = _self_task.workspace_path
-                        # Keep follow-up children inside the same project so the
-                        # whole subtree shares one repo + branch convention.
-                        if project_id is None and _self_task.project_id:
-                            project_id = _self_task.project_id
+            parent_tasks = []
+            missing_parents = []
+            for parent_id in parents:
+                task = kb.get_task(conn, parent_id)
+                if task is None:
+                    missing_parents.append(parent_id)
+                else:
+                    parent_tasks.append(task)
+            if missing_parents:
+                return tool_error(
+                    "kanban_create: unknown parent task(s): "
+                    + ", ".join(missing_parents)
+                )
+            blocked_parents = [
+                task.id for task in parent_tasks if task.status == "blocked"
+            ]
+            if blocked_parents:
+                return tool_error(
+                    "kanban_create: blocked task(s) cannot be parents for new "
+                    "follow-up work because the dependency could never become "
+                    "runnable: "
+                    + ", ".join(blocked_parents)
+                    + ". Create the resolution/review task without parents "
+                    "(the active workflow identity is inherited), reference "
+                    "the blocked task in its body, then unblock it after the "
+                    "follow-up resolves."
+                )
+
+            parent_workflows = {
+                workflow_id
+                for task in parent_tasks
+                if (
+                    workflow_id := str(
+                        getattr(task, "workflow_id", None) or ""
+                    ).strip()
+                )
+            }
+            if len(parent_workflows) > 1:
+                workflows = ", ".join(sorted(parent_workflows))
+                return tool_error(
+                    "kanban_create cannot join parents from multiple workflows "
+                    f"({workflows}); create one follow-up per workflow"
+                )
+            parent_workflow_id = (
+                next(iter(parent_workflows)) if parent_workflows else None
+            )
+            if (
+                parent_workflow_id
+                and ambient_workflow_id
+                and parent_workflow_id != ambient_workflow_id
+            ):
+                return tool_error(
+                    f"kanban_create parent workflow {parent_workflow_id} "
+                    f"conflicts with ambient workflow {ambient_workflow_id}"
+                )
+            workflow_id = parent_workflow_id or ambient_workflow_id
+            workflow = (
+                kb.get_workflow(conn, workflow_id) if workflow_id else None
+            )
+            if workflow_id and workflow is None:
+                return tool_error(
+                    f"kanban_create: unknown workflow {workflow_id}"
+                )
+
+            if _inherit_workspace and parent_tasks:
+                workspace_parent = parent_tasks[0]
+                if workspace_parent.workspace_kind:
+                    workspace_kind = workspace_parent.workspace_kind
+                    workspace_path = workspace_parent.workspace_path
+                if project_id is None and workspace_parent.project_id:
+                    project_id = workspace_parent.project_id
+            elif _inherit_workspace and workflow is not None:
+                workspace_kind = workflow.workspace_kind
+                workspace_path = workflow.workspace_path
+
+            if not session_id and parent_tasks:
+                session_id = parent_tasks[0].session_id
+            if not session_id and workflow is not None:
+                session_id = workflow.origin_session_id
+            if not tenant and parent_tasks:
+                tenant = parent_tasks[0].tenant
+            if not tenant and workflow is not None:
+                tenant = workflow.tenant
+
+            if workflow_id is None:
+                workflow_key = (
+                    f"kanban-create:{str(idempotency_key).strip()}"
+                    if idempotency_key is not None
+                    and str(idempotency_key).strip()
+                    else None
+                )
+                workflow_id = kb.create_workflow(
+                    conn,
+                    title=str(title).strip(),
+                    origin_session_id=session_id,
+                    tenant=tenant,
+                    workspace_kind=str(workspace_kind),
+                    workspace_path=workspace_path,
+                    idempotency_key=workflow_key,
+                )
+
             new_tid = kb.create_task(
                 conn,
                 title=str(title).strip(),
@@ -1546,8 +1421,10 @@ def _handle_create(args: dict, **kw) -> str:
                     int(goal_max_turns) if goal_max_turns is not None else None
                 ),
                 initial_status=str(initial_status),
-                created_by=os.environ.get("HERMES_PROFILE") or "worker",
+                created_by=os.environ.get("HERMES_PROFILE") or "orchestrator",
                 session_id=session_id,
+                workflow_id=workflow_id,
+                reject_blocked_parents=True,
             )
             new_task = kb.get_task(conn, new_tid)
             subscribed = _maybe_auto_subscribe(conn, new_tid)
@@ -1555,6 +1432,7 @@ def _handle_create(args: dict, **kw) -> str:
                 task_id=new_tid,
                 status=new_task.status if new_task else None,
                 subscribed=subscribed,
+                workflow_id=workflow_id,
             )
         finally:
             conn.close()
@@ -1566,7 +1444,7 @@ def _handle_create(args: dict, **kw) -> str:
 
 
 def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
-    """Auto-subscribe the calling session to task completion / block events.
+    """Auto-subscribe the calling session to coordination boundary events.
 
     Returns True if a subscription row was written, False otherwise (no
     session context, config gate disabled, or best-effort failure). The
@@ -1579,7 +1457,10 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
     originating user/chat opted out via the per-platform notification
     toggle (see ``hermes dashboard``).
 
-    Subscription paths:
+    Workflow members share one workflow-scoped route and leased cursor.
+    Ungrouped tasks retain a direct-task compatibility subscription.
+
+    Routing paths:
 
     - **Gateway** (telegram/discord/slack/etc): ``HERMES_SESSION_PLATFORM``
       and ``HERMES_SESSION_CHAT_ID`` are set in ContextVars by the
@@ -1634,6 +1515,9 @@ def _handle_unblock(args: dict, **kw) -> str:
 
 def _handle_link(args: dict, **kw) -> str:
     """Add a parent→child dependency edge after the fact."""
+    guard = _require_orchestrator_tool("kanban_link")
+    if guard:
+        return guard
     parent_id = args.get("parent_id")
     child_id = args.get("child_id")
     if not parent_id or not child_id:
@@ -1752,16 +1636,16 @@ KANBAN_LIST_SCHEMA = {
 KANBAN_COMPLETE_SCHEMA = {
     "name": "kanban_complete",
     "description": (
-        "Mark your current task done with a structured handoff for "
-        "downstream workers and humans. Prefer ``summary`` for a "
+        "Mark your current scoped work done. This terminal boundary delivers "
+        "the result and latest comments to the workflow-subscribed foreground, "
+        "which decides whether to close the workflow or create review/follow-up "
+        "work. Put suggestions or nuanced context in ``kanban_comment`` first; "
+        "completion itself never creates more tasks. Prefer ``summary`` for a "
         "human-readable 1-3 sentence description of what you did; put "
         "machine-readable facts in ``metadata`` (changed_files, "
         "tests_run, decisions, findings, etc). At least one of "
-        "``summary`` or ``result`` is required. If you created new "
-        "tasks via ``kanban_create`` during this run, list their ids "
-        "in ``created_cards`` — the kernel verifies them so phantom "
-        "references are caught before they leak into downstream "
-        "automation. If you produced deliverable files (charts, PDFs, "
+        "``summary`` or ``result`` is required. If you produced deliverable "
+        "files (charts, PDFs, "
         "spreadsheets, generated images), list their absolute paths "
         "in ``artifacts`` — the gateway notifier will upload them as "
         "native attachments to the human who subscribed to the task, "
@@ -1801,22 +1685,6 @@ KANBAN_COMPLETE_SCHEMA = {
                     "callers that still set --result on the CLI."
                 ),
             },
-            "created_cards": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "Optional structured manifest of task ids you "
-                    "created via ``kanban_create`` during this run. "
-                    "The kernel verifies each id exists and was "
-                    "created by this worker's profile; any phantom "
-                    "id blocks the completion with an error listing "
-                    "what went wrong (auditable in the task's events). "
-                    "Only list ids you got back from a successful "
-                    "``kanban_create`` call — do not invent or "
-                    "remember ids from prose. Omit the field if you "
-                    "did not create any cards."
-                ),
-            },
             "artifacts": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -1847,10 +1715,14 @@ KANBAN_COMPLETE_SCHEMA = {
 KANBAN_BLOCK_SCHEMA = {
     "name": "kanban_block",
     "description": (
-        "Transition the task to blocked because a real unresolved blocker "
-        "prevents completion. ``reason`` will be shown on the board and "
-        "included in context when an orchestrator, reviewer, or "
-        "operator routes/unblocks the task. State the concrete blocker; do "
+        "Stop because a real unresolved blocker prevents completion. A "
+        "non-dependency block transitions the task to blocked and delivers the "
+        "blocker plus latest comments to the workflow-subscribed foreground; a "
+        "dependency wait returns the task to todo and does not wake foreground. Put detailed "
+        "evidence, options, or a requested decision in ``kanban_comment`` "
+        "first. ``reason`` is shown on the board and included in context when "
+        "the foreground or operator routes/unblocks the task. State the "
+        "concrete blocker; do "
         "not decide whether it needs the user unless the task explicitly "
         "requires that label."
         "Stop work on this task and route it according to WHY you're stuck. "
@@ -1891,13 +1763,8 @@ KANBAN_BLOCK_SCHEMA = {
                 "type": "object",
                 "description": (
                     "Optional structured facts for the blocked run. "
-                    "Foreground handoffs are removed; use kanban_request_review "
-                    "for ordinary QA, or kanban_request_decision / "
-                    "kanban_request_orchestrator_handoff for active "
-                    "orchestrator judgment."
-                    "What you need answered or what stopped you, in one or "
-                    "two sentences. Don't paste the whole conversation; the "
-                    "human has the board and can ask follow-ups via comments."
+                    "Put the human-readable request and options in a preceding "
+                    "kanban_comment; comments are delivered with this boundary."
                 ),
             },
             "kind": {
@@ -1914,170 +1781,6 @@ KANBAN_BLOCK_SCHEMA = {
         "required": ["reason"],
     },
 }
-
-KANBAN_REQUEST_REVIEW_SCHEMA = {
-    "name": "kanban_request_review",
-    "description": (
-        "Move the current task itself into the review lane when the "
-        "implementation/artifact is ready for QA. This closes your worker "
-        "run as review_requested, assigns the same task to a reviewer "
-        "(default reviewer-qa), and lets the Kanban dispatcher spawn a "
-        "review agent with sdlc-review. Use this instead of creating a "
-        "dependent reviewer child or blocking with review-required when "
-        "ordinary QA is the next step."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "task_id": {
-                "type": "string",
-                "description": _DESC_TASK_ID_DEFAULT,
-            },
-            "reason": {
-                "type": "string",
-                "description": (
-                    "One or two sentences naming what the reviewer should "
-                    "verify and where the evidence lives."
-                ),
-            },
-            "summary": {
-                "type": "string",
-                "description": (
-                    "Optional structured review handoff summary. Prefer "
-                    "this for concise proof packets; put deeper details in "
-                    "a kanban_comment or metadata."
-                ),
-            },
-            "metadata": {
-                "type": "object",
-                "description": (
-                    "Optional structured facts for the review handoff/run, "
-                    "for example changed_files, tests_run, artifacts, "
-                    "diff_path, risk_level, or review_scope."
-                ),
-            },
-            "reviewer": {
-                "type": "string",
-                "description": "Reviewer profile to assign (default reviewer-qa).",
-            },
-            "review_kind": {
-                "type": "string",
-                "description": (
-                    "Optional review routing kind for narrow non-QA review "
-                    "lanes such as foreground_judgment with "
-                    "reviewer='orchestrator'. Leave unset for ordinary QA; "
-                    "use the typed decision/orchestrator handoff tools for "
-                    "scope or product decisions."
-                ),
-            },
-            "resume_mode": {
-                "type": "string",
-                "description": (
-                    "Optional downstream session resume mode, for example "
-                    "fork for review sessions."
-                ),
-            },
-            "fork": {
-                "type": "boolean",
-                "description": "Convenience flag equivalent to resume_mode='fork'.",
-            },
-            "review_subject_assignee": {
-                "type": "string",
-                "description": (
-                    "Original worker/assignee whose work is being reviewed; "
-                    "defaults to the task's previous assignee."
-                ),
-            },
-            "foreground_parent_session_id": {
-                "type": "string",
-                "description": "Foreground parent session id associated with this review request.",
-            },
-            "foreground_fork_session_id": {
-                "type": "string",
-                "description": "Foreground fork session id associated with this review request.",
-            },
-            "board": _board_schema_prop(),
-        },
-        "required": [],
-    },
-}
-
-KANBAN_REQUEST_DECISION_SCHEMA = {
-    "name": "kanban_request_decision",
-    "description": (
-        "Ask the Loop orchestrator for a mid-run decision "
-        "without blocking or completing the task. Use this when a worker can "
-        "continue reversible prep but needs an orchestrator decision before choosing "
-        "a product, scope, architecture, dependency, safety, or acceptance path."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "string", "description": _DESC_TASK_ID_DEFAULT},
-            "question": {
-                "type": "string",
-                "description": "The exact decision the orchestrator must make.",
-            },
-            "options": {
-                "type": "array",
-                "description": (
-                    "Two or more concrete choices. Items may be strings or objects "
-                    "with labels, tradeoffs, risk, and evidence refs."
-                ),
-                "items": {},
-            },
-            "recommendation": {
-                "type": "string",
-                "description": "Optional recommended option and why the worker prefers it.",
-            },
-            "summary": {
-                "type": "string",
-                "description": "Short visible handoff summary for the Loop drawer/review card.",
-            },
-            "reason": {
-                "type": "string",
-                "description": "Optional extra context explaining why foreground judgment is needed.",
-            },
-            "metadata": {
-                "type": "object",
-                "description": (
-                    "Optional compact evidence refs, changed files, tests, risk, or "
-                    "decision facts. Do not include secrets or large transcript text."
-                ),
-            },
-            "board": _board_schema_prop(),
-        },
-        "required": ["question", "options"],
-    },
-}
-
-
-KANBAN_REQUEST_ORCHESTRATOR_HANDOFF_SCHEMA = {
-    "name": "kanban_request_orchestrator_handoff",
-    "description": (
-        "Typed worker exit for graph/scope/routing problems. Routes the same "
-        "task to orchestrator review_kind='orchestrator_handoff' with a "
-        "structured handoff packet."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "string", "description": _DESC_TASK_ID_DEFAULT},
-            "summary": {"type": "string"},
-            "why_worker_cannot_finish": {"type": "string"},
-            "evidence": {"type": "array", "items": {}},
-            "recommended_orchestrator_action": {"type": "string"},
-            "affected_task_ids": {"type": "array", "items": {"type": "string"}},
-            "safe_next_actions": {"type": "array", "items": {}},
-            "unsafe_actions_requiring_approval": {"type": "array", "items": {}},
-            "reason": {"type": "string"},
-            "metadata": {"type": "object"},
-            "board": _board_schema_prop(),
-        },
-        "required": ["summary", "why_worker_cannot_finish"],
-    },
-}
-
 
 KANBAN_DECOMPOSE_SCHEMA = {
     "name": "kanban_decompose",
@@ -2133,28 +1836,6 @@ KANBAN_RESOLVE_BLOCKER_SCHEMA = {
 }
 
 
-KANBAN_RESOLVE_HANDOFF_SCHEMA = {
-    "name": "kanban_resolve_handoff",
-    "description": (
-        "Resolve a durable handoff by handoff_id through the neutral first-class "
-        "handoff queue. Use this for orchestrator, QA, human, or "
-        "worker continuation decisions when a handoff row already exists."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "handoff_id": {"type": "integer", "description": "Durable handoff row id."},
-            "action": {"type": "string", "description": "Resolution action, for example approve, choose_option_a, cancel, continue."},
-            "resolution_summary": {"type": "string", "description": "Concise durable answer to the handoff."},
-            "payload": {"type": "object", "description": "Optional structured resolution facts."},
-            "actor": {"type": "string", "description": "Resolving actor; defaults to the current profile."},
-            "board": _board_schema_prop(),
-        },
-        "required": ["handoff_id", "action"],
-    },
-}
-
-
 KANBAN_HEARTBEAT_SCHEMA = {
     "name": "kanban_heartbeat",
     "description": (
@@ -2186,10 +1867,13 @@ KANBAN_HEARTBEAT_SCHEMA = {
 KANBAN_COMMENT_SCHEMA = {
     "name": "kanban_comment",
     "description": (
-        "Append a comment to a task's thread. Use for durable notes "
-        "that should outlive this run (questions for the next worker, "
-        "partial findings, rationale). Ephemeral reasoning doesn't "
-        "belong here — use your normal response instead."
+        "Send a durable message through a task's comment thread. Use this "
+        "for results, risks, review suggestions, follow-up suggestions, and "
+        "context the foreground should evaluate. A comment is advisory: it "
+        "does not change task status, create work, or wake another session by "
+        "itself. The next kanban_complete or genuine non-dependency "
+        "kanban_block boundary delivers the latest comments to the subscribed "
+        "foreground; a system give-up boundary also delivers them."
     ),
     "parameters": {
         "type": "object",
@@ -2197,8 +1881,8 @@ KANBAN_COMMENT_SCHEMA = {
             "task_id": {
                 "type": "string",
                 "description": (
-                    "Task id. Required (may be your own task or "
-                    "another's — comment threads are per-task)."
+                    "Task id. Defaults to HERMES_KANBAN_TASK for a worker. "
+                    "Foreground/orchestrator callers may name another task."
                 ),
             },
             "body": {
@@ -2207,7 +1891,7 @@ KANBAN_COMMENT_SCHEMA = {
             },
             "board": _board_schema_prop(),
         },
-        "required": ["task_id", "body"],
+        "required": ["body"],
     },
 }
 
@@ -2310,12 +1994,13 @@ KANBAN_ATTACHMENTS_SCHEMA = {
 KANBAN_CREATE_SCHEMA = {
     "name": "kanban_create",
     "description": (
-        "Create a new kanban task, optionally as a child of the current "
-        "one (pass the current task id in ``parents``). Used by "
-        "orchestrator workers to fan out — decompose work into child "
-        "tasks with specific assignees, link them into a pipeline, "
-        "then complete your own task. The dispatcher picks up the new "
-        "tasks on its next tick and spawns the assigned profiles."
+        "Foreground/orchestrator-only committed workflow mutation. Create a "
+        "review or follow-up task after reading a worker boundary and its "
+        "comments. Pass a completed source task in ``parents`` so dependency "
+        "order, workspace, tenant, session, and workflow identity are inherited. "
+        "Never pass a blocked task as a parent; create runnable resolution work "
+        "without parents and reference the blocked task in the body. "
+        "A worker suggestion is not committed work until this call succeeds."
     ),
     "parameters": {
         "type": "object",
@@ -2470,8 +2155,8 @@ KANBAN_CREATE_SCHEMA = {
 KANBAN_UNBLOCK_SCHEMA = {
     "name": "kanban_unblock",
     "description": (
-        "Move a blocked Kanban task back to ready. Orchestrator-only — only "
-        "profiles with the kanban toolset can unblock routed work; "
+        "Move a blocked Kanban task back to ready. Available to enabled Loop "
+        "foreground sessions and profiles with the full kanban toolset; "
         "dispatcher-spawned task workers never see this tool."
     ),
     "parameters": {
@@ -2515,7 +2200,7 @@ registry.register(
     toolset="kanban",
     schema=KANBAN_SHOW_SCHEMA,
     handler=_handle_show,
-    check_fn=_check_kanban_mode,
+    check_fn=_check_kanban_reentry_mode,
     emoji="📋",
 )
 
@@ -2533,7 +2218,7 @@ registry.register(
     toolset="kanban",
     schema=KANBAN_COMPLETE_SCHEMA,
     handler=_handle_complete,
-    check_fn=_check_kanban_mode,
+    check_fn=_check_kanban_reentry_mode,
     emoji="✔",
 )
 
@@ -2544,33 +2229,6 @@ registry.register(
     handler=_handle_block,
     check_fn=_check_kanban_mode,
     emoji="⏸",
-)
-
-registry.register(
-    name="kanban_request_review",
-    toolset="kanban",
-    schema=KANBAN_REQUEST_REVIEW_SCHEMA,
-    handler=_handle_request_review,
-    check_fn=_check_kanban_mode,
-    emoji="◐",
-)
-
-registry.register(
-    name="kanban_request_decision",
-    toolset="kanban",
-    schema=KANBAN_REQUEST_DECISION_SCHEMA,
-    handler=_handle_request_decision,
-    check_fn=_check_kanban_mode,
-    emoji="◈",
-)
-
-registry.register(
-    name="kanban_request_orchestrator_handoff",
-    toolset="kanban",
-    schema=KANBAN_REQUEST_ORCHESTRATOR_HANDOFF_SCHEMA,
-    handler=_handle_request_orchestrator_handoff,
-    check_fn=_check_kanban_mode,
-    emoji="🧭",
 )
 
 registry.register(
@@ -2587,18 +2245,8 @@ registry.register(
     toolset="kanban",
     schema=KANBAN_RESOLVE_BLOCKER_SCHEMA,
     handler=_handle_resolve_blocker,
-    check_fn=_check_kanban_mode,
+    check_fn=_check_kanban_orchestrator_mode,
     emoji="🧭",
-)
-
-
-registry.register(
-    name="kanban_resolve_handoff",
-    toolset="kanban",
-    schema=KANBAN_RESOLVE_HANDOFF_SCHEMA,
-    handler=_handle_resolve_handoff,
-    check_fn=_check_kanban_mode,
-    emoji="✓",
 )
 
 
@@ -2616,7 +2264,7 @@ registry.register(
     toolset="kanban",
     schema=KANBAN_COMMENT_SCHEMA,
     handler=_handle_comment,
-    check_fn=_check_kanban_mode,
+    check_fn=_check_kanban_reentry_mode,
     emoji="💬",
 )
 
@@ -2652,7 +2300,7 @@ registry.register(
     toolset="kanban",
     schema=KANBAN_CREATE_SCHEMA,
     handler=_handle_create,
-    check_fn=_check_kanban_mode,
+    check_fn=_check_kanban_foreground_mode,
     emoji="➕",
 )
 
@@ -2661,7 +2309,7 @@ registry.register(
     toolset="kanban",
     schema=KANBAN_UNBLOCK_SCHEMA,
     handler=_handle_unblock,
-    check_fn=_check_kanban_orchestrator_mode,
+    check_fn=_check_kanban_foreground_mode,
     emoji="▶",
 )
 
@@ -2670,6 +2318,6 @@ registry.register(
     toolset="kanban",
     schema=KANBAN_LINK_SCHEMA,
     handler=_handle_link,
-    check_fn=_check_kanban_mode,
+    check_fn=_check_kanban_graph_control_mode,
     emoji="🔗",
 )

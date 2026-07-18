@@ -786,29 +786,6 @@ export interface LogsResponse {
   lines: string[]
 }
 
-export interface LoopHandoff {
-  artifacts?: string[]
-  attention?: null | string
-  created_cards?: string[]
-  handoff_kind?: string
-  reason?: string
-  resolution_summary?: string
-  run_id?: number
-  summary?: string
-  task_id: string
-  verification_state?: string
-  worker_session_id?: string
-}
-
-export interface LoopPendingHandoff {
-  handoff_kind?: string
-  node_id?: string
-  reason?: string
-  summary?: string
-  task_id: string
-  verification_state?: string
-}
-
 export interface LoopTaskNode {
   active?: boolean
   attention?: null | string
@@ -818,15 +795,14 @@ export interface LoopTaskNode {
   depth?: number
   dependents?: string[]
   frontier?: boolean
-  handoff?: LoopHandoff
   node_id?: string
   parents?: string[]
-  root_task_id?: string
   status?: string
   task_id: string
   tenant?: null | string
   title: string
   verification_state?: string
+  workflow_id?: null | string
 }
 
 export interface LoopTasksResponse {
@@ -834,10 +810,10 @@ export interface LoopTasksResponse {
   graph_revision: number
   nodes: LoopTaskNode[]
   ok: boolean
-  pending_handoffs?: LoopPendingHandoff[]
-  root_task_id: string
   source?: string
   tenant_ids?: string[]
+  workflow_id?: null | string
+  workflow_ids?: string[]
 }
 
 export interface PlatformStatus {

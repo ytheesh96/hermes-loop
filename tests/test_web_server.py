@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 
+import pytest
 import uvicorn
 
 from hermes_cli import web_server
@@ -120,11 +121,12 @@ def test_start_server_enables_ws_ping_for_half_open_detection(monkeypatch):
 def test_hydrates_compacted_loop_graph_read_for_desktop_panel(monkeypatch):
     def fake_read(args):
         assert args["board"] == "developer"
-        assert args["root_task_id"] == "t_root"
+        assert args["workflow_id"] == "wf_demo"
+        assert "root_task_id" not in args
         return json.dumps(
             {
                 "ok": True,
-                "root_task_id": "t_root",
+                "workflow_id": "wf_demo",
                 "graph_revision": 3,
                 "nodes": [{"task_id": "t_child", "title": "Visible Loop row"}],
             }
@@ -145,7 +147,7 @@ def test_hydrates_compacted_loop_graph_read_for_desktop_panel(monkeypatch):
                             {
                                 "action": "read",
                                 "board": "developer",
-                                "root_task_id": "t_root",
+                                "workflow_id": "wf_demo",
                                 "include_nodes": True,
                             }
                         ),
@@ -164,9 +166,172 @@ def test_hydrates_compacted_loop_graph_read_for_desktop_panel(monkeypatch):
     hydrated = web_server._hydrate_compacted_loop_graph_messages(messages)
     payload = json.loads(hydrated[1]["content"])
 
-    assert payload["root_task_id"] == "t_root"
+    assert payload["workflow_id"] == "wf_demo"
+    assert "root_task_id" not in payload
     assert payload["nodes"][0]["title"] == "Visible Loop row"
     assert messages[1]["content"].startswith("[loop_graph]")
+
+
+def test_loop_graph_legacy_records_are_detected_but_emitted_canonically():
+    legacy = {
+        "ok": True,
+        "root_task_id": "wf_legacy",
+        "graph_revision": 4,
+        "pending_handoffs": [{"task_id": "t_child"}],
+        "nodes": [
+            {
+                "task_id": "t_child",
+                "root_task_id": "wf_legacy",
+                "handoff": {"state": "pending"},
+                "attention": "needs-orchestrator",
+                "verification_state": "unknown",
+            }
+        ],
+    }
+    assert web_server._content_is_structured_loop_graph_result(
+        json.dumps(legacy)
+    )
+
+    call = {
+        "id": "call-legacy",
+        "function": {
+            "name": "loop_graph",
+            "arguments": json.dumps(
+                {
+                    "action": "read",
+                    "root_task_id": "wf_legacy",
+                    "include_nodes": True,
+                }
+            ),
+        },
+    }
+    args = web_server._loop_graph_call_args(call)
+    assert args == {
+        "action": "read",
+        "workflow_id": "wf_legacy",
+        "include_nodes": True,
+    }
+
+    snapshot = web_server._latest_loop_graph_snapshot_for_dashboard(
+        [
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {
+                "role": "tool",
+                "tool_name": "loop_graph",
+                "tool_call_id": "call-legacy",
+                "content": json.dumps(legacy),
+            },
+        ]
+    )
+    summary_args = json.loads(
+        snapshot[0]["tool_calls"][0]["function"]["arguments"]
+    )
+    payload = json.loads(snapshot[1]["content"])
+
+    assert summary_args["workflow_id"] == "wf_legacy"
+    assert "root_task_id" not in summary_args
+    assert payload["workflow_id"] == "wf_legacy"
+    assert "root_task_id" not in payload
+    assert "pending_handoffs" not in payload
+    assert "root_task_id" not in payload["nodes"][0]
+    assert "handoff" not in payload["nodes"][0]
+    assert "attention" not in payload["nodes"][0]
+    assert "verification_state" not in payload["nodes"][0]
+
+
+def test_loop_graph_routes_name_workflow_and_deprecate_root_alias():
+    routes = [
+        route
+        for route in web_server.app.routes
+        if getattr(route, "path", "") == "/api/loop-graph/{workflow_id}"
+    ]
+    assert {method for route in routes for method in route.methods} >= {
+        "GET",
+        "PATCH",
+    }
+    for route in routes:
+        aliases = {
+            parameter.name: parameter
+            for parameter in route.dependant.query_params
+        }
+        assert aliases["root_task_id"].field_info.deprecated is True
+
+
+@pytest.mark.asyncio
+async def test_loop_graph_endpoints_use_workflow_membership(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from hermes_cli import kanban_db as kb
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb._INITIALIZED_PATHS.clear()
+
+    conn = kb.connect()
+    try:
+        workflow_id = kb.create_workflow(
+            conn,
+            title="Web workflow",
+            origin_session_id="session-a",
+        )
+        member_id = kb.create_task(
+            conn,
+            title="Workflow member",
+            assignee="worker",
+            workflow_id=workflow_id,
+        )
+        kb.create_task(
+            conn,
+            title="Legacy-looking non-member",
+            assignee="worker",
+            created_by=f"loop:{member_id}",
+        )
+    finally:
+        conn.close()
+
+    read = await web_server.read_loop_graph_endpoint(
+        workflow_id,
+        include_nodes=True,
+    )
+    assert read["workflow_id"] == workflow_id
+    assert "root_task_id" not in read
+    assert "pending_handoffs" not in read
+    assert [node["task_id"] for node in read["nodes"]] == [member_id]
+    assert all("root_task_id" not in node for node in read["nodes"])
+
+    patch = await web_server.patch_loop_graph_endpoint(
+        workflow_id,
+        web_server.LoopGraphPatchRequest(
+            expected_revision=read["graph_revision"],
+            mutation_id="web-workflow-patch-1",
+            operations=[
+                {
+                    "op": "add_node",
+                    "title": "Workflow plan node",
+                    "client_id": "draft-1",
+                }
+            ],
+        ),
+    )
+    assert patch["workflow_id"] == workflow_id
+    assert "root_task_id" not in patch
+
+    legacy_read = web_server._read_loop_graph_for_dashboard(
+        {
+            "action": "read",
+            "root_task_id": workflow_id,
+            "include_nodes": True,
+        }
+    )
+    legacy_payload = json.loads(legacy_read)
+    assert legacy_payload["workflow_id"] == workflow_id
+    assert "root_task_id" not in legacy_payload
+    assert {node["title"] for node in legacy_payload["nodes"]} == {
+        "Workflow member",
+        "Workflow plan node",
+    }
 
 
 def test_start_server_runs_on_uvicorns_loop_factory(monkeypatch):

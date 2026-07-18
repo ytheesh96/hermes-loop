@@ -456,7 +456,7 @@ export function useSlashCommand(deps: SlashCommandDeps) {
               })
             }
 
-            const createdTaskId = result.task?.id || source?.root_task_id
+            const createdTaskId = result.task?.id || source?.tasks?.[0]?.id
 
             if (createdTaskId) {
               onOpenLoop(createdTaskId)

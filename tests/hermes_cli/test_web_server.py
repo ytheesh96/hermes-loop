@@ -1821,8 +1821,15 @@ class TestWebServerEndpoints:
         assert payload["session_id"] == "loop-tip"
         assert [m["role"] for m in payload["messages"]] == ["assistant", "tool", "user"]
         assert payload["messages"][0]["tool_calls"][0]["id"] == "loop-call"
+        inherited_args = json.loads(
+            payload["messages"][0]["tool_calls"][0]["function"]["arguments"]
+        )
+        assert inherited_args["workflow_id"] == "t_root"
+        assert "root_task_id" not in inherited_args
         assert payload["messages"][1]["tool_name"] == "loop_graph"
         loop_payload = json.loads(payload["messages"][1]["content"])
+        assert loop_payload["workflow_id"] == "t_root"
+        assert "root_task_id" not in loop_payload
         assert loop_payload["nodes"][0]["title"] == "Visible inherited row"
         assert payload["messages"][2]["content"] == "child turn"
 
@@ -1946,7 +1953,7 @@ class TestWebServerEndpoints:
         ]
 
     def test_get_session_loop_tasks_reads_kanban_by_session_tenant_lineage(self):
-        """Desktop can list current-session Loop rows directly from Kanban tenant data."""
+        """Desktop lists typed workflow members discovered through session tenants."""
         import time as _time
 
         from hermes_state import SessionDB
@@ -1969,19 +1976,34 @@ class TestWebServerEndpoints:
 
         conn = kb.connect(board="developer")
         try:
+            workflow_id = kb.create_workflow(
+                conn,
+                title="Session workflow",
+                origin_session_id="tenant-tip",
+                tenant="tenant-root",
+            )
             first_id = kb.create_task(
                 conn,
                 title="First visible tenant task",
                 tenant="tenant-root",
-                created_by="loop:tenant-root",
+                created_by="planner",
+                workflow_id=workflow_id,
                 triage=True,
             )
             second_id = kb.create_task(
                 conn,
                 title="Dependent visible tenant task",
                 tenant="tenant-root",
-                created_by="loop:tenant-root",
+                created_by="planner",
+                workflow_id=workflow_id,
                 parents=[first_id],
+                triage=True,
+            )
+            kb.create_task(
+                conn,
+                title="Legacy marker is not membership",
+                tenant="tenant-root",
+                created_by="loop:tenant-root",
                 triage=True,
             )
             kb.create_task(conn, title="Other tenant task", tenant="other-session", triage=True)
@@ -1992,8 +2014,12 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         payload = resp.json()
 
-        assert payload["source"] == "kanban_tenant"
-        assert payload["root_task_id"] == "tenant:tenant-tip"
+        assert payload["source"] == "kanban_workflow"
+        assert payload["workflow_ids"] == [workflow_id]
+        assert payload["workflows"][0]["workflow_id"] == workflow_id
+        assert payload["workflows"][0]["task_count"] == 2
+        assert "root_task_id" not in payload
+        assert "pending_handoffs" not in payload
         assert payload["tenant_ids"] == ["tenant-tip", "tenant-root"]
         node_ids = [node["task_id"] for node in payload["nodes"]]
         assert node_ids == [first_id, second_id]
@@ -2005,6 +2031,10 @@ class TestWebServerEndpoints:
         assert payload["nodes"][1]["parents"] == [first_id]
         assert payload["nodes"][1]["children"] == []
         assert payload["nodes"][1]["depth"] == 1
+        assert all(node["workflow_id"] == workflow_id for node in payload["nodes"])
+        assert all("root_task_id" not in node for node in payload["nodes"])
+        assert all("handoff" not in node for node in payload["nodes"])
+        assert all("created_by" not in node for node in payload["nodes"])
 
     def test_get_sessions_archived_is_boolean(self):
         from hermes_state import SessionDB

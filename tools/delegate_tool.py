@@ -2382,21 +2382,79 @@ def _recover_tasks_from_json_string(
 _LOOP_DELEGATION_MODES = {"loop", "durable"}
 
 
-def _loop_default_assignee(cfg: dict) -> str:
-    full_cfg = cfg
-    try:
-        from hermes_cli.config import load_config
+def _loop_auto_decompose_enabled() -> bool:
+    """Return whether the JIT compiler required by Loop delegation is enabled.
 
-        full_cfg = load_config()
+    ``kanban.auto_decompose`` is an operator safety stop.  Loop delegation
+    cannot bypass it because every submitted node is intentionally only a
+    title/context skeleton; creating those rows while the compiler is disabled
+    would leave them parked in triage indefinitely.
+    """
+    if os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1":
+        # ``hermes chat --ignore-user-config`` suppresses config.yaml,
+        # restoring the built-in default (enabled).
+        return True
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        cfg = load_config_readonly()
     except Exception:
-        pass
-    loop_cfg = full_cfg.get("loop", {}) if isinstance(full_cfg, dict) else {}
-    kanban_cfg = full_cfg.get("kanban", {}) if isinstance(full_cfg, dict) else {}
-    return str(
-        loop_cfg.get("default_assignee")
-        or kanban_cfg.get("default_assignee")
-        or ""
-    ).strip()
+        # Match the dispatcher safety posture: a config read failure must not
+        # silently turn automatic fan-out back on.
+        return False
+    kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+    return bool(kanban_cfg.get("auto_decompose", True))
+
+
+def _resolve_loop_workflow_compat(
+    *,
+    workflow_id: Optional[str],
+    root_task_id: Optional[str],
+    board: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Canonicalize a cached ``root_task_id`` without restoring root semantics.
+
+    New callers use ``workflow_id``.  Old provider/tool-schema caches may still
+    send ``root_task_id``.  Resolve that task to its immutable workflow when
+    possible.  A genuine pre-workflow Loop root is forwarded through the DB
+    compatibility alias so it can be migrated atomically.  Unknown stale
+    values are ignored rather than being mistaken for workflow ids.
+    """
+    explicit_workflow_id = str(workflow_id or "").strip() or None
+    if explicit_workflow_id:
+        return explicit_workflow_id, None
+
+    legacy_task_id = str(root_task_id or "").strip() or None
+    if not legacy_task_id:
+        return None, None
+
+    try:
+        from hermes_cli import kanban_db as kb
+
+        conn = kb.connect(board=board)
+        try:
+            resolved_workflow_id = kb.workflow_id_for_task(conn, legacy_task_id)
+            if resolved_workflow_id and kb.get_workflow(conn, resolved_workflow_id):
+                return resolved_workflow_id, None
+            if resolved_workflow_id and kb.get_task(conn, resolved_workflow_id):
+                # Pre-workflow Loop lineage: pass the actual legacy root (which
+                # may differ from the cached descendant id) to the atomic
+                # compatibility migration in create_loop_skeleton_graph().
+                return None, resolved_workflow_id
+            if kb.get_workflow(conn, legacy_task_id):
+                # Some old caches stored the workflow/root identity directly.
+                # It is safe only after proving that workflow exists.
+                return legacy_task_id, None
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning(
+            "delegate_task: could not resolve cached root_task_id=%r; "
+            "ignoring the stale compatibility value (%s)",
+            legacy_task_id,
+            exc,
+        )
+    return None, None
 
 
 def _loop_task_alias(task: dict[str, Any], index: int) -> tuple[Optional[str], Optional[str]]:
@@ -2426,232 +2484,6 @@ def _loop_depends_on(task: dict[str, Any], index: int) -> tuple[list[str], Optio
     return deps, None
 
 
-def _loop_batch_specs(
-    task_list,
-    *,
-    context,
-    assignee,
-    cfg,
-    board,
-    decompose=False,
-    goal_mode=False,
-    goal_max_turns=None,
-) -> tuple[Optional[list[dict[str, Any]]], Optional[list[int]], Optional[str]]:
-    default_assignee = _loop_default_assignee(cfg)
-    specs: list[dict[str, Any]] = []
-    alias_to_index: dict[str, int] = {}
-    for index, task in enumerate(task_list):
-        alias, alias_error = _loop_task_alias(task, index)
-        if alias_error:
-            return None, None, alias_error
-        if alias:
-            if alias in alias_to_index:
-                return None, None, f"duplicate loop task alias: {alias}"
-            alias_to_index[alias] = index
-        deps, deps_error = _loop_depends_on(task, index)
-        if deps_error:
-            return None, None, deps_error
-        target = str(task.get("assignee") or assignee or default_assignee).strip()
-        if not target:
-            return None, None, (
-                "assignee is required for delegate_task(mode='loop') unless "
-                "loop.default_assignee or kanban.default_assignee is configured"
-            )
-        specs.append(
-            {
-                "index": index,
-                "task": task,
-                "client_id": alias,
-                "goal": str(task.get("goal") or "").strip(),
-                "context": task.get("context") if task.get("context") is not None else context,
-                "target": target,
-                "decompose": task.get("decompose") if task.get("decompose") is not None else decompose,
-                "goal_mode": task.get("goal_mode") if task.get("goal_mode") is not None else goal_mode,
-                "goal_max_turns": task.get("goal_max_turns") if task.get("goal_max_turns") is not None else goal_max_turns,
-                "depends_on": deps,
-                "alias_dep_indices": [],
-                "external_parents": [],
-            }
-        )
-
-    external_deps: set[str] = set()
-    for spec in specs:
-        for dep in spec["depends_on"]:
-            if dep == spec["client_id"]:
-                return None, None, f"Task {spec['index']} cannot depend on itself: {dep}"
-            if dep in alias_to_index:
-                dep_index = alias_to_index[dep]
-                if dep_index == spec["index"]:
-                    return None, None, f"Task {spec['index']} cannot depend on itself: {dep}"
-                spec["alias_dep_indices"].append(dep_index)
-            else:
-                spec["external_parents"].append(dep)
-                external_deps.add(dep)
-
-    if external_deps:
-        from hermes_cli import kanban_db as kb
-
-        conn = kb.connect(board=board)
-        try:
-            missing = [dep for dep in sorted(external_deps) if kb.get_task(conn, dep) is None]
-        finally:
-            conn.close()
-        if missing:
-            return None, None, (
-                "unknown dependency alias or task id: " + ", ".join(missing)
-            )
-
-    visiting: set[int] = set()
-    visited: set[int] = set()
-    order: list[int] = []
-
-    def label(i: int) -> str:
-        return specs[i].get("client_id") or f"task {i}"
-
-    def visit(i: int, stack: list[int]) -> Optional[str]:
-        if i in visited:
-            return None
-        if i in visiting:
-            cycle = stack[stack.index(i):] + [i] if i in stack else stack + [i]
-            return "dependency cycle detected: " + " -> ".join(label(j) for j in cycle)
-        visiting.add(i)
-        stack.append(i)
-        for dep_index in specs[i]["alias_dep_indices"]:
-            err = visit(dep_index, stack)
-            if err:
-                return err
-        stack.pop()
-        visiting.remove(i)
-        visited.add(i)
-        order.append(i)
-        return None
-
-    for i in range(len(specs)):
-        cycle_error = visit(i, [])
-        if cycle_error:
-            return None, None, cycle_error
-
-    return specs, order, None
-
-
-def _loop_delegation_result(
-    task_list,
-    *,
-    context,
-    assignee,
-    cfg,
-    tenant,
-    board,
-    workspace_kind,
-    workspace_path,
-    decompose=False,
-    goal_mode=False,
-    goal_max_turns=None,
-) -> str:
-    """Create durable Loop rows for delegate_task(mode='loop')."""
-    from tools import loop_tools
-
-    specs, create_order, specs_error = _loop_batch_specs(
-        task_list,
-        context=context,
-        assignee=assignee,
-        cfg=cfg,
-        board=board,
-        decompose=decompose,
-        goal_mode=goal_mode,
-        goal_max_turns=goal_max_turns,
-    )
-    if specs_error:
-        return tool_error(specs_error)
-    assert specs is not None and create_order is not None
-
-    item_by_index: dict[int, dict[str, Any]] = {}
-    alias_to_task_id: dict[str, str] = {}
-    edges: list[list[str]] = []
-    for index in create_order:
-        spec = specs[index]
-        parent_ids = [
-            alias_to_task_id[dep] if dep in alias_to_task_id else dep
-            for dep in spec["depends_on"]
-        ]
-        task_decompose = spec["decompose"]
-        task_goal_mode = spec["goal_mode"]
-        origin_session_id = get_source_session_id()
-        proof_packet = {
-            "source": "delegate_task_mode_loop",
-            "goal": spec["goal"],
-            "origin_profile": os.environ.get("HERMES_PROFILE") or "",
-            "origin_session_id": origin_session_id,
-            "session_key_present": bool(get_session_env("HERMES_SESSION_KEY")),
-            "decompose": is_truthy_value(task_decompose, default=False),
-            "goal_mode": is_truthy_value(task_goal_mode, default=False),
-        }
-        if spec["client_id"]:
-            proof_packet["client_id"] = spec["client_id"]
-        raw = loop_tools._handle_loop_create(
-            {
-                "objective": spec["goal"],
-                "context": spec["context"],
-                "assignee": spec["target"],
-                "tenant": tenant,
-                "session_id": origin_session_id,
-                "board": board,
-                "workspace_kind": workspace_kind or "scratch",
-                "workspace_path": workspace_path,
-                "activation": "explicit_user_request",
-                "proof_packet": proof_packet,
-                "execution": {"mode": "async"},
-                "triage": is_truthy_value(task_decompose, default=False),
-                "goal_mode": is_truthy_value(task_goal_mode, default=False),
-                "goal_max_turns": spec["goal_max_turns"],
-                "parents": parent_ids,
-            }
-        )
-        created = json.loads(raw)
-        if not created.get("ok"):
-            return raw
-        loop_item_id = created["loop_item_id"]
-        if spec["client_id"]:
-            alias_to_task_id[spec["client_id"]] = loop_item_id
-        created_parents = list(created.get("parents") or parent_ids)
-        for parent_id in created_parents:
-            edges.append([parent_id, loop_item_id])
-        item_by_index[index] = {
-            "client_id": spec["client_id"],
-            "loop_item_id": loop_item_id,
-            "parents": created_parents,
-            "status": created["status"],
-            "assignee": created["assignee"],
-            "foreground_reentry": created.get("foreground_reentry"),
-            "subscribed": bool(created.get("subscribed")),
-            "decompose": is_truthy_value(task_decompose, default=False),
-            "goal_mode": is_truthy_value(task_goal_mode, default=False),
-        }
-
-    items = [item_by_index[i] for i in range(len(specs))]
-    any_subscribed = any(item["subscribed"] for item in items)
-    payload = {
-        "status": "dispatched",
-        "mode": "loop",
-        "count": len(items),
-        "items": items,
-        "edges": edges,
-        "note": (
-            "Durable Loop work is queued. Its terminal result or blocker will "
-            "re-enter the originating conversation when subscribed=True. "
-            "When subscribed=False, use loop_status/kanban status to check it."
-        ),
-        "auto_reentry": any_subscribed,
-    }
-    if len(items) == 1:
-        item = dict(items[0])
-        item["loop_status"] = item.pop("status")
-        if item.get("client_id") is None:
-            item.pop("client_id", None)
-        payload.update(item)
-    return json.dumps(payload, ensure_ascii=False)
-
-
 def _loop_skeleton_delegation_result(
     task_list,
     *,
@@ -2660,6 +2492,7 @@ def _loop_skeleton_delegation_result(
     board,
     workspace_kind,
     workspace_path,
+    workflow_id=None,
     root_task_id=None,
 ) -> str:
     """Submit a brief Loop graph for atomic, just-in-time specification."""
@@ -2695,23 +2528,24 @@ def _loop_skeleton_delegation_result(
         "origin_profile": os.environ.get("HERMES_PROFILE") or "",
         "origin_session_id": origin_session_id,
         "session_key_present": bool(get_session_env("HERMES_SESSION_KEY")),
-        "decompose": True,
         "task_count": len(nodes),
     }
-    raw = loop_tools._handle_loop_create_graph(
-        {
-            "nodes": nodes,
-            "root_task_id": root_task_id,
-            "shared_context": context,
-            "session_id": origin_session_id,
-            "tenant": tenant,
-            "board": board,
-            "workspace_kind": workspace_kind or "scratch",
-            "workspace_path": workspace_path,
-            "activation": "explicit_user_request",
-            "proof_packet": proof_packet,
-        }
-    )
+    create_args = {
+        "nodes": nodes,
+        "shared_context": context,
+        "session_id": origin_session_id,
+        "tenant": tenant,
+        "board": board,
+        "workspace_kind": workspace_kind or "scratch",
+        "workspace_path": workspace_path,
+        "activation": "explicit_user_request",
+        "proof_packet": proof_packet,
+    }
+    if workflow_id:
+        create_args["workflow_id"] = workflow_id
+    if root_task_id:
+        create_args["root_task_id"] = root_task_id
+    raw = loop_tools._handle_loop_create_graph(create_args)
     created = json.loads(raw)
     if not created.get("ok"):
         return raw
@@ -2738,7 +2572,7 @@ def _loop_skeleton_delegation_result(
         "count": len(items),
         "items": items,
         "edges": edges,
-        "root_task_id": created.get("root_task_id"),
+        "workflow_id": created.get("workflow_id"),
         "dispatch": created.get("dispatch"),
         "subscribed": subscribed,
         "auto_reentry": subscribed,
@@ -2767,8 +2601,9 @@ def delegate_task(
     board: Optional[str] = None,
     workspace_kind: Optional[str] = None,
     workspace_path: Optional[str] = None,
+    workflow_id: Optional[str] = None,
     root_task_id: Optional[str] = None,
-    decompose: bool = False,
+    decompose: Optional[bool] = None,
     goal_mode: bool = False,
     goal_max_turns: Optional[int] = None,
     parent_agent=None,
@@ -2845,25 +2680,33 @@ def delegate_task(
     # Normalize to task list. Durable Loop graph size is governed by the Loop
     # graph service, not the ephemeral child-agent concurrency limit.
     loop_mode = str(mode or "").strip().lower() in _LOOP_DELEGATION_MODES
+    if loop_mode and os.environ.get("HERMES_KANBAN_TASK"):
+        return tool_error(
+            "delegate_task(mode='loop') is foreground/orchestrator-only for "
+            "Kanban workers. Leave the proposed review or follow-up in "
+            "kanban_comment, then complete or cross a genuine non-dependency "
+            "block so the foreground can decide whether to create durable work."
+        )
+    if loop_mode and not _loop_auto_decompose_enabled():
+        return tool_error(
+            "delegate_task(mode='loop') requires kanban.auto_decompose: true "
+            "because every Loop task enters through the JIT auto-decomposer. "
+            "No durable work was created. Re-enable auto-decomposition before "
+            "retrying, or use the manual Kanban triage/decompose workflow."
+        )
     recovered_tasks, tasks_error = _recover_tasks_from_json_string(tasks)
     if tasks_error:
         return tool_error(tasks_error)
     if recovered_tasks is not None:
         tasks = recovered_tasks
 
-    # ``decompose=True`` predates live graph construction for single-goal Loop
-    # calls, where it also carries assignee/goal-mode metadata.  Keep that path
-    # compatible.  A tasks array (or an existing root) is the unambiguous live
-    # graph contract: brief aliases + dependencies, specified just in time.
-    skeleton_mode = (
-        loop_mode
-        and is_truthy_value(decompose, default=False)
-        and (isinstance(tasks, list) or bool(str(root_task_id or "").strip()))
-    )
+    # ``decompose`` remains an ignored Python kwarg for cached schemas and
+    # direct callers. Loop itself now owns the specify-vs-fan-out decision:
+    # every durable delegation enters as a brief, just-in-time skeleton.
     max_children = _get_max_concurrent_children()
 
     if tasks and isinstance(tasks, list):
-        if not skeleton_mode and len(tasks) > max_children:
+        if not loop_mode and len(tasks) > max_children:
             return tool_error(
                 f"Too many tasks: {len(tasks)} provided, but "
                 f"max_concurrent_children is {max_children}. "
@@ -2874,7 +2717,7 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [{"goal": goal, "context": context, "role": top_role}]
-        if skeleton_mode:
+        if loop_mode:
             task_list[0]["id"] = "task"
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -2888,12 +2731,17 @@ def delegate_task(
             return tool_error(
                 f"Task {i} must be an object, got {type(task).__name__}."
             )
-        title = task.get("goal") or (task.get("title") if skeleton_mode else None)
+        title = task.get("goal") or (task.get("title") if loop_mode else None)
         if not isinstance(title, str) or not title.strip():
-            expected = "'goal' or 'title'" if skeleton_mode else "'goal'"
+            expected = "'goal' or 'title'" if loop_mode else "'goal'"
             return tool_error(f"Task {i} is missing a {expected}.")
 
-    if skeleton_mode:
+    if loop_mode:
+        resolved_workflow_id, legacy_root_task_id = _resolve_loop_workflow_compat(
+            workflow_id=workflow_id,
+            root_task_id=root_task_id,
+            board=board,
+        )
         return _loop_skeleton_delegation_result(
             task_list,
             context=context,
@@ -2901,22 +2749,8 @@ def delegate_task(
             board=board,
             workspace_kind=workspace_kind,
             workspace_path=workspace_path,
-            root_task_id=root_task_id,
-        )
-
-    if loop_mode:
-        return _loop_delegation_result(
-            task_list,
-            context=context,
-            assignee=assignee,
-            cfg=cfg,
-            tenant=tenant,
-            board=board,
-            workspace_kind=workspace_kind,
-            workspace_path=workspace_path,
-            decompose=decompose,
-            goal_mode=goal_mode,
-            goal_max_turns=goal_max_turns,
+            workflow_id=resolved_workflow_id,
+            root_task_id=legacy_root_task_id,
         )
 
     # Resolve delegation credentials (provider:model pair).
@@ -3705,10 +3539,10 @@ def _build_top_level_description() -> str:
         f"2. Batch (parallel): provide 'tasks' array with up to {max_children} "
         f"items concurrently for this user (configured via "
         f"delegation.max_concurrent_children in config.yaml). {nesting_clause}\n"
-        "3. Live Loop graph: use mode='loop', decompose=true, and brief "
-        "id/title/depends_on rows. Creation submits the graph immediately; its "
-        "size is independent of ephemeral concurrency, and the auto-decomposer "
-        "owns detailed specifications and routing.\n\n"
+        "3. Live Loop graph: use mode='loop' with brief id/title/depends_on "
+        "rows. Creation submits the graph immediately; its size is independent "
+        "of ephemeral concurrency, and the auto-decomposer decides whether "
+        "each ready task needs specification or fan-out, then owns routing.\n\n"
         "EPHEMERAL MODES RUN IN THE BACKGROUND. delegate_task returns immediately — "
         "you and the user keep working, and each subagent's full result "
         "re-enters the conversation as its own new message when it finishes. A "
@@ -3769,13 +3603,14 @@ def _build_tasks_param_description() -> str:
         f"Batch mode: tasks to run in parallel (up to {max_children} for this "
         f"user, set via delegation.max_concurrent_children). Each gets "
         "its own subagent with isolated context and terminal session. "
-        "When provided, top-level goal/context/toolsets are ignored. "
-        "For mode='loop'/'durable', each item may include id/client_id as a "
-        "batch-local alias and depends_on as a list of aliases or existing "
-        "Kanban task ids; dependencies become parent->child task_links. With "
-        "mode='loop' and decompose=true, this ephemeral concurrency cap does "
-        "not apply: creation immediately submits the durable graph, and the "
-        "auto-decomposer owns detailed specifications and routing."
+        "For ephemeral batches, top-level goal/context/toolsets are ignored. "
+        "For mode='loop'/'durable', each item must include id/client_id as a "
+        "batch-local alias and may include depends_on as a list of aliases or "
+        "existing Kanban task ids; dependencies become parent->child task_links. "
+        "Top-level context is shared by every Loop task, while tasks[].context "
+        "adds task-specific details. The ephemeral concurrency cap does not "
+        "apply to Loop graphs: creation immediately submits the durable graph, "
+        "and the auto-decomposer owns specification, fan-out, and routing."
     )
 
 
@@ -3862,7 +3697,7 @@ DELEGATE_TASK_SCHEMA = {
                 "description": (
                     "What the subagent should accomplish. Be specific and "
                     "self-contained -- the subagent knows nothing about your "
-                    "conversation history. In Loop graph mode this is only a "
+                    "conversation history. In Loop mode this is only a "
                     "brief task title; the auto-decomposer writes the specification."
                 ),
             },
@@ -3871,7 +3706,9 @@ DELEGATE_TASK_SCHEMA = {
                 "description": (
                     "Background information the subagent needs: file paths, "
                     "error messages, project structure, constraints. The more "
-                    "specific you are, the better the subagent performs."
+                    "specific you are, the better the subagent performs. In "
+                    "Loop mode this is shared workflow context; use "
+                    "tasks[].context for details specific to one task."
                 ),
             },
             "mode": {
@@ -3882,13 +3719,6 @@ DELEGATE_TASK_SCHEMA = {
                     "Use loop/durable to create Kanban-backed Loop work that can outlive this turn."
                 ),
             },
-            "assignee": {
-                "type": "string",
-                "description": (
-                    "Loop/durable direct mode: profile that executes the work. "
-                    "Optional with decompose=true because the auto-decomposer routes it."
-                ),
-            },
             "tenant": {"type": "string", "description": "Loop/durable mode tenant namespace."},
             "board": {"type": "string", "description": "Loop/durable mode Kanban board slug."},
             "workspace_kind": {
@@ -3897,31 +3727,6 @@ DELEGATE_TASK_SCHEMA = {
                 "description": "Loop/durable mode workspace kind.",
             },
             "workspace_path": {"type": "string", "description": "Loop/durable mode workspace path."},
-            "root_task_id": {
-                "type": "string",
-                "description": "Loop graph mode: optional existing Loop root that owns the submitted nodes.",
-            },
-            "decompose": {
-                "type": "boolean",
-                "description": (
-                    "Loop/durable mode only. With a tasks array, every row is an "
-                    "immediately-submitted skeleton: provide brief titles and "
-                    "dependency aliases while the auto-decomposer owns detailed "
-                    "specifications, routing, and optional child decomposition. "
-                    "Legacy single-goal calls retain their direct decomposition behavior."
-                ),
-            },
-            "goal_mode": {
-                "type": "boolean",
-                "description": (
-                    "Loop/durable mode only: keep the worker/root going across "
-                    "goal-loop turns until acceptance criteria are met."
-                ),
-            },
-            "goal_max_turns": {
-                "type": "integer",
-                "description": "Loop/durable goal-mode turn budget.",
-            },
             "tasks": {
                 "type": "array",
                 "items": {
@@ -3929,7 +3734,7 @@ DELEGATE_TASK_SCHEMA = {
                     "properties": {
                         "goal": {
                             "type": "string",
-                            "description": "Task goal; a brief title when Loop decompose=true.",
+                            "description": "Task goal; a brief title in Loop mode.",
                         },
                         "title": {
                             "type": "string",
@@ -3951,26 +3756,6 @@ DELEGATE_TASK_SCHEMA = {
                         "context": {
                             "type": "string",
                             "description": "Task-specific context",
-                        },
-                        "assignee": {
-                            "type": "string",
-                            "description": (
-                                "Direct Loop mode routing override. Ignored when "
-                                "mode='loop' and decompose=true because the "
-                                "auto-decomposer owns routing."
-                            ),
-                        },
-                        "decompose": {
-                            "type": "boolean",
-                            "description": "Per-task loop/durable decompose override.",
-                        },
-                        "goal_mode": {
-                            "type": "boolean",
-                            "description": "Per-task loop/durable goal-mode override.",
-                        },
-                        "goal_max_turns": {
-                            "type": "integer",
-                            "description": "Per-task loop/durable goal-mode turn budget.",
                         },
                         "role": {
                             "type": "string",
@@ -4060,15 +3845,10 @@ registry.register(
         max_iterations=args.get("max_iterations"),
         role=args.get("role"),
         mode=args.get("mode"),
-        assignee=args.get("assignee"),
         tenant=args.get("tenant"),
         board=args.get("board"),
         workspace_kind=args.get("workspace_kind"),
         workspace_path=args.get("workspace_path"),
-        root_task_id=args.get("root_task_id"),
-        decompose=args.get("decompose", False),
-        goal_mode=args.get("goal_mode", False),
-        goal_max_turns=args.get("goal_max_turns"),
         background=_model_background_value(args, kw.get("parent_agent")),
         parent_agent=kw.get("parent_agent"),
     ),

@@ -501,13 +501,34 @@ class GatewaySlashCommandsMixin:
                             from hermes_cli import kanban_db as _kb
                             conn = _kb.connect(board=requested_board)
                             try:
-                                _kb.add_notify_sub(
-                                    conn, task_id=task_id,
-                                    platform=platform_str, chat_id=chat_id,
-                                    thread_id=thread_id or None,
-                                    user_id=user_id,
-                                    notifier_profile=getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name(),
-                                )
+                                task = _kb.get_task(conn, task_id)
+                                route = {
+                                    "platform": platform_str,
+                                    "chat_id": chat_id,
+                                    "chat_type": str(
+                                        getattr(source, "chat_type", "") or ""
+                                    )
+                                    or None,
+                                    "thread_id": thread_id or None,
+                                    "user_id": user_id,
+                                    "notifier_profile": getattr(
+                                        self, "_kanban_notifier_profile", None
+                                    )
+                                    or self._active_profile_name(),
+                                }
+                                if task is not None and task.workflow_id:
+                                    _kb.cutover_legacy_workflow_route(
+                                        conn,
+                                        workflow_id=task.workflow_id,
+                                        **route,
+                                    )
+                                else:
+                                    _kb.add_notify_sub(
+                                        conn,
+                                        task_id=task_id,
+                                        scope="task",
+                                        **route,
+                                    )
                             finally:
                                 conn.close()
                         await asyncio.to_thread(_sub)

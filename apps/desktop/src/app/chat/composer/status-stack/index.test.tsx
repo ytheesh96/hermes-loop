@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { useState } from 'react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -37,7 +37,7 @@ const renderStack = (sessionId: string, onOpenKanbanTask?: (taskId: string) => v
 function rootClickSource(): TenantLoopSource {
   return {
     latest_event_id: 10,
-    root_task_id: 't_root',
+    workflow_id: 't_root',
     session_id: 'logical-origin',
     tasks: [
       {
@@ -88,40 +88,48 @@ function RootRowOverviewHarness({
 function dependencyGatedRootClickSource(): TenantLoopSource {
   return {
     latest_event_id: 11,
-    root_task_id: 't_current_root',
+    workflow_ids: ['wf_current', 'wf_dependency'],
     session_id: 'logical-origin',
     tasks: [
       {
+        created_at: 20,
         created_by: 'loop:t_current_root',
         id: 't_current_root',
         included_child_ids: [],
         included_parent_ids: [],
         status: 'running',
-        title: 'Current Loop row'
+        title: 'Current Loop row',
+        workflow_id: 'wf_current'
       },
       {
+        created_at: 20,
         created_by: 'loop:t_dependency_root',
         id: 't_plan_a',
         included_child_ids: ['t_dependency_root'],
         included_parent_ids: [],
         status: 'done',
-        title: 'Parentless prerequisite A'
+        title: 'Parentless prerequisite A',
+        workflow_id: 'wf_dependency'
       },
       {
+        created_at: 21,
         created_by: 'loop:t_dependency_root',
         id: 't_plan_b',
         included_child_ids: ['t_dependency_root'],
         included_parent_ids: [],
         status: 'done',
-        title: 'Parentless prerequisite B'
+        title: 'Parentless prerequisite B',
+        workflow_id: 'wf_dependency'
       },
       {
+        created_at: 10,
         created_by: 'loop:t_dependency_root',
         id: 't_dependency_root',
         included_child_ids: [],
         included_parent_ids: ['t_plan_a', 't_plan_b'],
         status: 'running',
-        title: 'Dependency-gated Loop root'
+        title: 'Dependency-gated Loop workflow',
+        workflow_id: 'wf_dependency'
       }
     ]
   }
@@ -130,7 +138,7 @@ function dependencyGatedRootClickSource(): TenantLoopSource {
 function standaloneDelegatedRootClickSource(): TenantLoopSource {
   return {
     latest_event_id: 12,
-    root_task_id: 't_14fe5ade',
+    workflow_id: 't_14fe5ade',
     session_id: 'logical-origin',
     tasks: [
       {
@@ -173,7 +181,7 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
     vi.mocked(openSessionInNewWindow).mockClear()
   })
 
-  it('renders subscribed Loop roots in Tasks and active subscribed workers as visible Subagents rows', () => {
+  it('renders subscribed Loop workflows in Tasks and active subscribed workers as visible Subagents rows', () => {
     reconcileKanbanSessionSourceForComposer({
       activeSessionId: null,
       sourceSessionId: 'logical-origin',
@@ -186,7 +194,7 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
             included_child_ids: [],
             included_parent_ids: [],
             status: 'running',
-            title: 'Subscribed Loop root'
+            title: 'Subscribed Loop workflow'
           }
         ],
         workers: [
@@ -197,7 +205,7 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
             status: 'running',
             task_id: 't_subscribed_loop',
             task_status: 'running',
-            task_title: 'Subscribed Loop root',
+            task_title: 'Subscribed Loop workflow',
             worker_session_id: 'worker-session-77'
           }
         ]
@@ -208,10 +216,69 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '1 Subagent' }))
 
-    expect(screen.getAllByText('Subscribed Loop root')).toHaveLength(2)
+    expect(screen.getAllByText('Subscribed Loop workflow')).toHaveLength(2)
     expect(screen.getByText('Loop')).toBeTruthy()
     expect(screen.getByText('reviewer-qa')).toBeTruthy()
     expect(screen.getByText('Search Files')).toBeTruthy()
+  })
+
+  it('updates Tasks progress for dynamic descendants while keeping one workflow row', async () => {
+    const source: TenantLoopSource = {
+      session_id: 'logical-origin',
+      workflow_id: 'wf_dynamic',
+      tasks: [
+        {
+          id: 't_build',
+          included_child_ids: [],
+          included_parent_ids: [],
+          status: 'done',
+          title: 'Dynamic workflow'
+        },
+        {
+          id: 't_test',
+          included_child_ids: [],
+          included_parent_ids: [],
+          status: 'running',
+          title: 'Test implementation'
+        }
+      ]
+    }
+
+    reconcileKanbanSessionSourceForComposer({
+      activeSessionId: null,
+      source,
+      sourceSessionId: 'logical-origin'
+    })
+
+    renderStack('logical-origin')
+
+    expect(screen.getByRole('button', { name: 'Tasks 1/2' })).toBeTruthy()
+    expect(screen.getAllByText('Dynamic workflow')).toHaveLength(1)
+    expect(screen.queryByText('Test implementation')).toBeNull()
+
+    act(() => {
+      reconcileKanbanSessionSourceForComposer({
+        activeSessionId: null,
+        source: {
+          ...source,
+          tasks: [
+            ...source.tasks!,
+            {
+              id: 't_review',
+              included_child_ids: [],
+              included_parent_ids: [],
+              status: 'ready',
+              title: 'Review implementation'
+            }
+          ]
+        },
+        sourceSessionId: 'logical-origin'
+      })
+    })
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Tasks 1/3' })).toBeTruthy())
+    expect(screen.getAllByText('Dynamic workflow')).toHaveLength(1)
+    expect(screen.queryByText('Review implementation')).toBeNull()
   })
 
   it('opens Loop worker rows with session ids in watch windows before task drawer fallback', () => {
@@ -265,7 +332,7 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
     expect(openSessionInNewWindow).not.toHaveBeenCalled()
   })
 
-  it('returns an already-selected Loop root row click to the overview drawer', () => {
+  it('returns an already-selected Loop workflow row click to the overview drawer', () => {
     const source = rootClickSource()
     const state = deriveLoopPanelStateFromTenantSource(source)!
 
@@ -277,17 +344,17 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
 
     render(<RootRowOverviewHarness state={state} />)
 
-    fireEvent.click(within(screen.getByTestId('loop-root-agents-card')).getByTestId('loop-task-graph-node-t_child'))
+    fireEvent.click(within(screen.getByTestId('loop-workflow-canvas')).getByTestId('loop-task-graph-node-t_child'))
     expect(screen.getByRole('heading', { name: /Focused child/i })).toBeTruthy()
 
     fireEvent.click(within(screen.getByTestId('composer-status-host')).getByRole('button', { name: /Root Loop row/i }))
 
     expect(screen.queryByRole('heading', { name: /Focused child/i })).toBeNull()
-    expect(screen.getByTestId('loop-root-agents-card')).toBeTruthy()
+    expect(screen.getByTestId('loop-workflow-canvas')).toBeTruthy()
     expect(screen.getByTestId('loop-panel-body').className).not.toContain('p-3')
   })
 
-  it('opens dependency-gated self-anchored Loop root rows to the overview canvas', () => {
+  it('opens a dependency-gated workflow row from an explicit multi-workflow source', () => {
     const source = dependencyGatedRootClickSource()
     const state = deriveLoopPanelStateFromTenantSource(source)!
 
@@ -300,21 +367,21 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
     render(<RootRowOverviewHarness initialSelectedTaskId="t_current_root" state={state} />)
 
     fireEvent.click(
-      within(screen.getByTestId('composer-status-host')).getByRole('button', { name: /Dependency-gated Loop root/i })
+      within(screen.getByTestId('composer-status-host')).getByRole('button', { name: /Dependency-gated Loop workflow/i })
     )
 
-    const rootAgentsCard = screen.getByTestId('loop-root-agents-card')
-    const canvas = within(rootAgentsCard).getByTestId('loop-task-graph')
+    const workflowCanvas = screen.getByTestId('loop-workflow-canvas')
+    const canvas = within(workflowCanvas).getByTestId('loop-task-graph')
 
     expect(screen.queryByTestId('loop-task-card')).toBeNull()
     expect(screen.getByTestId('loop-panel-body').className).not.toContain('p-3')
     expect(within(canvas).getByTestId('loop-task-graph-node-t_dependency_root')).toBeTruthy()
 
-    expect(within(rootAgentsCard).queryByRole('button', { name: 'Show agents list' })).toBeNull()
-    expect(within(rootAgentsCard).queryByTestId('loop-root-agents-list')).toBeNull()
+    expect(within(workflowCanvas).queryByRole('button', { name: 'Show agents list' })).toBeNull()
+    expect(within(workflowCanvas).queryByTestId('loop-root-agents-list')).toBeNull()
   })
 
-  it('opens standalone delegated Loop root rows to a single-node overview canvas', () => {
+  it('opens a standalone delegated workflow row as ordinary task details', () => {
     const source = standaloneDelegatedRootClickSource()
     const state = deriveLoopPanelStateFromTenantSource(source)!
 
@@ -332,13 +399,9 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
       })
     )
 
-    const rootAgentsCard = screen.getByTestId('loop-root-agents-card')
-    const canvas = within(rootAgentsCard).getByTestId('loop-task-graph')
-
-    expect(screen.queryByTestId('loop-task-card')).toBeNull()
-    expect(screen.getByTestId('loop-panel-body').className).not.toContain('p-3')
-    expect(within(canvas).getByTestId('loop-task-graph-node-t_f2298d7d')).toBeTruthy()
-    expect(canvas.querySelectorAll('[data-testid^="loop-task-graph-edge-"]')).toHaveLength(0)
+    expect(screen.getByTestId('loop-task-card')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /Remove the root summary\/actions card/i })).toBeTruthy()
+    expect(screen.queryByTestId('loop-workflow-canvas')).toBeNull()
   })
 
   it('renders standalone delegated Loop source rows under the active runtime session', () => {

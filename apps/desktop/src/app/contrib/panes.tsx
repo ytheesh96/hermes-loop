@@ -103,11 +103,11 @@ export function LoopRailPane() {
         onUnlinkTasks={loop.onUnlinkTasks}
         open={loop.open}
         positions={loop.positions}
-        rootTaskId={loop.rootTaskId}
         selectedTaskDetail={loop.selectedTaskDetail}
         selectedTaskDetailError={loop.selectedTaskDetailError}
         selectedTaskId={loop.selectedTaskId}
         state={loop.state}
+        workflowId={loop.workflowId}
       />
     </div>
   )

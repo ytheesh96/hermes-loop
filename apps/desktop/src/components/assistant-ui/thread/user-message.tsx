@@ -110,6 +110,8 @@ interface LoopHandoffPayload {
   visible_cards?: LoopHandoffVisibleCard[]
 }
 
+// Read-only renderer for messages persisted by the removed Loop handoff
+// protocol. Current Desktop workflow actions never create this payload.
 function parseLoopHandoffPayload(text: string): LoopHandoffPayload | null {
   try {
     const parsed = JSON.parse(text.replace(/\u00a0/g, ' ')) as LoopHandoffPayload

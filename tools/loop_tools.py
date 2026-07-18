@@ -7,7 +7,11 @@ import time
 from typing import Any
 
 from tools.registry import registry, tool_error
-from gateway.session_context import get_session_env, get_source_session_id
+from gateway.session_context import (
+    get_current_workflow_id,
+    get_session_env,
+    get_source_session_id,
+)
 
 
 def _check_loop_enabled() -> bool:
@@ -21,12 +25,55 @@ def _check_loop_enabled() -> bool:
         return True
 
 
+def _check_loop_foreground_enabled() -> bool:
+    """Loop graph mutation is never exposed to a task-scoped worker."""
+
+    return not bool(os.environ.get("HERMES_KANBAN_TASK")) and _check_loop_enabled()
+
+
+def _require_loop_foreground_mutation(tool_name: str) -> str | None:
+    """Runtime backstop for stale schemas and direct handler calls."""
+
+    task_id = str(os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    if not task_id:
+        return None
+    return tool_error(
+        f"{tool_name} is foreground/orchestrator-only; worker {task_id} "
+        "must leave the proposed workflow change in kanban_comment, then "
+        "complete or cross a genuine non-dependency block so the foreground "
+        "can decide"
+    )
+
+
 def _json_ok(**payload: Any) -> str:
     return json.dumps({"ok": True, **payload}, ensure_ascii=False)
 
 
 def _json_error(error: str, message: str) -> str:
     return json.dumps({"ok": False, "error": error, "message": message}, ensure_ascii=False)
+
+
+def _workflow_close_error(exc: Any, *, limit: int = 20) -> str:
+    """Return a bounded, actionable close refusal for the foreground agent."""
+
+    task_blockers = [dict(item) for item in (exc.task_blockers or [])]
+    plan_blockers = [dict(item) for item in (exc.plan_blockers or [])]
+    blocker_count = len(task_blockers) + len(plan_blockers)
+    visible_tasks = task_blockers[:limit]
+    remaining = max(0, limit - len(visible_tasks))
+    visible_plan_nodes = plan_blockers[:remaining]
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error": "workflow_not_closable",
+        "message": str(exc),
+        "workflow_id": exc.workflow_id,
+        "blocker_count": blocker_count,
+        "task_blockers": visible_tasks,
+        "plan_blockers": visible_plan_nodes,
+    }
+    if blocker_count > len(visible_tasks) + len(visible_plan_nodes):
+        payload["truncated"] = True
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _require_activation(args: dict[str, Any]) -> str | None:
@@ -74,6 +121,7 @@ def _task_summary(kb: Any, conn: Any, task: Any) -> dict[str, Any]:
         "assignee": task.assignee,
         "tenant": task.tenant,
         "session_id": task.session_id,
+        "workflow_id": task.workflow_id,
         "created_by": task.created_by,
         "parents": kb.parent_ids(conn, task.id),
         "children": kb.child_ids(conn, task.id),
@@ -121,7 +169,7 @@ def _parse_execution(args: dict[str, Any]) -> dict[str, Any]:
     wait_until = str(raw.get("wait_until") or "created").strip().lower()
     if wait_until == "all_done":
         wait_until = "done"
-    if wait_until not in {"created", "dispatched", "first_result", "done", "blocked", "review_ready"}:
+    if wait_until not in {"created", "dispatched", "first_result", "done", "blocked"}:
         wait_until = "created"
     try:
         timeout_seconds = float(raw.get("timeout_seconds") or 0)
@@ -142,8 +190,6 @@ def _wait_condition(status: str, wait_until: str) -> bool:
         return status == "done"
     if wait_until == "blocked":
         return status == "blocked"
-    if wait_until == "review_ready":
-        return status == "review"
     return True
 
 
@@ -232,10 +278,29 @@ def _handle_loop_graph(args: dict[str, Any], **_kwargs) -> str:
     from hermes_cli import kanban_db as kb
     from hermes_cli import loop_graph as graph
 
-    root_task_id = str(args.get("root_task_id") or "").strip()
-    if not root_task_id:
-        return tool_error("root_task_id is required")
+    workflow_id = str(
+        args.get("workflow_id")
+        or args.get("root_task_id")
+        or get_current_workflow_id("")
+        or ""
+    ).strip()
     action = str(args.get("action") or "read").strip().lower()
+    task_id = str(
+        args.get("task_id")
+        or (args.get("root_task_id") if action == "triage" else "")
+        or ""
+    ).strip()
+    if action == "triage":
+        if not task_id:
+            return tool_error("task_id is required for triage")
+    elif not workflow_id:
+        return tool_error("workflow_id is required")
+    if action != "read":
+        foreground_guard = _require_loop_foreground_mutation(
+            f"loop_graph(action={action!r})"
+        )
+        if foreground_guard:
+            return foreground_guard
     board = args.get("board")
     if action == "triage":
         from hermes_cli import kanban_decompose
@@ -244,7 +309,7 @@ def _handle_loop_graph(args: dict[str, Any], **_kwargs) -> str:
             scoped_board = str(board or kb.get_current_board()).strip()
             with kb.scoped_current_board(scoped_board):
                 outcome = kanban_decompose.decompose_task(
-                    root_task_id,
+                    task_id,
                     author=str(args.get("author") or "foreground-triage").strip(),
                     loop_safe=True,
                 )
@@ -271,7 +336,7 @@ def _handle_loop_graph(args: dict[str, Any], **_kwargs) -> str:
             if action == "read":
                 include_nodes = bool(args.get("include_nodes", False))
                 return json.dumps(
-                    graph.read_graph(conn, root_task_id, include_nodes=include_nodes),
+                    graph.read_graph(conn, workflow_id, include_nodes=include_nodes),
                     ensure_ascii=False,
                 )
             if action == "patch":
@@ -282,16 +347,39 @@ def _handle_loop_graph(args: dict[str, Any], **_kwargs) -> str:
                 return json.dumps(
                     graph.apply_patch(
                         conn,
-                        root_task_id,
+                        workflow_id,
                         expected_revision=int(args.get("expected_revision")),
                         mutation_id=mutation_id,
                         operations=operations,
                     ),
                     ensure_ascii=False,
                 )
-            return tool_error("action must be 'read', 'patch', or 'triage'")
+            if action == "close":
+                closed = kb.close_workflow(conn, workflow_id)
+                if not closed:
+                    workflow = kb.get_workflow(conn, workflow_id)
+                    if workflow is None:
+                        return tool_error(f"unknown workflow: {workflow_id}")
+                    return _json_ok(
+                        workflow_id=workflow_id,
+                        status=workflow.status,
+                        already_closed=True,
+                    )
+                return _json_ok(
+                    workflow_id=workflow_id,
+                    status="closed",
+                    already_closed=False,
+                )
+            return tool_error(
+                "action must be 'read', 'patch', 'triage', or 'close'"
+            )
+        except kb.WorkflowNotClosableError as exc:
+            return _workflow_close_error(exc)
         except graph.LoopError as exc:
-            return json.dumps(graph.error_response(exc, conn, root_task_id), ensure_ascii=False)
+            return json.dumps(
+                graph.error_response(exc, conn, workflow_id),
+                ensure_ascii=False,
+            )
         except ValueError as exc:
             return tool_error(str(exc))
     finally:
@@ -299,6 +387,9 @@ def _handle_loop_graph(args: dict[str, Any], **_kwargs) -> str:
 
 
 def _handle_loop_create(args: dict[str, Any], **_kwargs) -> str:
+    foreground_guard = _require_loop_foreground_mutation("loop_create")
+    if foreground_guard:
+        return foreground_guard
     guard = _require_durable_mutation_contract(args)
     if guard:
         return guard
@@ -330,6 +421,77 @@ def _handle_loop_create(args: dict[str, Any], **_kwargs) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
+            parent_ids = tuple(
+                dict.fromkeys(
+                    str(parent).strip()
+                    for parent in parents
+                    if parent is not None and str(parent).strip()
+                )
+            )
+            parent_rows = [
+                kb.get_task(conn, parent_id) for parent_id in parent_ids
+            ]
+            missing_parents = [
+                parent_id
+                for parent_id, task in zip(parent_ids, parent_rows)
+                if task is None
+            ]
+            if missing_parents:
+                return tool_error(
+                    "unknown parent task(s): " + ", ".join(missing_parents)
+                )
+            parent_workflows = {
+                str(task.workflow_id).strip()
+                for task in parent_rows
+                if task is not None
+                and task.workflow_id is not None
+                and str(task.workflow_id).strip()
+            }
+            if len(parent_workflows) > 1:
+                return tool_error(
+                    "parents belong to different workflows: "
+                    + ", ".join(sorted(parent_workflows))
+                )
+            ambient_workflow_id = get_current_workflow_id("")
+            requested_workflow_id = str(
+                args.get("workflow_id") or ""
+            ).strip()
+            contextual_workflow_id = (
+                requested_workflow_id
+                or str(ambient_workflow_id or "").strip()
+                or None
+            )
+            workflow_id = (
+                next(iter(parent_workflows))
+                if parent_workflows
+                else contextual_workflow_id
+            )
+            if (
+                parent_workflows
+                and contextual_workflow_id
+                and workflow_id != contextual_workflow_id
+            ):
+                return tool_error(
+                    f"parent workflow {workflow_id} conflicts with ambient "
+                    f"workflow {contextual_workflow_id}"
+                )
+            if workflow_id:
+                if kb.get_workflow(conn, workflow_id) is None:
+                    return tool_error(f"unknown workflow: {workflow_id}")
+            else:
+                task_key = str(args.get("idempotency_key") or "").strip()
+                workflow_id = kb.create_workflow(
+                    conn,
+                    title=objective,
+                    origin_session_id=session_id,
+                    tenant=tenant,
+                    shared_context=args.get("body") or args.get("context"),
+                    workspace_kind=workspace_kind,
+                    workspace_path=args.get("workspace_path"),
+                    idempotency_key=(
+                        f"loop-create:{task_key}" if task_key else None
+                    ),
+                )
             task_id = kb.create_task(
                 conn,
                 title=objective,
@@ -340,13 +502,13 @@ def _handle_loop_create(args: dict[str, Any], **_kwargs) -> str:
                     args.get("body") or args.get("context"),
                 ),
                 assignee=assignee,
-                created_by=f"loop_delegation:{os.environ.get('HERMES_PROFILE') or 'agent'}",
+                created_by=os.environ.get("HERMES_PROFILE") or "foreground",
                 workspace_kind=workspace_kind,
                 workspace_path=args.get("workspace_path"),
                 branch_name=args.get("branch_name"),
                 tenant=tenant,
                 priority=int(args.get("priority") or 0),
-                parents=tuple(str(p).strip() for p in parents if str(p).strip()),
+                parents=parent_ids,
                 triage=triage,
                 idempotency_key=args.get("idempotency_key"),
                 max_runtime_seconds=(int(args["max_runtime_seconds"]) if args.get("max_runtime_seconds") is not None else None),
@@ -355,16 +517,9 @@ def _handle_loop_create(args: dict[str, Any], **_kwargs) -> str:
                 goal_max_turns=(int(args["goal_max_turns"]) if args.get("goal_max_turns") is not None else None),
                 initial_status=str(args.get("initial_status") or "running"),
                 session_id=session_id,
+                workflow_id=workflow_id,
                 board=board,
             )
-            if triage:
-                with kb.write_txn(conn):
-                    conn.execute(
-                        "UPDATE tasks SET created_by = ? "
-                        "WHERE id = ? AND status = 'triage' "
-                        "AND created_by LIKE 'loop_delegation:%'",
-                        (f"loop:{task_id}", task_id),
-                    )
             from tools.kanban_notify import maybe_auto_subscribe
 
             subscribed = maybe_auto_subscribe(conn, task_id)
@@ -383,6 +538,7 @@ def _handle_loop_create(args: dict[str, Any], **_kwargs) -> str:
                 foreground_reentry = str(args.get("foreground_reentry") or "on_final_or_blocker")
             return _json_ok(
                 loop_item_id=task_id,
+                workflow_id=workflow_id,
                 status=task.status,
                 assignee=task.assignee,
                 parents=kb.parent_ids(conn, task_id),
@@ -408,10 +564,13 @@ def _handle_loop_create(args: dict[str, Any], **_kwargs) -> str:
 def _handle_loop_create_graph(args: dict[str, Any], **_kwargs) -> str:
     """Persist one live Loop graph fragment and wake the existing dispatcher.
 
-    This is the internal batch boundary used by ``delegate_task(mode='loop',
-    decompose=True)``.  It deliberately is not another model-facing tool: the
+    This is the internal batch boundary used by ``delegate_task(mode='loop')``.
+    It deliberately is not another model-facing tool: the
     existing delegation schema is the narrow public contract.
     """
+    foreground_guard = _require_loop_foreground_mutation("loop_create_graph")
+    if foreground_guard:
+        return foreground_guard
     guard = _require_durable_mutation_contract(args)
     if guard:
         return guard
@@ -428,6 +587,11 @@ def _handle_loop_create_graph(args: dict[str, Any], **_kwargs) -> str:
             result = kb.create_loop_skeleton_graph(
                 conn,
                 nodes=nodes,
+                workflow_id=(
+                    str(args.get("workflow_id") or "").strip()
+                    or get_current_workflow_id("")
+                    or None
+                ),
                 root_task_id=str(args.get("root_task_id") or "").strip() or None,
                 shared_context=args.get("shared_context"),
                 session_id=session_id,
@@ -439,49 +603,24 @@ def _handle_loop_create_graph(args: dict[str, Any], **_kwargs) -> str:
                 idempotency_scope=str(args.get("idempotency_scope") or "").strip() or None,
             )
 
-            root_task_id = str(result.get("root_task_id") or "").strip()
-            if root_task_id and kb.get_task(conn, root_task_id) is not None:
-                latest = conn.execute(
-                    "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'loop_intake_state' "
-                    "ORDER BY id DESC LIMIT 1",
-                    (root_task_id,),
-                ).fetchone()
-                try:
-                    latest_intake = json.loads(latest["payload"] or "{}") if latest else {}
-                except (TypeError, ValueError):
-                    latest_intake = {}
-                if latest_intake.get("state") != "live" or latest_intake.get("dispatchable") is not True:
-                    with kb.write_txn(conn):
-                        kb._append_event(
-                            conn,
-                            root_task_id,
-                            "loop_intake_state",
-                            {
-                                "needed": True,
-                                "state": "live",
-                                "source": "foreground_graph",
-                                "dispatchable": True,
-                            },
-                        )
-
             from tools.kanban_notify import maybe_auto_subscribe
 
-            subscription_candidates = [
-                item["task_id"] for item in result.get("items", [])
-            ]
-            if root_task_id:
-                subscription_candidates.append(root_task_id)
-            subscribed_ids = [
-                task_id
-                for task_id in dict.fromkeys(subscription_candidates)
-                if maybe_auto_subscribe(conn, task_id)
-            ]
+            # Any member task resolves to the one workflow-scoped route; no
+            # per-node subscriptions or descendant mirror events are needed.
+            first_task_id = str(
+                (result.get("items") or [{}])[0].get("task_id") or ""
+            ).strip()
+            subscribed = bool(
+                first_task_id and maybe_auto_subscribe(conn, first_task_id)
+            )
             dispatch = _poke_dispatcher_once(kb, conn, board, warnings)
             return _json_ok(
                 **result,
                 dispatch=dispatch,
-                subscribed_ids=subscribed_ids,
-                subscribed=bool(subscribed_ids),
+                subscribed_workflow_id=(
+                    result.get("workflow_id") if subscribed else None
+                ),
+                subscribed=subscribed,
                 foreground_reentry="on_final_or_blocker",
                 warnings=warnings,
             )
@@ -507,7 +646,6 @@ def _handle_loop_status(args: dict[str, Any], **_kwargs) -> str:
             comments = kb.list_comments(conn, task_id)
             events = kb.list_events(conn, task_id)
             runs = kb.list_runs(conn, task_id)
-            handoffs = kb.list_loop_handoffs(conn, task_id=task_id)
             payload = {
                 "item": _task_summary(kb, conn, task),
                 "summary": _latest_summary(kb, conn, task_id),
@@ -515,7 +653,6 @@ def _handle_loop_status(args: dict[str, Any], **_kwargs) -> str:
                     "comments": len(comments),
                     "events": len(events),
                     "runs": len(runs),
-                    "handoffs": len(handoffs),
                 },
             }
             if include_details:
@@ -523,7 +660,6 @@ def _handle_loop_status(args: dict[str, Any], **_kwargs) -> str:
                     comments=[{"id": c.id, "author": c.author, "body": c.body, "created_at": c.created_at} for c in comments],
                     events=[{"id": e.id, "kind": e.kind, "payload": e.payload, "created_at": e.created_at, "run_id": e.run_id} for e in events[-20:]],
                     runs=[r.__dict__ for r in runs],
-                    handoffs=handoffs,
                 )
             return _json_ok(
                 **payload,
@@ -559,6 +695,9 @@ def _handle_loop_list_queue(args: dict[str, Any], **_kwargs) -> str:
 
 
 def _handle_loop_update(args: dict[str, Any], **_kwargs) -> str:
+    foreground_guard = _require_loop_foreground_mutation("loop_update")
+    if foreground_guard:
+        return foreground_guard
     guard = _require_durable_mutation_contract(args)
     if guard:
         return guard
@@ -583,6 +722,9 @@ def _handle_loop_update(args: dict[str, Any], **_kwargs) -> str:
 
 
 def _handle_loop_block(args: dict[str, Any], **_kwargs) -> str:
+    foreground_guard = _require_loop_foreground_mutation("loop_block")
+    if foreground_guard:
+        return foreground_guard
     guard = _require_durable_mutation_contract(args)
     if guard:
         return guard
@@ -609,49 +751,13 @@ def _handle_loop_block(args: dict[str, Any], **_kwargs) -> str:
         return tool_error(f"loop_block: {exc}")
 
 
-def _handle_loop_request_review(args: dict[str, Any], **_kwargs) -> str:
-    guard = _require_durable_mutation_contract(args)
-    if guard:
-        return guard
-    task_id = _loop_item_id(args)
-    if not task_id:
-        return tool_error("loop_item_id is required")
-    summary = str(args.get("summary") or args.get("reason") or "").strip()
-    if not summary:
-        return tool_error("summary or reason is required")
-    reviewer = str(args.get("reviewer") or "reviewer-qa").strip() or "reviewer-qa"
-    metadata = dict(args.get("metadata") or {})
-    metadata.setdefault("proof_packet", args.get("proof_packet"))
-    try:
-        kb, conn = _connect(board=args.get("board"))
-        try:
-            ok = kb.request_review_task(
-                conn,
-                task_id,
-                reviewer=reviewer,
-                review_kind=args.get("review_kind") or "loop_delegation_review",
-                resume_mode=args.get("resume_mode"),
-                reason=args.get("reason"),
-                summary=summary,
-                metadata=metadata,
-            )
-            if not ok:
-                return tool_error(f"could not request review for {task_id} (unknown id or terminal state)")
-            task = kb.get_task(conn, task_id)
-            run = kb.latest_run(conn, task_id)
-            return _json_ok(loop_item_id=task_id, status=task.status if task else "review", reviewer=reviewer, run_id=run.id if run else None, foreground_reentry="on_review", proof_packet=args.get("proof_packet"), warnings=[])
-        finally:
-            conn.close()
-    except Exception as exc:
-        return tool_error(f"loop_request_review: {exc}")
-
-
 LOOP_GRAPH_SCHEMA = {
     "name": "loop_graph",
     "description": (
-        "Read or safely update a live durable Loop task graph. "
+        "Read or safely update a workflow's live durable task graph. "
         "Patch uses expected_revision + mutation_id guards; create new executable nodes with "
-        "delegate_task(mode='loop', decompose=true). "
+        "delegate_task(mode='loop'). "
+        "Foreground-only close refuses while any member task or planning node is unfinished. "
         "Responses are compact: success/error plus graph revision data."
     ),
     "parameters": {
@@ -659,10 +765,25 @@ LOOP_GRAPH_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["read", "patch", "triage"],
-                "description": "Use triage only after clarification/specification; it plans one task or a scheduled dependency graph.",
+                "enum": ["read", "patch", "triage", "close"],
+                "description": (
+                    "Use triage only after clarification/specification. Use "
+                    "close only when the workflow needs no further follow-up; "
+                    "it refuses unfinished workflow members."
+                ),
             },
-            "root_task_id": {"type": "string", "description": "Durable Loop root task id, or a legacy Loop identity/tenant id."},
+            "workflow_id": {
+                "type": "string",
+                "description": (
+                    "Workflow identity returned by the first Loop delegation. "
+                    "Omit during a workflow wake; the foreground turn carries "
+                    "it internally. All member tasks are ordinary Kanban tasks."
+                ),
+            },
+            "task_id": {
+                "type": "string",
+                "description": "For triage only: the ordinary task to specify.",
+            },
             "include_nodes": {"type": "boolean", "description": "For read only, include compact Kanban dependency tasks."},
             "expected_revision": {"type": "integer", "description": "For patch, graph_revision from the last read."},
             "mutation_id": {"type": "string", "description": "For patch, caller-stable idempotency key for this mutation."},
@@ -670,9 +791,9 @@ LOOP_GRAPH_SCHEMA = {
                 "type": "array",
                 "description": (
                     "Patch ops for submitted nodes: update_node, set_parents, archive_node, "
-                    "resolve_handoff, validate. Mutations are allowed only while a task is still "
+                    "validate. Mutations are allowed only while a task is still "
                     "pending; running and completed work is immutable. Create new nodes with "
-                    "delegate_task(mode='loop', decompose=true)."
+                    "delegate_task(mode='loop')."
                 ),
                 "items": {"type": "object"},
             },
@@ -682,7 +803,7 @@ LOOP_GRAPH_SCHEMA = {
                 "description": "Optional Kanban board slug override; omit for current/pinned board.",
             },
         },
-        "required": ["action", "root_task_id"],
+        "required": ["action"],
     },
 }
 
@@ -719,7 +840,7 @@ LOOP_CREATE_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "mode": {"type": "string", "enum": ["async", "sync"]},
-                    "wait_until": {"type": "string", "enum": ["created", "dispatched", "first_result", "done", "blocked", "review_ready"]},
+                    "wait_until": {"type": "string", "enum": ["created", "dispatched", "first_result", "done", "blocked"]},
                     "timeout_seconds": {"type": "number", "minimum": 0, "maximum": 30},
                 },
             },
@@ -741,7 +862,7 @@ LOOP_CREATE_SCHEMA = {
 
 LOOP_STATUS_SCHEMA = {
     "name": "loop_status",
-    "description": "Read one durable Loop item. Compact by default; pass include_details=true for recent events, comments, runs, and handoffs.",
+    "description": "Read one durable Loop item. Compact by default; pass include_details=true for recent events, comments, and runs.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -806,33 +927,12 @@ LOOP_BLOCK_SCHEMA = {
 }
 
 
-LOOP_REQUEST_REVIEW_SCHEMA = {
-    "name": "loop_request_review",
-    "description": "Move a durable Loop item into review with a reviewer profile; requires activation + proof_packet.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "loop_item_id": {"type": "string"},
-            "reviewer": {"type": "string"},
-            "summary": {"type": "string"},
-            "reason": {"type": "string"},
-            "metadata": {"type": "object"},
-            "review_kind": {"type": "string"},
-            "resume_mode": {"type": "string"},
-            "board": {"type": "string"},
-            **_ACTIVATION_PROOF_PROPERTIES,
-        },
-        "required": ["loop_item_id", "summary", "activation", "proof_packet"],
-    },
-}
-
-
 registry.register(
     name="loop_graph",
     toolset="loop",
     schema=LOOP_GRAPH_SCHEMA,
     handler=_handle_loop_graph,
-    check_fn=_check_loop_enabled,
+    check_fn=_check_loop_foreground_enabled,
     emoji="🔁",
 )
 
@@ -841,7 +941,7 @@ registry.register(
     toolset="loop_delegation",
     schema=LOOP_CREATE_SCHEMA,
     handler=_handle_loop_create,
-    check_fn=_check_loop_enabled,
+    check_fn=_check_loop_foreground_enabled,
     emoji="🔁",
 )
 
@@ -868,7 +968,7 @@ registry.register(
     toolset="loop_delegation",
     schema=LOOP_UPDATE_SCHEMA,
     handler=_handle_loop_update,
-    check_fn=_check_loop_enabled,
+    check_fn=_check_loop_foreground_enabled,
     emoji="📝",
 )
 
@@ -877,15 +977,6 @@ registry.register(
     toolset="loop_delegation",
     schema=LOOP_BLOCK_SCHEMA,
     handler=_handle_loop_block,
-    check_fn=_check_loop_enabled,
+    check_fn=_check_loop_foreground_enabled,
     emoji="⛔",
-)
-
-registry.register(
-    name="loop_request_review",
-    toolset="loop_delegation",
-    schema=LOOP_REQUEST_REVIEW_SCHEMA,
-    handler=_handle_loop_request_review,
-    check_fn=_check_loop_enabled,
-    emoji="🔍",
 )

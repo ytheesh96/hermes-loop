@@ -30,7 +30,9 @@ from agent.prompt_builder import (
     OPENAI_MODEL_EXECUTION_GUIDANCE,
     PARALLEL_TOOL_CALL_GUIDANCE,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
+    KANBAN_FOREGROUND_GUIDANCE,
     KANBAN_GUIDANCE,
+    KANBAN_ORCHESTRATOR_GUIDANCE,
     MEMORY_GUIDANCE,
     SESSION_SEARCH_GUIDANCE,
     PLATFORM_HINTS,
@@ -50,7 +52,14 @@ class TestGuidanceConstants:
         from tools.registry import registry
 
         named_tools = set(
-            re.findall(r"`(kanban_[a-zA-Z0-9_]+)(?:\([^`]*\))?`", KANBAN_GUIDANCE)
+            re.findall(
+                r"`(kanban_[a-zA-Z0-9_]+)(?:\([^`]*\))?`",
+                (
+                    KANBAN_GUIDANCE
+                    + KANBAN_FOREGROUND_GUIDANCE
+                    + KANBAN_ORCHESTRATOR_GUIDANCE
+                ),
+            )
         )
         registered_tools = set(get_all_tool_names())
 
@@ -62,6 +71,56 @@ class TestGuidanceConstants:
             for tool in named_tools
             if get_toolset_for_tool(tool) != "kanban"
         }
+
+    def test_kanban_guidance_defines_comment_boundary_foreground_protocol(self):
+        assert "`kanban_comment` = worker message" in KANBAN_GUIDANCE
+        assert (
+            "`kanban_complete` / genuine non-dependency `kanban_block` = "
+            "delivery trigger"
+        ) in KANBAN_GUIDANCE
+        assert "Foreground = decision-maker" in KANBAN_GUIDANCE
+        assert (
+            "`kanban_create` = committed workflow mutation, owned by foreground"
+            in KANBAN_GUIDANCE
+        )
+        assert "does not wake or interrupt another running agent" in KANBAN_GUIDANCE
+        assert "Do not create, link, review-route, or assign follow-up tasks" in KANBAN_GUIDANCE
+        for retired in (
+            "kanban_request_review",
+            "kanban_request_decision",
+            "kanban_request_orchestrator_handoff",
+            "kanban_resolve_handoff",
+        ):
+            assert retired not in KANBAN_GUIDANCE
+
+    def test_kanban_foreground_guidance_owns_graph_mutation(self):
+        assert "You own workflow decisions and graph mutation" in KANBAN_FOREGROUND_GUIDANCE
+        assert "`kanban_show(task_id=...)`" in KANBAN_FOREGROUND_GUIDANCE
+        assert "only when evidence is missing, stale" in KANBAN_FOREGROUND_GUIDANCE
+        assert "read every changed task" not in KANBAN_FOREGROUND_GUIDANCE
+        assert "`kanban_create(...)`" in KANBAN_FOREGROUND_GUIDANCE
+        assert "parents=[...]" in KANBAN_FOREGROUND_GUIDANCE
+        assert "coalesced until automatic work reaches" in KANBAN_FOREGROUND_GUIDANCE
+        assert "closure refuses unfinished members" in KANBAN_FOREGROUND_GUIDANCE
+        assert "let its assigned worker execute it" in KANBAN_FOREGROUND_GUIDANCE
+        assert "Unknown assignees remain ready and never dispatch" in KANBAN_FOREGROUND_GUIDANCE
+        assert "Never use a blocked task as a parent" in KANBAN_FOREGROUND_GUIDANCE
+        assert "resolution/review work without parents" in KANBAN_FOREGROUND_GUIDANCE
+
+    def test_kanban_orchestrator_guidance_preserves_full_board_routing(self):
+        assert KANBAN_FOREGROUND_GUIDANCE in KANBAN_ORCHESTRATOR_GUIDANCE
+        assert "`kanban_list(...)`" in KANBAN_ORCHESTRATOR_GUIDANCE
+        assert "`kanban_decompose(task_id=...)`" in KANBAN_ORCHESTRATOR_GUIDANCE
+        assert "`kanban_link(...)`" in KANBAN_ORCHESTRATOR_GUIDANCE
+        assert "configured profile" in KANBAN_ORCHESTRATOR_GUIDANCE
+        assert "`loop_graph(action=\"close\")`" in KANBAN_ORCHESTRATOR_GUIDANCE
+        for retired in (
+            "kanban_request_review",
+            "kanban_request_decision",
+            "kanban_request_orchestrator_handoff",
+            "kanban_resolve_handoff",
+        ):
+            assert retired not in KANBAN_ORCHESTRATOR_GUIDANCE
 
     def test_memory_guidance_discourages_task_logs(self):
         assert "durable facts" in MEMORY_GUIDANCE
@@ -1709,5 +1768,3 @@ class TestParallelToolCallGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
-

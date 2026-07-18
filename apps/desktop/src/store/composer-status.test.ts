@@ -21,7 +21,8 @@ const delegatedLoopTask = (id: string, createdAt: number, title: string) => ({
   included_child_ids: [],
   included_parent_ids: [],
   status: 'done',
-  title
+  title,
+  workflow_id: id
 })
 
 const running = (id: string, command = `cmd ${id}`) => ({ command, session_id: id, status: 'running' })
@@ -191,8 +192,9 @@ describe('reconcileKanbanSessionSource', () => {
     $loopagentsBySession.set({})
   })
 
-  it('shows the dependency root in Tasks and active/attention children as Subagents', () => {
+  it('shows one workflow summary in Tasks and active/attention workers as Subagents', () => {
     reconcileKanbanSessionSource(SID, {
+      workflow_id: 't_root',
       tasks: [
         {
           id: 't_root',
@@ -269,8 +271,18 @@ describe('reconcileKanbanSessionSource', () => {
     const groups = groupStatusItems(items)
 
     expect(groups.map(group => group.type)).toEqual(['todo', 'subagent'])
-    expect(groups[0]!.items.map(item => [item.id, item.kanbanTaskId, item.todoStatus, item.currentTool, item.state, item.statusIndicator])).toEqual([
-      ['kanban-task:t_root', 't_root', 'in_progress', 'Loop', 'failed', 'attention']
+    expect(
+      groups[0]!.items.map(item => [
+        item.id,
+        item.kanbanTaskId,
+        item.todoStatus,
+        item.currentTool,
+        item.state,
+        item.statusIndicator,
+        item.taskProgress
+      ])
+    ).toEqual([
+      ['kanban-task:t_root', 't_root', 'in_progress', 'Loop', 'failed', 'attention', { completed: 1, total: 5 }]
     ])
     expect(groups[1]!.items.map(item => [item.id, item.state, item.sessionId, item.output, item.profile, item.currentTool])).toEqual([
       ['kanban-agent:t_running:7', 'running', 'worker-session-7', 'worker log tail', 'peacock', 'Terminal'],
@@ -280,9 +292,10 @@ describe('reconcileKanbanSessionSource', () => {
     expect(items.map(item => item.kanbanTaskId)).not.toContain('t_done')
   })
 
-  it('keeps an active self-root Loop task in Tasks while showing its worker under Subagents', () => {
+  it('keeps an active Loop workflow in Tasks while showing its worker under Subagents', () => {
     reconcileKanbanSessionSource(SID, {
       session_id: SID,
+      workflow_id: 't_root',
       tasks: [
         {
           id: 't_root',
@@ -317,9 +330,10 @@ describe('reconcileKanbanSessionSource', () => {
     ])
   })
 
-  it('keeps a subscribed root task in Tasks when the root itself has an active worker and graph links', () => {
+  it('keeps a subscribed workflow in Tasks when a member has an active worker and graph links', () => {
     reconcileKanbanSessionSource(SID, {
       session_id: SID,
+      workflow_id: 't_root',
       tasks: [
         {
           created_by: 'loop_delegation:agent',
@@ -372,12 +386,14 @@ describe('reconcileKanbanSessionSource', () => {
     expect($kanbanStatusBySession.get()).toEqual({})
   })
 
-  it('uses the session-anchored root instead of a parentless child for decomposed Loop roots', () => {
+  it('uses the oldest member as the workflow summary for a decomposed workflow', () => {
     reconcileKanbanSessionSource(SID, {
       session_id: SID,
       tenant: 'tenant-a',
+      workflow_id: 'wf_decomposed',
       tasks: [
         {
+          created_at: 20,
           id: 't_child',
           status: 'ready',
           title: 'Implementation child',
@@ -385,10 +401,11 @@ describe('reconcileKanbanSessionSource', () => {
           included_parent_ids: []
         },
         {
+          created_at: 10,
           id: 't_root',
           session_id: SID,
           status: 'todo',
-          title: 'Original Loop root',
+          title: 'Original Loop workflow',
           included_child_ids: [],
           included_parent_ids: ['t_child']
         }
@@ -396,13 +413,12 @@ describe('reconcileKanbanSessionSource', () => {
     })
 
     expect($kanbanStatusBySession.get()[SID]?.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus, item.currentTool])).toEqual([
-      ['kanban-task:t_root', 't_root', 'Original Loop root', 'pending', 'Loop']
+      ['kanban-task:t_root', 't_root', 'Original Loop workflow', 'pending', 'Loop']
     ])
   })
 
-  it('shows multiple self-anchored Loop roots from the same foreground session', () => {
+  it('shows multiple Loop workflows from the same foreground session', () => {
     reconcileKanbanSessionSource(SID, {
-      root_task_id: 't_new_root',
       session_id: SID,
       tenant: SID,
       tasks: [
@@ -413,7 +429,8 @@ describe('reconcileKanbanSessionSource', () => {
           included_child_ids: ['t_old_child'],
           included_parent_ids: ['t_old_child'],
           status: 'blocked',
-          title: 'Harden foreground handoff'
+          title: 'Harden foreground handoff',
+          workflow_id: 'wf_old'
         },
         {
           id: 't_old_child',
@@ -422,7 +439,8 @@ describe('reconcileKanbanSessionSource', () => {
           included_child_ids: ['t_old_root'],
           included_parent_ids: [],
           status: 'running',
-          title: 'Patch handoff child'
+          title: 'Patch handoff child',
+          workflow_id: 'wf_old'
         },
         {
           id: 't_new_root',
@@ -431,7 +449,8 @@ describe('reconcileKanbanSessionSource', () => {
           included_child_ids: ['t_new_child'],
           included_parent_ids: ['t_new_child'],
           status: 'done',
-          title: 'Create explainer atlas'
+          title: 'Create explainer atlas',
+          workflow_id: 'wf_new'
         },
         {
           id: 't_new_child',
@@ -440,7 +459,8 @@ describe('reconcileKanbanSessionSource', () => {
           included_child_ids: ['t_new_root'],
           included_parent_ids: [],
           status: 'done',
-          title: 'Build atlas child'
+          title: 'Build atlas child',
+          workflow_id: 'wf_new'
         }
       ],
       workers: [
@@ -466,16 +486,16 @@ describe('reconcileKanbanSessionSource', () => {
 
     expect(groups.map(group => group.type)).toEqual(['todo', 'subagent'])
     expect(groups[0]!.items.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus, item.currentTool])).toEqual([
+      ['kanban-task:t_old_root', 't_old_root', 'Harden foreground handoff', 'in_progress', 'Loop'],
       ['kanban-task:t_new_root', 't_new_root', 'Create explainer atlas', 'completed', 'Loop']
     ])
     expect(groups[1]!.items.map(item => [item.id, item.kanbanTaskId])).toEqual([
       ['kanban-agent:t_old_root:1', 't_old_root'],
       ['kanban-agent:t_old_child:2', 't_old_child']
     ])
-    expect(items.map(item => item.id)).not.toContain('kanban-task:t_old_root')
   })
 
-  it('shows multiple delegate_task Loop roots from the same foreground session', () => {
+  it('shows multiple delegate_task Loop workflows from the same foreground session', () => {
     reconcileKanbanSessionSource(SID, {
       session_id: SID,
       tenant: SID,
@@ -494,30 +514,32 @@ describe('reconcileKanbanSessionSource', () => {
     ])
   })
 
-  it('does not promote a parented delegated Loop task as an independent root', () => {
+  it('rolls delegated tasks with the same workflow id into one summary', () => {
     reconcileKanbanSessionSource(SID, {
       session_id: SID,
       tenant: SID,
       tasks: [
         {
           ...delegatedLoopTask('t_child_delegate', 10, 'Delegated child'),
-          included_parent_ids: ['t_root_delegate']
+          included_parent_ids: ['t_root_delegate'],
+          workflow_id: 'wf_delegate'
         },
         {
           ...delegatedLoopTask('t_root_delegate', 20, 'Delegated root'),
-          included_child_ids: ['t_child_delegate']
+          included_child_ids: ['t_child_delegate'],
+          workflow_id: 'wf_delegate'
         }
       ]
     })
 
     expect($kanbanStatusBySession.get()[SID]?.map(item => [item.id, item.kanbanTaskId, item.title])).toEqual([
-      ['kanban-task:t_root_delegate', 't_root_delegate', 'Delegated root']
+      ['kanban-task:t_child_delegate', 't_child_delegate', 'Delegated child']
     ])
   })
 
-  it('keeps a nested non-self sub-loop rolled up under the top-level composer root', () => {
+  it('rolls nested tasks up under their explicit workflow id', () => {
     reconcileKanbanSessionSource(SID, {
-      root_task_id: 't_nested_loop',
+      workflow_id: 'wf_outer',
       session_id: SID,
       tenant: SID,
       tasks: [
@@ -528,7 +550,7 @@ describe('reconcileKanbanSessionSource', () => {
           included_child_ids: ['t_nested_loop'],
           included_parent_ids: ['t_outer_child'],
           status: 'done',
-          title: 'Outer Loop root'
+          title: 'Outer Loop workflow'
         },
         {
           id: 't_outer_child',
@@ -561,15 +583,15 @@ describe('reconcileKanbanSessionSource', () => {
     })
 
     expect($kanbanStatusBySession.get()[SID]?.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus, item.currentTool])).toEqual([
-      ['kanban-task:t_outer_loop', 't_outer_loop', 'Outer Loop root', 'completed', 'Loop']
+      ['kanban-task:t_outer_loop', 't_outer_loop', 'Outer Loop workflow', 'completed', 'Loop']
     ])
   })
 
-  it('keeps explicit root_task_id as the composer root when a newer child has a lineage session', () => {
+  it('uses the task matching workflow_id as the workflow summary when present', () => {
     reconcileKanbanSessionSource(SID, {
       session_id: 'sess-current',
       lineage_session_ids: ['sess-root', 'sess-current'],
-      root_task_id: 't_root',
+      workflow_id: 't_root',
       tenant: 'tenant-a',
       tasks: [
         {
@@ -586,7 +608,7 @@ describe('reconcileKanbanSessionSource', () => {
           session_id: 'sess-root',
           created_at: 10,
           status: 'todo',
-          title: 'Original Loop root',
+          title: 'Original Loop workflow',
           included_child_ids: ['t_child'],
           included_parent_ids: []
         }
@@ -594,14 +616,15 @@ describe('reconcileKanbanSessionSource', () => {
     })
 
     expect($kanbanStatusBySession.get()[SID]?.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus, item.currentTool])).toEqual([
-      ['kanban-task:t_root', 't_root', 'Original Loop root', 'pending', 'Loop']
+      ['kanban-task:t_root', 't_root', 'Original Loop workflow', 'pending', 'Loop']
     ])
   })
 
-  it('falls back to the oldest lineage row instead of the newer child for composer roots', () => {
+  it('uses the oldest workflow member as its summary when no task id matches the workflow id', () => {
     reconcileKanbanSessionSource(SID, {
       session_id: SID,
       tenant: 'tenant-a',
+      workflow_id: 'wf_lineage',
       tasks: [
         {
           id: 't_child',
@@ -617,7 +640,7 @@ describe('reconcileKanbanSessionSource', () => {
           session_id: SID,
           created_at: 10,
           status: 'todo',
-          title: 'Original Loop root',
+          title: 'Original Loop workflow',
           included_child_ids: ['t_child'],
           included_parent_ids: []
         }
@@ -625,7 +648,7 @@ describe('reconcileKanbanSessionSource', () => {
     })
 
     expect($kanbanStatusBySession.get()[SID]?.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus, item.currentTool])).toEqual([
-      ['kanban-task:t_root', 't_root', 'Original Loop root', 'pending', 'Loop']
+      ['kanban-task:t_root', 't_root', 'Original Loop workflow', 'pending', 'Loop']
     ])
   })
 
@@ -633,7 +656,7 @@ describe('reconcileKanbanSessionSource', () => {
     reconcileKanbanSessionSourceForComposer({
       activeSessionId: 'runtime-tip',
       source: {
-        tasks: [{ id: 't_root', status: 'done', title: 'Root task', included_parent_ids: [], included_child_ids: [] }]
+        tasks: [{ id: 't_root', status: 'done', title: 'Workflow task', included_parent_ids: [], included_child_ids: [] }]
       },
       sourceSessionId: 'compression-root'
     })
@@ -688,6 +711,7 @@ describe('reconcileKanbanSessionSource', () => {
 
   it('lets a live loopagent task row override a stale session-source task row', () => {
     reconcileKanbanSessionSource('runtime-tip', {
+      workflow_id: 'wf_loop',
       tasks: [{ id: 't_root', status: 'ready', title: 'Snapshot title', included_parent_ids: [], included_child_ids: [] }]
     })
 
@@ -695,11 +719,11 @@ describe('reconcileKanbanSessionSource', () => {
       ['runtime-tip'],
       {
         event: 'loopagent.task.upsert',
-        is_root_task: true,
         revision: 3,
         task_id: 't_root',
         task_status: 'running',
-        task_title: 'Live title'
+        task_title: 'Live title',
+        workflow_id: 'wf_loop'
       },
       'loopagent.task.upsert'
     )
@@ -709,8 +733,9 @@ describe('reconcileKanbanSessionSource', () => {
     ).toEqual([['kanban-task:t_root', 'Live title', 'in_progress', 'Loop']])
   })
 
-  it('lets a live self-root worker override both live and snapshot task rows', () => {
+  it('merges a live workflow task and worker over the snapshot row', () => {
     reconcileKanbanSessionSource('runtime-tip', {
+      workflow_id: 'wf_loop',
       tasks: [{ id: 't_root', status: 'running', title: 'Snapshot self-root', included_parent_ids: [], included_child_ids: [] }]
     })
 
@@ -718,11 +743,11 @@ describe('reconcileKanbanSessionSource', () => {
       ['runtime-tip'],
       {
         event: 'loopagent.task.upsert',
-        is_root_task: true,
         revision: 3,
         task_id: 't_root',
         task_status: 'running',
-        task_title: 'Live self-root'
+        task_title: 'Live workflow',
+        workflow_id: 'wf_loop'
       },
       'loopagent.task.upsert'
     )
@@ -735,7 +760,8 @@ describe('reconcileKanbanSessionSource', () => {
         run_id: 42,
         run_status: 'running',
         task_id: 't_root',
-        task_title: 'Live self-root',
+        task_title: 'Live workflow',
+        workflow_id: 'wf_loop',
         worker_session_id: 'worker-session-root'
       },
       'loopagent.worker.upsert'
@@ -744,8 +770,103 @@ describe('reconcileKanbanSessionSource', () => {
     expect(
       $statusItemsBySession.get()['runtime-tip']?.map(item => [item.id, item.type, item.title, item.sessionId, item.profile, item.currentTool])
     ).toEqual([
-      ['kanban-task:t_root', 'todo', 'Live self-root', undefined, undefined, 'Loop'],
-      ['kanban-agent:t_root:42', 'subagent', 'Live self-root', 'worker-session-root', 'default', 'Read File']
+      ['kanban-task:t_root', 'todo', 'Live workflow', undefined, undefined, 'Loop'],
+      ['kanban-agent:t_root:42', 'subagent', 'Live workflow', 'worker-session-root', 'default', 'Read File']
     ])
+  })
+
+  it('aggregates ordinary live task activities by workflow and keeps workers underneath', () => {
+    upsertLoopagent(
+      ['runtime-tip'],
+      {
+        event: 'loopagent.task.upsert',
+        revision: 1,
+        task_id: 't_build',
+        task_status: 'running',
+        task_title: 'Build implementation',
+        workflow_id: 'wf_dynamic'
+      },
+      'loopagent.task.upsert'
+    )
+    upsertLoopagent(
+      ['runtime-tip'],
+      {
+        event: 'loopagent.task.upsert',
+        revision: 2,
+        task_id: 't_review',
+        task_status: 'blocked',
+        task_title: 'Review implementation',
+        workflow_id: 'wf_dynamic'
+      },
+      'loopagent.task.upsert'
+    )
+    upsertLoopagent(
+      ['runtime-tip'],
+      {
+        event: 'loopagent.worker.upsert',
+        profile: 'reviewer-qa',
+        run_id: 9,
+        run_status: 'running',
+        task_id: 't_review',
+        task_status: 'blocked',
+        task_title: 'Review implementation',
+        workflow_id: 'wf_dynamic',
+        worker_session_id: 'worker-review'
+      },
+      'loopagent.worker.upsert'
+    )
+
+    expect(
+      $statusItemsBySession.get()['runtime-tip']?.map(item => [
+        item.id,
+        item.type,
+        item.kanbanWorkflowId,
+        item.kanbanTaskId,
+        item.state
+      ])
+    ).toEqual([
+      ['kanban-workflow:wf_dynamic', 'todo', 'wf_dynamic', 't_build', 'failed'],
+      ['kanban-agent:t_review:9', 'subagent', undefined, 't_review', 'failed']
+    ])
+  })
+
+  it('updates one live workflow summary with dynamic descendant progress', () => {
+    upsertLoopagent(
+      ['runtime-tip'],
+      {
+        event: 'loopagent.task.upsert',
+        revision: 1,
+        task_id: 't_build',
+        task_status: 'done',
+        task_title: 'Build implementation',
+        workflow_id: 'wf_dynamic'
+      },
+      'loopagent.task.upsert'
+    )
+
+    expect(
+      $statusItemsBySession
+        .get()['runtime-tip']
+        ?.map(item => [item.id, item.kanbanWorkflowId, item.taskProgress])
+    ).toEqual([['kanban-workflow:wf_dynamic', 'wf_dynamic', { completed: 1, total: 1 }]])
+
+    upsertLoopagent(
+      ['runtime-tip'],
+      {
+        event: 'loopagent.task.upsert',
+        revision: 2,
+        task_id: 't_review',
+        task_status: 'running',
+        task_title: 'Review implementation',
+        workflow_id: 'wf_dynamic'
+      },
+      'loopagent.task.upsert'
+    )
+
+    expect(
+      $statusItemsBySession
+        .get()['runtime-tip']
+        ?.map(item => [item.id, item.kanbanWorkflowId, item.taskProgress])
+    ).toEqual([['kanban-workflow:wf_dynamic', 'wf_dynamic', { completed: 1, total: 2 }]])
   })
 })

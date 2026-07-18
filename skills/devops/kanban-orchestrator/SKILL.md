@@ -1,6 +1,6 @@
 ---
 name: kanban-orchestrator
-description: Decomposition playbook + anti-temptation rules for an orchestrator profile routing work through Kanban. The "don't do the work yourself" rule and the basic lifecycle are auto-injected into every kanban worker's system prompt; this skill is the deeper playbook when you're specifically playing the orchestrator role.
+description: Decomposition playbook and anti-temptation rules for an unscoped foreground/orchestrator profile routing work through Kanban. Worker lifecycle guidance is injected separately; this is the deeper routing playbook.
 version: 3.0.0
 platforms: [linux, macos, windows]
 environments: [kanban]
@@ -12,7 +12,11 @@ metadata:
 
 # Kanban Orchestrator — Decomposition Playbook
 
-> The **core worker lifecycle** (including the `kanban_create` fan-out pattern and the "decompose, don't execute" rule) is auto-injected into every kanban process via the `KANBAN_GUIDANCE` system-prompt block. This skill is the deeper playbook when you're an orchestrator profile whose whole job is routing.
+> The **core lifecycle** (workers communicate with `kanban_comment`, cross a
+> completion/genuine-block boundary, and foreground owns `kanban_create`) is
+> auto-injected via the worker `KANBAN_GUIDANCE` and foreground
+> `KANBAN_FOREGROUND_GUIDANCE` system-prompt blocks. This skill is
+> the deeper playbook for an orchestrator profile whose whole job is routing.
 
 ## Profiles are user-configured — not a fixed roster
 
@@ -119,23 +123,12 @@ t4 = kanban_create(
 
 If the task graph has dependencies, create the parent cards first, capture their returned ids, and include those ids in the child card's `parents` list during the child `kanban_create` call. Avoid creating all cards in parallel and linking them afterward; that creates a window where the dispatcher can claim a child before its inputs exist.
 
-### Step 4 — Complete your own task
+### Step 4 — Let the assigned workers execute
 
-If you were spawned as a task yourself (e.g. a planner profile was assigned `T0: "investigate Postgres migration"`), mark it done with a summary of what you created:
-
-```python
-kanban_complete(
-    summary="decomposed into T1-T4: 2 research lanes in parallel, 1 synthesis on their outputs, 1 prose draft on the recommendation",
-    metadata={
-        "task_graph": {
-            "T1": {"assignee": "<profile-A>", "parents": []},
-            "T2": {"assignee": "<profile-A>", "parents": []},
-            "T3": {"assignee": "<profile-B>", "parents": ["T1", "T2"]},
-            "T4": {"assignee": "<profile-C>", "parents": ["T3"]},
-        },
-    },
-)
-```
+Do not claim one of the tasks you just created or implement it in the
+foreground. The dispatcher runs the assigned profiles. When their completion,
+genuine-block, or give-up boundaries return, inspect each changed task and
+decide whether to accept it or commit another ordinary follow-up.
 
 ### Step 5 — Report back to the user
 
@@ -213,4 +206,8 @@ When a worker profile keeps crashing, hallucinating, or getting blocked by its o
 2. **Reassign** (or `hermes kanban reassign <task_id> <new-profile> --reclaim`) — switch the task to a different profile (one that exists on this setup) and let the dispatcher pick it up with a fresh worker.
 3. **Change profile model** — the dashboard prints a copy-paste hint for `hermes -p <profile> model` since profile config lives on disk; edit it in a terminal, then Reclaim to retry with the new model.
 
-Hallucination warnings appear on tasks where a worker's `kanban_complete(created_cards=[...])` claim included card ids that don't exist or weren't created by the worker's profile (the gate blocks the completion), or where the free-form summary references `t_<hex>` ids that don't resolve (advisory prose scan, non-blocking). Both produce audit events that persist even after recovery actions — the trail stays for debugging.
+Hallucination warnings appear when a worker's free-form summary references
+`t_<hex>` ids that do not resolve. Workers do not create follow-up cards; they
+describe proposed review or follow-up work in `kanban_comment`, then complete
+or block. The foreground verifies the task and commits any real card with
+`kanban_create`, so a returned id is authoritative.

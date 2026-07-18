@@ -192,70 +192,6 @@ def _task_dict(
     return d
 
 
-_LOOP_HANDOFF_TASK_FIELDS = (
-    "id",
-    "root_task_id",
-    "task_id",
-    "run_id",
-    "handoff_kind",
-    "intent",
-    "target_actor",
-    "state",
-    "queue_state",
-    "attention",
-    "verification_state",
-    "verification_status",
-    "claimed_by",
-    "claimed_at",
-    "worker_profile",
-    "worker_session_id",
-    "summary",
-    "reason",
-    "payload",
-    "review_task_id",
-    "review_run_id",
-    "reviewer_session_id",
-    "decision_actor",
-    "decision_reason",
-    "resolution_action",
-    "resolution_summary",
-    "resolved_by",
-)
-
-
-def _compact_loop_handoff_for_task(row: dict[str, Any]) -> dict[str, Any]:
-    """Small task-attached handoff payload for Loop/desktop drawers."""
-    return {key: row.get(key) for key in _LOOP_HANDOFF_TASK_FIELDS if row.get(key) is not None}
-
-
-def _loop_handoffs_by_task(
-    conn: sqlite3.Connection,
-    task_ids: list[str],
-    *,
-    root_task_id: Optional[str] = None,
-    tenant: Optional[str] = None,
-) -> dict[str, list[dict[str, Any]]]:
-    """Return durable Loop handoffs keyed by the task they are attached to."""
-    if not task_ids:
-        return {}
-    task_id_set = set(task_ids)
-    kwargs: dict[str, Any] = {}
-    if root_task_id:
-        kwargs["root_task_id"] = root_task_id
-    if tenant:
-        kwargs["tenant"] = tenant
-    rows = kanban_db.list_loop_handoffs(conn, **kwargs)
-    grouped: dict[str, list[dict[str, Any]]] = {task_id: [] for task_id in task_ids}
-    for row in rows:
-        attached_task_id = str(row.get("task_id") or "")
-        review_task_id = str(row.get("review_task_id") or "")
-        for candidate in (attached_task_id, review_task_id):
-            if candidate in task_id_set:
-                grouped.setdefault(candidate, []).append(_compact_loop_handoff_for_task(row))
-                break
-    return {task_id: handoffs for task_id, handoffs in grouped.items() if handoffs}
-
-
 def _normalized_loop_intake_payload(payload: Any) -> Optional[dict[str, Any]]:
     if not isinstance(payload, dict):
         return None
@@ -426,22 +362,26 @@ def _task_dict_with_loop_intake(
 
 def _loop_planning_projection(
     conn: sqlite3.Connection,
-    root_task_id: Optional[str],
+    workflow_id: Optional[str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]], int]:
-    """Return lightweight planning nodes for a Loop root without task rows.
+    """Return lightweight planning nodes for one workflow without task rows.
 
     ``tasks`` / ``links`` stay reserved for real Kanban execution rows and
     formal prerequisites. These planning nodes are rendered by the Loop UI as
     graph/detail records only; they are not dispatchable queue items.
     """
-    if not root_task_id:
+    if not workflow_id:
         return [], [], 0
     try:
         from hermes_cli import loop_graph
 
-        graph = loop_graph.read_graph(conn, root_task_id, include_nodes=True)
+        graph = loop_graph.read_graph(conn, workflow_id, include_nodes=True)
     except Exception:
-        log.debug("loop planning projection failed for %s", root_task_id, exc_info=True)
+        log.debug(
+            "loop planning projection failed for workflow %s",
+            workflow_id,
+            exc_info=True,
+        )
         return [], [], 0
 
     nodes: list[dict[str, Any]] = []
@@ -459,8 +399,9 @@ def _loop_planning_projection(
             "title": node.get("title") or node_id,
             "body": node.get("body"),
             "status": node.get("status") or "scheduled",
-            "tenant": root_task_id,
-            "created_by": f"loop_plan:{root_task_id}",
+            "workflow_id": workflow_id,
+            "tenant": workflow_id,
+            "created_by": "workflow_plan",
             "is_planning_node": True,
             "active": bool(node.get("active")),
             "frontier": bool(node.get("frontier")),
@@ -477,7 +418,11 @@ def _loop_planning_projection(
         }
         nodes.append(item)
         for parent_id in parents:
-            links.append({"parent_id": parent_id, "child_id": node_id})
+            links.append({
+                "parent_id": parent_id,
+                "child_id": node_id,
+                "workflow_id": workflow_id,
+            })
     return nodes, links, int(graph.get("graph_revision") or 0)
 
 
@@ -518,12 +463,27 @@ def _activate_planned_loop(
             "reason": f"Loop task {task_id} must be triaged before it can be submitted.",
         }
 
+    task = kanban_db.get_task(conn, task_id)
+    if task is None:
+        return {
+            "ok": False,
+            "task_id": task_id,
+            "activated_ids": [],
+            "reason": "unknown task id",
+        }
+    workflow_id = str(task.workflow_id or "").strip()
+    if not workflow_id:
+        return {
+            "ok": False,
+            "task_id": task_id,
+            "activated_ids": [],
+            "reason": f"task {task_id} has no workflow membership",
+        }
     rows = conn.execute(
-        "SELECT id, status FROM tasks WHERE id = ? OR created_by = ? ORDER BY created_at ASC, id ASC",
-        (task_id, f"loop:{task_id}"),
+        "SELECT id, status FROM tasks WHERE workflow_id = ? "
+        "ORDER BY created_at ASC, id ASC",
+        (workflow_id,),
     ).fetchall()
-    if not any(str(row["id"]) == task_id for row in rows):
-        return {"ok": False, "task_id": task_id, "activated_ids": [], "reason": "unknown task id"}
 
     task_ids = list(dict.fromkeys(str(row["id"]) for row in rows))
     scheduled_ids = [str(row["id"]) for row in rows if row["status"] == "scheduled"]
@@ -539,7 +499,7 @@ def _activate_planned_loop(
                     conn,
                     activated_id,
                     "loop_plan_activated",
-                    {"root_task_id": task_id, "author": author},
+                    {"workflow_id": workflow_id, "author": author},
                 )
         kanban_db._append_event(
             conn,
@@ -823,6 +783,9 @@ def _session_compression_lineage(session_id: Optional[str]) -> list[str]:
 _SESSION_SOURCE_LOOP_TOOL_NAMES = {
     "loop_block",
     "loop_create",
+    # Compatibility-only: old session transcripts can still contain this
+    # retired tool result. Keep parsing its loop_item_id so legacy tasks remain
+    # discoverable from their originating session.
     "loop_request_review",
     "loop_status",
     "loop_update",
@@ -1103,54 +1066,6 @@ def _latest_event_id_for_tasks(
     return int(row["m"] if row else 0)
 
 
-def _session_source_root_task_id(
-    conn: sqlite3.Connection,
-    tasks: list[kanban_db.Task],
-    included_links: list[dict[str, str]],
-) -> Optional[str]:
-    """Infer the real draft root row for a flat session-source payload.
-
-    Decomposition intentionally rewrites the original triage task into a
-    dependency-gated closure row by linking children as parents of the root.
-    In that state topological order starts with a child, and parent absence no
-    longer identifies the root. The decomposed root's own event is the durable
-    source of truth; parentless/single-row fallbacks only cover pre-decompose
-    draft roots and legacy payloads.
-    """
-    if not tasks:
-        return None
-
-    task_ids = [task.id for task in tasks]
-    placeholders = ",".join("?" for _ in task_ids)
-    row = conn.execute(
-        f"""
-        SELECT task_id
-        FROM task_events
-        WHERE task_id IN ({placeholders})
-          AND kind = 'decomposed'
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1
-        """,
-        tuple(task_ids),
-    ).fetchone()
-    if row and row["task_id"]:
-        return str(row["task_id"])
-
-    for task in tasks:
-        if task.created_by == f"loop:{task.id}":
-            return task.id
-
-    parent_counts = {task.id: 0 for task in tasks}
-    for link in included_links:
-        child_id = link.get("child_id")
-        if child_id in parent_counts:
-            parent_counts[child_id] += 1
-
-    parentless = [task.id for task in tasks if parent_counts.get(task.id, 0) == 0]
-    if len(parentless) == 1:
-        return parentless[0]
-
-    return tasks[0].id if len(tasks) == 1 else None
 
 
 def _preview_text(value: Any, *, max_chars: int = 200) -> Optional[str]:
@@ -1454,14 +1369,24 @@ def get_session_source(
             kanban_db.active_decomposition_child_counts(conn, task_ids)
         )
         loop_node_metadata = _loop_node_metadata_for_tasks(conn, task_ids)
-        root_task_id = _session_source_root_task_id(conn, tasks, included_links)
-        planning_nodes, planning_links, planning_revision = _loop_planning_projection(conn, root_task_id)
-        source_revision = max(source_revision, planning_revision)
-        loop_handoffs = _loop_handoffs_by_task(
-            conn,
-            task_ids,
-            tenant=explicit_tenant or (inferred_tenants[0] if len(inferred_tenants) == 1 else None),
+        workflow_ids = list(
+            dict.fromkeys(
+                str(task.workflow_id).strip()
+                for task in tasks
+                if task.workflow_id and str(task.workflow_id).strip()
+            )
         )
+        planning_nodes: list[dict[str, Any]] = []
+        planning_links: list[dict[str, str]] = []
+        planning_revision = 0
+        for workflow_id in workflow_ids:
+            workflow_nodes, workflow_links, workflow_revision = (
+                _loop_planning_projection(conn, workflow_id)
+            )
+            planning_nodes.extend(workflow_nodes)
+            planning_links.extend(workflow_links)
+            planning_revision = max(planning_revision, workflow_revision)
+        source_revision = max(source_revision, planning_revision)
         ordered_tasks = _topologically_order_tasks(tasks, included_links)
         payload_tasks: list[dict[str, Any]] = []
         for task in ordered_tasks:
@@ -1476,8 +1401,6 @@ def get_session_source(
                 item["active_decomposition_child_count"] = active_decomposition_child_count
             if task.id in loop_node_metadata:
                 item.update(loop_node_metadata[task.id])
-            if task.id in loop_handoffs:
-                item["loop_handoffs"] = loop_handoffs[task.id]
             item["is_container"] = False
             item["links"] = task_links
             item["included_parent_ids"] = [pid for pid in task_links["parents"] if pid in task_id_set]
@@ -1500,8 +1423,10 @@ def get_session_source(
             "board": selected_board,
             "session_id": (session_id or os.environ.get("HERMES_SESSION_ID") or "").strip(),
             "lineage_session_ids": lineage_session_ids,
-            "root_task_id": root_task_id,
-            "tenant": explicit_tenant or (inferred_tenants[0] if len(inferred_tenants) == 1 else None),
+            "workflow_id": workflow_ids[0] if len(workflow_ids) == 1 else None,
+            "workflow_ids": workflow_ids,
+            "tenant": explicit_tenant
+            or (inferred_tenants[0] if len(inferred_tenants) == 1 else None),
             "tenants": tenant_filters,
             "include_archived": include_archived,
             "tasks": payload_tasks,
@@ -1703,13 +1628,6 @@ def get_task(
         # a second round-trip. Cards on /board carry a 200-char preview.
         full_summary = kanban_db.latest_summary(conn, task_id)
         task_d = _task_dict_with_loop_intake(conn, task, latest_summary=full_summary)
-        task_loop_handoffs = _loop_handoffs_by_task(
-            conn,
-            [task_id],
-            tenant=task.tenant,
-        ).get(task_id)
-        if task_loop_handoffs:
-            task_d["loop_handoffs"] = task_loop_handoffs
         latest_runs = _latest_runs_for_tasks(conn, [task_id])
         worker_activity = _worker_activity_for_tasks(conn, [task_id], latest_runs, board=board).get(task_id)
         if worker_activity:
@@ -1768,6 +1686,7 @@ class CreateTaskBody(BaseModel):
     title: str
     body: Optional[str] = None
     assignee: Optional[str] = None
+    workflow_id: Optional[str] = None
     tenant: Optional[str] = None
     session_id: Optional[str] = None
     priority: int = 0
@@ -1805,6 +1724,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             goal_mode=payload.goal_mode,
             goal_max_turns=payload.goal_max_turns,
             session_id=payload.session_id,
+            workflow_id=payload.workflow_id,
         )
         task = kanban_db.get_task(conn, task_id)
         body: dict[str, Any] = {"task": _task_dict(task) if task else None}
@@ -1832,10 +1752,14 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
 class CreateLoopDraftBody(BaseModel):
     title: Optional[str] = None
     body: Optional[str] = None
+    workflow_id: Optional[str] = None
+    # COMPAT(workflow-id-cutover): old Desktop builds send the former root
+    # task id. It is resolved through tasks.workflow_id and never restores
+    # root/sink semantics.
+    root_task_id: Optional[str] = None
     assignee: Optional[str] = "orchestrator"
     tenant: Optional[str] = None
     session_id: Optional[str] = None
-    root_task_id: Optional[str] = None
     parents: list[str] = Field(default_factory=list)
     child_ids: list[str] = Field(default_factory=list)
     priority: int = 0
@@ -1855,28 +1779,115 @@ def _draft_title(value: Optional[str]) -> str:
     return title or "Loop draft"
 
 
-def _create_loop_draft_root(
+def _resolve_workflow_request(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: Optional[str] = None,
+    root_task_id: Optional[str] = None,
+    required: bool = False,
+) -> Optional[str]:
+    """Resolve a canonical workflow id and its temporary root-task alias."""
+
+    canonical = str(workflow_id or "").strip() or None
+    legacy = str(root_task_id or "").strip() or None
+    legacy_workflow_id: Optional[str] = None
+    if legacy:
+        legacy_task = kanban_db.get_task(conn, legacy)
+        if legacy_task is not None and legacy_task.workflow_id:
+            legacy_workflow_id = str(legacy_task.workflow_id)
+        elif kanban_db.get_workflow(conn, legacy) is not None:
+            # Migrated legacy workflow ids can equal their former root id.
+            legacy_workflow_id = legacy
+        else:
+            raise ValueError(
+                f"unknown workflow or deprecated root_task_id alias: {legacy}"
+            )
+    if canonical and legacy_workflow_id and canonical != legacy_workflow_id:
+        raise ValueError(
+            "workflow_id and deprecated root_task_id alias resolve to "
+            "different workflows"
+        )
+    resolved = canonical or legacy_workflow_id
+    if required and not resolved:
+        raise ValueError("workflow_id is required")
+    if resolved and kanban_db.get_workflow(conn, resolved) is None:
+        raise ValueError(f"unknown workflow: {resolved}")
+    return resolved
+
+
+def _require_workflow(
+    conn: sqlite3.Connection,
+    workflow_id: str,
+) -> str:
+    """Resolve a workflow-first route, accepting a legacy task id in its slot."""
+
+    try:
+        resolved = _resolve_workflow_request(
+            conn,
+            workflow_id=workflow_id,
+            root_task_id=workflow_id,
+            required=True,
+        )
+    except ValueError:
+        # Supplying the same value as both fields only works for workflow ids;
+        # retry it strictly as the legacy alias for old `/.../{root_task_id}`
+        # callers.
+        try:
+            resolved = _resolve_workflow_request(
+                conn,
+                root_task_id=workflow_id,
+                required=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+    assert resolved is not None
+    return resolved
+
+
+def _workflow_relation_tasks(
+    conn: sqlite3.Connection,
+    task_ids: list[str],
+) -> dict[str, kanban_db.Task]:
+    tasks: dict[str, kanban_db.Task] = {}
+    for task_id in dict.fromkeys(task_ids):
+        task = kanban_db.get_task(conn, task_id)
+        if task is None:
+            raise ValueError(f"unknown task: {task_id}")
+        tasks[task_id] = task
+    return tasks
+
+
+def _create_loop_draft_node(
     conn: sqlite3.Connection,
     payload: CreateLoopDraftBody,
     *,
     board: Optional[str],
-) -> str:
-    """Create one live, title-only Loop node with its initial edges atomically."""
+) -> dict[str, Any]:
+    """Create one ordinary workflow member through the canonical graph API."""
+
     title = _draft_title(payload.title)
-    session_id = (payload.session_id or os.environ.get("HERMES_SESSION_ID") or "").strip() or None
+    session_id = (
+        payload.session_id or os.environ.get("HERMES_SESSION_ID") or ""
+    ).strip() or None
     tenant = (payload.tenant or "").strip() or None
     needs_intake = not (payload.body or "").strip()
-    root_task_id = (payload.root_task_id or "").strip() or None
-    default_idempotency = f"loop-draft:{session_id}" if session_id and root_task_id is None else ""
-    idempotency_key = (payload.idempotency_key or default_idempotency).strip() or None
-    parents = list(dict.fromkeys(str(task_id).strip() for task_id in payload.parents if str(task_id).strip()))
-    child_ids = list(dict.fromkeys(str(task_id).strip() for task_id in payload.child_ids if str(task_id).strip()))
-    if root_task_id and root_task_id in parents:
-        raise ValueError(
-            "the canonical Loop root is an aggregate sink and cannot be a prerequisite"
+    workflow_id = _resolve_workflow_request(
+        conn,
+        workflow_id=payload.workflow_id,
+        root_task_id=payload.root_task_id,
+    )
+    parents = list(
+        dict.fromkeys(
+            str(task_id).strip() for task_id in payload.parents if str(task_id).strip()
         )
-    if root_task_id and not child_ids:
-        child_ids = [root_task_id]
+    )
+    child_ids = list(
+        dict.fromkeys(
+            str(task_id).strip()
+            for task_id in payload.child_ids
+            if str(task_id).strip()
+        )
+    )
 
     if payload.workspace_kind not in kanban_db.VALID_WORKSPACE_KINDS:
         raise ValueError(
@@ -1884,194 +1895,100 @@ def _create_loop_draft_root(
             f"got {payload.workspace_kind!r}"
         )
 
-    if idempotency_key:
-        row = conn.execute(
-            "SELECT id, created_by FROM tasks WHERE idempotency_key = ? "
-            "AND status != 'archived' "
-            "ORDER BY created_at DESC LIMIT 1",
-            (idempotency_key,),
-        ).fetchone()
-        if row:
-            task_id = str(row["id"])
-            marker = f"loop:{root_task_id or task_id}"
-            with kanban_db.write_txn(conn):
-                if row["created_by"] != marker:
-                    conn.execute("UPDATE tasks SET created_by = ? WHERE id = ?", (marker, task_id))
-                    kanban_db._append_event(conn, task_id, "edited", {"created_by": marker, "loop_root": True})
-                if root_task_id is None and needs_intake and not _loop_intake_state_for_task(conn, task_id):
-                    kanban_db._append_event(
-                        conn, task_id, _LOOP_INTAKE_EVENT_KIND, dict(_LOOP_INTAKE_DRAFT_PAYLOAD)
-                    )
-            return task_id
-
     if payload.workspace_path is None and payload.workspace_kind in {"dir", "worktree"}:
-        board_meta = kanban_db.read_board_metadata(board if board else kanban_db.get_current_board())
+        board_meta = kanban_db.read_board_metadata(
+            board if board else kanban_db.get_current_board()
+        )
         board_default = board_meta.get("default_workdir")
         if board_default:
             payload.workspace_path = str(board_default)
 
-    now = int(time.time())
-    for attempt in range(2):
-        task_id = kanban_db._new_task_id()
-        try:
-            with kanban_db.write_txn(conn):
-                relation_ids = [*parents, *child_ids]
-                missing = kanban_db._find_missing_parents(conn, relation_ids)
-                if missing:
-                    raise ValueError(f"unknown task(s): {', '.join(missing)}")
-                if root_task_id:
-                    root = kanban_db.get_task(conn, root_task_id)
-                    if root is None:
-                        raise ValueError(f"unknown Loop root: {root_task_id}")
-                    allowed = f"loop:{root_task_id}"
-                    if root.created_by != allowed:
-                        raise ValueError(
-                            f"task {root_task_id} is not a canonical Loop root"
-                        )
-                    for relation_id in relation_ids:
-                        relation = kanban_db.get_task(conn, relation_id)
-                        if relation and relation.id != root_task_id and relation.created_by != allowed:
-                            raise ValueError(
-                                f"task {relation_id} is not part of Loop root {root_task_id}"
-                            )
+    relation_tasks = _workflow_relation_tasks(conn, [*parents, *child_ids])
+    relation_workflows = {
+        str(task.workflow_id).strip()
+        for task in relation_tasks.values()
+        if task.workflow_id and str(task.workflow_id).strip()
+    }
+    unowned = [
+        task_id
+        for task_id, task in relation_tasks.items()
+        if not task.workflow_id or not str(task.workflow_id).strip()
+    ]
+    if unowned:
+        raise ValueError(
+            "Loop relations require workflow members: " + ", ".join(unowned)
+        )
+    if len(relation_workflows) > 1:
+        raise ValueError(
+            "Loop relations belong to different workflows: "
+            + ", ".join(sorted(relation_workflows))
+        )
+    if relation_workflows:
+        relation_workflow_id = next(iter(relation_workflows))
+        if workflow_id and workflow_id != relation_workflow_id:
+            raise ValueError(f"workflow {workflow_id} does not own every related task")
+        workflow_id = relation_workflow_id
 
-                is_intake_root = root_task_id is None
-                effective_assignee = payload.assignee if is_intake_root else None
-                unfinished_parent = bool(parents) and conn.execute(
-                    "SELECT 1 FROM tasks WHERE id IN ("
-                    + ",".join("?" for _ in parents)
-                    + ") AND status NOT IN ('done', 'archived') LIMIT 1",
-                    tuple(parents),
-                ).fetchone() is not None
-                initial_status = "scheduled" if is_intake_root else ("todo" if unfinished_parent else "triage")
-                needs_specification = 0 if is_intake_root else 1
-                conn.execute(
-                    """
-                    INSERT INTO tasks (
-                        id, title, body, assignee, status, priority,
-                        created_by, created_at, workspace_kind, workspace_path,
-                        branch_name, tenant, idempotency_key, max_runtime_seconds,
-                        skills, max_retries, goal_mode, goal_max_turns, session_id,
-                        needs_specification
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL, 0, NULL, ?, ?)
-                    """,
-                    (
-                        task_id,
-                        title,
-                        payload.body,
-                        effective_assignee,
-                        initial_status,
-                        payload.priority,
-                        f"loop:{root_task_id or task_id}",
-                        now,
-                        payload.workspace_kind,
-                        payload.workspace_path,
-                        tenant,
-                        idempotency_key,
-                        session_id,
-                        needs_specification,
-                    ),
-                )
-                for parent_id in parents:
-                    conn.execute(
-                        "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
-                        (parent_id, task_id),
-                    )
-                    kanban_db._append_event(
-                        conn, task_id, "linked", {"parent": parent_id, "child": task_id}
-                    )
-                for child_id in child_ids:
-                    child = kanban_db.get_task(conn, child_id)
-                    if child is None:
-                        raise ValueError(f"unknown task: {child_id}")
-                    mutable_ready_root = (
-                        child_id == root_task_id
-                        and child.status == "ready"
-                        and child.assignee is None
-                    )
-                    active_compiled_shell = (
-                        kanban_db.task_has_active_decomposition_children(conn, child_id)
-                    )
-                    if (
-                        (
-                            child.status not in _LOOP_GRAPH_MUTABLE_STATUSES
-                            and not mutable_ready_root
-                        )
-                        or active_compiled_shell
-                    ):
-                        reason = (
-                            "decomposition children are still active"
-                            if active_compiled_shell
-                            else f"the task is {child.status}"
-                        )
-                        raise HTTPException(
-                            status_code=409,
-                            detail=(
-                                f"Loop dependencies for {child_id} are immutable because "
-                                f"{reason}; add a successor node instead"
-                            ),
-                        )
-                    if kanban_db._would_cycle(conn, task_id, child_id):
-                        raise ValueError(f"linking {task_id} -> {child_id} would create a cycle")
-                    conn.execute(
-                        "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
-                        (task_id, child_id),
-                    )
-                    if child_id == root_task_id:
-                        activated = conn.execute(
-                            "UPDATE tasks SET status = 'todo', assignee = NULL "
-                            "WHERE id = ? AND "
-                            "(status IN ('scheduled', 'ready', 'todo') OR "
-                            " (status = 'triage' AND needs_specification = 1))",
-                            (child_id,),
-                        ).rowcount
-                    else:
-                        activated = conn.execute(
-                            "UPDATE tasks SET status = 'todo' WHERE id = ? AND "
-                            "(status IN ('scheduled', 'ready') OR "
-                            " (status = 'triage' AND needs_specification = 1))",
-                            (child_id,),
-                        ).rowcount
-                    if activated and child_id == root_task_id and child.status == "scheduled":
-                        kanban_db._append_event(
-                            conn,
-                            child_id,
-                            "activated",
-                            {"reason": "live_loop_node_created"},
-                        )
-                    kanban_db._append_event(
-                        conn, child_id, "linked", {"parent": task_id, "child": child_id}
-                    )
-                kanban_db._append_event(
-                    conn,
-                    task_id,
-                    "created",
-                    {
-                        "assignee": effective_assignee,
-                        "status": initial_status,
-                        "parents": parents,
-                        "tenant": tenant,
-                        "loop_root": is_intake_root,
-                        "root_task_id": root_task_id or task_id,
-                        "needs_specification": bool(needs_specification),
-                    },
-                )
-                if is_intake_root and needs_intake:
-                    kanban_db._append_event(
-                        conn, task_id, _LOOP_INTAKE_EVENT_KIND, dict(_LOOP_INTAKE_DRAFT_PAYLOAD)
-                    )
-            return task_id
-        except sqlite3.IntegrityError:
-            if attempt == 1:
-                raise
-            continue
-    raise RuntimeError("unreachable")
+    child_status_guards = {
+        child_id: _loop_graph_allowed_child_statuses(conn, child_id)
+        for child_id in child_ids
+    }
+    creates_workflow = workflow_id is None
+    idempotency_scope = (
+        str(payload.idempotency_key or "").strip()
+        or f"dashboard-loop-draft:{uuid.uuid4().hex}"
+    )
+    result = kanban_db.create_loop_skeleton_graph(
+        conn,
+        nodes=[
+            {
+                "client_id": "draft",
+                "title": title,
+                "depends_on": parents,
+                "context": (payload.body or "").strip() or None,
+            }
+        ],
+        workflow_id=workflow_id,
+        session_id=session_id,
+        tenant=tenant,
+        workspace_kind=payload.workspace_kind,
+        workspace_path=payload.workspace_path,
+        board=board,
+        created_by="dashboard",
+        idempotency_scope=idempotency_scope,
+    )
+    task_id = str(result["items"][0]["task_id"])
+    workflow_id = str(result["workflow_id"])
+
+    for child_id in child_ids:
+        kanban_db.link_tasks(
+            conn,
+            task_id,
+            child_id,
+            allowed_child_statuses=child_status_guards[child_id],
+        )
+
+    if (
+        creates_workflow
+        and needs_intake
+        and not _loop_intake_state_for_task(conn, task_id)
+    ):
+        with kanban_db.write_txn(conn):
+            kanban_db._append_event(
+                conn,
+                task_id,
+                _LOOP_INTAKE_EVENT_KIND,
+                dict(_LOOP_INTAKE_DRAFT_PAYLOAD),
+            )
+    result["workflow_id"] = workflow_id
+    return result
 
 
 def _loop_draft_source_payload(
     conn: sqlite3.Connection,
     task: kanban_db.Task,
     *,
+    workflow_id: str,
     board: Optional[str],
 ) -> dict[str, Any]:
     task_item = _task_dict_with_loop_intake(conn, task)
@@ -2087,10 +2004,12 @@ def _loop_draft_source_payload(
         "external_links": [],
         "include_archived": False,
         "latest_event_id": latest_event_id,
+        "source_revision": latest_event_id,
         "lineage_session_ids": [session_id] if session_id else [],
         "links": [],
         "now": int(time.time()),
-        "root_task_id": task.id,
+        "workflow_id": workflow_id,
+        "workflow_ids": [workflow_id],
         "session_id": session_id,
         "tasks": [task_item],
         "tenant": tenant,
@@ -2104,7 +2023,9 @@ def create_loop_draft(payload: CreateLoopDraftBody, board: Optional[str] = Query
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        task_id = _create_loop_draft_root(conn, payload, board=board)
+        graph_result = _create_loop_draft_node(conn, payload, board=board)
+        task_id = str(graph_result["items"][0]["task_id"])
+        workflow_id = str(graph_result["workflow_id"])
         subscribed = False
         dispatch: Optional[dict[str, Any]] = None
         warnings: list[str] = []
@@ -2114,7 +2035,7 @@ def create_loop_draft(payload: CreateLoopDraftBody, board: Optional[str] = Query
             subscribed = maybe_auto_subscribe(conn, task_id)
         except Exception as exc:
             warnings.append(f"auto-subscribe failed: {type(exc).__name__}: {exc}")
-        if payload.root_task_id:
+        if payload.workflow_id or payload.root_task_id:
             try:
                 dispatch_result = kanban_db.dispatch_once(
                     conn,
@@ -2122,16 +2043,27 @@ def create_loop_draft(payload: CreateLoopDraftBody, board: Optional[str] = Query
                     max_spawn=1,
                 )
                 dispatch = {
-                    "spawned": [task for task, _assignee, _workspace in dispatch_result.spawned],
+                    "spawned": [
+                        task for task, _assignee, _workspace in dispatch_result.spawned
+                    ],
                 }
             except Exception as exc:
                 warnings.append(f"inline dispatch failed: {type(exc).__name__}: {exc}")
         task = kanban_db.get_task(conn, task_id)
         if task is None:
-            raise HTTPException(status_code=500, detail=f"draft task {task_id} was not persisted")
+            raise HTTPException(
+                status_code=500, detail=f"draft task {task_id} was not persisted"
+            )
         return {
+            "workflow_id": workflow_id,
             "task": _task_dict_with_loop_intake(conn, task),
-            "source": _loop_draft_source_payload(conn, task, board=board),
+            "source": _loop_draft_source_payload(
+                conn,
+                task,
+                workflow_id=workflow_id,
+                board=board,
+            ),
+            "graph": graph_result,
             "subscribed": subscribed,
             "dispatch": dispatch,
             "warnings": warnings,
@@ -2159,26 +2091,67 @@ class ArchiveLoopNodesBody(BaseModel):
 
 _LOOP_CANVAS_COORD_LIMIT = 1_000_000.0
 
+_LOOP_CANVAS_POSITIONS_SQL = """
+    CREATE TABLE IF NOT EXISTS loop_canvas_positions (
+        workflow_id TEXT NOT NULL,
+        task_id     TEXT NOT NULL,
+        x           REAL NOT NULL,
+        y           REAL NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        PRIMARY KEY (workflow_id, task_id)
+    )
+"""
+
 
 def _ensure_loop_canvas_positions_schema(conn: sqlite3.Connection) -> None:
-    """Create the dashboard-only Loop layout table on first use."""
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS loop_canvas_positions (
-            root_task_id TEXT NOT NULL,
-            task_id      TEXT NOT NULL,
-            x            REAL NOT NULL,
-            y            REAL NOT NULL,
-            updated_at   INTEGER NOT NULL,
-            PRIMARY KEY (root_task_id, task_id)
+    """Create or idempotently migrate workflow-owned canvas positions."""
+
+    columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(loop_canvas_positions)").fetchall()
+    }
+    if not columns:
+        conn.execute(_LOOP_CANVAS_POSITIONS_SQL)
+        return
+    if "workflow_id" in columns and "root_task_id" not in columns:
+        return
+    if "root_task_id" not in columns:
+        raise sqlite3.OperationalError(
+            "loop_canvas_positions has neither workflow_id nor legacy root_task_id"
         )
-        """
-    )
+
+    conn.execute("SAVEPOINT loop_canvas_workflow_migration")
+    try:
+        legacy_table = "loop_canvas_positions__legacy_root_owner"
+        conn.execute(f"ALTER TABLE loop_canvas_positions RENAME TO {legacy_table}")
+        conn.execute(_LOOP_CANVAS_POSITIONS_SQL)
+        owner_source = (
+            "COALESCE(l.workflow_id, t.workflow_id, w.id, l.root_task_id)"
+            if "workflow_id" in columns
+            else "COALESCE(t.workflow_id, w.id, l.root_task_id)"
+        )
+        conn.execute(
+            f"""
+            INSERT OR REPLACE INTO loop_canvas_positions (
+                workflow_id, task_id, x, y, updated_at
+            )
+            SELECT {owner_source}, l.task_id, l.x, l.y, l.updated_at
+            FROM {legacy_table} l
+            LEFT JOIN tasks t ON t.id = l.root_task_id
+            LEFT JOIN workflows w ON w.id = l.root_task_id
+            """
+        )
+        conn.execute(f"DROP TABLE {legacy_table}")
+        conn.execute("RELEASE SAVEPOINT loop_canvas_workflow_migration")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT loop_canvas_workflow_migration")
+        conn.execute("RELEASE SAVEPOINT loop_canvas_workflow_migration")
+        raise
 
 
 def _loop_canvas_positions_payload(
     conn: sqlite3.Connection,
-    root_task_id: str,
+    workflow_id: str,
     members: Optional[set[str]] = None,
 ) -> dict[str, Any]:
     rows = conn.execute(
@@ -2186,14 +2159,15 @@ def _loop_canvas_positions_payload(
         SELECT p.task_id, p.x, p.y, p.updated_at
         FROM loop_canvas_positions p
         JOIN tasks t ON t.id = p.task_id
-        WHERE p.root_task_id = ?
+        WHERE p.workflow_id = ?
+          AND t.workflow_id = p.workflow_id
           AND t.status != 'archived'
         ORDER BY p.task_id
         """,
-        (root_task_id,),
+        (workflow_id,),
     ).fetchall()
     return {
-        "root_task_id": root_task_id,
+        "workflow_id": workflow_id,
         "positions": [
             {
                 "task_id": row["task_id"],
@@ -2207,79 +2181,40 @@ def _loop_canvas_positions_payload(
     }
 
 
-def _require_loop_canvas_root(conn: sqlite3.Connection, root_task_id: str) -> kanban_db.Task:
-    root = kanban_db.get_task(conn, root_task_id)
-    if root is None:
-        raise HTTPException(status_code=404, detail=f"task {root_task_id} not found")
-    return root
-
-
-def _loop_canvas_task_ids(conn: sqlite3.Connection, root_task_id: str) -> set[str]:
-    """Return the root's undirected component plus its session peers."""
-    root = _require_loop_canvas_root(conn, root_task_id)
-    adjacency: dict[str, set[str]] = {}
-    for row in conn.execute("SELECT parent_id, child_id FROM task_links").fetchall():
-        adjacency.setdefault(row["parent_id"], set()).add(row["child_id"])
-        adjacency.setdefault(row["child_id"], set()).add(row["parent_id"])
-
-    members = {root_task_id}
-    pending = [root_task_id]
-    while pending:
-        for task_id in adjacency.get(pending.pop(), ()):
-            if task_id not in members:
-                members.add(task_id)
-                pending.append(task_id)
-
-    if root.session_id and root.session_id.strip():
-        members.update(
-            row["id"]
-            for row in conn.execute(
-                "SELECT id FROM tasks WHERE session_id = ?",
-                (root.session_id,),
-            ).fetchall()
-        )
-    return members
-
-
-def _loop_session_source_task_ids(conn: sqlite3.Connection, session_id: str) -> set[str]:
-    lineage_session_ids = _session_compression_lineage(session_id)
-    referenced_task_ids = _loop_tool_task_ids_for_sessions(lineage_session_ids)
-    rows, _, _ = _query_session_source_rows(
-        conn,
-        lineage_session_ids,
-        explicit_tenant=None,
-        include_archived=False,
-        referenced_task_ids=referenced_task_ids,
-    )
-    return {row["id"] for row in rows}
-
-
 def _require_loop_canvas_tasks(
     conn: sqlite3.Connection,
-    root_task_id: str,
+    workflow_id: str,
     task_ids: list[str],
     *,
     session_id: Optional[str] = None,
 ) -> set[str]:
-    source_session_id = (session_id or "").strip()
-    members = (
-        _loop_session_source_task_ids(conn, source_session_id)
-        if source_session_id
-        else _loop_canvas_task_ids(conn, root_task_id)
-    )
-    required = dict.fromkeys([root_task_id, *task_ids])
+    """Require immutable workflow membership; session scope is compatibility-only."""
+
+    if kanban_db.get_workflow(conn, workflow_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"workflow {workflow_id} not found",
+        )
+    members = {
+        str(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM tasks WHERE workflow_id = ?",
+            (workflow_id,),
+        ).fetchall()
+    }
+    required = dict.fromkeys(task_ids)
     outside = [task_id for task_id in required if task_id not in members]
     if outside:
         raise HTTPException(
             status_code=400,
-            detail=f"task(s) outside Loop canvas {root_task_id}: {', '.join(outside)}",
+            detail=(f"task(s) outside workflow {workflow_id}: " + ", ".join(outside)),
         )
     return members
 
 
-@router.get("/loop-canvas/{root_task_id}/positions")
+@router.get("/loop-canvas/{workflow_id}/positions")
 def get_loop_canvas_positions(
-    root_task_id: str,
+    workflow_id: str,
     board: Optional[str] = Query(None),
     session_id: Optional[str] = Query(None),
 ):
@@ -2287,22 +2222,30 @@ def get_loop_canvas_positions(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        members = _require_loop_canvas_tasks(conn, root_task_id, [], session_id=session_id)
+        workflow_id = _require_workflow(conn, workflow_id)
+        members = _require_loop_canvas_tasks(
+            conn,
+            workflow_id,
+            [],
+            session_id=session_id,
+        )
         _ensure_loop_canvas_positions_schema(conn)
-        return _loop_canvas_positions_payload(conn, root_task_id, members)
+        return _loop_canvas_positions_payload(conn, workflow_id, members)
     finally:
         conn.close()
 
 
-@router.post("/loop-canvas/{root_task_id}/archive-nodes")
+@router.post("/loop-canvas/{workflow_id}/archive-nodes")
 def archive_loop_nodes(
-    root_task_id: str,
+    workflow_id: str,
     payload: ArchiveLoopNodesBody,
     board: Optional[str] = Query(None),
 ):
     """Atomically archive pending Loop nodes with in-transaction state guards."""
     task_ids = list(
-        dict.fromkeys(str(task_id).strip() for task_id in payload.task_ids if str(task_id).strip())
+        dict.fromkeys(
+            str(task_id).strip() for task_id in payload.task_ids if str(task_id).strip()
+        )
     )
     if not task_ids:
         raise HTTPException(status_code=400, detail="task_ids is required")
@@ -2311,33 +2254,33 @@ def archive_loop_nodes(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
+        workflow_id = _require_workflow(conn, workflow_id)
         _require_loop_canvas_tasks(
             conn,
-            root_task_id,
+            workflow_id,
             task_ids,
             session_id=payload.session_id,
         )
-        revision = loop_graph.graph_revision(conn, root_task_id)
+        revision = loop_graph.graph_revision(conn, workflow_id)
         result = loop_graph.apply_patch(
             conn,
-            root_task_id,
+            workflow_id,
             expected_revision=revision,
             mutation_id=f"desktop-archive-{uuid.uuid4().hex}",
             operations=[
-                {"op": "archive_node", "task_id": task_id}
-                for task_id in task_ids
+                {"op": "archive_node", "task_id": task_id} for task_id in task_ids
             ],
         )
-        return result
+        return _canonical_loop_graph_payload(result)
     except loop_graph.LoopError as exc:
         raise HTTPException(status_code=409, detail=exc.message)
     finally:
         conn.close()
 
 
-@router.put("/loop-canvas/{root_task_id}/positions")
+@router.put("/loop-canvas/{workflow_id}/positions")
 def put_loop_canvas_positions(
-    root_task_id: str,
+    workflow_id: str,
     payload: PutLoopCanvasPositionsBody,
     board: Optional[str] = Query(None),
     session_id: Optional[str] = Query(None),
@@ -2346,7 +2289,7 @@ def put_loop_canvas_positions(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        _require_loop_canvas_root(conn, root_task_id)
+        workflow_id = _require_workflow(conn, workflow_id)
         _ensure_loop_canvas_positions_schema(conn)
 
         task_ids: list[str] = []
@@ -2354,12 +2297,21 @@ def put_loop_canvas_positions(
         for item in payload.positions:
             task_id = item.task_id.strip()
             if not task_id:
-                raise HTTPException(status_code=400, detail="position task_id is required")
+                raise HTTPException(
+                    status_code=400, detail="position task_id is required"
+                )
             if task_id in task_ids:
-                raise HTTPException(status_code=400, detail=f"duplicate position for task {task_id}")
+                raise HTTPException(
+                    status_code=400, detail=f"duplicate position for task {task_id}"
+                )
             if not math.isfinite(item.x) or not math.isfinite(item.y):
-                raise HTTPException(status_code=400, detail=f"position for {task_id} must be finite")
-            if abs(item.x) > _LOOP_CANVAS_COORD_LIMIT or abs(item.y) > _LOOP_CANVAS_COORD_LIMIT:
+                raise HTTPException(
+                    status_code=400, detail=f"position for {task_id} must be finite"
+                )
+            if (
+                abs(item.x) > _LOOP_CANVAS_COORD_LIMIT
+                or abs(item.y) > _LOOP_CANVAS_COORD_LIMIT
+            ):
                 raise HTTPException(
                     status_code=400,
                     detail=f"position for {task_id} exceeds the canvas coordinate limit",
@@ -2378,20 +2330,33 @@ def put_loop_canvas_positions(
             }
             missing = [task_id for task_id in task_ids if task_id not in existing]
             if missing:
-                raise HTTPException(status_code=400, detail=f"unknown task(s): {', '.join(missing)}")
+                raise HTTPException(
+                    status_code=400, detail=f"unknown task(s): {', '.join(missing)}"
+                )
 
-        members = _require_loop_canvas_tasks(conn, root_task_id, task_ids, session_id=session_id)
+        members = _require_loop_canvas_tasks(
+            conn,
+            workflow_id,
+            task_ids,
+            session_id=session_id,
+        )
 
         now = int(time.time())
         with kanban_db.write_txn(conn):
-            conn.execute("DELETE FROM loop_canvas_positions WHERE root_task_id = ?", (root_task_id,))
+            conn.execute(
+                "DELETE FROM loop_canvas_positions WHERE workflow_id = ?",
+                (workflow_id,),
+            )
             conn.executemany(
-                "INSERT INTO loop_canvas_positions (root_task_id, task_id, x, y, updated_at) "
+                "INSERT INTO loop_canvas_positions (workflow_id, task_id, x, y, updated_at) "
                 "VALUES (?, ?, ?, ?, ?)",
-                [(root_task_id, task_id, x, y, now) for task_id, x, y in coordinates],
+                [(workflow_id, task_id, x, y, now) for task_id, x, y in coordinates],
             )
 
-        return {"ok": True, **_loop_canvas_positions_payload(conn, root_task_id, members)}
+        return {
+            "ok": True,
+            **_loop_canvas_positions_payload(conn, workflow_id, members),
+        }
     finally:
         conn.close()
 
@@ -2402,9 +2367,35 @@ class LoopGraphPatchBody(BaseModel):
     operations: list[dict[str, Any]] = Field(default_factory=list)
 
 
-@router.get("/loop-graph/{root_task_id}")
+def _canonical_loop_graph_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Remove deprecated task-root and handoff projections from graph output."""
+
+    result = dict(payload)
+    result.pop("root_task_id", None)
+    result.pop("pending_handoffs", None)
+    nodes = result.get("nodes")
+    if isinstance(nodes, list):
+        canonical_nodes: list[Any] = []
+        for node in nodes:
+            if not isinstance(node, dict):
+                canonical_nodes.append(node)
+                continue
+            item = dict(node)
+            for key in (
+                "root_task_id",
+                "handoff",
+                "attention",
+                "verification_state",
+            ):
+                item.pop(key, None)
+            canonical_nodes.append(item)
+        result["nodes"] = canonical_nodes
+    return result
+
+
+@router.get("/loop-graph/{workflow_id}")
 def read_loop_graph(
-    root_task_id: str,
+    workflow_id: str,
     include_nodes: bool = Query(False),
     board: Optional[str] = Query(None),
 ):
@@ -2413,16 +2404,22 @@ def read_loop_graph(
 
     conn = _conn(board=board)
     try:
-        return graph.read_graph(conn, root_task_id, include_nodes=include_nodes)
+        workflow_id = _require_workflow(conn, workflow_id)
+        return _canonical_loop_graph_payload(
+            graph.read_graph(conn, workflow_id, include_nodes=include_nodes)
+        )
     except graph.LoopError as e:
-        raise HTTPException(status_code=400, detail=graph.error_response(e, conn, root_task_id))
+        raise HTTPException(
+            status_code=400,
+            detail=graph.error_response(e, conn, workflow_id),
+        )
     finally:
         conn.close()
 
 
-@router.patch("/loop-graph/{root_task_id}")
+@router.patch("/loop-graph/{workflow_id}")
 def patch_loop_graph(
-    root_task_id: str,
+    workflow_id: str,
     request: LoopGraphPatchBody,
     board: Optional[str] = Query(None),
 ):
@@ -2431,15 +2428,21 @@ def patch_loop_graph(
 
     conn = _conn(board=board)
     try:
-        return graph.apply_patch(
-            conn,
-            root_task_id,
-            expected_revision=request.expected_revision,
-            mutation_id=request.mutation_id,
-            operations=request.operations,
+        workflow_id = _require_workflow(conn, workflow_id)
+        return _canonical_loop_graph_payload(
+            graph.apply_patch(
+                conn,
+                workflow_id,
+                expected_revision=request.expected_revision,
+                mutation_id=request.mutation_id,
+                operations=request.operations,
+            )
         )
     except graph.LoopError as e:
-        raise HTTPException(status_code=400, detail=graph.error_response(e, conn, root_task_id))
+        raise HTTPException(
+            status_code=400,
+            detail=graph.error_response(e, conn, workflow_id),
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -3027,6 +3030,8 @@ def add_comment(task_id: str, payload: CommentBody, board: Optional[str] = Query
 class LinkBody(BaseModel):
     parent_id: str
     child_id: str
+    workflow_id: Optional[str] = None
+    # COMPAT(workflow-id-cutover)
     root_task_id: Optional[str] = None
     session_id: Optional[str] = None
 
@@ -3034,58 +3039,41 @@ class LinkBody(BaseModel):
 _LOOP_GRAPH_MUTABLE_STATUSES = frozenset({"triage", "scheduled", "todo"})
 
 
-def _is_canonical_loop_root(task: kanban_db.Task) -> bool:
-    return task.created_by == f"loop:{task.id}"
-
-
 def _require_loop_graph_ownership(
     conn: sqlite3.Connection,
-    root_task_id: str,
+    workflow_id: str,
     task_ids: list[str],
-) -> kanban_db.Task:
-    """Require every scoped mutation endpoint to stay inside one Loop root."""
-    root = _require_loop_canvas_root(conn, root_task_id)
-    if not _is_canonical_loop_root(root):
+) -> None:
+    """Require every scoped mutation to stay inside one immutable workflow."""
+
+    if kanban_db.get_workflow(conn, workflow_id) is None:
         raise HTTPException(
-            status_code=400,
-            detail=f"task {root_task_id} is not a canonical Loop root",
+            status_code=404,
+            detail=f"workflow {workflow_id} not found",
         )
-    marker = f"loop:{root_task_id}"
     outside: list[str] = []
     for task_id in dict.fromkeys(task_ids):
         task = kanban_db.get_task(conn, task_id)
         if task is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
-        if task.created_by != marker:
+        if task.workflow_id != workflow_id:
             outside.append(task_id)
     if outside:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"task(s) not owned by Loop root {root_task_id}: "
-                + ", ".join(outside)
+                f"task(s) not owned by workflow {workflow_id}: " + ", ".join(outside)
             ),
         )
-    return root
 
 
 def _loop_graph_allowed_child_statuses(
     conn: sqlite3.Connection,
     child_id: str,
-    *,
-    root_task_id: str,
 ) -> set[str]:
     child = kanban_db.get_task(conn, child_id)
     if child is None:
         raise HTTPException(status_code=404, detail=f"task {child_id} not found")
-    mutable_ready_root = (
-        child.id == root_task_id
-        and _is_canonical_loop_root(child)
-        and child.status == "ready"
-        and child.assignee is None
-    )
-    if mutable_ready_root:
-        return {*_LOOP_GRAPH_MUTABLE_STATUSES, "ready"}
     if child.status not in _LOOP_GRAPH_MUTABLE_STATUSES:
         raise HTTPException(
             status_code=409,
@@ -3110,32 +3098,22 @@ def add_link(payload: LinkBody, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        if payload.session_id and not payload.root_task_id:
-            raise HTTPException(status_code=400, detail="root_task_id is required with session_id")
+        workflow_id = _resolve_workflow_request(
+            conn,
+            workflow_id=payload.workflow_id,
+            root_task_id=payload.root_task_id,
+        )
         allowed_child_statuses = None
-        if payload.root_task_id:
-            if payload.parent_id == payload.root_task_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail="the canonical Loop root is an aggregate sink and cannot be a prerequisite",
-                )
+        if workflow_id:
             _require_loop_graph_ownership(
                 conn,
-                payload.root_task_id,
+                workflow_id,
                 [payload.parent_id, payload.child_id],
             )
             allowed_child_statuses = _loop_graph_allowed_child_statuses(
                 conn,
                 payload.child_id,
-                root_task_id=payload.root_task_id,
             )
-        else:
-            parent = kanban_db.get_task(conn, payload.parent_id)
-            if parent is not None and _is_canonical_loop_root(parent):
-                raise HTTPException(
-                    status_code=400,
-                    detail="the canonical Loop root is an aggregate sink and cannot be a prerequisite",
-                )
         kanban_db.link_tasks(
             conn,
             payload.parent_id,
@@ -3155,6 +3133,7 @@ def add_link(payload: LinkBody, board: Optional[str] = Query(None)):
 def delete_link(
     parent_id: str = Query(...),
     child_id: str = Query(...),
+    workflow_id: Optional[str] = Query(None),
     root_task_id: Optional[str] = Query(None),
     session_id: Optional[str] = Query(None),
     board: Optional[str] = Query(None),
@@ -3162,19 +3141,21 @@ def delete_link(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        if session_id and not root_task_id:
-            raise HTTPException(status_code=400, detail="root_task_id is required with session_id")
+        workflow_id = _resolve_workflow_request(
+            conn,
+            workflow_id=workflow_id,
+            root_task_id=root_task_id,
+        )
         allowed_child_statuses = None
-        if root_task_id:
+        if workflow_id:
             _require_loop_graph_ownership(
                 conn,
-                root_task_id,
+                workflow_id,
                 [parent_id, child_id],
             )
             allowed_child_statuses = _loop_graph_allowed_child_statuses(
                 conn,
                 child_id,
-                root_task_id=root_task_id,
             )
         ok = kanban_db.unlink_tasks(
             conn,
@@ -3870,8 +3851,8 @@ def subscribe_home(task_id: str, platform: str, board: Optional[str] = Query(Non
         raise HTTPException(
             status_code=404,
             detail=f"No home channel configured for platform {platform!r}. "
-                   f"Set one from the messenger via /sethome, or configure "
-                   f"gateway.platforms.{platform}.home_channel in config.yaml.",
+            f"Set one from the messenger via /sethome, or configure "
+            f"gateway.platforms.{platform}.home_channel in config.yaml.",
         )
     board = _resolve_board(board)
     conn = _conn(board=board)
@@ -3879,15 +3860,32 @@ def subscribe_home(task_id: str, platform: str, board: Optional[str] = Query(Non
         task = kanban_db.get_task(conn, task_id)
         if task is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
-        kanban_db.add_notify_sub(
-            conn,
-            task_id=task_id,
-            platform=platform,
-            chat_id=home["chat_id"],
-            thread_id=home["thread_id"] or None,
-            notifier_profile=_active_profile_name(),
-        )
-        return {"ok": True, "task_id": task_id, "home_channel": home}
+        route = {
+            "platform": platform,
+            "chat_id": home["chat_id"],
+            "chat_type": ("thread" if home["thread_id"] else "group"),
+            "thread_id": home["thread_id"] or None,
+            "notifier_profile": _active_profile_name(),
+        }
+        if task.workflow_id:
+            kanban_db.cutover_legacy_workflow_route(
+                conn,
+                workflow_id=task.workflow_id,
+                **route,
+            )
+        else:
+            kanban_db.add_notify_sub(
+                conn,
+                task_id=task_id,
+                scope="task",
+                **route,
+            )
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "workflow_id": task.workflow_id,
+            "home_channel": home,
+        }
     finally:
         conn.close()
 
@@ -3905,13 +3903,24 @@ def unsubscribe_home(task_id: str, platform: str, board: Optional[str] = Query(N
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        kanban_db.remove_notify_sub(
-            conn,
-            task_id=task_id,
-            platform=platform,
-            chat_id=home["chat_id"],
-            thread_id=home["thread_id"] or None,
-        )
+        task = kanban_db.get_task(conn, task_id)
+        if task is not None and task.workflow_id:
+            kanban_db.remove_workflow_notify_sub_if_idle(
+                conn,
+                workflow_id=task.workflow_id,
+                notifier_profile=_active_profile_name(),
+                platform=platform,
+                chat_id=home["chat_id"],
+                thread_id=home["thread_id"] or None,
+            )
+        else:
+            kanban_db.remove_notify_sub(
+                conn,
+                task_id=task_id,
+                platform=platform,
+                chat_id=home["chat_id"],
+                thread_id=home["thread_id"] or None,
+            )
         return {"ok": True, "task_id": task_id, "home_channel": home}
     finally:
         conn.close()

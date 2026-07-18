@@ -73,6 +73,7 @@ def session_context_engaged() -> bool:
 _SESSION_PLATFORM: ContextVar = ContextVar("HERMES_SESSION_PLATFORM", default=_UNSET)
 _SESSION_SOURCE: ContextVar = ContextVar("HERMES_SESSION_SOURCE", default=_UNSET)
 _SESSION_CHAT_ID: ContextVar = ContextVar("HERMES_SESSION_CHAT_ID", default=_UNSET)
+_SESSION_CHAT_TYPE: ContextVar = ContextVar("HERMES_SESSION_CHAT_TYPE", default=_UNSET)
 _SESSION_CHAT_NAME: ContextVar = ContextVar("HERMES_SESSION_CHAT_NAME", default=_UNSET)
 _SESSION_THREAD_ID: ContextVar = ContextVar("HERMES_SESSION_THREAD_ID", default=_UNSET)
 _SESSION_USER_ID: ContextVar = ContextVar("HERMES_SESSION_USER_ID", default=_UNSET)
@@ -93,6 +94,13 @@ _SESSION_UI_SESSION_ID: ContextVar = ContextVar("HERMES_UI_SESSION_ID", default=
 _SESSION_MESSAGE_ID: ContextVar = ContextVar("HERMES_SESSION_MESSAGE_ID", default=_UNSET)
 
 _SESSION_PROFILE: ContextVar = ContextVar("HERMES_SESSION_PROFILE", default=_UNSET)
+
+# Internal workflow identity for the current turn. This deliberately has no
+# legacy environment-variable mapping: it is process-local routing context,
+# not model prompt content or subprocess state.
+_SESSION_WORKFLOW_ID: ContextVar = ContextVar(
+    "hermes_internal_workflow_id", default=_UNSET
+)
 
 # Whether the current session's delivery channel can route an ASYNC completion
 # back to the agent AFTER the current turn ends (i.e. wake a fresh turn).
@@ -125,6 +133,7 @@ _VAR_MAP = {
     "HERMES_SESSION_PLATFORM": _SESSION_PLATFORM,
     "HERMES_SESSION_SOURCE": _SESSION_SOURCE,
     "HERMES_SESSION_CHAT_ID": _SESSION_CHAT_ID,
+    "HERMES_SESSION_CHAT_TYPE": _SESSION_CHAT_TYPE,
     "HERMES_SESSION_CHAT_NAME": _SESSION_CHAT_NAME,
     "HERMES_SESSION_THREAD_ID": _SESSION_THREAD_ID,
     "HERMES_SESSION_USER_ID": _SESSION_USER_ID,
@@ -160,6 +169,7 @@ def set_session_vars(
     platform: str = "",
     source: str = "",
     chat_id: str = "",
+    chat_type: str = "",
     chat_name: str = "",
     thread_id: str = "",
     user_id: str = "",
@@ -172,6 +182,7 @@ def set_session_vars(
     cwd: str = "",
     async_delivery: bool = True,
     ui_session_id: str = "",
+    workflow_id: str = "",
 ) -> list:
     """Set all session context variables and return reset tokens.
 
@@ -197,6 +208,7 @@ def set_session_vars(
         _SESSION_PLATFORM.set(platform),
         _SESSION_SOURCE.set(source),
         _SESSION_CHAT_ID.set(chat_id),
+        _SESSION_CHAT_TYPE.set(chat_type),
         _SESSION_CHAT_NAME.set(chat_name),
         _SESSION_THREAD_ID.set(thread_id),
         _SESSION_USER_ID.set(user_id),
@@ -207,6 +219,7 @@ def set_session_vars(
         _SESSION_UI_SESSION_ID.set(ui_session_id),
         _SESSION_MESSAGE_ID.set(message_id),
         _SESSION_PROFILE.set(profile),
+        _SESSION_WORKFLOW_ID.set(str(workflow_id or "").strip()),
         _SESSION_ASYNC_DELIVERY.set(bool(async_delivery)),
     ]
     try:
@@ -233,6 +246,7 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_PLATFORM,
         _SESSION_SOURCE,
         _SESSION_CHAT_ID,
+        _SESSION_CHAT_TYPE,
         _SESSION_CHAT_NAME,
         _SESSION_THREAD_ID,
         _SESSION_USER_ID,
@@ -243,6 +257,7 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_UI_SESSION_ID,
         _SESSION_MESSAGE_ID,
         _SESSION_PROFILE,
+        _SESSION_WORKFLOW_ID,
     ):
         var.set("")
     # Reset async-delivery capability to the "never set" sentinel rather than a
@@ -283,14 +298,11 @@ def reset_session_vars() -> None:
     tests/tools/test_local_env_session_leak.py and
     tests/gateway/test_session_context_inheritance.py.
 
-    Note ``_SESSION_ASYNC_DELIVERY`` lives outside ``_VAR_MAP`` (it is a bool
-    capability flag read via :func:`async_delivery_supported`, not a string
-    ``HERMES_SESSION_*`` env var read via :func:`get_session_env`), so it is
-    reset explicitly below. Without it, a task spawned from a context where a
-    sibling adapter bound ``async_delivery=False`` (the stateless API server)
-    inherits that ``False`` through the pre-bind window, and
-    ``async_delivery_supported`` wrongly reports the new turn's channel as
-    unable to route a background completion until ``set_session_vars`` runs.
+    ``_SESSION_ASYNC_DELIVERY`` and ``_SESSION_WORKFLOW_ID`` intentionally live
+    outside ``_VAR_MAP``: neither is a legacy string environment variable.
+    Reset both explicitly so a newly spawned task cannot inherit either a
+    sibling adapter capability or a sibling workflow identity in its pre-bind
+    window.
     """
     for var in _VAR_MAP.values():
         var.set(_UNSET)
@@ -298,6 +310,7 @@ def reset_session_vars() -> None:
     # same inheritance-leak reason as the mapped vars above — see clear_session_vars,
     # which resets this var on the handler-exit path for the symmetric concern.
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
+    _SESSION_WORKFLOW_ID.set(_UNSET)
     try:
         from agent.runtime_cwd import clear_session_cwd
 
@@ -340,6 +353,18 @@ def async_delivery_supported() -> bool:
     return bool(value)
 
 
+def get_current_workflow_id(default: str = "") -> str:
+    """Return the internal workflow identity bound for the current turn.
+
+    Unlike :func:`get_session_env`, this accessor never falls back to
+    ``os.environ``. Workflow identity is task-local routing state only.
+    """
+    value = _SESSION_WORKFLOW_ID.get()
+    if value is _UNSET:
+        return default
+    return str(value or "")
+
+
 def get_logical_session_id(default: Any = "") -> Any:
     """Return the user-facing session key before the internal runtime id."""
     return (
@@ -370,3 +395,4 @@ def reset_session_vars_for_tests() -> None:
     for var in _VAR_MAP.values():
         var.set(_UNSET)
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
+    _SESSION_WORKFLOW_ID.set(_UNSET)

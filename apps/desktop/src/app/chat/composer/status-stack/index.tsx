@@ -46,7 +46,15 @@ const GROUP_ICON: Record<StatusGroup['type'], string> = {
 
 const groupLabel = (group: StatusGroup, s: Translations['statusStack']) => {
   if (group.type === 'todo') {
-    return s.todos(group.items.filter(i => i.todoStatus === 'completed').length, group.items.length)
+    const progress = group.items.reduce(
+      (total, item) => ({
+        completed: total.completed + (item.taskProgress?.completed ?? (item.todoStatus === 'completed' ? 1 : 0)),
+        tasks: total.tasks + (item.taskProgress?.total ?? 1)
+      }),
+      { completed: 0, tasks: 0 }
+    )
+
+    return s.todos(progress.completed, progress.tasks)
   }
 
   return group.type === 'subagent' ? s.subagents(group.items.length) : s.background(group.items.length)

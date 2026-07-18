@@ -76,6 +76,9 @@ export type GatewayEventPayload = {
   count?: number
   // status.update (kind=process → background process completion/watch-match)
   kind?: string
+  /** status.update workflow boundary metadata; never rendered as prose. */
+  workflow_id?: string
+  event_id?: number
   // session.title (live auto-title push) — stored session id + generated title
   session_id?: string
   title?: string
@@ -743,6 +746,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
 
     if (!pendingToolHidden && appendPartsToActiveAssistant(pendingToolParts, pendingToolTimestamp)) {
       clearPendingTools()
+
       return
     }
 

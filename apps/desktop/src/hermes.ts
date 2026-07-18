@@ -1,6 +1,5 @@
 import { JsonRpcGatewayClient } from '@hermes/shared'
 
-import type { LoopTaskAction } from '@/app/chat/loop-panel'
 import type { LoopTaskComment, LoopTaskDetail, TenantLoopSource } from '@/app/chat/loop-state'
 import type {
   ActionResponse,
@@ -459,19 +458,22 @@ export interface CreateLoopDraftTaskPayload {
   idempotencyKey?: null | string
   parents?: readonly string[]
   profile?: null | string
-  rootTaskId?: null | string
   sessionId: string
   tenant?: null | string
   title?: null | string
+  workflowId?: null | string
 }
 
 type TenantLoopTaskResponse = NonNullable<TenantLoopSource['tasks']>[number]
 
 export interface CreateLoopDraftTaskResponse {
   board?: null | string
+  /** Deprecated response-read fallback from runtimes predating workflow ids. */
+  root_task_id?: null | string
   source?: TenantLoopSource
   task?: null | TenantLoopTaskResponse
   tenant?: null | string
+  workflow_id?: null | string
 }
 
 export function loopSourceFromDraftResult(
@@ -486,12 +488,15 @@ export function loopSourceFromDraftResult(
     return null
   }
 
+  const workflowId = result.workflow_id || result.root_task_id || result.task.workflow_id || null
+
   return {
     board: result.board,
-    root_task_id: result.task.id,
     session_id: sessionId,
     tasks: [result.task],
-    tenant: result.tenant
+    tenant: result.tenant,
+    workflow_id: workflowId,
+    workflow_ids: workflowId ? [workflowId] : []
   }
 }
 
@@ -510,9 +515,18 @@ export function mergeLoopDraftSource(
     board: incoming.board ?? current.board,
     latest_event_id: Math.max(current.latest_event_id || 0, incoming.latest_event_id || 0),
     now: incoming.now ?? current.now,
-    root_task_id: current.root_task_id || incoming.root_task_id,
     tasks: [...(current.tasks || []).filter(task => !incomingTaskIds.has(task.id)), ...(incoming.tasks || [])],
-    tenant: current.tenant ?? incoming.tenant
+    tenant: current.tenant ?? incoming.tenant,
+    workflow_id:
+      current.workflow_id || incoming.workflow_id || current.root_task_id || incoming.root_task_id || undefined,
+    workflow_ids: Array.from(
+      new Set([
+        ...(current.workflow_ids || []),
+        ...(incoming.workflow_ids || []),
+        ...(current.workflow_id ? [current.workflow_id] : []),
+        ...(incoming.workflow_id ? [incoming.workflow_id] : [])
+      ])
+    )
   }
 }
 
@@ -535,12 +549,14 @@ interface LoopCanvasPositionsResponse {
     x: number
     y: number
   }>
-  root_task_id: string
+  /** Deprecated response-read fallback from runtimes predating workflow ids. */
+  root_task_id?: string
+  workflow_id?: string
 }
 
 export interface LoopCanvasPositions {
   positions: LoopCanvasPosition[]
-  rootTaskId: string
+  workflowId: string
 }
 
 export interface KanbanCapabilities {
@@ -562,26 +578,26 @@ function loopCanvasPositions(response: LoopCanvasPositionsResponse): LoopCanvasP
       x: position.x,
       y: position.y
     })),
-    rootTaskId: response.root_task_id
+    workflowId: response.workflow_id || response.root_task_id || ''
   }
 }
 
 export async function getLoopCanvasPositions(
-  rootTaskId: string,
+  workflowId: string,
   profile?: null | string,
   board?: null | string,
   sessionId?: null | string
 ): Promise<LoopCanvasPositions> {
   const response = await window.hermesDesktop.api<LoopCanvasPositionsResponse>({
     ...(profile ? { profile } : profileScoped()),
-    path: `/api/plugins/kanban/loop-canvas/${encodeURIComponent(rootTaskId)}/positions${loopCanvasQuery(board, sessionId)}`
+    path: `/api/plugins/kanban/loop-canvas/${encodeURIComponent(workflowId)}/positions${loopCanvasQuery(board, sessionId)}`
   })
 
   return loopCanvasPositions(response)
 }
 
 export async function saveLoopCanvasPositions(
-  rootTaskId: string,
+  workflowId: string,
   positions: LoopCanvasPosition[],
   profile?: null | string,
   board?: null | string,
@@ -591,14 +607,14 @@ export async function saveLoopCanvasPositions(
     ...(profile ? { profile } : profileScoped()),
     body: { positions: positions.map(({ taskId, x, y }) => ({ task_id: taskId, x, y })) },
     method: 'PUT',
-    path: `/api/plugins/kanban/loop-canvas/${encodeURIComponent(rootTaskId)}/positions${loopCanvasQuery(board, sessionId)}`
+    path: `/api/plugins/kanban/loop-canvas/${encodeURIComponent(workflowId)}/positions${loopCanvasQuery(board, sessionId)}`
   })
 
   return loopCanvasPositions(response)
 }
 
 export function archiveLoopNodes(
-  rootTaskId: string,
+  workflowId: string,
   taskIds: readonly string[],
   profile?: null | string,
   board?: null | string,
@@ -613,7 +629,7 @@ export function archiveLoopNodes(
       session_id: sessionId?.trim() || undefined
     },
     method: 'POST',
-    path: `/api/plugins/kanban/loop-canvas/${encodeURIComponent(rootTaskId)}/archive-nodes${kanbanBoardQuery(board)}`
+    path: `/api/plugins/kanban/loop-canvas/${encodeURIComponent(workflowId)}/archive-nodes${kanbanBoardQuery(board)}`
   })
 }
 
@@ -622,7 +638,7 @@ export function linkLoopTasks(
   childId: string,
   profile?: null | string,
   board?: null | string,
-  rootTaskId?: null | string,
+  workflowId?: null | string,
   sessionId?: null | string
 ): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
@@ -630,7 +646,7 @@ export function linkLoopTasks(
     body: {
       child_id: childId,
       parent_id: parentId,
-      ...(rootTaskId ? { root_task_id: rootTaskId } : {}),
+      ...(workflowId ? { workflow_id: workflowId } : {}),
       ...(sessionId ? { session_id: sessionId } : {})
     },
     method: 'POST',
@@ -643,20 +659,20 @@ export function unlinkLoopTasks(
   childId: string,
   profile?: null | string,
   board?: null | string,
-  rootTaskId?: null | string,
+  workflowId?: null | string,
   sessionId?: null | string
 ): Promise<{ ok: boolean }> {
   const query = new URLSearchParams({ child_id: childId, parent_id: parentId })
   const normalizedBoard = board?.trim()
-  const normalizedRootTaskId = rootTaskId?.trim()
+  const normalizedWorkflowId = workflowId?.trim()
   const normalizedSessionId = sessionId?.trim()
 
   if (normalizedBoard) {
     query.set('board', normalizedBoard)
   }
 
-  if (normalizedRootTaskId) {
-    query.set('root_task_id', normalizedRootTaskId)
+  if (normalizedWorkflowId) {
+    query.set('workflow_id', normalizedWorkflowId)
   }
 
   if (normalizedSessionId) {
@@ -688,16 +704,16 @@ export function createLoopDraftTask({
   idempotencyKey,
   parents,
   profile,
-  rootTaskId,
   sessionId,
   tenant,
-  title
+  title,
+  workflowId
 }: CreateLoopDraftTaskPayload): Promise<CreateLoopDraftTaskResponse> {
   const normalizedTenant = tenant?.trim()
   const normalizedIdempotencyKey = idempotencyKey?.trim()
   const normalizedParents = [...new Set((parents || []).map(value => value.trim()).filter(Boolean))]
   const normalizedChildIds = [...new Set((childIds || []).map(value => value.trim()).filter(Boolean))]
-  const normalizedRootTaskId = rootTaskId?.trim()
+  const normalizedWorkflowId = workflowId?.trim()
 
   return window.hermesDesktop.api<CreateLoopDraftTaskResponse>({
     ...(profile ? { profile } : profileScoped()),
@@ -707,10 +723,10 @@ export function createLoopDraftTask({
       ...(normalizedChildIds.length ? { child_ids: normalizedChildIds } : {}),
       ...(normalizedIdempotencyKey ? { idempotency_key: normalizedIdempotencyKey } : {}),
       ...(normalizedParents.length ? { parents: normalizedParents } : {}),
-      ...(normalizedRootTaskId ? { root_task_id: normalizedRootTaskId } : {}),
       session_id: sessionId,
       ...(normalizedTenant ? { tenant: normalizedTenant } : {}),
-      title: title?.trim() || 'Loop draft'
+      title: title?.trim() || 'Loop draft',
+      ...(normalizedWorkflowId ? { workflow_id: normalizedWorkflowId } : {})
     },
     method: 'POST',
     path: `/api/plugins/kanban/loop-drafts${kanbanBoardQuery(board)}`
@@ -773,115 +789,6 @@ export function updateLoopTaskStatus(
       status,
       ...(options?.blockReason ? { block_reason: options.blockReason } : {})
     }
-  })
-}
-
-interface LoopHandoffSummary {
-  attention?: null | string
-  id?: number
-  state?: null | string
-  task_id?: string
-  updated_at?: number
-  verification_state?: null | string
-}
-
-interface LoopHandoffListResponse {
-  handoffs?: LoopHandoffSummary[]
-  ok?: boolean
-}
-
-export interface LoopHandoffReviewResult {
-  created_cards?: unknown[]
-  escalation_reason?: string
-  notification?: { level?: string; state?: string }
-  ok: boolean
-  outcome?: string
-}
-
-function latestActionableHandoff(handoffs: readonly LoopHandoffSummary[]): LoopHandoffSummary | null {
-  const byFreshness = [...handoffs].sort(
-    (a, b) => (b.updated_at || 0) - (a.updated_at || 0) || (b.id || 0) - (a.id || 0)
-  )
-
-  return (
-    byFreshness.find(handoff => {
-      const state = (handoff.state || '').toLowerCase()
-      const verification = (handoff.verification_state || '').toLowerCase()
-
-      return (
-        state === 'assigned' ||
-        state === 'reviewing' ||
-        verification === 'needs-orchestrator' ||
-        Boolean(handoff.attention)
-      )
-    }) ||
-    byFreshness[0] ||
-    null
-  )
-}
-
-function reviewActionBody(action: Extract<LoopTaskAction, 'accept-review' | 'escalate-review' | 'reject-review'>) {
-  if (action === 'accept-review') {
-    return {
-      action: 'approve_release',
-      actor: 'desktop-loop-panel',
-      evidence_passed: true,
-      reason: 'Accepted from the Loop side panel after reviewing the foreground handoff.'
-    }
-  }
-
-  if (action === 'escalate-review') {
-    return {
-      action: 'approve_release',
-      actor: 'desktop-loop-panel',
-      evidence_passed: true,
-      prohibited_flags: ['product_decision'],
-      reason: 'Escalated from the Loop side panel because this needs a user decision.'
-    }
-  }
-
-  return {
-    action: 'approve_release',
-    actor: 'desktop-loop-panel',
-    evidence_passed: false,
-    reason: 'Rejected from the Loop side panel; the foreground handoff evidence did not pass.'
-  }
-}
-
-export async function reviewLoopHandoffForTask(
-  taskId: string,
-  action: Extract<LoopTaskAction, 'accept-review' | 'escalate-review' | 'reject-review'>,
-  profile?: string | null,
-  options: { board?: null | string } = {}
-): Promise<LoopHandoffReviewResult> {
-  const query = new URLSearchParams({ task_id: taskId })
-
-  if (options.board) {
-    query.set('board', options.board)
-  }
-
-  const list = await window.hermesDesktop.api<LoopHandoffListResponse>({
-    ...(profile ? { profile } : profileScoped()),
-    path: `/api/plugins/kanban/loop-handoffs?${query.toString()}`
-  })
-
-  const handoff = latestActionableHandoff(list.handoffs || [])
-
-  if (!handoff?.id) {
-    throw new Error(`No Loop handoff is available for ${taskId}`)
-  }
-
-  const actionQuery = new URLSearchParams()
-
-  if (options.board) {
-    actionQuery.set('board', options.board)
-  }
-
-  return window.hermesDesktop.api<LoopHandoffReviewResult>({
-    ...(profile ? { profile } : profileScoped()),
-    body: reviewActionBody(action),
-    method: 'POST',
-    path: `/api/plugins/kanban/loop-handoffs/${encodeURIComponent(String(handoff.id))}/auto-action${actionQuery.size ? `?${actionQuery.toString()}` : ''}`
   })
 }
 

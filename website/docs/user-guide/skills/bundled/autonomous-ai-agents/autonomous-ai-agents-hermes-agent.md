@@ -704,19 +704,24 @@ User docs: https://hermes-agent.nousresearch.com/docs/user-guide/features/curato
 
 Durable SQLite board for multi-profile / multi-worker collaboration.
 Users drive it via `hermes kanban <verb>`; dispatcher-spawned workers
-see a focused `kanban_*` toolset gated by `HERMES_KANBAN_TASK`, and
-orchestrator profiles can opt into the broader `kanban` toolset. Normal
-sessions still have zero `kanban_*` schema footprint unless configured.
+see a focused `kanban_*` toolset gated by `HERMES_KANBAN_TASK`. With
+Loop enabled, unscoped foreground sessions retain the bounded controls
+needed to act on workflow wakes; orchestrator profiles can opt into
+the full `kanban` toolset.
 
 - **CLI verbs (common):** `init`, `create`, `list` (alias `ls`),
   `show`, `assign`, `link`, `unlink`, `comment`, `complete`, `block`,
   `unblock`, `archive`, `tail`. Less common: `watch`, `stats`, `runs`,
   `log`, `dispatch`, `daemon`, `gc`.
-- **Worker/orchestrator toolset:** `kanban_show`, `kanban_complete`,
-  `kanban_block`, `kanban_heartbeat`, `kanban_comment`, `kanban_create`,
-  `kanban_link`; profiles that explicitly enable the `kanban` toolset
-  outside a dispatcher-spawned task also get `kanban_list` and
-  `kanban_unblock` for board routing.
+- **Task worker:** `kanban_show`, `kanban_complete`, `kanban_block`,
+  `kanban_heartbeat`, and `kanban_comment` for its assigned card.
+- **Enabled Loop foreground:** `kanban_show`, `kanban_complete`,
+  `kanban_comment`, `kanban_create`, and `kanban_unblock` for bounded
+  re-entry control.
+- **Configured orchestrator profile:** the full eleven-tool surface:
+  `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_block`,
+  `kanban_heartbeat`, `kanban_comment`, `kanban_create`, `kanban_link`,
+  `kanban_unblock`, `kanban_decompose`, and `kanban_resolve_blocker`.
 - **Dispatcher** runs inside the gateway by default
   (`kanban.dispatch_in_gateway: true`) — reclaims stale claims,
   promotes ready tasks, atomically claims, spawns assigned profiles.

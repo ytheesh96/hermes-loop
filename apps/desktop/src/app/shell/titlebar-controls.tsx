@@ -115,11 +115,10 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
     }
   }
 
-  // POSITIONAL toggles: each button shows/hides everything on its physical
-  // side of the main zone (the layout tree collapses the whole side), so they
-  // stay correct through flips and rearranges. $sidebarOpen ≙ left side,
-  // $fileBrowserOpen ≙ right side. Never an active highlight — plain
-  // show/hide affordances.
+  // The buttons retain their semantic owners through flips and rearranges:
+  // sessions on one side, Files on the other. Files is pane-scoped so hiding
+  // it does not take independent Loop/preview/review panes with it. Never an
+  // active highlight — plain show/hide affordances.
   const leftEdge = { open: sidebarOpen, toggle: toggleSidebarOpen }
   const rightEdge = { open: fileBrowserOpen, toggle: toggleFileBrowserOpen }
 

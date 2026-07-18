@@ -7,6 +7,7 @@ export interface LoopagentActivity {
   currentTool?: string
   errorPreview?: string
   id: string
+  /** Legacy live-event compatibility only. Canonical grouping uses workflowId. */
   isRootTask?: boolean
   kind: 'task' | 'worker'
   latestTaskEventId?: number
@@ -23,6 +24,7 @@ export interface LoopagentActivity {
   title: string
   updatedAt: number
   workerSessionId?: string
+  workflowId?: string
 }
 
 export type LoopagentPayload = Record<string, unknown>
@@ -57,6 +59,7 @@ const compact = (value: unknown, max = 220): string | undefined => {
 
 const statusFromPayload = (payload: LoopagentPayload, eventType: string): LoopagentStatus => {
   const worker = record(payload.worker)
+
   const candidates = [
     payload.status,
     payload.run_status,
@@ -161,6 +164,7 @@ const toActivity = (
   const task = record(payload.task)
   const worker = record(payload.worker)
   const kind = kindOf(payload, eventType)
+
   const summaryPreview =
     compact(payload.summary_preview) ??
     compact(payload.safe_summary) ??
@@ -168,13 +172,18 @@ const toActivity = (
     compact(worker.summary_preview) ??
     compact(worker.summary) ??
     prev?.summaryPreview
+
   const errorPreview =
     compact(payload.error_preview) ?? compact(payload.error) ?? compact(worker.error_preview) ?? prev?.errorPreview
+
   const parentTaskIds = strings(payload.parent_task_ids).length
     ? strings(payload.parent_task_ids)
     : strings(task.parent_task_ids).length
       ? strings(task.parent_task_ids)
       : (prev?.parentTaskIds ?? [])
+
+  const workflowId =
+    str(payload.workflow_id) || str(task.workflow_id) || str(worker.workflow_id) || prev?.workflowId
 
   return {
     board: str(payload.board) || prev?.board,
@@ -186,7 +195,11 @@ const toActivity = (
       prev?.currentTool,
     errorPreview,
     id: prev?.id ?? idOf(payload, eventType),
-    isRootTask: typeof payload.is_root_task === 'boolean' ? payload.is_root_task : parentTaskIds.length === 0,
+    isRootTask: workflowId
+      ? undefined
+      : typeof payload.is_root_task === 'boolean'
+        ? payload.is_root_task
+        : parentTaskIds.length === 0,
     kind,
     latestTaskEventId: latestTaskEventIdOf(payload) ?? prev?.latestTaskEventId,
     parentTaskIds,
@@ -201,12 +214,14 @@ const toActivity = (
     tenant: str(payload.tenant) || prev?.tenant,
     title: str(payload.task_title) || str(payload.title) || str(task.title) || prev?.title || taskId,
     updatedAt: at,
-    workerSessionId: str(payload.worker_session_id) || prev?.workerSessionId
+    workerSessionId: str(payload.worker_session_id) || prev?.workerSessionId,
+    workflowId
   }
 }
 
 export function loopagentSessionKeys(payload: unknown, explicitSessionId?: null | string): string[] {
   const record = isRecord(payload) ? payload : {}
+
   const keys = [
     explicitSessionId,
     record.current_session_id,

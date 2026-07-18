@@ -8,7 +8,7 @@ description: "Authoritative reference for Hermes built-in tools, grouped by tool
 
 This page documents Hermes' built-in tools, grouped by toolset. Availability varies by platform, credentials, and enabled toolsets.
 
-**Quick counts (current registry):** ~73 tools — 10 browser tools (core) + 2 CDP-gated browser tools, 4 file tools, 4 Home Assistant tools, 3 terminal tools (`terminal`, `process`, `read_terminal`), 2 web tools, 5 Feishu tools, 7 Spotify tools (registered by the bundled `spotify` plugin), 5 Yuanbao tools, 9 kanban tools (registered when the kanban dispatcher spawns the agent), 3 project tools (desktop/GUI sessions), 2 Discord tools, and a handful of standalone tools (`memory`, `clarify`, `delegate_task`, `execute_code`, `cronjob`, `session_search`, `skill_view`/`skill_manage`/`skills_list`, `text_to_speech`, `image_generate`, `video_generate`, `vision_analyze`, `video_analyze`, `todo`, `computer_use`).
+**Quick inventory (plugin additions can vary):** 10 browser tools (core) + 2 CDP-gated browser tools, 4 file tools, 4 Home Assistant tools, 3 terminal tools (`terminal`, `process`, `read_terminal`), 2 web tools, 5 Feishu tools, 7 Spotify tools (registered by the bundled `spotify` plugin), 5 Yuanbao tools, 11 kanban tools (with worker, Loop-foreground, and full-orchestrator visibility gates), 3 project tools (desktop/GUI sessions), 2 Discord tools, and a handful of standalone tools (`memory`, `clarify`, `delegate_task`, `execute_code`, `cronjob`, `session_search`, `skill_view`/`skill_manage`/`skills_list`, `text_to_speech`, `image_generate`, `video_generate`, `vision_analyze`, `video_analyze`, `todo`, `computer_use`).
 
 :::tip MCP Tools
 In addition to built-in tools, Hermes can load tools dynamically from MCP servers. MCP tools appear with the prefix `mcp_<server>_` (e.g., `mcp_github_create_issue` for the `github` MCP server). See [MCP Integration](/user-guide/features/mcp) for configuration.
@@ -118,19 +118,27 @@ Scoped to the Feishu document-comment handler. Drives comment read/write operati
 
 ## `kanban` toolset
 
-Registered when the agent is either (a) spawned by the kanban dispatcher (`HERMES_KANBAN_TASK` env set) or (b) running in a profile that explicitly enables the `kanban` toolset. Task-scoped workers use lifecycle tools for their assigned task; orchestrator profiles additionally get board-routing tools like `kanban_list` and `kanban_unblock`. See [Kanban Multi-Agent](/user-guide/features/kanban) for the full workflow.
+Availability has three levels. Dispatcher-spawned task workers
+(`HERMES_KANBAN_TASK` set) receive five scoped lifecycle/message tools. With
+Loop enabled, unscoped foreground sessions receive the bounded re-entry set
+(`show`, `complete`, `comment`, `create`, `unblock`). Profiles that explicitly
+enable `kanban` receive the full eleven-tool orchestrator surface. Workers never
+receive graph-control tools. See [Kanban Multi-Agent](/user-guide/features/kanban)
+for the full workflow.
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
-| `kanban_show` | Show the active kanban task assigned to this worker (title, description, comments, dependencies). | `HERMES_KANBAN_TASK` or `kanban` toolset |
+| `kanban_show` | Show a task's state, comments, dependencies, and worker context. | worker, enabled Loop foreground, or `kanban` profile |
 | `kanban_list` | List board tasks with filters. Orchestrator-only; hidden from dispatcher-spawned task workers. | profile with `kanban` toolset |
-| `kanban_complete` | Mark the current task done with a structured handoff payload (results, artifacts, follow-ups). | `HERMES_KANBAN_TASK` or `kanban` toolset |
-| `kanban_block` | Block the current task on a question for the user — the dispatcher pauses, surfaces the question, and resumes once a human replies. | `HERMES_KANBAN_TASK` or `kanban` toolset |
+| `kanban_complete` | Mark a task done. A worker completion delivers its summary and recent comments to the subscribed foreground session; foreground may create follow-up work or explicitly close the workflow. | worker, enabled Loop foreground, or `kanban` profile |
+| `kanban_block` | Stop the current task at a genuine non-dependency blocker. Add detailed evidence or decision options with `kanban_comment` first; the block boundary delivers them to the foreground, which decides whether to ask the user, unblock, or create follow-up work. | `HERMES_KANBAN_TASK` or `kanban` toolset |
 | `kanban_heartbeat` | Send a progress heartbeat during a long-running operation so the dispatcher knows the worker is still alive. | `HERMES_KANBAN_TASK` or `kanban` toolset |
-| `kanban_comment` | Add a comment to the task thread without changing its state — useful for surfacing intermediate findings. | `HERMES_KANBAN_TASK` or `kanban` toolset |
-| `kanban_create` | Fan out child tasks from the current task. Used by orchestrators and follow-up-spawning workers. | `HERMES_KANBAN_TASK` or `kanban` toolset |
-| `kanban_link` | Link tasks with a parent → child dependency edge. | `HERMES_KANBAN_TASK` or `kanban` toolset |
-| `kanban_unblock` | Return a blocked task to `ready`. Orchestrator-only; hidden from dispatcher-spawned task workers. | profile with `kanban` toolset |
+| `kanban_comment` | Add a durable, non-waking message to the task thread. A later completion, genuine non-dependency block, or system give-up boundary carries recent comments to foreground. | worker, enabled Loop foreground, or `kanban` profile |
+| `kanban_create` | Create committed review/follow-up work. Foreground/orchestrator-only; parent membership or the active foreground wake supplies the internal workflow identity. | enabled Loop foreground or `kanban` profile |
+| `kanban_link` | Link tasks with a parent → child dependency edge. Foreground/orchestrator-only. | profile with `kanban` toolset |
+| `kanban_unblock` | Return a blocked task to `ready`. Hidden from dispatcher-spawned task workers. | enabled Loop foreground or `kanban` profile |
+| `kanban_decompose` | Canonically decompose a triage task into routed work. Hidden from dispatcher-spawned task workers and the bounded Loop foreground surface. | profile with `kanban` toolset |
+| `kanban_resolve_blocker` | Resolve blocker-triage state by completing, returning, or creating visible follow-ups. | profile with `kanban` toolset |
 
 ## `project` toolset
 
@@ -265,5 +273,3 @@ Registered only on the `hermes-yuanbao` platform toolset. Yuanbao is Tencent's c
 | `yb_send_dm` | Send a private/direct message to a user in a group, with optional media files. | Yuanbao credentials |
 | `yb_search_sticker` | Search the built-in Yuanbao sticker (TIM face) catalogue by keyword. | Yuanbao credentials |
 | `yb_send_sticker` | Send a built-in sticker to the current Yuanbao chat. | Yuanbao credentials |
-
-

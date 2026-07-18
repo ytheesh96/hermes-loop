@@ -28,14 +28,14 @@ function previewTarget(label = 'Preview artifact'): PreviewTarget {
 
 function loopController(): LoopPanelController {
   const state = deriveLoopPanelStateFromTenantSource({
-    root_task_id: 't_root',
+    workflow_id: 't_root',
     tasks: [
       {
         id: 't_root',
         included_child_ids: ['t_child'],
         included_parent_ids: [],
         status: 'triage',
-        title: 'Loop root'
+        title: 'Loop workflow'
       },
       {
         id: 't_child',
@@ -64,7 +64,7 @@ function loopController(): LoopPanelController {
     onTaskAction: vi.fn(),
     open: true,
     positions: [],
-    rootTaskId: 't_root',
+    workflowId: 't_root',
     selectedTaskDetail: undefined,
     selectedTaskDetailError: null,
     selectedTaskId: 't_root',
@@ -137,7 +137,7 @@ describe('ChatWorkRail', () => {
     const idea = screen.getByRole('textbox', { name: 'Rough idea' })
     fireEvent.change(idea, { target: { value: 'Fix flaky auth test' } })
     fireEvent.keyDown(idea, { key: 'Enter' })
-    expect(onCreateLoopTask).toHaveBeenCalledWith('Fix flaky auth test', { rootTaskId: 't_root' })
+    expect(onCreateLoopTask).toHaveBeenCalledWith('Fix flaky auth test', { workflowId: 't_root' })
   })
 
   it('reactivates the Loop tab when the same root row is explicitly opened again', async () => {

@@ -67,14 +67,12 @@ _HERMES_CORE_TOOLS = [
     "cronjob",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
-    # Kanban multi-agent coordination — only in schema when the agent is
-    # spawned as a kanban worker (HERMES_KANBAN_TASK env set) or the current
-    # profile explicitly enables the kanban toolset. Gated via check_fn in
-    # tools/kanban_tools.py.
+    # Kanban multi-agent coordination — check_fn-gated to task workers, the
+    # bounded enabled-Loop foreground controls, or an explicitly configured
+    # full orchestrator profile.
     "kanban_show", "kanban_list",
     "kanban_complete", "kanban_block", "kanban_heartbeat",
-    "kanban_request_decision", "kanban_request_review", "kanban_resolve_blocker", "kanban_comment",
-    "kanban_request_orchestrator_handoff",
+    "kanban_resolve_blocker", "kanban_comment",
     "kanban_create", "kanban_link", "kanban_unblock",
     "kanban_decompose",
     "kanban_attach", "kanban_attach_url", "kanban_attachments",
@@ -265,19 +263,15 @@ TOOLSETS = {
 
     "kanban": {
         "description": (
-            "Kanban multi-agent coordination — only active when the agent "
-            "is spawned by the kanban dispatcher (HERMES_KANBAN_TASK env "
-            "set). The dispatcher runs inside the gateway by default; see "
-            "`kanban.dispatch_in_gateway` in config.yaml. Lets workers mark "
-            "tasks done with structured handoffs, block for human input, "
-            "heartbeat during long ops, comment on threads, attach files, and "
-            "(for orchestrators) list, unblock, and fan out tasks."
+            "Kanban multi-agent coordination. Dispatcher workers receive "
+            "task-scoped lifecycle tools; enabled Loop origins retain the "
+            "bounded controls needed for foreground re-entry; profiles that "
+            "explicitly enable this toolset receive the full orchestrator "
+            "surface. The dispatcher runs inside the gateway by default."
         ),
         "tools": [
             "kanban_show", "kanban_list", "kanban_complete", "kanban_block",
-            "kanban_request_decision", "kanban_request_review", "kanban_resolve_blocker",
-            "kanban_heartbeat", "kanban_comment",
-            "kanban_request_orchestrator_handoff",
+            "kanban_resolve_blocker", "kanban_heartbeat", "kanban_comment",
             "kanban_create", "kanban_link", "kanban_unblock",
             "kanban_decompose",
             "kanban_attach", "kanban_attach_url", "kanban_attachments",
@@ -293,7 +287,7 @@ TOOLSETS = {
         ),
         "tools": [
             "loop_create", "loop_status", "loop_update", "loop_block",
-            "loop_request_review", "loop_list_queue",
+            "loop_list_queue",
         ],
         "includes": [],
     },

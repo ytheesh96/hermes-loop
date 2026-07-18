@@ -347,6 +347,7 @@ def _task_link_payload(conn: Any, task_id: str) -> dict:
         children = []
     return {
         "child_task_ids": children,
+        # Legacy render hint only. Workflow identity comes from workflow_id.
         "is_root_task": len(parents) == 0,
         "parent_task_ids": parents,
     }
@@ -362,6 +363,7 @@ def _task_row_payload(task: Any, *, board: Optional[str]) -> dict:
         "assignee": getattr(task, "assignee", None),
         "tenant": getattr(task, "tenant", None),
         "board": _board_slug(board),
+        "workflow_id": getattr(task, "workflow_id", None),
         "workspace_kind": getattr(task, "workspace_kind", None),
         "current_run_id": getattr(task, "current_run_id", None),
         "source_session_id": getattr(task, "session_id", None),
@@ -417,6 +419,7 @@ def _loopagent_task_upsert_payload(
         "event": "loopagent.task.upsert",
         "board": _board_slug(board),
         "tenant": getattr(task, "tenant", None),
+        "workflow_id": getattr(task, "workflow_id", None),
         "task_id": task_id,
         "run_id": int(run_id) if run_id is not None else None,
         "source_session_id": getattr(task, "session_id", None),
@@ -452,6 +455,7 @@ def _worker_row_payload(
     created_at: Optional[int],
 ) -> dict:
     row = {
+        "workflow_id": getattr(task, "workflow_id", None),
         "task_id": getattr(task, "id", ""),
         "run_id": worker_payload.get("run_id"),
         "status": worker_payload.get("run_status") or _run_value(run, "status"),
@@ -518,6 +522,7 @@ def _loopagent_worker_upsert_payload(
         "event": "loopagent.worker.upsert",
         "board": _board_slug(board),
         "tenant": getattr(task, "tenant", None),
+        "workflow_id": getattr(task, "workflow_id", None),
         "task_id": getattr(task, "id", ""),
         "run_id": int(run_id) if run_id is not None else worker_payload.get("run_id"),
         "source_session_id": getattr(task, "session_id", None),

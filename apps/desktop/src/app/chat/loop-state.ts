@@ -88,38 +88,6 @@ export interface LoopWorkerCounts {
   total: number
 }
 
-export interface LoopTaskHandoff {
-  attention?: null | string
-  claimed_at?: null | number
-  claimed_by?: null | string
-  decision_actor?: null | string
-  decision_reason?: null | string
-  handoff_kind?: null | string
-  id?: number
-  intent?: null | string
-  payload?: null | Record<string, unknown>
-  queue_state?: null | string
-  reason?: null | string
-  resolution_action?: null | string
-  resolved_at?: null | number
-  resolution_summary?: null | string
-  resolved_by?: null | string
-  review_run_id?: null | number
-  review_task_id?: null | string
-  reviewer_session_id?: null | string
-  root_task_id?: null | string
-  run_id?: null | number
-  state?: null | string
-  summary?: null | string
-  target_actor?: null | string
-  task_id?: null | string
-  verification_state?: null | string
-  verification_status?: null | string
-  worker_metadata?: null | Record<string, unknown>
-  worker_profile?: null | string
-  worker_session_id?: null | string
-}
-
 export interface CompactLoopTask {
   assignee?: null | string
   completed_at?: null | number
@@ -167,7 +135,6 @@ export interface TenantLoopTask {
   latest_run?: null | LoopLatestRun
   latest_summary?: null | string
   loop_intake?: null | LoopIntakeState
-  loop_handoffs?: LoopTaskHandoff[]
   links?: {
     children?: string[]
     parents?: string[]
@@ -190,6 +157,7 @@ export interface TenantLoopTask {
   tenant?: null | string
   title: string
   warnings?: unknown
+  workflow_id?: null | string
   workspace_kind?: null | string
   workspace_path?: null | string
   worker_activity?: null | LoopWorkerActivity
@@ -204,11 +172,14 @@ export interface TenantLoopSource {
   lineage_session_ids?: string[]
   links?: { child_id?: string; parent_id?: string }[]
   now?: number
+  /** Deprecated response-read fallback from runtimes predating workflow ids. */
   root_task_id?: null | string
   session_id?: string
   tasks?: TenantLoopTask[]
   tenant?: null | string
   tenants?: string[]
+  workflow_id?: null | string
+  workflow_ids?: string[]
   workers?: LoopWorkerActivity[]
 }
 
@@ -273,7 +244,6 @@ export interface LoopRow {
   latestRun?: null | LoopLatestRun
   latestSummary?: null | string
   loopIntake?: null | LoopIntakeState
-  loopHandoffs?: LoopTaskHandoff[]
   needsSpecification?: boolean
   parentCount: number
   parents: string[]
@@ -294,6 +264,7 @@ export interface LoopRow {
   title: string
   unfinishedParentCount?: number
   workerActivity?: null | LoopWorkerActivity
+  workflowId?: null | string
   workspaceKind?: null | string
   workspacePath?: null | string
 }
@@ -317,16 +288,6 @@ export function loopTaskAllowsDependencyEdits(row: Pick<LoopRow, 'activeDecompos
 
 export function loopTaskAllowsDependencySource(row: Pick<LoopRow, 'activeDecompositionChildCount'>): boolean {
   return (row.activeDecompositionChildCount || 0) === 0
-}
-
-export function loopRootAllowsNewSink(
-  row: Pick<LoopRow, 'activeDecompositionChildCount' | 'assignee' | 'status'>
-): boolean {
-  return (
-    (row.activeDecompositionChildCount || 0) === 0 &&
-    (row.status || '').trim().toLowerCase().replaceAll('-', '_') === 'ready' &&
-    !row.assignee?.trim()
-  )
 }
 
 export function loopTaskPhase(row: LoopRow): LoopTaskPhase | null {
@@ -385,67 +346,11 @@ export interface LoopPanelState {
   message: string
   rawJson: string
   revision: number
-  rootTaskId: string
   rows: LoopRow[]
   sourceNow?: number
   status: LoopPanelStatus
-}
-
-export function loopConnectedTaskIds(state?: LoopPanelState | null, rootTaskId?: null | string): string[] {
-  const rows = state?.rows || []
-  const taskId = rootTaskId?.trim() || state?.rootTaskId || ''
-
-  if (!taskId) {
-    return []
-  }
-
-  const rowById = new Map(rows.map(row => [row.taskId, row]))
-
-  if (!rowById.has(taskId)) {
-    return rows.map(row => row.taskId)
-  }
-
-  const neighbors = new Map(rows.map(row => [row.taskId, new Set<string>()]))
-
-  const link = (left?: null | string, right?: null | string) => {
-    if (!left || !right || !rowById.has(left) || !rowById.has(right)) {
-      return
-    }
-
-    neighbors.get(left)?.add(right)
-    neighbors.get(right)?.add(left)
-  }
-
-  for (const row of rows) {
-    for (const parentId of row.parents) {
-      link(row.taskId, parentId)
-    }
-
-    for (const childId of row.children) {
-      link(row.taskId, childId)
-    }
-  }
-
-  const seen = new Set<string>()
-  const queue = [taskId]
-
-  while (queue.length) {
-    const currentId = queue.shift()!
-
-    if (seen.has(currentId) || !rowById.has(currentId)) {
-      continue
-    }
-
-    seen.add(currentId)
-
-    for (const nextId of neighbors.get(currentId) || []) {
-      if (!seen.has(nextId)) {
-        queue.push(nextId)
-      }
-    }
-  }
-
-  return rows.filter(row => seen.has(row.taskId)).map(row => row.taskId)
+  workflowId: string
+  workflowIds: string[]
 }
 
 const ARCHIVED_STATUSES = new Set(['archived'])
@@ -621,193 +526,27 @@ function taskChildren(task: TenantLoopTask): string[] {
   return Array.from(new Set([...explicit, ...external]))
 }
 
-const LOOP_DELEGATION_CREATED_BY_PREFIX = 'loop_delegation:'
-
-const isDelegatedLoopRootTask = (task: TenantLoopTask): boolean =>
-  Boolean(task.created_by?.startsWith(LOOP_DELEGATION_CREATED_BY_PREFIX)) && taskParents(task).length === 0
-
-const isSelfAnchoredLoopTask = (task: TenantLoopTask): boolean =>
-  task.created_by === `loop:${task.id}` || isDelegatedLoopRootTask(task)
-
-function taskNeighborMap(
-  source: Omit<TenantLoopSource, 'tasks'> & { tasks?: readonly TenantLoopTask[] },
-  tasks: readonly TenantLoopTask[]
-): Map<string, Set<string>> {
-  const taskIds = new Set(tasks.map(task => task.id))
-  const neighbors = new Map(tasks.map(task => [task.id, new Set<string>()]))
-
-  const link = (left?: null | string, right?: null | string) => {
-    if (!left || !right || !taskIds.has(left) || !taskIds.has(right)) {
-      return
-    }
-
-    neighbors.get(left)?.add(right)
-    neighbors.get(right)?.add(left)
-  }
-
-  for (const task of tasks) {
-    for (const parentId of taskParents(task)) {
-      link(task.id, parentId)
-    }
-
-    for (const childId of taskChildren(task)) {
-      link(task.id, childId)
-    }
-  }
-
-  for (const sourceLink of [...(source.links || []), ...(source.external_links || [])]) {
-    link(sourceLink.parent_id, sourceLink.child_id)
-  }
-
-  return neighbors
-}
-
-function taskGraphHasPath(startId: string, targetId: string, neighbors: Map<string, Set<string>>): boolean {
-  if (startId === targetId) {
-    return true
-  }
-
-  const seen = new Set<string>()
-  const queue = [startId]
-
-  while (queue.length) {
-    const taskId = queue.shift()!
-
-    if (seen.has(taskId)) {
-      continue
-    }
-
-    seen.add(taskId)
-
-    for (const nextId of neighbors.get(taskId) || []) {
-      if (nextId === targetId) {
-        return true
-      }
-
-      if (!seen.has(nextId)) {
-        queue.push(nextId)
-      }
-    }
-  }
-
-  return false
-}
-
-export function relatedLoopTaskIdsForRoot(
-  source: Omit<TenantLoopSource, 'tasks'> & { tasks?: readonly TenantLoopTask[] },
-  root: TenantLoopTask,
-  tasks: readonly TenantLoopTask[] = source.tasks || []
-): Set<string> {
-  const neighbors = taskNeighborMap(source, tasks)
-  const seen = new Set<string>()
-  const queue = [root.id]
-
-  while (queue.length > 0) {
-    const taskId = queue.shift()!
-
-    if (seen.has(taskId)) {
-      continue
-    }
-
-    seen.add(taskId)
-
-    for (const nextId of neighbors.get(taskId) || []) {
-      if (!seen.has(nextId)) {
-        queue.push(nextId)
-      }
-    }
-  }
-
-  return seen
-}
-
-function topLevelSelfAnchoredRoots(source: TenantLoopSource, tasks: readonly TenantLoopTask[]): TenantLoopTask[] {
-  const neighbors = taskNeighborMap(source, tasks)
-
-  const selfAnchored = tasks
-    .filter(isSelfAnchoredLoopTask)
-    .sort((a, b) => (a.created_at || 0) - (b.created_at || 0) || a.id.localeCompare(b.id))
-
-  return selfAnchored.filter((task, index) => {
-    const connectedEarlierRoot = selfAnchored
-      .slice(0, index)
-      .find(other => taskGraphHasPath(task.id, other.id, neighbors))
-
-    return !connectedEarlierRoot
-  })
-}
-
-function preferredSelfAnchoredRootForTask(
+export function workflowIdsFromTenantSource(
   source: TenantLoopSource,
-  tasks: readonly TenantLoopTask[],
-  taskId: string
-): TenantLoopTask | null {
-  const neighbors = taskNeighborMap(source, tasks)
-  const selfAnchored = topLevelSelfAnchoredRoots(source, tasks)
-
-  return selfAnchored.find(root => taskGraphHasPath(taskId, root.id, neighbors)) || null
-}
-
-function orderedSessionLineageIds(source: TenantLoopSource): string[] {
-  return Array.from(
-    new Set([...(source.lineage_session_ids || []), source.session_id].filter((id): id is string => Boolean(id)))
+  tasks: readonly TenantLoopTask[] = source.tasks || []
+): string[] {
+  const canonical = Array.from(
+    new Set(
+      [
+        ...(source.workflow_ids || []),
+        source.workflow_id,
+        ...tasks.map(task => task.workflow_id)
+      ].filter((value): value is string => Boolean(value?.trim()))
+    )
   )
-}
 
-export function inferLoopRootTaskIdFromTenantSource(
-  source: TenantLoopSource,
-  tasks: readonly TenantLoopTask[] = source.tasks || []
-): string {
-  const byId = new Map(tasks.map(task => [task.id, task]))
-
-  if (source.root_task_id && byId.has(source.root_task_id)) {
-    const topLevelRoot = preferredSelfAnchoredRootForTask(source, tasks, source.root_task_id)
-
-    return topLevelRoot?.id || source.root_task_id
+  if (canonical.length > 0) {
+    return canonical
   }
 
-  const selfAnchoredRoots = topLevelSelfAnchoredRoots(source, tasks)
-
-  if (selfAnchoredRoots[0]?.id) {
-    return selfAnchoredRoots[0].id
-  }
-
-  for (const lineageId of orderedSessionLineageIds(source)) {
-    const anchoredRows = tasks
-      .filter(task => task.id && task.session_id === lineageId)
-      .sort((a, b) => (a.created_at || 0) - (b.created_at || 0))
-
-    if (anchoredRows[0]?.id) {
-      return anchoredRows[0].id
-    }
-  }
-
-  if (source.tenant && tasks.some(task => task.id === source.tenant)) {
-    return source.tenant
-  }
-
-  if (!tasks.length) {
-    return ''
-  }
-
-  return source.tenant || source.session_id || source.lineage_session_ids?.[0] || tasks[0]?.id || ''
-}
-
-export function inferLoopRootTasksFromTenantSource(
-  source: TenantLoopSource,
-  tasks: readonly TenantLoopTask[] = source.tasks || []
-): TenantLoopTask[] {
-  const roots = topLevelSelfAnchoredRoots(source, tasks)
-
-  if (roots.length > 0) {
-    return roots
-  }
-
-  const byId = new Map(tasks.map(task => [task.id, task]))
-  const inferredRoot = byId.get(inferLoopRootTaskIdFromTenantSource(source, tasks))
-  const fallbackRoot = inferredRoot || tasks.find(task => taskParents(task).length === 0) || tasks[0]
-
-  return fallbackRoot ? [fallbackRoot] : []
+  // Narrow response-read compatibility for older runtimes. The value is
+  // treated as a workflow identity, never as a privileged task.
+  return source.root_task_id?.trim() ? [source.root_task_id.trim()] : []
 }
 
 function depthByTaskId(tasks: readonly TenantLoopTask[]): Map<string, number> {
@@ -898,7 +637,6 @@ function tenantRowFromTask(
     latestSummary:
       task.latest_summary || workerActivity?.summary || workerActivity?.summary_preview || latestRun?.summary || null,
     loopIntake: task.loop_intake || null,
-    loopHandoffs: task.loop_handoffs || [],
     needsSpecification: task.needs_specification,
     parentCount: parents.length || task.parent_count || task.parents_count || 0,
     parents,
@@ -923,6 +661,7 @@ function tenantRowFromTask(
       return !parent || !COMPLETE_STATUSES.has(normalizedStatus(parent.status))
     }).length,
     workerActivity,
+    workflowId: task.workflow_id,
     workspaceKind: task.workspace_kind,
     workspacePath: task.workspace_path
   }
@@ -939,18 +678,24 @@ export function deriveLoopPanelStateFromTenantSource(
     task => task.id && (source.include_archived || !ARCHIVED_STATUSES.has(normalizedStatus(task.status)))
   )
 
+  const workflowIds = workflowIdsFromTenantSource(source, tasks)
+  const workflowId = source.workflow_id?.trim() || (workflowIds.length === 1 ? workflowIds[0]! : '')
   const depths = depthByTaskId(tasks)
   const taskById = new Map((source.tasks || []).map(task => [task.id, task]))
-  const rows = tasks.map(task => tenantRowFromTask(task, depths, source.workers || [], taskById))
-  const rootTaskId = inferLoopRootTaskIdFromTenantSource(source, tasks)
+
+  const rows = tasks.map(task => ({
+    ...tenantRowFromTask(task, depths, source.workers || [], taskById),
+    workflowId: task.workflow_id || workflowId || null
+  }))
 
   return {
     message: '',
     rawJson: rawJson(source),
     revision: source.latest_event_id || 0,
-    rootTaskId,
     rows,
     sourceNow: source.now,
-    status: 'ready'
+    status: 'ready',
+    workflowId,
+    workflowIds
   }
 }

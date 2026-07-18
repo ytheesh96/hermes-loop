@@ -5,7 +5,7 @@ import { deriveLoopPanelStateFromTenantSource, type TenantLoopSource } from './l
 
 const titleOnlyIntakeSource: TenantLoopSource = {
   latest_event_id: 1,
-  root_task_id: 't_intake',
+  workflow_id: 't_intake',
   session_id: 'session-intake',
   tasks: [
     {
@@ -42,7 +42,7 @@ describe('Loop intake foreground trigger', () => {
     const draft = buildLoopTriageDraft(row, 'developer')
 
     expect(draft).toBe(
-      '/loop-triage Triage Loop root t_intake on Kanban board developer: Launch a Peacock workflow'
+      '/loop-triage Triage Loop workflow task t_intake on Kanban board developer: Launch a Peacock workflow'
     )
   })
 
@@ -59,7 +59,7 @@ describe('Loop intake foreground trigger', () => {
   it('keeps ordinary Loop chat drafts for rows without durable intake state', () => {
     const state = deriveLoopPanelStateFromTenantSource({
       latest_event_id: 1,
-      root_task_id: 't_ready',
+      workflow_id: 't_ready',
       session_id: 'session-ready',
       tasks: [
         {

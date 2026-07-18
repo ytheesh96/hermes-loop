@@ -386,6 +386,16 @@ def _compute_tool_definitions(
                     print(f"✅ Enabled legacy toolset '{toolset_name}': {', '.join(legacy_tools)}")
             elif not quiet_mode:
                 print(f"⚠️  Unknown toolset: {toolset_name}")
+        if (
+            not os.environ.get("HERMES_KANBAN_TASK")
+            and {"delegate_task", "loop_graph"} & tools_to_include
+        ):
+            # A session that can originate durable Loop work must keep the
+            # same compact Kanban control surface when that workflow wakes it
+            # later. Individual tools remain check_fn-gated, so enabled Loop
+            # foregrounds receive only show/complete/comment/create/unblock;
+            # webhook-safe and other non-Loop postures gain nothing.
+            tools_to_include.update(resolve_toolset("kanban"))
     else:
         # Default: start with everything
         from toolsets import get_all_toolsets

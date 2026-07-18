@@ -121,12 +121,12 @@ function handoffMessage(): ThreadMessage {
 }
 
 // Mirrors chat/index.tsx: incremental runtime + messageRepository + onEdit.
-function IncrementalHarness({ onEdit }: { onEdit: () => Promise<void> }) {
+function IncrementalHarness({ isRunning = false, onEdit }: { isRunning?: boolean; onEdit: () => Promise<void> }) {
   const repository = ExportedMessageRepository.fromArray([userMessage(), assistantMessage()])
 
   const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messageRepository: repository,
-    isRunning: false,
+    isRunning,
     setMessages: () => {},
     onNew: async () => {},
     onEdit,
@@ -173,6 +173,10 @@ function HandoffHarness({ onOpenKanbanTask }: { onOpenKanbanTask?: (taskId: stri
 }
 
 describe('click-to-edit user message', () => {
+  it('creates the running assistant placeholder with the incremental runtime', () => {
+    expect(() => render(<IncrementalHarness isRunning onEdit={async () => {}} />)).not.toThrow()
+  })
+
   it('opens the edit composer with the incremental runtime', async () => {
     const { container } = render(<IncrementalHarness onEdit={async () => {}} />)
 

@@ -2021,6 +2021,16 @@ from gateway.whatsapp_identity import (
 logger = logging.getLogger(__name__)
 
 
+def _workflow_id_from_event(event: Any) -> str:
+    """Return trusted, internal workflow routing metadata for this turn."""
+    if not bool(getattr(event, "internal", False)):
+        return ""
+    metadata = getattr(event, "metadata", None)
+    if not isinstance(metadata, dict):
+        return ""
+    return str(metadata.get("workflow_id") or "").strip()
+
+
 _OWN_POLICY_OPEN_ENV = {
     Platform.WECOM: ("WECOM_DM_POLICY", "WECOM_GROUP_POLICY", "WECOM_ALLOW_ALL_USERS"),
     Platform.WEIXIN: ("WEIXIN_DM_POLICY", "WEIXIN_GROUP_POLICY", "WEIXIN_ALLOW_ALL_USERS"),
@@ -2375,8 +2385,17 @@ def _dequeue_pending_event(adapter, session_key: str) -> MessageEvent | None:
 
     Queued follow-ups must preserve their media metadata so they can re-enter
     the normal image/STT/document preprocessing path instead of being reduced
-    to a placeholder string.
+    to a placeholder string. Receipt-bearing workflow wakes are deliberately
+    reserved for the adapter's next real processing turn instead of being
+    folded recursively into the currently active turn.
     """
+    dequeue_for_turn = getattr(
+        type(adapter),
+        "get_pending_message_for_active_turn",
+        None,
+    )
+    if callable(dequeue_for_turn):
+        return dequeue_for_turn(adapter, session_key)
     return adapter.get_pending_message(session_key)
 
 
@@ -4702,6 +4721,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         queued_events = getattr(self, "_queued_events", None)
         if not queued_events:
             return pending_event
+        has_reserved = getattr(
+            type(adapter),
+            "has_reserved_pending_message",
+            None,
+        )
+        if (
+            pending_event is None
+            and callable(has_reserved)
+            and has_reserved(adapter, session_key)
+        ):
+            # Do not let /queue overflow jump ahead of a workflow wake whose
+            # exact foreground turn owns a live completion receipt.
+            return None
         overflow = queued_events.get(session_key)
         if not overflow:
             return pending_event
@@ -11470,7 +11502,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         context = build_session_context(source, self.config, session_entry)
 
         # Set session context variables for tools (task-local, concurrency-safe)
-        _session_env_tokens = self._set_session_env(context)
+        _session_env_tokens = self._set_session_env(
+            context,
+            workflow_id=_workflow_id_from_event(event),
+        )
 
         # Read privacy.redact_pii from config (re-read per message)
         _redact_pii = False
@@ -15641,7 +15676,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return delivered
 
-    def _set_session_env(self, context: SessionContext) -> list:
+    def _set_session_env(
+        self,
+        context: SessionContext,
+        *,
+        workflow_id: str = "",
+    ) -> list:
         """Set session context variables for the current async task.
 
         Uses ``contextvars`` instead of ``os.environ`` so that concurrent
@@ -15664,6 +15704,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return set_session_vars(
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,
+            chat_type=context.source.chat_type,
             chat_name=context.source.chat_name or "",
             thread_id=str(context.source.thread_id) if context.source.thread_id else "",
             user_id=str(context.source.user_id) if context.source.user_id else "",
@@ -15672,6 +15713,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,
+            workflow_id=workflow_id,
         )
 
     def _clear_session_env(self, tokens: list) -> None:

@@ -15,5 +15,5 @@ export function buildLoopChatDraft(row: LoopRow): string {
 export function buildLoopTriageDraft(row: LoopTaskReference, board?: null | string): string {
   const boardContext = board?.trim() ? ` on Kanban board ${board.trim()}` : ''
 
-  return `/loop-triage Triage Loop root ${row.taskId}${boardContext}: ${rowTitle(row)}`
+  return `/loop-triage Triage Loop workflow task ${row.taskId}${boardContext}: ${rowTitle(row)}`
 }

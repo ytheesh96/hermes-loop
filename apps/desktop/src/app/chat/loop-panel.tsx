@@ -24,13 +24,12 @@ import { cn } from '@/lib/utils'
 import type { ComposerStatusItem, StatusItemState } from '@/store/composer-status'
 import type { PreviewTarget } from '@/store/preview'
 
-import { loopConnectedTaskIds, loopTaskAllowsDependencyEdits, loopTaskPhaseLabel } from './loop-state'
+import { loopTaskAllowsDependencyEdits, loopTaskPhaseLabel } from './loop-state'
 import type {
   LoopPanelState,
   LoopRow,
   LoopTaskComment,
   LoopTaskDetail,
-  LoopTaskHandoff,
   LoopWorkerActivity,
   TenantLoopTask
 } from './loop-state'
@@ -38,17 +37,14 @@ import { LoopTaskGraph, type LoopTaskGraphPosition } from './loop-task-graph'
 import { LocalFilePreview } from './right-rail/preview-file'
 
 export type LoopTaskAction =
-  | 'accept-review'
   | 'archive'
   | 'archive-loop'
   | 'ask-hermes'
   | 'block'
   | 'details'
-  | 'escalate-review'
   | 'kanban'
   | 'logs'
   | 'park'
-  | 'reject-review'
   | 'start'
   | 'unblock'
   | 'worker-run'
@@ -57,7 +53,7 @@ export type LoopTaskAction =
 export interface LoopTaskCreateOptions {
   childId?: string
   parentId?: string
-  rootTaskId?: string
+  workflowId?: string
 }
 
 type LoopTaskCommentSubmit = (taskId: string, body: string) => Promise<void> | void
@@ -164,48 +160,8 @@ const FAILED_LOOP_STATUSES = new Set([
   'timeout'
 ])
 
-const ACTIVE_LOOP_HANDOFF_STATES = new Set(['assigned', 'batched', 'queued', 'recorded', 'reviewing', 'escalated'])
-
-const TERMINAL_LOOP_HANDOFF_STATES = new Set([
-  'approved',
-  'blocked_waiting',
-  'cancelled_superseded',
-  'closed',
-  'ignored_duplicate',
-  'rejected',
-  'released'
-])
-
 function normalizedLoopValue(value?: null | string): string {
   return (value || '').trim().toLowerCase().replaceAll('-', '_')
-}
-
-function isPendingLoopHandoff(handoff: LoopTaskHandoff): boolean {
-  if ((handoff as { resolved_at?: unknown }).resolved_at != null) {
-    return false
-  }
-
-  const queueState = normalizedLoopValue(handoff.queue_state)
-
-  if (queueState === 'open' || queueState === 'claimed') {
-    return true
-  }
-
-  if (queueState === 'resolved' || queueState === 'canceled') {
-    return false
-  }
-
-  const state = normalizedLoopValue(handoff.state)
-
-  if (!state) {
-    return true
-  }
-
-  if (TERMINAL_LOOP_HANDOFF_STATES.has(state)) {
-    return false
-  }
-
-  return ACTIVE_LOOP_HANDOFF_STATES.has(state)
 }
 
 function attentionText(row: LoopRow): string {
@@ -223,18 +179,7 @@ function attentionText(row: LoopRow): string {
     row.resumeMode,
     row.reviewSubjectAssignee,
     row.foregroundParentSessionId,
-    row.foregroundForkSessionId,
-    ...(row.loopHandoffs || []).flatMap(handoff => [
-      handoff.handoff_kind,
-      handoff.intent,
-      handoff.target_actor,
-      handoff.queue_state,
-      handoff.state,
-      handoff.attention,
-      handoff.verification_state,
-      handoff.summary,
-      handoff.reason
-    ])
+    row.foregroundForkSessionId
   ]
     .filter((value): value is string => Boolean(value))
     .join(' ')
@@ -261,7 +206,7 @@ function attentionReason(row: LoopRow): string {
   }
 
   if (FAILED_LOOP_STATUSES.has(status) || FAILED_LOOP_STATUSES.has(runStatus) || FAILED_LOOP_STATUSES.has(runOutcome)) {
-    return 'Worker handoff failed'
+    return 'Worker failed'
   }
 
   if (isOrchestratorReviewRow(row)) {
@@ -276,6 +221,8 @@ function attentionReason(row: LoopRow): string {
     return 'Approval needed'
   }
 
+  // Read-only compatibility for persisted tasks from the removed foreground
+  // handoff state machine. Current workflows do not create this status.
   if (status === 'foreground_handoff') {
     return 'Foreground handoff'
   }
@@ -344,82 +291,51 @@ function isQueuedLoopRow(row: LoopRow): boolean {
   return QUEUED_OVERVIEW_STATUSES.has(status)
 }
 
-interface RootOverviewGroups {
-  active: LoopRow[]
-  attention: LoopRow[]
-  completed: LoopRow[]
-  other: LoopRow[]
-  queued: LoopRow[]
-}
-
-interface LoopDependencyGroup {
+interface LoopWorkflowGroup {
   anchor: LoopRow
-  hasDependencyLink: boolean
+  hasMultipleTasks: boolean
   ids: Set<string>
   rows: LoopRow[]
+  workflowId: string
 }
 
-const LOOP_DELEGATION_CREATED_BY_PREFIX = 'loop_delegation:'
-
-function isSelfAnchoredLoopRootRow(row: LoopRow): boolean {
-  const createdBy = row.rawTask?.created_by?.trim()
-
-  if (createdBy === `loop:${row.taskId}`) {
-    return true
-  }
-
-  return Boolean(
-    createdBy?.startsWith(LOOP_DELEGATION_CREATED_BY_PREFIX) && row.parents.length === 0 && row.parentCount === 0
-  )
-}
-
-function dependencyGroupAnchor(rows: LoopRow[], preferredTaskId?: null | string): LoopRow {
+function workflowGroupAnchor(rows: LoopRow[], preferredTaskId?: null | string): LoopRow {
   return (
     (preferredTaskId ? rows.find(row => row.taskId === preferredTaskId) : null) ||
-    rows.find(isSelfAnchoredLoopRootRow) ||
-    rows.find(row => row.parents.length === 0 && row.parentCount === 0) ||
-    rows[0]!
+    [...rows].sort(
+      (left, right) =>
+        (left.rawTask?.created_at ?? Number.MAX_SAFE_INTEGER) -
+        (right.rawTask?.created_at ?? Number.MAX_SAFE_INTEGER)
+    )[0]!
   )
 }
 
-function loopDependencyGroups(state?: LoopPanelState | null): LoopDependencyGroup[] {
+function loopWorkflowGroups(state?: LoopPanelState | null): LoopWorkflowGroup[] {
   const rows = state?.rows || []
-  const remaining = new Set(rows.map(row => row.taskId))
-  const groups: LoopDependencyGroup[] = []
+  const rowsByWorkflow = new Map<string, LoopRow[]>()
 
   for (const row of rows) {
-    if (!remaining.has(row.taskId)) {
-      continue
-    }
-
-    const componentIds = new Set(loopConnectedTaskIds(state, row.taskId))
-
-    if (componentIds.size === 0) {
-      componentIds.add(row.taskId)
-    }
-
-    const groupRows = rows.filter(candidate => componentIds.has(candidate.taskId))
-
-    for (const taskId of componentIds) {
-      remaining.delete(taskId)
-    }
-
-    groups.push({
-      anchor: dependencyGroupAnchor(groupRows, state?.rootTaskId),
-      hasDependencyLink: groupRows.length > 1,
-      ids: new Set(groupRows.map(candidate => candidate.taskId)),
-      rows: groupRows
-    })
+    const workflowId = row.workflowId?.trim() || state?.workflowId || `task:${row.taskId}`
+    rowsByWorkflow.set(workflowId, [...(rowsByWorkflow.get(workflowId) || []), row])
   }
 
-  return groups
+  return [...rowsByWorkflow].map(([workflowId, workflowRows]) => ({
+    // Older workflow ids were task ids. Prefer that matching row as the
+    // display representative when present, without giving it lifecycle or
+    // mutation privileges over the other workflow members.
+    anchor: workflowGroupAnchor(workflowRows, workflowId),
+    hasMultipleTasks: workflowRows.length > 1,
+    ids: new Set(workflowRows.map(row => row.taskId)),
+    rows: workflowRows,
+    workflowId
+  }))
 }
 
-function loopDependencyGroupForTask(
+function loopWorkflowGroupForTask(
   state: LoopPanelState | null,
   taskId?: null | string,
-  groups = loopDependencyGroups(state)
-): LoopDependencyGroup | null {
+  groups = loopWorkflowGroups(state)
+): LoopWorkflowGroup | null {
   if (!groups.length) {
     return null
   }
@@ -428,39 +344,11 @@ function loopDependencyGroupForTask(
     return groups.find(group => group.ids.has(taskId)) || null
   }
 
-  return groups.find(group => group.hasDependencyLink) || groups[0] || null
+  return groups.find(group => group.hasMultipleTasks) || groups[0] || null
 }
 
-function loopDependencyGroupShowsOverview(group?: LoopDependencyGroup | null): boolean {
-  return Boolean(group && (group.hasDependencyLink || isSelfAnchoredLoopRootRow(group.anchor)))
-}
-
-function loopDependencyGroupMembers(group: LoopDependencyGroup): LoopRow[] {
-  return group.rows.filter(row => row.taskId !== group.anchor.taskId)
-}
-
-function rootOverviewGroups(group: LoopDependencyGroup): RootOverviewGroups {
-  const descendants = loopDependencyGroupMembers(group)
-  const attention = attentionRows(descendants)
-  const attentionIds = new Set(attention.map(row => row.taskId))
-  const active = descendants.filter(row => !attentionIds.has(row.taskId) && isActiveLoopRow(row))
-  const queued = descendants.filter(row => !attentionIds.has(row.taskId) && isQueuedLoopRow(row))
-  const completed = descendants.filter(row => !attentionIds.has(row.taskId) && isDoneLoopRow(row))
-
-  const groupedIds = new Set([
-    ...attention.map(row => row.taskId),
-    ...active.map(row => row.taskId),
-    ...queued.map(row => row.taskId),
-    ...completed.map(row => row.taskId)
-  ])
-
-  return {
-    active,
-    attention,
-    queued,
-    other: descendants.filter(row => !groupedIds.has(row.taskId)),
-    completed
-  }
+function loopWorkflowGroupShowsOverview(group?: LoopWorkflowGroup | null): boolean {
+  return Boolean(group?.hasMultipleTasks)
 }
 
 function idsFromTask(task: TenantLoopTask, key: 'children' | 'parents'): string[] {
@@ -502,7 +390,6 @@ function detailRowFromTaskDetail(detail?: LoopTaskDetail | null, selectedTaskId?
     latestRun,
     latestSummary: task.latest_summary || latestRun?.summary || null,
     loopIntake: task.loop_intake || null,
-    loopHandoffs: task.loop_handoffs || [],
     needsSpecification: task.needs_specification,
     parentCount: parents.length || task.parent_count || task.parents_count || 0,
     parents,
@@ -521,6 +408,7 @@ function detailRowFromTaskDetail(detail?: LoopTaskDetail | null, selectedTaskId?
     tenant: task.tenant,
     title: task.title || task.id,
     workerActivity: task.worker_activity || undefined,
+    workflowId: task.workflow_id,
     workspaceKind: task.workspace_kind,
     workspacePath: task.workspace_path
   }
@@ -555,7 +443,7 @@ function selectedRowFrom(
 }
 
 interface LoopStackRowProps {
-  group?: LoopDependencyGroup
+  group?: LoopWorkflowGroup
   onSelect: (taskId: string) => void
   row: LoopRow
   selected: boolean
@@ -582,7 +470,7 @@ function LoopPriorityIndicator({ row }: { row: LoopRow }) {
   )
 }
 
-function loopDependencyGroupStatusIndicator(group: LoopDependencyGroup): StatusIndicatorKind {
+function loopWorkflowGroupStatusIndicator(group: LoopWorkflowGroup): StatusIndicatorKind {
   const indicators = group.rows.map(loopRowStatusIndicator)
 
   if (indicators.includes('attention')) {
@@ -612,8 +500,8 @@ function loopDependencyGroupStatusIndicator(group: LoopDependencyGroup): StatusI
   return indicators[0] || 'unknown'
 }
 
-function loopStackStatusIndicator(row: LoopRow, group?: LoopDependencyGroup): StatusIndicatorKind {
-  return group?.hasDependencyLink ? loopDependencyGroupStatusIndicator(group) : loopRowStatusIndicator(row)
+function loopStackStatusIndicator(row: LoopRow, group?: LoopWorkflowGroup): StatusIndicatorKind {
+  return group?.hasMultipleTasks ? loopWorkflowGroupStatusIndicator(group) : loopRowStatusIndicator(row)
 }
 
 function loopStackStateFromIndicator(indicator: StatusIndicatorKind): StatusItemState {
@@ -632,11 +520,11 @@ function pluralizeLoopUnit(count: number, singular: string, plural = `${singular
   return `${count} ${count === 1 ? singular : plural}`
 }
 
-function loopStackTaskCountLabel(group?: LoopDependencyGroup): string | undefined {
-  return group?.hasDependencyLink ? pluralizeLoopUnit(group.rows.length, 'task') : undefined
+function loopStackTaskCountLabel(group?: LoopWorkflowGroup): string | undefined {
+  return group?.hasMultipleTasks ? pluralizeLoopUnit(group.rows.length, 'task') : undefined
 }
 
-function loopStackStatusItem(row: LoopRow, group?: LoopDependencyGroup): ComposerStatusItem {
+function loopStackStatusItem(row: LoopRow, group?: LoopWorkflowGroup): ComposerStatusItem {
   const statusIndicator = loopStackStatusIndicator(row, group)
 
   return {
@@ -679,7 +567,7 @@ function LoopCollapsedAttentionQueue({
   onSelectTaskId,
   rows
 }: {
-  groups?: LoopDependencyGroup[]
+  groups?: LoopWorkflowGroup[]
   onSelectTaskId: (taskId: string) => void
   rows: LoopRow[]
 }) {
@@ -715,7 +603,7 @@ interface LoopTaskStackProps {
 
 export function LoopTaskStack({ onSelectTaskId, selectedTaskId, state }: LoopTaskStackProps) {
   const selected = useMemo(() => selectedRowFrom(state, selectedTaskId), [selectedTaskId, state])
-  const groups = useMemo(() => loopDependencyGroups(state), [state])
+  const groups = useMemo(() => loopWorkflowGroups(state), [state])
   const collapsedAttentionRows = useMemo(() => attentionRows(state?.rows || []), [state])
 
   if (!state || state.rows.length === 0) {
@@ -757,19 +645,19 @@ interface LoopPanelProps {
   onCreateTask?: (idea: string, options?: LoopTaskCreateOptions) => Promise<null | string>
   onLinkTasks?: (parentId: string, childId: string) => Promise<boolean>
   onUnlinkTasks?: (parentId: string, childId: string) => Promise<boolean>
-  onSavePositions?: (positions: LoopTaskGraphPosition[], rootTaskId?: string) => Promise<boolean>
+  onSavePositions?: (positions: LoopTaskGraphPosition[], workflowId?: string) => Promise<boolean>
   onSelectTaskId?: (taskId: string) => void
   onAddTaskComment?: LoopTaskCommentSubmit
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
   open?: boolean
   positions?: LoopTaskGraphPosition[]
-  rootTaskId?: string
   selectedTaskComments?: LoopTaskComment[] | null
   selectedTaskCommentsError?: null | string
   selectedTaskDetail?: LoopTaskDetail | null
   selectedTaskDetailError?: null | string
   selectedTaskId?: null | string
   state: LoopPanelState | null
+  workflowId?: string
 }
 
 function DetailSection({
@@ -1724,137 +1612,6 @@ function loopTaskGraphAgentLabel(row: LoopRow): string | undefined {
   )
 }
 
-type LoopHandoffLine = { label: string; value: string }
-
-function loopMetadataLabel(value: string): string {
-  return loopToolLabel(value.replaceAll('-', '_'))
-}
-
-function loopHandoffLinesForRow(row: LoopRow): LoopHandoffLine[] {
-  const lines: LoopHandoffLine[] = []
-
-  const pushLine = (label: string, value?: null | number | string) => {
-    if (value === null || value === undefined || value === '') {
-      return
-    }
-
-    lines.push({ label, value: String(value) })
-  }
-
-  pushLine('Review kind', row.reviewKind ? loopMetadataLabel(row.reviewKind) : undefined)
-  pushLine('Resume mode', row.resumeMode ? loopMetadataLabel(row.resumeMode) : undefined)
-  pushLine('Review subject', row.reviewSubjectAssignee)
-  pushLine('Task session', row.sourceSessionId)
-  pushLine('Parent session', row.foregroundParentSessionId)
-  pushLine('Fork session', row.foregroundForkSessionId)
-
-  return lines
-}
-
-function loopHandoffSummary(handoff: LoopTaskHandoff): string {
-  return [
-    handoff.intent ? loopMetadataLabel(handoff.intent) : undefined,
-    handoff.target_actor ? `Target ${loopMetadataLabel(handoff.target_actor)}` : undefined,
-    handoff.queue_state ? loopMetadataLabel(handoff.queue_state) : undefined,
-    handoff.handoff_kind ? loopMetadataLabel(handoff.handoff_kind) : undefined,
-    handoff.state ? loopMetadataLabel(handoff.state) : undefined,
-    handoff.verification_state ? loopMetadataLabel(handoff.verification_state) : undefined,
-    handoff.attention ? loopMetadataLabel(handoff.attention) : undefined
-  ]
-    .filter(Boolean)
-    .join(' · ')
-}
-
-function LoopForegroundHandoffCard({ row }: { row: LoopRow }) {
-  const lines = loopHandoffLinesForRow(row)
-  const handoffs = (row.loopHandoffs || []).filter(isPendingLoopHandoff)
-
-  const hasReviewRouting = Boolean(
-    row.reviewKind || row.resumeMode || row.foregroundParentSessionId || row.foregroundForkSessionId
-  )
-
-  if (!hasReviewRouting && handoffs.length === 0) {
-    return null
-  }
-
-  return (
-    <DetailSection testId="loop-foreground-handoff-card" title="Handoff request">
-      <div className="grid gap-2 text-[0.72rem] text-(--ui-text-secondary)">
-        {isOrchestratorReviewRow(row) ? (
-          <div className="flex items-start gap-2 rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-fill-quaternary) px-2 py-1.5">
-            <StatusIndicator ariaLabel="Orchestrator review attention" kind="attention" />
-            <div className="grid min-w-0 gap-0.5">
-              <p className="m-0 font-medium text-(--ui-text-primary)">{attentionReason(row)}</p>
-              <p className="m-0 text-[0.66rem] text-(--ui-text-tertiary)">
-                This handoff remains attached to task {row.taskId}.
-              </p>
-            </div>
-          </div>
-        ) : null}
-
-        {lines.length > 0 ? (
-          <dl className="m-0 grid gap-1" data-testid="loop-foreground-lineage-list">
-            {lines.map(line => (
-              <div className="grid min-w-0 grid-cols-[6.5rem_minmax(0,1fr)] gap-2" key={`${line.label}:${line.value}`}>
-                <dt className="text-(--ui-text-tertiary)">{line.label}</dt>
-                <dd className="m-0 min-w-0 break-all font-mono text-[0.68rem] text-(--ui-text-secondary)">
-                  {line.value}
-                </dd>
-              </div>
-            ))}
-          </dl>
-        ) : null}
-
-        {handoffs.length > 0 ? (
-          <div className="grid gap-1" data-testid="loop-foreground-handoff-list">
-            <p className="m-0 text-[0.62rem] font-medium uppercase tracking-wide text-(--ui-text-tertiary)">
-              Durable handoffs
-            </p>
-            {handoffs.map((handoff, index) => (
-              <div
-                className="grid min-w-0 gap-0.5 rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-surface-background) px-2 py-1.5"
-                key={handoff.id ?? `${handoff.handoff_kind}:${handoff.run_id}:${index}`}
-              >
-                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                  <span className="font-medium text-(--ui-text-primary)">
-                    {loopHandoffSummary(handoff) || 'Loop handoff'}
-                  </span>
-                  {handoff.review_task_id ? (
-                    <span className="rounded bg-(--ui-fill-quaternary) px-1.5 py-0.5 font-mono text-[0.62rem] text-(--ui-text-tertiary)">
-                      review {handoff.review_task_id}
-                    </span>
-                  ) : null}
-                  {handoff.resolution_action ? (
-                    <span className="rounded bg-(--ui-fill-quaternary) px-1.5 py-0.5 font-mono text-[0.62rem] text-(--ui-text-tertiary)">
-                      {loopMetadataLabel(handoff.resolution_action)}
-                      {handoff.resolved_by ? ` by ${handoff.resolved_by}` : ''}
-                    </span>
-                  ) : null}
-                </div>
-                {(handoff.summary || handoff.reason) && (
-                  <p className="m-0 whitespace-pre-wrap text-[0.68rem] leading-relaxed text-(--ui-text-secondary)">
-                    {handoff.summary || handoff.reason}
-                  </p>
-                )}
-                {handoff.worker_session_id || handoff.reviewer_session_id ? (
-                  <p className="m-0 break-all font-mono text-[0.64rem] text-(--ui-text-tertiary)">
-                    {[
-                      handoff.worker_session_id && `worker ${handoff.worker_session_id}`,
-                      handoff.reviewer_session_id && `reviewer ${handoff.reviewer_session_id}`
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')}
-                  </p>
-                ) : null}
-              </div>
-            ))}
-          </div>
-        ) : null}
-      </div>
-    </DetailSection>
-  )
-}
-
 function loopOverviewItemState(row: LoopRow): StatusItemState {
   const status = normalizedLoopValue(row.status)
   const runStatus = normalizedLoopValue(row.latestRun?.status)
@@ -1896,10 +1653,9 @@ function loopOverviewStatusItem(row: LoopRow, options: { preferAssigneeForQueued
   }
 }
 
-function LoopRootAgentsCard({
-  allRows,
+function LoopWorkflowCanvas({
   canvasScopeKey,
-  groups,
+  rows,
   onCreateTask,
   onLinkTasks,
   onUnlinkTasks,
@@ -1907,38 +1663,26 @@ function LoopRootAgentsCard({
   onSavePositions,
   onTaskAction,
   positions,
-  rootTaskId,
-  root
+  workflowId
 }: {
-  allRows?: LoopRow[]
   canvasScopeKey?: string
-  groups: RootOverviewGroups
+  rows: LoopRow[]
   onCreateTask?: (idea: string, options?: LoopTaskCreateOptions) => Promise<null | string>
   onLinkTasks?: (parentId: string, childId: string) => Promise<boolean>
   onUnlinkTasks?: (parentId: string, childId: string) => Promise<boolean>
   onOpenTaskTab?: (row: LoopRow) => void
-  onSavePositions?: (positions: LoopTaskGraphPosition[], rootTaskId?: string) => Promise<boolean>
+  onSavePositions?: (positions: LoopTaskGraphPosition[], workflowId?: string) => Promise<boolean>
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
   positions?: LoopTaskGraphPosition[]
-  rootTaskId?: string
-  root: LoopRow
+  workflowId: string
 }) {
   const [selectedGraphTaskId, setSelectedGraphTaskId] = useState<null | string>(null)
-
-  const rows = allRows || [
-    root,
-    ...groups.active,
-    ...groups.attention,
-    ...groups.queued,
-    ...groups.other,
-    ...groups.completed
-  ]
 
   const selectedGraphRow = selectedGraphTaskId ? rows.find(row => row.taskId === selectedGraphTaskId) || null : null
 
   useEffect(() => {
     setSelectedGraphTaskId(null)
-  }, [root.taskId])
+  }, [workflowId])
 
   const selectGraphTask = useCallback((targetRow: LoopRow) => {
     setSelectedGraphTaskId(targetRow.taskId)
@@ -1948,8 +1692,7 @@ function LoopRootAgentsCard({
     <section
       aria-label="Loop graph canvas"
       className="relative flex h-full min-h-0 w-full min-w-0 max-w-full flex-1 flex-col overflow-hidden bg-(--ui-editor-surface-background) text-xs"
-      data-root-overview-canvas="true"
-      data-testid="loop-root-agents-card"
+      data-testid="loop-workflow-canvas"
     >
       {rows.length === 0 ? (
         <EmptyDetail>No agents yet.</EmptyDetail>
@@ -1964,18 +1707,17 @@ function LoopRootAgentsCard({
           onTaskAction={onTaskAction}
           onUnlinkTasks={onUnlinkTasks}
           positions={positions}
-          rootTaskId={rootTaskId}
           rows={rows}
           scopeKey={canvasScopeKey}
           selectedTaskId={selectedGraphRow?.taskId || null}
+          workflowId={workflowId}
         />
       )}
     </section>
   )
 }
 
-function LoopRootOverview({
-  allRows,
+function LoopWorkflowOverview({
   canvasScopeKey,
   group,
   onCreateTask,
@@ -1986,26 +1728,20 @@ function LoopRootOverview({
   positions,
   onTaskAction
 }: {
-  allRows?: LoopRow[]
   canvasScopeKey?: string
-  group: LoopDependencyGroup
+  group: LoopWorkflowGroup
   onCreateTask?: (idea: string, options?: LoopTaskCreateOptions) => Promise<null | string>
   onLinkTasks?: (parentId: string, childId: string) => Promise<boolean>
   onUnlinkTasks?: (parentId: string, childId: string) => Promise<boolean>
   onOpenTaskTab?: (row: LoopRow) => void
-  onSavePositions?: (positions: LoopTaskGraphPosition[], rootTaskId?: string) => Promise<boolean>
+  onSavePositions?: (positions: LoopTaskGraphPosition[], workflowId?: string) => Promise<boolean>
   positions?: LoopTaskGraphPosition[]
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
 }) {
-  const root = group.anchor
-  const groups = rootOverviewGroups(group)
-
   return (
     <div className="flex h-full min-h-0 min-w-0 max-w-full flex-col">
-      <LoopRootAgentsCard
-        allRows={allRows}
+      <LoopWorkflowCanvas
         canvasScopeKey={canvasScopeKey}
-        groups={groups}
         onCreateTask={onCreateTask}
         onLinkTasks={onLinkTasks}
         onOpenTaskTab={onOpenTaskTab}
@@ -2013,8 +1749,8 @@ function LoopRootOverview({
         onTaskAction={onTaskAction}
         onUnlinkTasks={onUnlinkTasks}
         positions={positions}
-        root={root}
-        rootTaskId={root.taskId}
+        rows={group.rows}
+        workflowId={group.workflowId}
       />
     </div>
   )
@@ -2028,7 +1764,6 @@ function LoopTaskDetails({
   onAddComment,
   onBack,
   onTaskAction,
-  rootTaskId,
   row
 }: {
   backLabel?: null | string
@@ -2038,7 +1773,6 @@ function LoopTaskDetails({
   onAddComment?: LoopTaskCommentSubmit
   onBack?: () => void
   onTaskAction?: (action: LoopTaskAction, row: LoopRow) => void
-  rootTaskId?: string
   row: LoopRow
 }) {
   return (
@@ -2072,11 +1806,9 @@ function LoopTaskDetails({
               </span>
             ) : null}
           </div>
-          <LoopTaskActions allowMutations={row.taskId !== rootTaskId} onTaskAction={onTaskAction} row={row} />
+          <LoopTaskActions onTaskAction={onTaskAction} row={row} />
         </div>
       </section>
-      <LoopForegroundHandoffCard row={row} />
-
       {row.specificationFailure ? (
         <DetailSection title={row.specificationFailure.backing_off ? 'Specification retry' : 'Specification failure'}>
           <div className="grid gap-1 text-xs text-(--ui-text-secondary)" data-testid="loop-specification-failure">
@@ -2336,13 +2068,13 @@ export function LoopPanel({
   onTaskAction,
   open = false,
   positions,
-  rootTaskId,
   selectedTaskComments,
   selectedTaskCommentsError,
   selectedTaskDetail,
   selectedTaskDetailError,
   selectedTaskId,
-  state
+  state,
+  workflowId
 }: LoopPanelProps) {
   const [debugOpen, setDebugOpen] = useState(false)
   const [navigationStack, setNavigationStack] = useState<LoopRow[]>([])
@@ -2354,14 +2086,14 @@ export function LoopPanel({
   const internalFocusTaskIdRef = useRef<null | string>(null)
   const lastFocusRequestKeyRef = useRef(focusRequestKey)
   const [panelWidth, setPanelWidth] = useState(LOOP_PANEL_DEFAULT_WIDTH)
-  const stateRootTaskId = state?.rootTaskId || ''
+  const stateWorkflowKey = state?.workflowIds.join('|') || state?.workflowId || workflowId || ''
 
   useEffect(() => {
     setTaskTabs([])
     setActiveTaskTabId(null)
     setArtifactTabs([])
     setActiveArtifactTabId(null)
-  }, [stateRootTaskId])
+  }, [stateWorkflowKey])
 
   useEffect(() => {
     const nextSelectedTaskId = selectedTaskId || null
@@ -2418,15 +2150,19 @@ export function LoopPanel({
     [activeArtifactTabId, artifactTabs]
   )
 
-  const dependencyGroups = useMemo(() => loopDependencyGroups(state), [state])
+  const workflowGroups = useMemo(() => loopWorkflowGroups(state), [state])
 
   const selectedOverviewGroup = useMemo(
-    () => loopDependencyGroupForTask(state, focusedTaskId || stateRootTaskId || null, dependencyGroups),
-    [dependencyGroups, focusedTaskId, state, stateRootTaskId]
+    () =>
+      focusedTaskId
+        ? loopWorkflowGroupForTask(state, focusedTaskId, workflowGroups)
+        : workflowGroups.find(group => group.workflowId === (workflowId || state?.workflowId)) ||
+          loopWorkflowGroupForTask(state, null, workflowGroups),
+    [focusedTaskId, state, workflowGroups, workflowId]
   )
 
   const overviewAnchor = selectedOverviewGroup?.anchor || null
-  const loopOverviewEligible = loopDependencyGroupShowsOverview(selectedOverviewGroup)
+  const loopOverviewEligible = loopWorkflowGroupShowsOverview(selectedOverviewGroup)
 
   const showingLoopOverview = Boolean(
     loopOverviewEligible && overviewAnchor && (!focusedTaskId || focusedTaskId === overviewAnchor.taskId)
@@ -2505,15 +2241,9 @@ export function LoopPanel({
     setActiveTaskTabId(null)
     setActiveArtifactTabId(null)
     setNavigationStack([])
-
-    if (activeTaskTabId && overviewAnchor) {
-      focusDrawerTask(overviewAnchor.taskId)
-    } else if (!focusedTaskId && overviewAnchor) {
-      focusDrawerTask(overviewAnchor.taskId)
-    } else if (!focusedTaskId) {
-      setFocusedTaskId(null)
-    }
-  }, [activeTaskTabId, focusDrawerTask, focusedTaskId, overviewAnchor])
+    internalFocusTaskIdRef.current = null
+    setFocusedTaskId(null)
+  }, [])
 
   const openArtifactTab = useCallback(
     (entry: LoopArtifactSourceEntry, row: LoopRow) => {
@@ -2739,29 +2469,31 @@ export function LoopPanel({
     if (previous) {
       focusDrawerTask(previous.taskId)
       setNavigationStack(stack => stack.slice(0, -1))
-    } else if (overviewAnchor && focusedTaskId !== overviewAnchor.taskId) {
-      focusDrawerTask(overviewAnchor.taskId)
+    } else if (overviewAnchor) {
+      internalFocusTaskIdRef.current = null
+      setFocusedTaskId(null)
     }
-  }, [focusDrawerTask, focusedTaskId, navigationStack, overviewAnchor])
+  }, [focusDrawerTask, navigationStack, overviewAnchor])
 
   const backTarget = navigationStack.at(-1)
 
   const detailBackLabel =
     backTarget?.taskId === overviewAnchor?.taskId
       ? 'Loop overview'
-      : backTarget?.title || (overviewAnchor && focusedTaskId !== overviewAnchor.taskId ? 'Loop overview' : null)
+      : backTarget?.title || (overviewAnchor && focusedTaskId ? 'Loop overview' : null)
 
   const detailBack = detailBackLabel ? goBack : undefined
 
   const openLoopOverviewTask = embedded
     ? (row: LoopRow) => {
+        // The stack's representative row opens the workflow canvas, but the
+        // same row remains an ordinary task when explicitly opened from the
+        // canvas.
         if (row.taskId === overviewAnchor?.taskId) {
           openTaskTab(row)
-
-          return
+        } else {
+          selectRelatedTask(row.taskId)
         }
-
-        selectRelatedTask(row.taskId)
       }
     : openTaskTab
 
@@ -2777,7 +2509,7 @@ export function LoopPanel({
   const missingTaskId = activeTaskTabId || focusedTaskId
   const showingTaskCreateCanvas = !missingTaskId && (!state || state.rows.length === 0)
 
-  const showingRootCanvas = Boolean(
+  const showingWorkflowCanvas = Boolean(
     showingTaskCreateCanvas ||
     (!activeArtifactTab && !activeTaskTabId && showingLoopOverview && overviewAnchor && selectedOverviewGroup)
   )
@@ -2831,9 +2563,9 @@ export function LoopPanel({
       onSavePositions={onSavePositions}
       onUnlinkTasks={onUnlinkTasks}
       positions={positions}
-      rootTaskId={rootTaskId}
       rows={[]}
       scopeKey={canvasScopeKey}
+      workflowId={workflowId}
     />
   )
 
@@ -2891,7 +2623,7 @@ export function LoopPanel({
           />
         )}
         <div
-          className={cn('flex min-h-0 min-w-0 flex-1 flex-col', showingRootCanvas ? 'p-0' : 'p-3')}
+          className={cn('flex min-h-0 min-w-0 flex-1 flex-col', showingWorkflowCanvas ? 'p-0' : 'p-3')}
           data-testid="loop-panel-body"
         >
           {state?.message && (
@@ -2907,7 +2639,7 @@ export function LoopPanel({
             </div>
           )}
 
-          <div className={cn('min-h-0 flex-1', showingRootCanvas ? 'overflow-hidden' : 'overflow-auto')}>
+          <div className={cn('min-h-0 flex-1', showingWorkflowCanvas ? 'overflow-hidden' : 'overflow-auto')}>
             {!state && missingTaskId ? (
               <section
                 className="grid min-w-0 gap-2 rounded-lg border border-dashed border-(--ui-stroke-tertiary) bg-(--ui-fill-quaternary) p-3 text-xs text-(--ui-text-tertiary)"
@@ -2943,7 +2675,6 @@ export function LoopPanel({
                         : undefined
                     }
                     onTaskAction={onTaskAction}
-                    rootTaskId={rootTaskId || overviewAnchor?.taskId || state.rootTaskId}
                     row={activeTaskTabRow}
                   />
                 </div>
@@ -2959,8 +2690,7 @@ export function LoopPanel({
               )
             ) : showingLoopOverview && overviewAnchor && selectedOverviewGroup ? (
               <div className="flex h-full min-h-0 min-w-0 max-w-full flex-col">
-                <LoopRootOverview
-                  allRows={state.rows}
+                <LoopWorkflowOverview
                   canvasScopeKey={canvasScopeKey}
                   group={selectedOverviewGroup}
                   onCreateTask={onCreateTask}
@@ -2982,7 +2712,6 @@ export function LoopPanel({
                   onAddComment={onAddTaskComment}
                   onBack={detailBack}
                   onTaskAction={onTaskAction}
-                  rootTaskId={rootTaskId || state.rootTaskId}
                   row={selected}
                 />
               </div>

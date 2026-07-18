@@ -194,11 +194,12 @@ def test_create_task_upserts_triage_draft_root_without_dispatch_run(client):
     assert runs == []
 
 
-def test_create_loop_draft_anchors_session_source_and_real_root(client):
+def test_create_loop_draft_anchors_session_source_and_workflow(client):
     payload = {
         "title": "Draft overview",
         "body": "User-visible draft spec",
         "session_id": "session-draft-1",
+        "idempotency_key": "draft-overview",
     }
 
     first = client.post("/api/plugins/kanban/loop-drafts", json=payload)
@@ -209,20 +210,22 @@ def test_create_loop_draft_anchors_session_source_and_real_root(client):
     task = first.json()["task"]
     assert task["id"] == second.json()["task"]["id"]
     assert task["title"] == "Draft overview"
-    assert task["status"] == "scheduled"
+    assert task["status"] == "triage"
     assert task["session_id"] == "session-draft-1"
     assert task["tenant"] is None
-    assert task["created_by"] == f"loop:{task['id']}"
+    assert task["created_by"] == "dashboard"
 
     source = first.json()["source"]
-    assert source["root_task_id"] == task["id"]
+    assert source["workflow_id"] == task["workflow_id"]
+    assert "root_task_id" not in source
     assert source["session_id"] == "session-draft-1"
     assert source["tasks"][0]["id"] == task["id"]
 
     session_source = client.get("/api/plugins/kanban/session-source", params={"session_id": "session-draft-1"})
     assert session_source.status_code == 200, session_source.text
     session_payload = session_source.json()
-    assert session_payload["root_task_id"] == task["id"]
+    assert session_payload["workflow_id"] == task["workflow_id"]
+    assert "root_task_id" not in session_payload
     assert [item["id"] for item in session_payload["tasks"]] == [task["id"]]
 
     conn = kb.connect()
@@ -233,8 +236,8 @@ def test_create_loop_draft_anchors_session_source_and_real_root(client):
         conn.close()
 
     assert persisted is not None
-    assert persisted.created_by == f"loop:{task['id']}"
-    assert persisted.status == "scheduled"
+    assert persisted.created_by == "dashboard"
+    assert persisted.status == "triage"
     assert persisted.tenant is None
     assert runs == []
 
@@ -256,7 +259,7 @@ def test_create_loop_node_is_live_and_stores_its_initial_edges_atomically(client
     assert downstream["status"] == "triage"
     assert downstream["needs_specification"] is True
     assert downstream["assignee"] is None
-    assert downstream["created_by"] == f"loop:{root['id']}"
+    assert downstream["created_by"] == "dashboard"
     assert "loop_intake" not in downstream
 
     predecessor_response = client.post(
@@ -278,20 +281,20 @@ def test_create_loop_node_is_live_and_stores_its_initial_edges_atomically(client
         assert stored_downstream.status == "todo"
         assert stored_downstream.needs_specification is True
         assert kb.parent_ids(conn, downstream["id"]) == [predecessor["id"]]
-        assert kb.parent_ids(conn, root["id"]) == [downstream["id"]]
+        assert kb.parent_ids(conn, root["id"]) == []
         assert kb.get_task(conn, predecessor["id"]).status == "triage"
     finally:
         conn.close()
 
 
-def test_first_desktop_node_activates_root_and_completion_promotes_it(client):
+def test_first_desktop_node_does_not_mutate_an_existing_member(client):
     session_id = "session-first-live-node"
     root = client.post(
         "/api/plugins/kanban/loop-drafts",
         json={"title": "Fresh root", "session_id": session_id},
     ).json()["task"]
-    assert root["status"] == "scheduled"
-    assert root["assignee"] == "orchestrator"
+    assert root["status"] == "triage"
+    assert root["assignee"] is None
 
     created = client.post(
         "/api/plugins/kanban/loop-drafts",
@@ -306,11 +309,11 @@ def test_first_desktop_node_activates_root_and_completion_promotes_it(client):
 
     conn = kb.connect()
     try:
-        activated_root = kb.get_task(conn, root["id"])
-        assert activated_root is not None
-        assert activated_root.status == "todo"
-        assert activated_root.assignee is None
-        assert kb.parent_ids(conn, root["id"]) == [child_id]
+        unchanged_root = kb.get_task(conn, root["id"])
+        assert unchanged_root is not None
+        assert unchanged_root.status == "triage"
+        assert unchanged_root.assignee is None
+        assert kb.parent_ids(conn, root["id"]) == []
 
         assert kb.specify_triage_task(
             conn,
@@ -321,10 +324,10 @@ def test_first_desktop_node_activates_root_and_completion_promotes_it(client):
         assert kb.claim_task(conn, child_id, claimer="worker-a:first-live-node")
         assert kb.complete_task(conn, child_id, summary="First node complete")
 
-        completed_root = kb.get_task(conn, root["id"])
-        assert completed_root is not None
-        assert completed_root.status == "ready"
-        assert completed_root.assignee is None
+        unchanged_root = kb.get_task(conn, root["id"])
+        assert unchanged_root is not None
+        assert unchanged_root.status == "triage"
+        assert unchanged_root.assignee is None
     finally:
         conn.close()
 
@@ -347,11 +350,13 @@ def test_desktop_live_node_completion_has_one_foreground_notification(client):
     assert created.status_code == 200, created.text
     assert created.json()["subscribed"] is True
     task_id = created.json()["task"]["id"]
+    workflow_id = created.json()["workflow_id"]
     conn = kb.connect()
     try:
-        [subscription] = kb.list_notify_subs(conn, task_id)
+        [subscription] = kb.list_workflow_notify_subs(conn, workflow_id)
         assert subscription["platform"] == "tui"
         assert subscription["chat_id"] == session_id
+        assert kb.list_notify_subs(conn, task_id) == []
         assert kb.specify_triage_task(
             conn,
             task_id,
@@ -361,19 +366,37 @@ def test_desktop_live_node_completion_has_one_foreground_notification(client):
         assert kb.claim_task(conn, task_id, claimer="worker-a:test") is not None
         assert kb.complete_task(conn, task_id, summary="Completed live node")
 
-        _old_cursor, _new_cursor, events = kb.claim_unseen_events_for_sub(
-            conn,
-            task_id=task_id,
-            platform="tui",
-            chat_id=session_id,
-            kinds=["completed"],
+        _old_cursor, new_cursor, events, claim_token = (
+            kb.claim_unseen_events_for_workflow_sub(
+                conn,
+                workflow_id=workflow_id,
+                notifier_profile=subscription["notifier_profile"],
+                platform="tui",
+                chat_id=session_id,
+                thread_id=subscription["thread_id"],
+                kinds=["completed"],
+            )
         )
         assert [event.kind for event in events] == ["completed"]
-        assert kb.claim_unseen_events_for_sub(
+        assert events[0].task_id == task_id
+        assert claim_token
+        assert kb.complete_workflow_notify_claim(
             conn,
-            task_id=task_id,
+            workflow_id=workflow_id,
+            notifier_profile=subscription["notifier_profile"],
             platform="tui",
             chat_id=session_id,
+            thread_id=subscription["thread_id"],
+            claimed_cursor=new_cursor,
+            claim_token=claim_token,
+        )
+        assert kb.claim_unseen_events_for_workflow_sub(
+            conn,
+            workflow_id=workflow_id,
+            notifier_profile=subscription["notifier_profile"],
+            platform="tui",
+            chat_id=session_id,
+            thread_id=subscription["thread_id"],
             kinds=["completed"],
         )[2] == []
     finally:
@@ -389,12 +412,14 @@ def test_desktop_root_subscription_wakes_once_for_nested_fanout_blocker(client):
     assert created_root.status_code == 200, created_root.text
     assert created_root.json()["subscribed"] is True
     root_id = created_root.json()["task"]["id"]
+    workflow_id = created_root.json()["workflow_id"]
 
     conn = kb.connect()
     try:
+        [subscription] = kb.list_workflow_notify_subs(conn, workflow_id)
         graph = kb.create_loop_skeleton_graph(
             conn,
-            root_task_id=root_id,
+            workflow_id=workflow_id,
             nodes=[{"client_id": "shell", "title": "Expandable shell"}],
         )
         shell_id = graph["items"][0]["task_id"]
@@ -419,21 +444,37 @@ def test_desktop_root_subscription_wakes_once_for_nested_fanout_blocker(client):
             child_id,
             reason="review-required: foreground decision needed",
         )
-        _old_cursor, _new_cursor, events = kb.claim_unseen_events_for_sub(
-            conn,
-            task_id=root_id,
-            platform="tui",
-            chat_id=session_id,
-            kinds=["loop_descendant_blocked"],
+        _old_cursor, new_cursor, events, claim_token = (
+            kb.claim_unseen_events_for_workflow_sub(
+                conn,
+                workflow_id=workflow_id,
+                notifier_profile=subscription["notifier_profile"],
+                platform="tui",
+                chat_id=session_id,
+                thread_id=subscription["thread_id"],
+                kinds=["blocked"],
+            )
         )
         assert len(events) == 1
-        assert events[0].payload["source_task_id"] == child_id
-        assert kb.claim_unseen_events_for_sub(
+        assert events[0].task_id == child_id
+        assert kb.complete_workflow_notify_claim(
             conn,
-            task_id=root_id,
+            workflow_id=workflow_id,
+            notifier_profile=subscription["notifier_profile"],
             platform="tui",
             chat_id=session_id,
-            kinds=["loop_descendant_blocked"],
+            thread_id=subscription["thread_id"],
+            claimed_cursor=new_cursor,
+            claim_token=claim_token,
+        )
+        assert kb.claim_unseen_events_for_workflow_sub(
+            conn,
+            workflow_id=workflow_id,
+            notifier_profile=subscription["notifier_profile"],
+            platform="tui",
+            chat_id=session_id,
+            thread_id=subscription["thread_id"],
+            kinds=["blocked"],
         )[2] == []
     finally:
         conn.close()
@@ -525,7 +566,7 @@ def test_session_source_exposes_active_decomposition_children(client):
     assert detail.json()["task"]["active_decomposition_child_count"] == 1
 
 
-def test_archive_loop_nodes_is_atomic_and_rejects_the_canonical_root(client):
+def test_archive_loop_nodes_is_atomic_and_all_members_are_ordinary(client):
     session_id = "session-atomic-archive"
     root = client.post(
         "/api/plugins/kanban/loop-drafts",
@@ -557,12 +598,12 @@ def test_archive_loop_nodes_is_atomic_and_rejects_the_canonical_root(client):
     finally:
         conn.close()
 
-    rejected = client.post(
+    archived_member = client.post(
         f"/api/plugins/kanban/loop-canvas/{root['id']}/archive-nodes",
         json={"task_ids": [root["id"]], "session_id": session_id},
     )
-    assert rejected.status_code == 409
-    assert "root" in rejected.json()["detail"].lower()
+    assert archived_member.status_code == 200, archived_member.text
+    assert archived_member.json()["archived"] == [root["id"]]
 
 
 def test_archive_loop_nodes_rolls_back_if_a_node_is_claimed_during_the_request(
@@ -671,7 +712,7 @@ def test_create_loop_node_rolls_back_task_events_and_edges_on_bad_relation(clien
     assert after == before
 
 
-def test_create_loop_node_rejects_canonical_root_as_parent(client):
+def test_create_loop_node_accepts_any_workflow_member_as_parent(client):
     root = client.post(
         "/api/plugins/kanban/loop-drafts",
         json={"title": "Aggregate root", "session_id": "session-root-sink"},
@@ -687,11 +728,17 @@ def test_create_loop_node_rejects_canonical_root_as_parent(client):
         },
     )
 
-    assert response.status_code == 400
-    assert "aggregate sink" in response.json()["detail"]
+    assert response.status_code == 200, response.text
+    child = response.json()["task"]
+    assert child["workflow_id"] == root["workflow_id"]
+    conn = kb.connect()
+    try:
+        assert kb.parent_ids(conn, child["id"]) == [root["id"]]
+    finally:
+        conn.close()
 
 
-def test_create_loop_node_extends_unassigned_ready_root_as_new_sink(client):
+def test_create_loop_node_extends_workflow_without_rewiring_existing_members(client):
     session_id = "session-ready-root-extension"
     root = client.post(
         "/api/plugins/kanban/loop-drafts",
@@ -714,10 +761,10 @@ def test_create_loop_node_extends_unassigned_ready_root_as_new_sink(client):
         )
         assert kb.claim_task(conn, first_id, claimer="worker-a:first") is not None
         assert kb.complete_task(conn, first_id, summary="First pass complete")
-        ready_root = kb.get_task(conn, root["id"])
-        assert ready_root is not None
-        assert ready_root.status == "ready"
-        assert ready_root.assignee is None
+        unchanged_member = kb.get_task(conn, root["id"])
+        assert unchanged_member is not None
+        assert unchanged_member.status == "triage"
+        assert unchanged_member.assignee is None
     finally:
         conn.close()
 
@@ -734,10 +781,11 @@ def test_create_loop_node_extends_unassigned_ready_root_as_new_sink(client):
     extension_id = extension.json()["task"]["id"]
     conn = kb.connect()
     try:
-        extended_root = kb.get_task(conn, root["id"])
-        assert extended_root is not None
-        assert extended_root.status == "todo"
-        assert set(kb.parent_ids(conn, root["id"])) == {first_id, extension_id}
+        unchanged_member = kb.get_task(conn, root["id"])
+        assert unchanged_member is not None
+        assert unchanged_member.status == "triage"
+        assert kb.parent_ids(conn, root["id"]) == []
+        assert kb.parent_ids(conn, extension_id) == []
     finally:
         conn.close()
 
@@ -798,18 +846,28 @@ def test_create_loop_predecessor_rejects_active_or_completed_child_atomically(
 
 
 def test_loop_canvas_positions_round_trip_replace_and_clear_without_task_events(client):
-    root = client.post(
+    created = client.post(
         "/api/plugins/kanban/loop-drafts",
         json={"title": "Canvas root", "session_id": "session-canvas-layout"},
-    ).json()["task"]
+    ).json()
+    root = created["task"]
+    workflow_id = created["workflow_id"]
     child = client.post(
         "/api/plugins/kanban/tasks",
-        json={"title": "Canvas child", "session_id": "session-canvas-layout", "triage": True},
+        json={
+            "title": "Canvas child",
+            "session_id": "session-canvas-layout",
+            "workflow_id": workflow_id,
+            "triage": True,
+        },
     ).json()["task"]
 
     empty = client.get(f"/api/plugins/kanban/loop-canvas/{root['id']}/positions")
     assert empty.status_code == 200, empty.text
-    assert empty.json() == {"root_task_id": root["id"], "positions": []}
+    assert empty.json() == {
+        "workflow_id": workflow_id,
+        "positions": [],
+    }
 
     conn = kb.connect()
     try:
@@ -829,7 +887,8 @@ def test_loop_canvas_positions_round_trip_replace_and_clear_without_task_events(
     assert saved.status_code == 200, saved.text
     payload = saved.json()
     assert payload["ok"] is True
-    assert payload["root_task_id"] == root["id"]
+    assert payload["workflow_id"] == workflow_id
+    assert "root_task_id" not in payload
     assert [item["task_id"] for item in payload["positions"]] == sorted([root["id"], child["id"]])
     assert {(item["task_id"], item["x"], item["y"]) for item in payload["positions"]} == {
         (root["id"], 32.0, 64.0),
@@ -839,7 +898,10 @@ def test_loop_canvas_positions_round_trip_replace_and_clear_without_task_events(
 
     read_back = client.get(f"/api/plugins/kanban/loop-canvas/{root['id']}/positions")
     assert read_back.status_code == 200, read_back.text
-    assert read_back.json() == {"root_task_id": root["id"], "positions": payload["positions"]}
+    assert read_back.json() == {
+        "workflow_id": workflow_id,
+        "positions": payload["positions"],
+    }
 
     replaced = client.put(
         f"/api/plugins/kanban/loop-canvas/{root['id']}/positions",
@@ -855,12 +917,16 @@ def test_loop_canvas_positions_round_trip_replace_and_clear_without_task_events(
         json={"positions": []},
     )
     assert cleared.status_code == 200, cleared.text
-    assert cleared.json() == {"ok": True, "root_task_id": root["id"], "positions": []}
+    assert cleared.json() == {
+        "ok": True,
+        "workflow_id": workflow_id,
+        "positions": [],
+    }
 
     conn = kb.connect()
     try:
         assert conn.execute("SELECT COUNT(*) AS n FROM task_events").fetchone()["n"] == event_count
-        assert kb.get_task(conn, root["id"]).status == "scheduled"
+        assert kb.get_task(conn, root["id"]).status == "triage"
         assert kb.get_task(conn, child["id"]).status == "triage"
     finally:
         conn.close()
@@ -914,22 +980,34 @@ def test_loop_canvas_positions_validate_before_replacing_saved_layout(client):
     assert (position["task_id"], position["x"], position["y"]) == (root["id"], 1.0, 2.0)
 
 
-def test_loop_canvas_positions_are_scoped_to_root_component_and_session(client):
-    root = client.post(
+def test_loop_canvas_positions_are_scoped_only_to_workflow_membership(client):
+    created = client.post(
         "/api/plugins/kanban/loop-drafts",
         json={"title": "Canvas root", "session_id": "session-canvas-a"},
-    ).json()["task"]
+    ).json()
+    root = created["task"]
+    workflow_id = created["workflow_id"]
     same_session = client.post(
         "/api/plugins/kanban/tasks",
-        json={"title": "Disconnected card", "session_id": "session-canvas-a", "triage": True},
+        json={
+            "title": "Disconnected card",
+            "session_id": "session-canvas-a",
+            "workflow_id": workflow_id,
+            "triage": True,
+        },
     ).json()["task"]
     connected = client.post(
         "/api/plugins/kanban/tasks",
-        json={"title": "Cross-session card", "session_id": "session-canvas-b", "triage": True},
+        json={
+            "title": "Cross-session card",
+            "session_id": "session-canvas-b",
+            "workflow_id": workflow_id,
+            "triage": True,
+        },
     ).json()["task"]
     unrelated = client.post(
-        "/api/plugins/kanban/tasks",
-        json={"title": "Other canvas", "session_id": "session-canvas-c", "triage": True},
+        "/api/plugins/kanban/loop-drafts",
+        json={"title": "Other canvas", "session_id": "session-canvas-a"},
     ).json()["task"]
     assert client.post(
         "/api/plugins/kanban/links",
@@ -953,7 +1031,7 @@ def test_loop_canvas_positions_are_scoped_to_root_component_and_session(client):
         json={"positions": [{"task_id": unrelated["id"], "x": 50, "y": 60}]},
     )
     assert rejected.status_code == 400
-    assert "outside Loop canvas" in rejected.json()["detail"]
+    assert "outside workflow" in rejected.json()["detail"]
     assert {position["task_id"] for position in client.get(path).json()["positions"]} == {
         same_session["id"],
         connected["id"],
@@ -962,13 +1040,19 @@ def test_loop_canvas_positions_are_scoped_to_root_component_and_session(client):
 
 def test_loop_canvas_positions_omit_archived_cards_from_session_scope(client):
     session_id = "session-canvas-archived-position"
-    root = client.post(
+    created = client.post(
         "/api/plugins/kanban/loop-drafts",
         json={"title": "Canvas root", "session_id": session_id},
-    ).json()["task"]
+    ).json()
+    root = created["task"]
     card = client.post(
         "/api/plugins/kanban/tasks",
-        json={"title": "Temporary card", "session_id": session_id, "triage": True},
+        json={
+            "title": "Temporary card",
+            "session_id": session_id,
+            "workflow_id": created["workflow_id"],
+            "triage": True,
+        },
     ).json()["task"]
     path = f"/api/plugins/kanban/loop-canvas/{root['id']}/positions"
     scope = {"session_id": session_id}
@@ -1006,7 +1090,9 @@ def test_loop_canvas_positions_omit_archived_cards_from_session_scope(client):
     assert round_trip.status_code == 200, round_trip.text
 
 
-def test_loop_canvas_session_scope_matches_compression_lineage_source(client, kanban_home):
+def test_loop_canvas_session_scope_does_not_merge_compression_lineage_workflows(
+    client, kanban_home
+):
     from hermes_state import SessionDB
 
     session_db = SessionDB()
@@ -1036,7 +1122,7 @@ def test_loop_canvas_session_scope_matches_compression_lineage_source(client, ka
     path = f"/api/plugins/kanban/loop-canvas/{root['id']}/positions"
     scope = {"board": "default", "session_id": "canvas-tip-session"}
 
-    saved = client.put(
+    cross_workflow_positions = client.put(
         path,
         params=scope,
         json={
@@ -1045,6 +1131,14 @@ def test_loop_canvas_session_scope_matches_compression_lineage_source(client, ka
                 {"task_id": second_root["id"], "x": 30, "y": 40},
             ]
         },
+    )
+    assert cross_workflow_positions.status_code == 400
+    assert "outside workflow" in cross_workflow_positions.json()["detail"]
+
+    saved = client.put(
+        path,
+        params=scope,
+        json={"positions": [{"task_id": root["id"], "x": 10, "y": 20}]},
     )
     assert saved.status_code == 200, saved.text
 
@@ -1066,7 +1160,7 @@ def test_loop_canvas_session_scope_matches_compression_lineage_source(client, ka
         json={"positions": [{"task_id": unrelated["id"], "x": 50, "y": 60}]},
     )
     assert rejected_position.status_code == 400
-    assert "outside Loop canvas" in rejected_position.json()["detail"]
+    assert "outside workflow" in rejected_position.json()["detail"]
 
     rejected_link = client.post(
         "/api/plugins/kanban/links",
@@ -1079,14 +1173,14 @@ def test_loop_canvas_session_scope_matches_compression_lineage_source(client, ka
         },
     )
     assert rejected_link.status_code == 400
-    assert "aggregate sink" in rejected_link.json()["detail"]
+    assert "not owned by workflow" in rejected_link.json()["detail"]
 
-    rejected_root = client.get(
+    independent_workflow = client.get(
         f"/api/plugins/kanban/loop-canvas/{unrelated['id']}/positions",
         params=scope,
     )
-    assert rejected_root.status_code == 400
-    assert "outside Loop canvas" in rejected_root.json()["detail"]
+    assert independent_workflow.status_code == 200
+    assert independent_workflow.json()["workflow_id"] == unrelated["workflow_id"]
 
 
 def test_create_loop_draft_preserves_explicit_tenant_metadata(client):
@@ -1124,7 +1218,7 @@ def test_title_only_loop_draft_records_durable_intake_needed_state(client):
     assert created.status_code == 200, created.text
     task = created.json()["task"]
     assert task["body"] is None
-    assert task["status"] == "scheduled"
+    assert task["status"] == "triage"
     assert task["loop_intake"] == {
         "needed": True,
         "state": "drafted",
@@ -1179,7 +1273,7 @@ def test_loop_intake_needed_blocks_ready_and_decompose_until_approved(client):
     assert "must be triaged" in activate.json()["reason"]
 
     still_planning = client.get(f"/api/plugins/kanban/tasks/{task_id}")
-    assert still_planning.json()["task"]["status"] == "scheduled"
+    assert still_planning.json()["task"]["status"] == "triage"
 
     approved_body = "Chosen path remains visible in the Loop graph.\n"
     approved = client.patch(
@@ -1197,14 +1291,15 @@ def test_loop_intake_needed_blocks_ready_and_decompose_until_approved(client):
     assert approved.status_code == 200, approved.text
     approved_task = approved.json()["task"]
     assert approved_task["body"] == approved_body
-    assert approved_task["status"] == "scheduled"
+    assert approved_task["status"] == "triage"
     assert approved_task["assignee"] == initial_assignee
     assert approved_task["loop_intake"]["state"] == "approved"
     assert approved_task["loop_intake"]["dispatchable"] is True
 
     approval_source = client.get("/api/plugins/kanban/session-source", params={"session_id": "session-intake-2"})
     assert approval_source.status_code == 200, approval_source.text
-    assert approval_source.json()["root_task_id"] == task_id
+    assert approval_source.json()["workflow_id"] == created.json()["workflow_id"]
+    assert "root_task_id" not in approval_source.json()
     assert [item["id"] for item in approval_source.json()["tasks"]] == [task_id]
     assert approval_source.json()["workers"] == []
 
@@ -1217,7 +1312,7 @@ def test_loop_intake_needed_blocks_ready_and_decompose_until_approved(client):
         conn.close()
 
     assert persisted_after_approval is not None
-    assert persisted_after_approval.status == "scheduled"
+    assert persisted_after_approval.status == "triage"
     assert persisted_after_approval.assignee == initial_assignee
     assert runs_after_approval == []
     assert children_after_approval == []
@@ -1286,7 +1381,7 @@ def test_activate_loop_plan_promotes_only_dependency_free_children(client, monke
             ],
             author="foreground-triage",
             auto_promote=False,
-            allowed_root_statuses={"scheduled"},
+            allowed_root_statuses={"triage"},
             root_next_status="scheduled",
             loop_intake_payload={
                 "needed": True,
@@ -1371,7 +1466,7 @@ def test_activate_single_task_plan_promotes_root_to_ready(client):
             conn,
             task_id,
             body="**Objective**\n\nShip the single task.",
-            allowed_statuses={"scheduled"},
+            allowed_statuses={"triage"},
             next_status="scheduled",
             recompute=False,
             loop_intake_payload={
@@ -1790,7 +1885,9 @@ def test_session_source_returns_non_archived_tenant_tasks_across_compression_lin
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["lineage_session_ids"] == ["root-session", "tip-session"]
-    assert data["root_task_id"] == root
+    assert data["workflow_id"] is None
+    assert data["workflow_ids"] == []
+    assert "root_task_id" not in data
     assert [task["id"] for task in data["tasks"]] == [root, child]
     assert {task["id"] for task in data["tasks"]}.isdisjoint({archived, other_tenant})
     assert all(task["is_container"] is False for task in data["tasks"])
@@ -2083,8 +2180,8 @@ def test_session_source_recovers_tasks_when_lineage_id_is_tenant_key(client, kan
     assert data["links"] == [{"parent_id": parent, "child_id": child}]
 
 
-def test_session_source_reports_decomposed_original_root_task_id(client, kanban_home):
-    """The drawer overview must stay bound to the decomposed root row, not the first child."""
+def test_session_source_does_not_infer_workflow_from_decomposition(client, kanban_home):
+    """Ordinary task links do not synthesize workflow membership."""
     from hermes_state import SessionDB
 
     tenant_root = "tenant-decomposed-root"
@@ -2127,12 +2224,14 @@ def test_session_source_reports_decomposed_original_root_task_id(client, kanban_
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["tenant"] == tenant_root
-    assert data["root_task_id"] == root
+    assert data["workflow_id"] is None
+    assert data["workflow_ids"] == []
+    assert "root_task_id" not in data
     assert [task["id"] for task in data["tasks"]] == [child_ids[0], root]
     assert data["links"] == [{"parent_id": child_ids[0], "child_id": root}]
 
 
-def test_session_source_preserves_legacy_loop_planning_projection(client, monkeypatch):
+def test_session_source_preserves_workflow_planning_projection(client, monkeypatch):
     from hermes_cli import loop_graph
 
     monkeypatch.setenv("HERMES_SESSION_ID", "session-decision-metadata")
@@ -2145,14 +2244,15 @@ def test_session_source_preserves_legacy_loop_planning_projection(client, monkey
         },
     )
     assert draft.status_code == 200, draft.text
-    root_task_id = draft.json()["task"]["id"]
+    task_id = draft.json()["task"]["id"]
+    workflow_id = draft.json()["workflow_id"]
 
     conn = kb.connect()
     try:
-        expected_revision = loop_graph.graph_revision(conn, root_task_id)
+        expected_revision = loop_graph.graph_revision(conn, workflow_id)
         result = loop_graph.apply_patch(
             conn,
-            root_task_id,
+            workflow_id,
             expected_revision=expected_revision,
             mutation_id="m-decision-option",
             operations=[
@@ -2160,7 +2260,7 @@ def test_session_source_preserves_legacy_loop_planning_projection(client, monkey
                     "op": "add_node",
                     "client_id": "option-a",
                     "title": "Option A",
-                    "parents": [root_task_id],
+                    "parents": [task_id],
                     "branch_kind": "alternative",
                     "decision_group_id": "choice-1",
                     "selection_state": "candidate",
@@ -2180,15 +2280,24 @@ def test_session_source_preserves_legacy_loop_planning_projection(client, monkey
     data = response.json()
     [task] = data["tasks"]
     [planning_node] = data["planning_nodes"]
-    assert data["root_task_id"] == root_task_id
-    assert task["id"] == root_task_id
+    assert data["workflow_id"] == workflow_id
+    assert data["workflow_ids"] == [workflow_id]
+    assert "root_task_id" not in data
+    assert task["id"] == task_id
     assert planning_node["id"] == option_id
+    assert planning_node["workflow_id"] == workflow_id
     assert planning_node["is_planning_node"] is True
     assert planning_node["branch_kind"] == "alternative"
     assert planning_node["decision_group_id"] == "choice-1"
     assert planning_node["selection_state"] == "candidate"
-    assert planning_node["included_parent_ids"] == [root_task_id]
-    assert data["planning_links"] == [{"parent_id": root_task_id, "child_id": option_id}]
+    assert planning_node["included_parent_ids"] == [task_id]
+    assert data["planning_links"] == [
+        {
+            "parent_id": task_id,
+            "child_id": option_id,
+            "workflow_id": workflow_id,
+        }
+    ]
     assert data["links"] == []
 
     conn = kb.connect()
@@ -2818,11 +2927,12 @@ def test_add_link_can_be_scoped_to_loop_canvas_membership(client):
         "/api/plugins/kanban/loop-drafts",
         json={"title": "Canvas root", "session_id": session_id},
     ).json()["task"]
+    workflow_id = root["workflow_id"]
     first = client.post(
         "/api/plugins/kanban/loop-drafts",
         json={
             "title": "First owned node",
-            "root_task_id": root["id"],
+            "workflow_id": workflow_id,
             "session_id": session_id,
         },
     ).json()["task"]
@@ -2830,7 +2940,7 @@ def test_add_link_can_be_scoped_to_loop_canvas_membership(client):
         "/api/plugins/kanban/loop-drafts",
         json={
             "title": "Second owned node",
-            "root_task_id": root["id"],
+            "workflow_id": workflow_id,
             "session_id": session_id,
         },
     ).json()["task"]
@@ -2844,7 +2954,7 @@ def test_add_link_can_be_scoped_to_loop_canvas_membership(client):
         json={
             "parent_id": first["id"],
             "child_id": second["id"],
-            "root_task_id": root["id"],
+            "workflow_id": workflow_id,
             "session_id": session_id,
         },
     )
@@ -2855,25 +2965,26 @@ def test_add_link_can_be_scoped_to_loop_canvas_membership(client):
         json={
             "parent_id": first["id"],
             "child_id": same_session_outsider["id"],
-            "root_task_id": root["id"],
+            "workflow_id": workflow_id,
             "session_id": session_id,
         },
     )
     assert rejected.status_code == 400
-    assert "not owned by Loop root" in rejected.json()["detail"]
+    assert f"not owned by workflow {workflow_id}" in rejected.json()["detail"]
 
 
-def test_scoped_link_adds_existing_pending_node_to_unassigned_ready_root(client):
+def test_scoped_link_adds_existing_pending_node_to_ordinary_workflow_member(client):
     session_id = "session-link-ready-root"
     root = client.post(
         "/api/plugins/kanban/loop-drafts",
         json={"title": "Ready root", "assignee": None, "session_id": session_id},
     ).json()["task"]
+    workflow_id = root["workflow_id"]
     first = client.post(
         "/api/plugins/kanban/loop-drafts",
         json={
             "title": "Initial work",
-            "root_task_id": root["id"],
+            "workflow_id": workflow_id,
             "session_id": session_id,
         },
     ).json()["task"]
@@ -2885,14 +2996,15 @@ def test_scoped_link_adds_existing_pending_node_to_unassigned_ready_root(client)
         )
         assert kb.claim_task(conn, first["id"], claimer="worker-a:ready-root")
         assert kb.complete_task(conn, first["id"], summary="Initial work complete")
-        assert kb.get_task(conn, root["id"]).status == "ready"
+        assert kb.get_task(conn, root["id"]).status == "triage"
         pending_id = kb.create_task(
             conn,
             title="Existing pending follow-up",
-            created_by=f"loop:{root['id']}",
+            created_by="dashboard",
             triage=True,
             needs_specification=True,
             session_id=session_id,
+            workflow_id=workflow_id,
         )
     finally:
         conn.close()
@@ -2902,7 +3014,7 @@ def test_scoped_link_adds_existing_pending_node_to_unassigned_ready_root(client)
         json={
             "parent_id": pending_id,
             "child_id": root["id"],
-            "root_task_id": root["id"],
+            "workflow_id": workflow_id,
             "session_id": session_id,
         },
     )
@@ -2910,56 +3022,65 @@ def test_scoped_link_adds_existing_pending_node_to_unassigned_ready_root(client)
 
     conn = kb.connect()
     try:
-        reopened_root = kb.get_task(conn, root["id"])
-        assert reopened_root is not None
-        assert reopened_root.status == "todo"
+        linked_member = kb.get_task(conn, root["id"])
+        assert linked_member is not None
+        assert linked_member.workflow_id == workflow_id
         assert pending_id in kb.parent_ids(conn, root["id"])
     finally:
         conn.close()
 
 
-def test_scoped_links_reject_other_ready_targets_and_root_as_parent(client):
+def test_scoped_links_accept_all_mutable_workflow_members_as_peers(client):
     session_id = "session-link-ready-target"
     root = client.post(
         "/api/plugins/kanban/loop-drafts",
         json={"title": "Aggregate root", "assignee": None, "session_id": session_id},
     ).json()["task"]
+    workflow_id = root["workflow_id"]
     conn = kb.connect()
     try:
         source_id = kb.create_task(
             conn,
             title="Pending source",
-            created_by=f"loop:{root['id']}",
+            created_by="dashboard",
             triage=True,
             needs_specification=True,
             session_id=session_id,
+            workflow_id=workflow_id,
         )
-        ready_target_id = kb.create_task(
+        target_id = kb.create_task(
             conn,
-            title="Ordinary ready target",
-            created_by=f"loop:{root['id']}",
+            title="Ordinary mutable target",
+            created_by="dashboard",
+            triage=True,
+            needs_specification=True,
             session_id=session_id,
+            workflow_id=workflow_id,
         )
     finally:
         conn.close()
 
-    scope = {"root_task_id": root["id"], "session_id": session_id}
-    ready_target = client.post(
+    scope = {"workflow_id": workflow_id, "session_id": session_id}
+    ordinary_link = client.post(
         "/api/plugins/kanban/links",
-        json={"parent_id": source_id, "child_id": ready_target_id, **scope},
+        json={"parent_id": source_id, "child_id": target_id, **scope},
     )
-    root_parent = client.post(
+    first_member_parent = client.post(
         "/api/plugins/kanban/links",
         json={"parent_id": root["id"], "child_id": source_id, **scope},
     )
 
-    assert ready_target.status_code == 409
-    assert "immutable" in ready_target.json()["detail"]
-    assert root_parent.status_code == 400
-    assert "aggregate sink" in root_parent.json()["detail"]
+    assert ordinary_link.status_code == 200, ordinary_link.text
+    assert first_member_parent.status_code == 200, first_member_parent.text
+    conn = kb.connect()
+    try:
+        assert kb.parent_ids(conn, source_id) == [root["id"]]
+        assert kb.parent_ids(conn, target_id) == [source_id]
+    finally:
+        conn.close()
 
 
-def test_scoped_links_reject_cross_root_mutations_with_shared_session(client):
+def test_scoped_links_reject_cross_workflow_mutations_with_shared_session(client):
     session_id = "session-two-loop-roots"
     root_a = client.post(
         "/api/plugins/kanban/loop-drafts",
@@ -2977,11 +3098,14 @@ def test_scoped_links_reject_cross_root_mutations_with_shared_session(client):
             "idempotency_key": "loop-root-b",
         },
     ).json()["task"]
+    workflow_a = root_a["workflow_id"]
+    workflow_b = root_b["workflow_id"]
+    assert workflow_a != workflow_b
     child_a = client.post(
         "/api/plugins/kanban/loop-drafts",
         json={
             "title": "Owned by A",
-            "root_task_id": root_a["id"],
+            "workflow_id": workflow_a,
             "session_id": session_id,
         },
     ).json()["task"]
@@ -2989,11 +3113,11 @@ def test_scoped_links_reject_cross_root_mutations_with_shared_session(client):
         "/api/plugins/kanban/loop-drafts",
         json={
             "title": "Owned by B",
-            "root_task_id": root_b["id"],
+            "workflow_id": workflow_b,
             "session_id": session_id,
         },
     ).json()["task"]
-    scope_a = {"root_task_id": root_a["id"], "session_id": session_id}
+    scope_a = {"workflow_id": workflow_a, "session_id": session_id}
 
     foreign_source = client.post(
         "/api/plugins/kanban/links",
@@ -3016,14 +3140,14 @@ def test_scoped_links_reject_cross_root_mutations_with_shared_session(client):
     assert foreign_target.status_code == 400
     assert foreign_delete.status_code == 400
     assert all(
-        "not owned by Loop root" in response.json()["detail"]
+        f"not owned by workflow {workflow_a}" in response.json()["detail"]
         for response in (foreign_source, foreign_target, foreign_delete)
     )
     conn = kb.connect()
     try:
         assert kb.parent_ids(conn, child_a["id"]) == []
         assert kb.parent_ids(conn, child_b["id"]) == []
-        assert kb.parent_ids(conn, root_b["id"]) == [child_b["id"]]
+        assert kb.parent_ids(conn, root_b["id"]) == []
     finally:
         conn.close()
 

@@ -529,11 +529,11 @@ $panesFlipped.listen(flipped => {
   }
 })
 
-// POSITIONAL side toggles (titlebar buttons, ⌘B / ⌘J): $sidebarOpen ≙ the
-// LEFT side of the main zone, $fileBrowserOpen ≙ the RIGHT — everything on
-// that side hides together, whatever panes have been rearranged there.
+// The sessions sidebar keeps semantic side-collapse behavior so ⌘B follows it
+// through flips and rearrangement. Files is pane-scoped below: collapsing the
+// file browser must not also hide independently owned right-side panes such as
+// Loop, preview, review, or terminal.
 bindTreeSideVisibility('left', $sidebarOpen, setSidebarOpen)
-bindTreeSideVisibility('right', $fileBrowserOpen, setFileBrowserOpen)
 
 // Workspace-scoped surfaces: the file tree and git diff only mean something
 // inside a project. A detached chat (no cwd) hides them — their zones
@@ -542,7 +542,12 @@ bindTreeSideVisibility('right', $fileBrowserOpen, setFileBrowserOpen)
 // rode the rail's row and vanished with it), its zone stands on its own.
 const $hasWorkspace = computed($currentCwd, cwd => Boolean(cwd.trim()))
 
-bindPaneVisibility('files', $hasWorkspace)
+const $filesVisible = computed(
+  [$fileBrowserOpen, $hasWorkspace],
+  (fileBrowserOpen, hasWorkspace) => fileBrowserOpen && hasWorkspace
+)
+
+bindPaneVisibility('files', $filesVisible)
 // ⌘G — the review sidebar appears/disappears (and comes to the front).
 bindPaneVisibility(
   'review',
@@ -605,9 +610,7 @@ registry.register({
 registerPaneCloser('sessions', () =>
   paneRootSide('sessions') === 'left' ? setSidebarOpen(false) : dismissTreePane('sessions')
 )
-registerPaneCloser('files', () =>
-  paneRootSide('files') === 'right' ? setFileBrowserOpen(false) : dismissTreePane('files')
-)
+registerPaneCloser('files', () => setFileBrowserOpen(false))
 
 // A preview target lands NEXT TO the file tree — position-aware: wherever
 // files currently lives (default rail, ⌘\-flipped, dragged into a stack), the

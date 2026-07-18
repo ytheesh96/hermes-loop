@@ -590,20 +590,22 @@ def test_notify_claim_is_single_owner_and_rewindable(kanban_home):
         kb.add_notify_sub(conn1, task_id=tid, platform="telegram", chat_id="123")
         kb.complete_task(conn1, tid, result="ok")
 
-        old_cursor, claimed_cursor, events = kb.claim_unseen_events_for_sub(
-            conn1,
-            task_id=tid,
-            platform="telegram",
-            chat_id="123",
-            kinds=["completed", "blocked"],
+        old_cursor, claimed_cursor, events, claim_token = (
+            kb.claim_unseen_events_for_sub(
+                conn1,
+                task_id=tid,
+                platform="telegram",
+                chat_id="123",
+                kinds=["completed", "blocked"],
+            )
         )
         assert old_cursor == 0
         assert claimed_cursor > old_cursor
         assert [ev.kind for ev in events] == ["completed"]
 
-        # A concurrent notifier instance sees the advanced cursor and cannot
-        # claim/send the same event range.
-        _, _, duplicate_events = kb.claim_unseen_events_for_sub(
+        # A concurrent notifier instance sees the durable in-flight lease and
+        # cannot claim/send the same event range.
+        _, _, duplicate_events, _duplicate_token = kb.claim_unseen_events_for_sub(
             conn2,
             task_id=tid,
             platform="telegram",
@@ -619,6 +621,7 @@ def test_notify_claim_is_single_owner_and_rewindable(kanban_home):
             chat_id="123",
             claimed_cursor=claimed_cursor,
             old_cursor=old_cursor,
+            claim_token=claim_token,
         ) is True
         _, retried_events = kb.unseen_events_for_sub(
             conn2,
@@ -628,6 +631,131 @@ def test_notify_claim_is_single_owner_and_rewindable(kanban_home):
             kinds=["completed", "blocked"],
         )
         assert [ev.kind for ev in retried_events] == ["completed"]
+    finally:
+        conn1.close()
+        conn2.close()
+
+
+def test_notify_idle_cleanup_preserves_live_claim_then_removes_drained_row(
+    kanban_home,
+):
+    conn1 = kb.connect()
+    conn2 = kb.connect()
+    try:
+        tid = kb.create_task(conn1, title="lease-safe cleanup", assignee="w")
+        kb.add_notify_sub(conn1, task_id=tid, platform="tui", chat_id="session")
+        kb.complete_task(conn1, tid, result="ok")
+
+        _old, cursor, events, token = kb.claim_unseen_events_for_sub(
+            conn1,
+            task_id=tid,
+            platform="tui",
+            chat_id="session",
+            kinds=["completed"],
+        )
+        assert [event.kind for event in events] == ["completed"]
+        assert token
+
+        assert not kb.remove_notify_sub_if_idle(
+            conn2,
+            task_id=tid,
+            platform="tui",
+            chat_id="session",
+        )
+        assert len(kb.list_notify_subs(conn2, tid)) == 1
+
+        assert kb.complete_notify_claim(
+            conn1,
+            task_id=tid,
+            platform="tui",
+            chat_id="session",
+            claimed_cursor=cursor,
+            claim_token=token,
+        )
+        assert kb.remove_notify_sub_if_idle(
+            conn2,
+            task_id=tid,
+            platform="tui",
+            chat_id="session",
+        )
+        assert kb.list_notify_subs(conn2, tid) == []
+    finally:
+        conn1.close()
+        conn2.close()
+
+
+def test_notify_lease_blocks_overtake_and_rejects_stale_ack(kanban_home):
+    conn1 = kb.connect()
+    conn2 = kb.connect()
+    try:
+        tid = kb.create_task(conn1, title="lease", assignee="w")
+        kb.add_notify_sub(conn1, task_id=tid, platform="telegram", chat_id="123")
+        kb.complete_task(conn1, tid, result="ok")
+
+        old_cursor, claimed_cursor, events, first_token = (
+            kb.claim_unseen_events_for_sub(
+                conn1,
+                task_id=tid,
+                platform="telegram",
+                chat_id="123",
+                kinds=["completed", "blocked"],
+            )
+        )
+        assert [event.kind for event in events] == ["completed"]
+
+        with kb.write_txn(conn2):
+            kb._append_event(conn2, tid, "blocked", {"reason": "later"})
+
+        # A later event cannot overtake the in-flight range.
+        _, _, overtaking_events, overtaking_token = (
+            kb.claim_unseen_events_for_sub(
+                conn2,
+                task_id=tid,
+                platform="telegram",
+                chat_id="123",
+                kinds=["completed", "blocked"],
+            )
+        )
+        assert overtaking_events == []
+        assert overtaking_token is None
+
+        # Simulate the first notifier dying and its lease expiring.
+        with kb.write_txn(conn2):
+            conn2.execute(
+                "UPDATE kanban_notify_subs SET pending_expires_at = 0 "
+                "WHERE task_id = ?",
+                (tid,),
+            )
+        retry_old, retry_cursor, retry_events, retry_token = (
+            kb.claim_unseen_events_for_sub(
+                conn2,
+                task_id=tid,
+                platform="telegram",
+                chat_id="123",
+                kinds=["completed", "blocked"],
+            )
+        )
+        assert retry_old == old_cursor
+        assert retry_cursor > claimed_cursor
+        assert [event.kind for event in retry_events] == ["completed", "blocked"]
+        assert retry_token and retry_token != first_token
+
+        assert not kb.complete_notify_claim(
+            conn1,
+            task_id=tid,
+            platform="telegram",
+            chat_id="123",
+            claimed_cursor=claimed_cursor,
+            claim_token=first_token,
+        )
+        assert kb.complete_notify_claim(
+            conn2,
+            task_id=tid,
+            platform="telegram",
+            chat_id="123",
+            claimed_cursor=retry_cursor,
+            claim_token=retry_token,
+        )
     finally:
         conn1.close()
         conn2.close()
@@ -1703,6 +1831,47 @@ def test_build_worker_context_uses_parent_run_summary(kanban_home):
         assert "Parent task results" in ctx
         assert "three angles explored; B looks strongest" in ctx
         assert '"sources"' in ctx  # metadata JSON serialized
+    finally:
+        conn.close()
+
+
+def test_build_worker_context_includes_parent_comment_review_context(kanban_home):
+    """A child sees the parent's review/caveat comments, not only its summary."""
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(conn, title="implement", assignee="engineer")
+        child = kb.create_task(
+            conn,
+            title="verify",
+            assignee="reviewer",
+            parents=[parent],
+        )
+        unrelated = kb.create_task(conn, title="unrelated", assignee="other")
+        kb.add_comment(
+            conn,
+            parent,
+            "reviewer-qa",
+            "PARENT_REVIEW_MARKER: re-check the wake coalescing edge case.",
+        )
+        kb.add_comment(
+            conn,
+            unrelated,
+            "other",
+            "UNRELATED_COMMENT_MARKER",
+        )
+        kb.claim_task(conn, parent)
+        kb.complete_task(
+            conn,
+            parent,
+            summary="Implementation is complete.",
+        )
+
+        ctx = kb.build_worker_context(conn, child)
+
+        assert "Parent comment/review context" in ctx
+        assert "comment from parent worker `reviewer-qa`" in ctx
+        assert "PARENT_REVIEW_MARKER" in ctx
+        assert "UNRELATED_COMMENT_MARKER" not in ctx
     finally:
         conn.close()
 

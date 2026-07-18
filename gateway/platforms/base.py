@@ -1851,6 +1851,53 @@ class MessageEvent:
         return args
 
 
+_PROCESSING_RECEIPT_ATTR = "_hermes_processing_receipt"
+_PENDING_FOLLOWUPS_ATTR = "_hermes_pending_followups"
+
+
+def attach_processing_receipt(event: MessageEvent, receipt: asyncio.Future) -> None:
+    """Attach an in-process completion receipt to a synthetic event.
+
+    The receipt is intentionally kept off the dataclass fields and metadata:
+    events are sometimes serialized or copied, while an asyncio Future is
+    meaningful only inside the gateway process and event loop that created it.
+    """
+
+    setattr(event, _PROCESSING_RECEIPT_ATTR, receipt)
+
+
+def get_processing_receipt(event: Optional[MessageEvent]) -> Optional[asyncio.Future]:
+    """Return the event's completion receipt, if one was attached."""
+
+    if event is None:
+        return None
+    receipt = getattr(event, _PROCESSING_RECEIPT_ATTR, None)
+    return receipt if isinstance(receipt, asyncio.Future) else None
+
+
+def resolve_processing_receipt(event: MessageEvent, success: bool) -> bool:
+    """Resolve an event receipt exactly once.
+
+    Returns True when this call completed a live receipt. A missing, cancelled,
+    or already-resolved receipt is a no-op.
+    """
+
+    receipt = get_processing_receipt(event)
+    if receipt is None or receipt.done():
+        return False
+    receipt.set_result(bool(success))
+    return True
+
+
+def _workflow_identity(event: Optional[MessageEvent]) -> str:
+    """Return the durable workflow identity carried by an internal wake."""
+
+    metadata = getattr(event, "metadata", None)
+    if not isinstance(metadata, dict):
+        return ""
+    return str(metadata.get("workflow_id") or "")
+
+
 @dataclass
 class TextDebounceState:
     event: MessageEvent
@@ -2124,6 +2171,24 @@ def merge_pending_message_event(
     """
     existing = pending_messages.get(session_key)
     if existing:
+        followups = getattr(existing, _PENDING_FOLLOWUPS_ATTR, None)
+        if (
+            followups
+            or _workflow_identity(existing)
+            or _workflow_identity(event)
+        ):
+            # Workflow wakes are transaction-like foreground turns: each one
+            # owns a distinct DB claim and completion receipt. Combining their
+            # text would lose one workflow identity and make it impossible to
+            # ACK the matching claim after the matching turn. Once such a turn
+            # is in the queue, preserve all later arrivals behind it in FIFO
+            # order instead of folding them into the head event.
+            if followups is None:
+                followups = []
+                setattr(existing, _PENDING_FOLLOWUPS_ATTR, followups)
+            followups.append(event)
+            return
+
         existing_is_photo = getattr(existing, "message_type", None) == MessageType.PHOTO
         incoming_is_photo = event.message_type == MessageType.PHOTO
         existing_has_media = bool(existing.media_urls)
@@ -2329,6 +2394,12 @@ class BasePlatformAdapter(ABC):
     # a delivery promise they can't keep. A new stateless adapter only needs to
     # set this to False to stay correct-by-default.
     supports_async_delivery: bool = True
+
+    # Whether synthetic internal events can carry a Future that resolves only
+    # after their exact foreground turn (including outbound delivery) finishes.
+    # Workflow notification leases rely on this capability to avoid ACKing a
+    # wake merely because it was accepted into a busy session's pending queue.
+    supports_processing_receipts: bool = True
 
     # Whether this adapter's ``send()`` splits long content into multiple
     # messages via ``truncate_message()``.  When True, the delivery router
@@ -4495,6 +4566,78 @@ class BasePlatformAdapter(ABC):
         self._discard_text_debounce(session_key)
         return True
 
+    def _stage_pending_followups(
+        self,
+        event: MessageEvent,
+        session_key: str,
+    ) -> None:
+        """Put an event's isolated FIFO followers back into the pending slot.
+
+        Workflow wakes cannot be text-coalesced because each carries a distinct
+        workflow identity and completion receipt. ``merge_pending_message_event``
+        chains those events on the pending head. When that head starts, this
+        method restores the chain behind it, ahead of any later arrival.
+        """
+
+        followups = list(getattr(event, _PENDING_FOLLOWUPS_ATTR, None) or [])
+        if not followups:
+            return
+        try:
+            delattr(event, _PENDING_FOLLOWUPS_ATTR)
+        except AttributeError:
+            pass
+
+        trailing = self._pending_messages.pop(session_key, None)
+        sequence: list[MessageEvent] = []
+        stack = list(reversed(followups))
+        if trailing is not None:
+            stack.insert(0, trailing)
+        while stack:
+            candidate = stack.pop()
+            nested = list(
+                getattr(candidate, _PENDING_FOLLOWUPS_ATTR, None) or []
+            )
+            if nested:
+                try:
+                    delattr(candidate, _PENDING_FOLLOWUPS_ATTR)
+                except AttributeError:
+                    pass
+            sequence.append(candidate)
+            stack.extend(reversed(nested))
+
+        head, *tail = sequence
+        if tail:
+            setattr(head, _PENDING_FOLLOWUPS_ATTR, tail)
+        self._pending_messages[session_key] = head
+
+    def get_pending_message_for_active_turn(
+        self,
+        session_key: str,
+    ) -> Optional[MessageEvent]:
+        """Return a normal follow-up, but reserve receipt-bearing turns.
+
+        ``GatewayRunner`` normally consumes pending messages recursively inside
+        the current adapter handler. A workflow wake must instead cross the
+        adapter's real turn boundary so its receipt is resolved after that
+        specific handler and delivery complete. Leaving it in the pending slot
+        lets ``_process_message_background`` spawn the exact next turn.
+        """
+
+        if self.has_reserved_pending_message(session_key):
+            return None
+        event = self._pending_messages.pop(session_key, None)
+        if event is not None:
+            self._stage_pending_followups(event, session_key)
+        return event
+
+    def has_reserved_pending_message(self, session_key: str) -> bool:
+        """Return whether the pending head owns an unresolved turn receipt."""
+
+        receipt = get_processing_receipt(
+            self._pending_messages.get(session_key)
+        )
+        return receipt is not None and not receipt.done()
+
     def _start_session_processing(
         self,
         event: MessageEvent,
@@ -4525,6 +4668,11 @@ class BasePlatformAdapter(ABC):
         if hasattr(task, "add_done_callback"):
             task.add_done_callback(self._background_tasks.discard)
             task.add_done_callback(self._expected_cancelled_tasks.discard)
+            task.add_done_callback(
+                lambda _done, _event=event: resolve_processing_receipt(
+                    _event, False
+                )
+            )
         return True
 
     async def cancel_session_processing(
@@ -4682,6 +4830,7 @@ class BasePlatformAdapter(ABC):
         enabling interruption support.
         """
         if not self._message_handler:
+            resolve_processing_receipt(event, False)
             return
 
         coerce_plaintext_gateway_command(event)
@@ -4708,6 +4857,17 @@ class BasePlatformAdapter(ABC):
 
         # Check if there's already an active handler for this session
         if session_key in self._active_sessions:
+            if get_processing_receipt(event) is not None:
+                # A claimed workflow wake is neither an interrupt nor an
+                # inline clarify/command response. It owns a completion
+                # receipt, so preserve it as a distinct next foreground turn.
+                merge_pending_message_event(
+                    self._pending_messages,
+                    session_key,
+                    event,
+                )
+                return
+
             # Certain commands must bypass the active-session guard and be
             # dispatched directly to the gateway runner.  Without this, they
             # are queued as pending messages and either:
@@ -4867,7 +5027,8 @@ class BasePlatformAdapter(ABC):
         # pattern — set the guard synchronously, not inside the task.)
         # _start_session_processing installs the guard AND the owner-task
         # mapping atomically so stale-lock detection works.
-        self._start_session_processing(event, session_key)
+        if not self._start_session_processing(event, session_key):
+            resolve_processing_receipt(event, False)
     
     @staticmethod
     def _get_human_delay() -> float:
@@ -4898,6 +5059,12 @@ class BasePlatformAdapter(ABC):
 
     async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
         """Background task that actually processes the message."""
+        # A workflow wake may have accumulated isolated FIFO followers while it
+        # waited behind another turn. Restore those followers before entering
+        # the handler so the runner sees the receipt-bearing head as reserved
+        # and cannot merge or overtake it.
+        self._stage_pending_followups(event, session_key)
+
         # Track delivery outcomes for the processing-complete hook
         delivery_attempted = False
         delivery_succeeded = False
@@ -5247,6 +5414,7 @@ class BasePlatformAdapter(ABC):
                 event,
                 ProcessingOutcome.SUCCESS if processing_ok else ProcessingOutcome.FAILURE,
             )
+            resolve_processing_receipt(event, processing_ok)
 
             # The active drain owns debounce state. If a queue-mode timer has
             # not fired yet, force-flush into _pending_messages here and let
@@ -5287,6 +5455,10 @@ class BasePlatformAdapter(ABC):
                 try:
                     self._background_tasks.add(drain_task)
                     drain_task.add_done_callback(self._background_tasks.discard)
+                    drain_task.add_done_callback(
+                        lambda _done, _event=pending_event:
+                        resolve_processing_receipt(_event, False)
+                    )
                 except TypeError:
                     # Tests stub create_task() with non-hashable sentinels; tolerate.
                     pass
@@ -5298,9 +5470,11 @@ class BasePlatformAdapter(ABC):
             if current_task is None or current_task not in self._expected_cancelled_tasks:
                 outcome = ProcessingOutcome.FAILURE
             await self._run_processing_hook("on_processing_complete", event, outcome)
+            resolve_processing_receipt(event, False)
             raise
         except Exception as e:
             await self._run_processing_hook("on_processing_complete", event, ProcessingOutcome.FAILURE)
+            resolve_processing_receipt(event, False)
             logger.error("[%s] Error handling message: %s", self.name, e, exc_info=True)
             # Send the error to the user so they aren't left with radio silence
             try:
@@ -5322,6 +5496,10 @@ class BasePlatformAdapter(ABC):
                     self.name, notify_err, exc_info=True,
                 )  # Last resort — don't let error reporting crash the handler
         finally:
+            # Defensive completion for cancellation before the handler or a
+            # processing-hook failure. Successful/known-failure paths above
+            # have already resolved this exact event's receipt.
+            resolve_processing_receipt(event, False)
             # Stop typing before any deferred callback work.  Post-delivery
             # callbacks may perform platform I/O; a stuck callback must not
             # leave the typing refresh task running indefinitely.
@@ -5412,6 +5590,10 @@ class BasePlatformAdapter(ABC):
                     try:
                         self._background_tasks.add(drain_task)
                         drain_task.add_done_callback(self._background_tasks.discard)
+                        drain_task.add_done_callback(
+                            lambda _done, _event=late_pending:
+                            resolve_processing_receipt(_event, False)
+                        )
                     except TypeError:
                         # Tests stub create_task() with non-hashable sentinels; tolerate.
                         pass

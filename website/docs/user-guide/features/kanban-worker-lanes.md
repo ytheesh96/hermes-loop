@@ -14,11 +14,11 @@ If you're writing the worker code itself — the agent that runs *inside* a lane
 ```text
 Hermes Kanban  =  canonical task lifecycle + audit trail
 Worker lane    =  implementation executor for one assigned card
-Reviewer       =  human or human-proxy that gates "done"
+Reviewer       =  optional follow-up lane after implementation completes
 GitHub PR      =  upstreamable artifact (optional, for code lanes)
 ```
 
-Hermes Kanban owns lifecycle truth — `ready` → `running` → `blocked` / `done` / `archived`. Worker lanes execute work but never own that truth; everything they do flows back through the kanban kernel via the `kanban_*` tools (or, for non-Hermes external workers, via the API). Reviewers gate the transition from "code change written" to "task done."
+Hermes Kanban owns lifecycle truth — `ready` → `running` → `blocked` / `done` / `archived`. Worker lanes execute work but never own that truth; everything they do flows back through the kanban kernel via the `kanban_*` tools (or, for non-Hermes external workers, via the API). An implementation worker completes its own card when its assigned work is finished. Foreground may then create a separate reviewer card whose result gates acceptance or release, not the original card's transition to `done`.
 
 ## What a lane provides
 
@@ -51,20 +51,32 @@ For non-Hermes lanes (registered via a plugin), the plugin supplies its own `spa
 Every claim must end in exactly one of:
 
 - `kanban_complete(summary=..., metadata=...)` — task succeeds, status flips to `done`.
-- `kanban_block(reason=...)` — task waits for human input, status flips to `blocked`. The dispatcher respawns when `kanban_unblock` runs.
+- `kanban_block(reason=..., kind=...)` — a genuine non-dependency blocker flips
+  to `blocked` and returns to foreground; `kind="dependency"` returns to
+  `todo`, wakes nobody, and auto-resumes when its parents finish.
 - The worker process exits without a tool call. The kernel reaps it and emits `crashed` (PID died) or `gave_up` (consecutive-failure breaker tripped) or `timed_out` (max_runtime exceeded). This is the failure path; healthy workers don't end here.
 
 The kanban kernel enforces that exactly one of these terminates each run. A worker that calls neither and exits normally is treated as crashed.
 
-## Outputs and the review-required convention
+## Outputs and review requests
 
 For most code-changing tasks, the work isn't truly *done* the moment the worker finishes — it needs a human reviewer. The kanban kernel doesn't enforce this distinction (a "code-changing task" is fuzzy and forcing block-instead-of-complete on every code worker would break flows where no review is wanted). It's a convention layered on top:
 
-- **Block instead of complete**, with `reason` prefixed `review-required: ` so the dashboard / `hermes kanban show` surfaces the row as awaiting review.
-- **Drop structured metadata into a `kanban_comment` first** since `kanban_block` only carries the human-readable `reason`. Comments are the durable annotation channel — every audit-relevant field (changed_files, tests_run, diff_path or PR url, decisions) belongs there.
-- **Reviewer either approves and unblocks**, which respawns the worker with the comment thread for follow-ups; or asks for changes via another comment, which the next worker run sees as part of `kanban_show`'s context.
+- **Write the review request and evidence in `kanban_comment`**, including
+  changed files, tests, artifact or PR links, risks, and the requested review.
+  A comment is durable but deliberately does not wake or interrupt foreground.
+- **Call `kanban_complete` when the assigned work is finished.** Completion is
+  the delivery boundary: the root subscription carries the summary and recent
+  comments into one foreground turn.
+- **Use `kanban_block` only when the task itself cannot proceed.** A genuine
+  non-dependency block is also a delivery boundary, but it is not a synonym
+  for "please review." A dependency wait is deliberately quiet.
+- **Foreground decides the next mutation.** It may accept the result, ask the
+  user, or create a reviewer/fix task with `kanban_create`. The worker never
+  creates or links that task itself.
 
-The injected `KANBAN_GUIDANCE` covers both `kanban_complete` (truly terminal tasks — typo fixes, docs changes, research writeups) and the `review-required` block pattern.
+The injected `KANBAN_GUIDANCE` encodes this comment → boundary → foreground
+decision contract.
 
 ## Logs and audit trail
 
@@ -80,9 +92,9 @@ The dashboard renders run history with summaries, metadata blocks, and exit-stat
 
 ### Hermes profile lane (default)
 
-The shape every kanban worker takes today: the assignee is a profile name, the dispatcher spawns `hermes -p <profile>`, the worker gets the `KANBAN_GUIDANCE` system-prompt block injected automatically, and uses the `kanban_*` tools to terminate the run. No setup beyond defining the profile.
+The shape every kanban worker takes today: the assignee is a profile name, the dispatcher spawns `hermes -p <profile>`, the worker gets the worker-only `KANBAN_GUIDANCE` system-prompt block injected automatically, and uses the five lifecycle/message `kanban_*` tools to terminate the run. No setup beyond defining the profile.
 
-When you create profiles for your fleet, choose names that match the *role* you want the orchestrator to route to. The orchestrator (when there is one) discovers your profile names via `hermes profile list` — there's no fixed roster the system assumes (the orchestrator side of the contract is part of the injected `KANBAN_GUIDANCE`).
+When you create profiles for your fleet, choose names that match the *role* you want the orchestrator to route to. The orchestrator (when there is one) discovers your profile names via `hermes profile list` — there's no fixed roster the system assumes. That foreground contract is injected through `KANBAN_FOREGROUND_GUIDANCE`, separately from the worker block.
 
 ### Orchestrator profile lane
 
@@ -110,4 +122,4 @@ So lane authors don't have to reimplement these:
 
 - [Kanban overview](./kanban) — the user-facing intro.
 - [Kanban tutorial](./kanban-tutorial) — walkthrough with the dashboard open.
-- [`KANBAN_GUIDANCE`](https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py) — the worker + orchestrator lifecycle injected into every kanban worker's system prompt.
+- [`KANBAN_GUIDANCE` and `KANBAN_FOREGROUND_GUIDANCE`](https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py) — separate worker lifecycle and foreground graph-control contracts.

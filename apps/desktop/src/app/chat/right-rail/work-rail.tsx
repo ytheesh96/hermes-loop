@@ -38,9 +38,9 @@ interface WorkRailTab {
 }
 
 function loopRailLabel(loop: LoopPanelController): string {
-  const root = loop.state?.rows.find(row => row.taskId === loop.state?.rootTaskId)
+  const firstTask = loop.state?.rows[0]
 
-  return root?.title || 'Loop'
+  return firstTask?.title || 'Loop'
 }
 
 export function ChatWorkRail({
@@ -204,11 +204,11 @@ export function ChatWorkRail({
             onUnlinkTasks={loop.onUnlinkTasks}
             open={loop.open}
             positions={loop.positions}
-            rootTaskId={loop.rootTaskId}
             selectedTaskDetail={loop.selectedTaskDetail}
             selectedTaskDetailError={loop.selectedTaskDetailError}
             selectedTaskId={loop.selectedTaskId}
             state={loop.state}
+            workflowId={loop.workflowId}
           />
         ) : (
           <ChatPreviewRail embedded onRestartServer={onRestartServer} setTitlebarToolGroup={setTitlebarToolGroup} />

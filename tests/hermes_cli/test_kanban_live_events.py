@@ -37,12 +37,19 @@ def test_task_event_append_emits_loop_source_changed_with_identity(kanban_home, 
     frames = _capture_publishes(monkeypatch)
     conn = kb.connect()
     try:
+        workflow_id = kb.create_workflow(
+            conn,
+            workflow_id="wf-live-task",
+            title="Live task workflow",
+            tenant="tenant-a",
+        )
         tid = kb.create_task(
             conn,
             title="Loop row",
             assignee="worker",
             tenant="tenant-a",
             session_id="source-session-1",
+            workflow_id=workflow_id,
         )
     finally:
         conn.close()
@@ -63,6 +70,7 @@ def test_task_event_append_emits_loop_source_changed_with_identity(kanban_home, 
     assert loopagent_frames, "task creation should also push a renderable Loopagent row"
     loopagent_payload = _event_payload(loopagent_frames[-1])
     assert loopagent_payload["event"] == "loopagent.task.upsert"
+    assert loopagent_payload["workflow_id"] == workflow_id
     assert loopagent_payload["task_id"] == tid
     assert loopagent_payload["task_title"] == "Loop row"
     assert loopagent_payload["task_status"] == "ready"
@@ -74,11 +82,13 @@ def test_task_event_append_emits_loop_source_changed_with_identity(kanban_home, 
     assert loopagent_payload["parent_task_ids"] == []
     assert loopagent_payload["latest_task_event_id"] == payload["latest_task_event_id"]
     assert loopagent_payload["task"]["id"] == tid
+    assert loopagent_payload["task"]["workflow_id"] == workflow_id
 
     upsert_frames = [f for f in frames if f["params"]["type"] == "loopagent.task.upsert"]
     assert upsert_frames, "task creation should also publish a row upsert event"
     upsert = _event_payload(upsert_frames[-1])
     assert upsert["event"] == "loopagent.task.upsert"
+    assert upsert["workflow_id"] == workflow_id
     assert upsert["tenant"] == "tenant-a"
     assert upsert["task_id"] == tid
     assert upsert["source_session_id"] == "source-session-1"
@@ -88,6 +98,7 @@ def test_task_event_append_emits_loop_source_changed_with_identity(kanban_home, 
     assert upsert["latest_task_event_revision"] == payload["latest_task_event_id"]
     assert upsert["latest_task_event_kind"] == "created"
     assert upsert["task"]["id"] == tid
+    assert upsert["task"]["workflow_id"] == workflow_id
     assert upsert["task"]["title"] == "Loop row"
     assert upsert["task"]["status"] == "ready"
     assert upsert["latest_task_event"]["kind"] == "created"
@@ -98,7 +109,19 @@ def test_worker_terminal_event_emits_namespaced_completion(kanban_home, monkeypa
     frames = _capture_publishes(monkeypatch)
     conn = kb.connect()
     try:
-        tid = kb.create_task(conn, title="Ship thing", assignee="peacock", tenant="tenant-a")
+        workflow_id = kb.create_workflow(
+            conn,
+            workflow_id="wf-live-worker",
+            title="Live worker workflow",
+            tenant="tenant-a",
+        )
+        tid = kb.create_task(
+            conn,
+            title="Ship thing",
+            assignee="peacock",
+            tenant="tenant-a",
+            workflow_id=workflow_id,
+        )
         res = kb.dispatch_once(conn, spawn_fn=lambda task, workspace: 4242)
         assert [item[0] for item in res.spawned] == [tid]
         run_id = kb.get_task(conn, tid).current_run_id
@@ -133,6 +156,7 @@ def test_worker_terminal_event_emits_namespaced_completion(kanban_home, monkeypa
     assert loopagent_frames, "completion should also push a renderable Loopagent worker row"
     loopagent_payload = _event_payload(loopagent_frames[-1])
     assert loopagent_payload["event"] == "loopagent.worker.upsert"
+    assert loopagent_payload["workflow_id"] == workflow_id
     assert loopagent_payload["task_id"] == tid
     assert loopagent_payload["run_id"] == run_id
     assert loopagent_payload["task_title"] == "Ship thing"
@@ -140,13 +164,16 @@ def test_worker_terminal_event_emits_namespaced_completion(kanban_home, monkeypa
     assert loopagent_payload["run_status"] == "completed"
     assert loopagent_payload["worker_session_id"] == "worker-sess-1"
     assert loopagent_payload["worker"]["task_id"] == tid
+    assert loopagent_payload["worker"]["workflow_id"] == workflow_id
     assert loopagent_payload["worker"]["run_id"] == run_id
     assert loopagent_payload["worker"]["summary_preview"] == "implemented backend events"
+    assert loopagent_payload["task"]["workflow_id"] == workflow_id
 
     upsert_frames = [f for f in frames if f["params"]["type"] == "loopagent.worker.upsert"]
     assert upsert_frames, "completion should also publish a worker row upsert event"
     upsert = _event_payload(upsert_frames[-1])
     assert upsert["event"] == "loopagent.worker.upsert"
+    assert upsert["workflow_id"] == workflow_id
     assert upsert["task_id"] == tid
     assert upsert["run_id"] == run_id
     assert upsert["worker_session_id"] == "worker-sess-1"
@@ -157,12 +184,14 @@ def test_worker_terminal_event_emits_namespaced_completion(kanban_home, monkeypa
     assert upsert["latest_task_event_kind"] == "completed"
     assert upsert["safe_summary"] == "implemented backend events"
     assert upsert["worker"]["task_id"] == tid
+    assert upsert["worker"]["workflow_id"] == workflow_id
     assert upsert["worker"]["run_id"] == run_id
     assert upsert["worker"]["status"] == "completed"
     assert upsert["worker"]["outcome"] == "completed"
     assert upsert["worker"]["summary_preview"] == "implemented backend events"
     assert upsert["worker"]["recent_task_events"][-1]["kind"] == "completed"
     assert upsert["task"]["status"] == "done"
+    assert upsert["task"]["workflow_id"] == workflow_id
 
 
 def test_auto_give_up_emits_source_invalidation_and_safe_worker_terminal_event(

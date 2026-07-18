@@ -44,7 +44,7 @@ import zipfile
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -93,7 +93,7 @@ from utils import env_var_enabled
 
 try:
     from fastapi import (
-        FastAPI, File, Form, HTTPException, Request, UploadFile,
+        FastAPI, File, Form, HTTPException, Query, Request, UploadFile,
         WebSocket, WebSocketDisconnect,
     )
     from fastapi.middleware.cors import CORSMiddleware
@@ -109,7 +109,7 @@ except ImportError:
         from tools.lazy_deps import ensure as _lazy_ensure
         _lazy_ensure("tool.dashboard", prompt=False)
         from fastapi import (
-            FastAPI, File, Form, HTTPException, Request, UploadFile,
+            FastAPI, File, Form, HTTPException, Query, Request, UploadFile,
             WebSocket, WebSocketDisconnect,
         )
         from fastapi.middleware.cors import CORSMiddleware
@@ -10137,6 +10137,78 @@ def _parse_json_record(value: Any) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _loop_graph_workflow_id(record: Dict[str, Any]) -> str:
+    """Return canonical workflow identity, accepting the deprecated alias."""
+    workflow_id = str(record.get("workflow_id") or "").strip()
+    root_task_id = str(record.get("root_task_id") or "").strip()
+    if workflow_id and root_task_id and workflow_id != root_task_id:
+        return ""
+    return workflow_id or root_task_id
+
+
+def _canonical_loop_graph_args(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize legacy tool-call arguments to canonical workflow identity."""
+    workflow_id = _loop_graph_workflow_id(args)
+    if not workflow_id:
+        return dict(args)
+    normalized = dict(args)
+    normalized["workflow_id"] = workflow_id
+    # COMPAT(workflow-id-cutover): accept this input alias, but never emit it
+    # in hydrated/synthetic records returned by the web API.
+    normalized.pop("root_task_id", None)
+    return normalized
+
+
+_LOOP_GRAPH_HANDOFF_NODE_KEYS = frozenset(
+    {
+        "attention",
+        "handoff",
+        "handoff_kind",
+        "loop_handoffs",
+        "verification_state",
+    }
+)
+
+
+def _canonical_loop_graph_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Format a workflow-keyed graph record for live web clients.
+
+    ``root_task_id`` remains accepted on stored legacy records, but the live
+    response never projects a synthetic root card or removed handoff state.
+    """
+    workflow_id = _loop_graph_workflow_id(record)
+    canonical = dict(record)
+    canonical.pop("root_task_id", None)
+    canonical.pop("pending_handoffs", None)
+    if workflow_id:
+        canonical["workflow_id"] = workflow_id
+
+    nodes = canonical.get("nodes")
+    if isinstance(nodes, list):
+        canonical_nodes: List[Any] = []
+        for value in nodes:
+            if not isinstance(value, dict):
+                canonical_nodes.append(value)
+                continue
+            node = dict(value)
+            node_workflow_id = _loop_graph_workflow_id(node) or workflow_id
+            node.pop("root_task_id", None)
+            for key in _LOOP_GRAPH_HANDOFF_NODE_KEYS:
+                node.pop(key, None)
+            if node_workflow_id:
+                node["workflow_id"] = node_workflow_id
+            canonical_nodes.append(node)
+        canonical["nodes"] = canonical_nodes
+    return canonical
+
+
+def _canonical_loop_graph_json(content: Any) -> Optional[str]:
+    record = _parse_json_record(content)
+    if not record:
+        return None
+    return json.dumps(_canonical_loop_graph_record(record), ensure_ascii=False)
+
+
 def _loop_graph_call_args(call: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(call, dict):
         return None
@@ -10149,7 +10221,7 @@ def _loop_graph_call_args(call: Any) -> Optional[Dict[str, Any]]:
         or _parse_json_record(call.get("arguments"))
         or _parse_json_record(call.get("args"))
     )
-    return args or None
+    return _canonical_loop_graph_args(args) if args else None
 
 
 def _loop_graph_call_id(call: Any) -> str:
@@ -10158,9 +10230,42 @@ def _loop_graph_call_id(call: Any) -> str:
     return str(call.get("id") or call.get("tool_call_id") or call.get("call_id") or "")
 
 
+def _canonical_loop_graph_call(
+    call: Dict[str, Any],
+    args: Dict[str, Any],
+    *,
+    call_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    canonical = dict(call)
+    function = (
+        dict(canonical.get("function"))
+        if isinstance(canonical.get("function"), dict)
+        else {}
+    )
+    function["name"] = "loop_graph"
+    function["arguments"] = json.dumps(
+        _canonical_loop_graph_args(args),
+        ensure_ascii=False,
+    )
+    canonical["function"] = function
+    canonical.pop("arguments", None)
+    canonical.pop("args", None)
+    if call_id:
+        canonical["id"] = call_id
+    return canonical
+
+
 def _content_is_structured_loop_graph_result(content: Any) -> bool:
     record = _parse_json_record(content)
-    return bool(record.get("root_task_id") and ("nodes" in record or "graph_revision" in record or record.get("ok") is False))
+    workflow_id = _loop_graph_workflow_id(record)
+    return bool(
+        workflow_id
+        and (
+            "nodes" in record
+            or "graph_revision" in record
+            or record.get("ok") is False
+        )
+    )
 
 
 def _messages_have_structured_loop_graph_result(messages: List[Dict[str, Any]]) -> bool:
@@ -10173,9 +10278,14 @@ def _messages_have_structured_loop_graph_result(messages: List[Dict[str, Any]]) 
 
 
 def _read_loop_graph_for_dashboard(args: Dict[str, Any]) -> Optional[str]:
-    action = str(args.get("action") or "read").strip().lower()
+    workflow_id = str(args.get("workflow_id") or "").strip()
     root_task_id = str(args.get("root_task_id") or "").strip()
-    if action != "read" or not root_task_id:
+    if workflow_id and root_task_id and workflow_id != root_task_id:
+        return None
+    args = _canonical_loop_graph_args(args)
+    action = str(args.get("action") or "read").strip().lower()
+    workflow_id = str(args.get("workflow_id") or "").strip()
+    if action != "read" or not workflow_id:
         return None
     include_nodes = bool(args.get("include_nodes", False))
 
@@ -10184,8 +10294,15 @@ def _read_loop_graph_for_dashboard(args: Dict[str, Any]) -> Optional[str]:
 
     conn = kb.connect(board=args.get("board"))
     try:
-        result = graph.read_graph(conn, root_task_id, include_nodes=include_nodes)
-        return json.dumps(result, ensure_ascii=False)
+        result = graph.read_graph(
+            conn,
+            workflow_id=workflow_id,
+            include_nodes=include_nodes,
+        )
+        return json.dumps(
+            _canonical_loop_graph_record(result),
+            ensure_ascii=False,
+        )
     finally:
         conn.close()
 
@@ -10194,7 +10311,7 @@ def _hydrate_compacted_loop_graph_messages(messages: List[Dict[str, Any]]) -> Li
     """Restore compacted loop_graph reads for the desktop Loop side panel.
 
     Context compression can replace a small structured result like
-    ``{"root_task_id": ..., "nodes": [...]}`` with a summary string such as
+    ``{"workflow_id": ..., "nodes": [...]}`` with a summary string such as
     ``[loop_graph] action=read ...``. That summary is fine for model context,
     but the desktop side panel needs the structured graph. The tool-call args
     remain in the preceding assistant message, so replay read-only loop_graph
@@ -10206,27 +10323,42 @@ def _hydrate_compacted_loop_graph_messages(messages: List[Dict[str, Any]]) -> Li
 
     for msg in messages:
         if msg.get("role") == "assistant" and isinstance(msg.get("tool_calls"), list):
+            canonical_calls: List[Any] = []
             for call in msg.get("tool_calls") or []:
                 call_id = _loop_graph_call_id(call)
                 args = _loop_graph_call_args(call)
                 if call_id and args:
                     loop_calls_by_id[call_id] = args
+                canonical_calls.append(
+                    _canonical_loop_graph_call(call, args)
+                    if isinstance(call, dict) and args
+                    else call
+                )
+            if canonical_calls != msg.get("tool_calls"):
+                msg = {**msg, "tool_calls": canonical_calls}
+                changed = True
 
-        if (
-            msg.get("role") == "tool"
-            and msg.get("tool_name") == "loop_graph"
-            and not _content_is_structured_loop_graph_result(msg.get("content"))
-        ):
-            args = loop_calls_by_id.get(str(msg.get("tool_call_id") or ""))
-            if args:
-                try:
-                    content = _read_loop_graph_for_dashboard(args)
-                except Exception as exc:
-                    _log.debug("Failed to hydrate compacted loop_graph result: %s", exc)
-                    content = None
-                if content:
-                    msg = {**msg, "content": content}
+        if msg.get("role") == "tool" and msg.get("tool_name") == "loop_graph":
+            existing_content = msg.get("content")
+            if _content_is_structured_loop_graph_result(existing_content):
+                canonical_content = _canonical_loop_graph_json(existing_content)
+                if canonical_content and canonical_content != existing_content:
+                    msg = {**msg, "content": canonical_content}
                     changed = True
+            else:
+                args = loop_calls_by_id.get(str(msg.get("tool_call_id") or ""))
+                if args:
+                    try:
+                        content = _read_loop_graph_for_dashboard(args)
+                    except Exception as exc:
+                        _log.debug(
+                            "Failed to hydrate compacted loop_graph result: %s",
+                            exc,
+                        )
+                        content = None
+                    if content:
+                        msg = {**msg, "content": content}
+                        changed = True
 
         hydrated.append(msg)
 
@@ -10265,11 +10397,13 @@ def _latest_loop_graph_snapshot_for_dashboard(messages: List[Dict[str, Any]]) ->
         if call_and_args:
             call, args = call_and_args
         else:
-            result = _parse_json_record(msg.get("content"))
+            result = _canonical_loop_graph_record(
+                _parse_json_record(msg.get("content"))
+            )
             call_id = call_id or f"synthetic-loop-graph-{msg.get('id') or 'snapshot'}"
             args = {
                 "action": "read",
-                "root_task_id": result.get("root_task_id"),
+                "workflow_id": result.get("workflow_id"),
                 "include_nodes": True,
             }
             call = {
@@ -10284,11 +10418,14 @@ def _latest_loop_graph_snapshot_for_dashboard(messages: List[Dict[str, Any]]) ->
 
     call, tool_msg, args = latest
     content = tool_msg.get("content")
+    canonical_content = _canonical_loop_graph_json(content)
+    if canonical_content:
+        content = canonical_content
     # Preserve structured transcript snapshots as the source of truth when
     # inheriting across compression boundaries. Re-reading is only needed when
     # compression replaced the JSON payload with a text summary; otherwise a
-    # root id that names the graph/tenant (not a real root task row) can refresh
-    # to an empty graph and erase the UI seed captured in the parent session.
+    # workflow id that names the stored graph can refresh to an empty graph and
+    # erase the UI seed captured in the parent session.
     if args and not _content_is_structured_loop_graph_result(content):
         try:
             refreshed = _read_loop_graph_for_dashboard(args)
@@ -10302,10 +10439,15 @@ def _latest_loop_graph_snapshot_for_dashboard(messages: List[Dict[str, Any]]) ->
         return []
 
     call_id = _loop_graph_call_id(call) or str(tool_msg.get("tool_call_id") or "synthetic-loop-graph-snapshot")
+    canonical_call = (
+        _canonical_loop_graph_call(call, args, call_id=call_id)
+        if args
+        else {**call, "id": call_id}
+    )
     assistant_msg = {
         "role": "assistant",
         "content": "",
-        "tool_calls": [{**call, "id": call_id}],
+        "tool_calls": [canonical_call],
         "timestamp": tool_msg.get("timestamp"),
         "hidden": True,
     }
@@ -10437,12 +10579,24 @@ def _session_tenant_lineage_ids(db: Any, session_id: str) -> List[str]:
 
 
 def _loop_tasks_for_session_tenants(tenant_ids: List[str], board: Optional[str] = None) -> Dict[str, Any]:
-    """Build a Loop-panel-compatible Kanban task list from session tenant ids."""
+    """Build workflow-keyed live task records for a session lineage.
+
+    Tenant ids remain the discovery filter for compression compatibility.
+    Coordination identity comes exclusively from ``tasks.workflow_id``.
+    """
     from hermes_cli import kanban_db as kb
     from hermes_cli import loop_graph as graph
 
     if not tenant_ids:
-        return {"ok": True, "source": "kanban_tenant", "root_task_id": "tenant:", "graph_revision": 0, "nodes": [], "pending_handoffs": []}
+        return {
+            "ok": True,
+            "source": "kanban_workflow",
+            "tenant_ids": [],
+            "boards": [],
+            "workflow_ids": [],
+            "workflows": [],
+            "nodes": [],
+        }
 
     if board:
         board_slugs = [board]
@@ -10452,8 +10606,7 @@ def _loop_tasks_for_session_tenants(tenant_ids: List[str], board: Optional[str] 
 
     placeholders = ", ".join("?" for _ in tenant_ids)
     all_nodes: List[Dict[str, Any]] = []
-    pending_handoffs: List[Dict[str, Any]] = []
-    max_revision = 0
+    workflow_summaries: List[Dict[str, Any]] = []
 
     for board_slug in board_slugs:
         conn = kb.connect(board=board_slug)
@@ -10461,7 +10614,10 @@ def _loop_tasks_for_session_tenants(tenant_ids: List[str], board: Optional[str] 
             rows = conn.execute(
                 f"""
                 SELECT * FROM tasks
-                WHERE tenant IN ({placeholders}) AND status != 'archived'
+                WHERE tenant IN ({placeholders})
+                  AND status != 'archived'
+                  AND workflow_id IS NOT NULL
+                  AND workflow_id != ''
                 ORDER BY priority DESC, created_at ASC, id ASC
                 """,
                 tenant_ids,
@@ -10470,28 +10626,22 @@ def _loop_tasks_for_session_tenants(tenant_ids: List[str], board: Optional[str] 
                 continue
 
             tasks = [kb.Task.from_row(row) for row in rows]
-            visible_tasks = tasks
-            visible_ids = {task.id for task in visible_tasks}
-            parent_map = {task.id: kb.parent_ids(conn, task.id) for task in visible_tasks}
-            child_map: Dict[str, List[str]] = {task.id: [] for task in visible_tasks}
+            task_by_id = {task.id: task for task in tasks}
+            visible_ids = set(task_by_id)
+            parent_map: Dict[str, List[str]] = {}
+            for task in tasks:
+                parent_map[task.id] = [
+                    parent_id
+                    for parent_id in kb.parent_ids(conn, task.id)
+                    if (
+                        parent_id in visible_ids
+                        and task_by_id[parent_id].workflow_id == task.workflow_id
+                    )
+                ]
+            child_map: Dict[str, List[str]] = {task.id: [] for task in tasks}
             for child_id, parent_ids in parent_map.items():
                 for parent_id in parent_ids:
-                    if parent_id in child_map:
-                        child_map[parent_id].append(child_id)
-            root_by_task_id: Dict[str, str] = {}
-            for task in visible_tasks:
-                if task.created_by and str(task.created_by).startswith("loop:"):
-                    root_by_task_id[task.id] = str(task.created_by).split(":", 1)[1]
-            handoffs_by_task_id: Dict[str, List[Dict[str, Any]]] = {task.id: [] for task in visible_tasks}
-            root_ids = sorted({root_id for root_id in root_by_task_id.values() if root_id})
-            for root_task_id in root_ids:
-                try:
-                    for handoff in kb.list_loop_handoffs(conn, root_task_id=root_task_id):
-                        task_id = str(handoff.get("task_id") or "")
-                        if task_id in handoffs_by_task_id:
-                            handoffs_by_task_id[task_id].append(handoff)
-                except Exception:
-                    pass
+                    child_map[parent_id].append(child_id)
             depth_cache: Dict[str, int] = {}
 
             def depth(task_id: str, visiting: Optional[set[str]] = None) -> int:
@@ -10500,15 +10650,41 @@ def _loop_tasks_for_session_tenants(tenant_ids: List[str], board: Optional[str] 
                 visiting = visiting or set()
                 if task_id in visiting:
                     return 0
-                visiting.add(task_id)
-                parents = [pid for pid in parent_map.get(task_id, []) if pid in visible_ids]
-                value = 0 if not parents else 1 + max(depth(pid, visiting) for pid in parents)
+                parents = parent_map.get(task_id, [])
+                value = (
+                    0
+                    if not parents
+                    else 1
+                    + max(
+                        depth(parent_id, visiting | {task_id})
+                        for parent_id in parents
+                    )
+                )
                 depth_cache[task_id] = value
                 return value
 
-            for task in visible_tasks:
-                root_task_id = root_by_task_id.get(task.id)
-                handoff = graph.latest_handoff_for_task(conn, task.id, root_task_id) if root_task_id else None
+            board_workflow_ids = sorted(
+                {
+                    str(task.workflow_id)
+                    for task in tasks
+                    if task.workflow_id
+                }
+            )
+            for workflow_id in board_workflow_ids:
+                workflow_summaries.append(
+                    {
+                        "workflow_id": workflow_id,
+                        "board": board_slug,
+                        "graph_revision": graph.graph_revision(conn, workflow_id),
+                        "task_count": sum(
+                            1
+                            for task in tasks
+                            if task.workflow_id == workflow_id
+                        ),
+                    }
+                )
+
+            for task in tasks:
                 node: Dict[str, Any] = {
                     "task_id": task.id,
                     "title": task.title,
@@ -10520,51 +10696,40 @@ def _loop_tasks_for_session_tenants(tenant_ids: List[str], board: Optional[str] 
                     "frontier": False,
                     "board": board_slug,
                     "tenant": task.tenant,
-                    "created_by": task.created_by,
+                    "workflow_id": task.workflow_id,
                 }
-                if root_task_id:
-                    node["root_task_id"] = root_task_id
-                task_handoffs = handoffs_by_task_id.get(task.id) or []
-                if task_handoffs:
-                    node["loop_handoffs"] = task_handoffs
-                if handoff:
-                    node["attention"] = handoff.get("attention")
-                    node["verification_state"] = handoff.get("verification_state")
-                    node["handoff"] = handoff
-                    if graph.handoff_is_pending(handoff):
-                        pending: Dict[str, Any] = {
-                            "task_id": task.id,
-                            "handoff_kind": handoff.get("handoff_kind"),
-                            "verification_state": handoff.get("verification_state"),
-                        }
-                        for key in ("summary", "reason"):
-                            if handoff.get(key) is not None:
-                                pending[key] = handoff[key]
-                        pending_handoffs.append(pending)
                 all_nodes.append(node)
-
-            revision_row = conn.execute(
-                f"""
-                SELECT MAX(e.id) AS rev
-                FROM task_events e
-                JOIN tasks t ON t.id = e.task_id
-                WHERE t.tenant IN ({placeholders})
-                """,
-                tenant_ids,
-            ).fetchone()
-            max_revision = max(max_revision, int(revision_row["rev"] or 0) if revision_row else 0)
         finally:
             conn.close()
 
-    all_nodes.sort(key=lambda node: (str(node.get("board") or ""), int(node.get("depth") or 0), str(node.get("task_id") or "")))
+    all_nodes.sort(
+        key=lambda node: (
+            str(node.get("board") or ""),
+            str(node.get("workflow_id") or ""),
+            int(node.get("depth") or 0),
+            str(node.get("task_id") or ""),
+        )
+    )
+    workflow_summaries.sort(
+        key=lambda summary: (
+            str(summary.get("board") or ""),
+            str(summary.get("workflow_id") or ""),
+        )
+    )
+    workflow_ids = sorted(
+        {
+            str(summary["workflow_id"])
+            for summary in workflow_summaries
+            if summary.get("workflow_id")
+        }
+    )
     return {
         "ok": True,
-        "source": "kanban_tenant",
-        "root_task_id": f"tenant:{tenant_ids[0]}",
-        "graph_revision": max_revision,
+        "source": "kanban_workflow",
         "tenant_ids": tenant_ids,
         "boards": board_slugs,
-        "pending_handoffs": pending_handoffs,
+        "workflow_ids": workflow_ids,
+        "workflows": workflow_summaries,
         "nodes": all_nodes,
     }
 
@@ -10655,36 +10820,122 @@ class LoopGraphPatchRequest(BaseModel):
     operations: List[Dict[str, Any]] = []
 
 
-@app.get("/api/loop-graph/{root_task_id}")
-async def read_loop_graph_endpoint(root_task_id: str, include_nodes: bool = False, board: Optional[str] = None):
+DeprecatedRootTaskId = Annotated[
+    Optional[str],
+    Query(
+        deprecated=True,
+        description=(
+            "Deprecated compatibility alias for workflow_id. "
+            "Remove after legacy Loop clients migrate."
+        ),
+    ),
+]
+
+
+def _resolve_web_workflow_id(
+    workflow_id: Optional[str],
+    root_task_id: Optional[str] = None,
+) -> str:
+    """Resolve canonical workflow id and an explicit deprecated alias."""
+    canonical = str(workflow_id or "").strip()
+    legacy = str(root_task_id or "").strip()
+    if canonical and legacy and canonical != legacy:
+        raise HTTPException(
+            status_code=400,
+            detail="workflow_id and deprecated root_task_id alias disagree",
+        )
+    resolved = canonical or legacy
+    if not resolved:
+        raise HTTPException(status_code=400, detail="workflow_id is required")
+    return resolved
+
+
+def _canonical_loop_graph_error(
+    graph: Any,
+    exc: Exception,
+    conn: Any,
+    workflow_id: str,
+) -> Dict[str, Any]:
+    detail = graph.error_response(
+        exc,
+        conn,
+        workflow_id=workflow_id,
+    )
+    detail["workflow_id"] = workflow_id
+    return _canonical_loop_graph_record(detail)
+
+
+@app.get("/api/loop-graph/{workflow_id}")
+async def read_loop_graph_endpoint(
+    workflow_id: str,
+    include_nodes: bool = False,
+    board: Optional[str] = None,
+    root_task_id: DeprecatedRootTaskId = None,
+):
+    """Read one workflow graph.
+
+    ``root_task_id`` is a deprecated query alias retained for staged clients.
+    """
     from hermes_cli import kanban_db as kb
     from hermes_cli import loop_graph as graph
 
+    workflow_id = _resolve_web_workflow_id(workflow_id, root_task_id)
     conn = kb.connect(board=board)
     try:
-        return graph.read_graph(conn, root_task_id, include_nodes=include_nodes)
+        return _canonical_loop_graph_record(
+            graph.read_graph(
+                conn,
+                workflow_id=workflow_id,
+                include_nodes=include_nodes,
+            )
+        )
     except graph.LoopError as exc:
-        raise HTTPException(status_code=400, detail=graph.error_response(exc, conn, root_task_id)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail=_canonical_loop_graph_error(
+                graph,
+                exc,
+                conn,
+                workflow_id,
+            ),
+        ) from exc
     finally:
         conn.close()
 
 
-@app.patch("/api/loop-graph/{root_task_id}")
-async def patch_loop_graph_endpoint(root_task_id: str, body: LoopGraphPatchRequest, board: Optional[str] = None):
+@app.patch("/api/loop-graph/{workflow_id}")
+async def patch_loop_graph_endpoint(
+    workflow_id: str,
+    body: LoopGraphPatchRequest,
+    board: Optional[str] = None,
+    root_task_id: DeprecatedRootTaskId = None,
+):
+    """Patch one workflow graph; ``root_task_id`` is deprecated."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import loop_graph as graph
 
+    workflow_id = _resolve_web_workflow_id(workflow_id, root_task_id)
     conn = kb.connect(board=board)
     try:
-        return graph.apply_patch(
-            conn,
-            root_task_id,
-            expected_revision=body.expected_revision,
-            mutation_id=body.mutation_id,
-            operations=body.operations,
+        return _canonical_loop_graph_record(
+            graph.apply_patch(
+                conn,
+                workflow_id=workflow_id,
+                expected_revision=body.expected_revision,
+                mutation_id=body.mutation_id,
+                operations=body.operations,
+            )
         )
     except graph.LoopError as exc:
-        raise HTTPException(status_code=400, detail=graph.error_response(exc, conn, root_task_id)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail=_canonical_loop_graph_error(
+                graph,
+                exc,
+                conn,
+                workflow_id,
+            ),
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
@@ -10706,7 +10957,8 @@ async def get_session_loop_tasks(session_id: str, board: Optional[str] = None, p
 
 @app.get("/api/loop-handoffs")
 async def list_loop_handoffs_endpoint(
-    root_task_id: Optional[str] = None,
+    workflow_id: Optional[str] = None,
+    root_task_id: DeprecatedRootTaskId = None,
     tenant: Optional[str] = None,
     state: Optional[str] = None,
     task_id: Optional[str] = None,
@@ -10717,19 +10969,50 @@ async def list_loop_handoffs_endpoint(
 
     conn = kb.connect(board=board)
     try:
+        resolved_workflow_id: Optional[str] = None
+        if workflow_id or root_task_id:
+            resolved_workflow_id = _resolve_web_workflow_id(
+                workflow_id,
+                root_task_id,
+            )
         if status_only:
-            if not tenant or not root_task_id:
-                raise HTTPException(status_code=400, detail="status_only requires tenant and root_task_id")
-            return kb.loop_handoff_status(conn, tenant=tenant, root_task_id=root_task_id)
+            if not tenant or not resolved_workflow_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="status_only requires tenant and workflow_id",
+                )
+            status = kb.loop_handoff_status(
+                conn,
+                tenant=tenant,
+                root_task_id=resolved_workflow_id,
+            )
+            if isinstance(status, dict):
+                status = dict(status)
+                status.pop("root_task_id", None)
+                status["workflow_id"] = resolved_workflow_id
+            return status
+        handoffs = kb.list_loop_handoffs(
+            conn,
+            root_task_id=resolved_workflow_id,
+            tenant=tenant,
+            state=state,
+            task_id=task_id,
+        )
+        canonical_handoffs = []
+        for handoff in handoffs:
+            record = dict(handoff)
+            record_workflow_id = (
+                str(record.get("workflow_id") or "").strip()
+                or str(record.pop("root_task_id", "") or "").strip()
+                or resolved_workflow_id
+            )
+            record.pop("root_task_id", None)
+            if record_workflow_id:
+                record["workflow_id"] = record_workflow_id
+            canonical_handoffs.append(record)
         return {
             "ok": True,
-            "handoffs": kb.list_loop_handoffs(
-                conn,
-                root_task_id=root_task_id,
-                tenant=tenant,
-                state=state,
-                task_id=task_id,
-            ),
+            "handoffs": canonical_handoffs,
         }
     finally:
         conn.close()
