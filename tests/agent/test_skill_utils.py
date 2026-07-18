@@ -13,9 +13,22 @@ from agent.skill_utils import (
     iter_skill_index_files,
     parse_frontmatter,
     resolve_skill_config_values,
+    skill_command_slug,
     skill_matches_platform,
     skill_matches_platform_list,
 )
+
+
+def test_skill_command_slug_matches_all_registration_rules():
+    assert skill_command_slug("Stable Diffusion Image Generation") == (
+        "stable-diffusion-image-generation"
+    )
+    assert skill_command_slug("git_helper") == "git-helper"
+    assert skill_command_slug("C++ / Code---Review") == "c-code-review"
+    assert skill_command_slug("many   spaces___and---separators") == (
+        "many-spaces-and-separators"
+    )
+    assert skill_command_slug("+++") == ""
 
 
 def test_metadata_as_dict_with_hermes():
@@ -504,13 +517,3 @@ class TestBOMToleranceSiblingSites:
         fm = _split_frontmatter("\ufeff---\nname: bp\n---\nbody")
         assert fm is not None
         assert fm.get("name") == "bp"
-
-    def test_skills_hub_parsers_accept_bom(self):
-        from tools.skills_hub import GitHubSource, OptionalSkillSource
-
-        for parser in (
-            GitHubSource._parse_frontmatter_quick,
-            OptionalSkillSource._parse_frontmatter,
-        ):
-            fm = parser("\ufeff" + self.SKILL)
-            assert fm.get("name") == "bom-skill", parser.__qualname__

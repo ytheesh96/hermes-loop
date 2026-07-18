@@ -21,6 +21,15 @@ from tools.skills_tool import (
 )
 
 
+def test_parse_frontmatter_compatibility_reexport():
+    content = "---\nname: compatibility-skill\n---\n\n# Body\n"
+
+    frontmatter, body = _parse_frontmatter(content)
+
+    assert frontmatter["name"] == "compatibility-skill"
+    assert body.lstrip().startswith("# Body")
+
+
 def _make_skill(
     skills_dir, name, frontmatter_extra="", body="Step 1: Do the thing.", category=None
 ):
@@ -54,56 +63,6 @@ def _symlink_category(skills_dir: Path, linked_root: Path, category: str) -> Pat
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"symlinks unavailable in test environment: {exc}")
     return external_category
-
-
-# ---------------------------------------------------------------------------
-# _parse_frontmatter
-# ---------------------------------------------------------------------------
-
-
-class TestParseFrontmatter:
-    def test_valid_frontmatter(self):
-        content = "---\nname: test\ndescription: A test.\n---\n\n# Body\n"
-        fm, body = _parse_frontmatter(content)
-        assert fm["name"] == "test"
-        assert fm["description"] == "A test."
-        assert "# Body" in body
-
-    def test_no_frontmatter(self):
-        content = "# Just a heading\nSome content.\n"
-        fm, body = _parse_frontmatter(content)
-        assert fm == {}
-        assert body == content
-
-    def test_empty_frontmatter(self):
-        content = "---\n---\n\n# Body\n"
-        fm, body = _parse_frontmatter(content)
-        assert fm == {}
-
-    def test_nested_yaml(self):
-        content = (
-            "---\nname: test\nmetadata:\n  hermes:\n    tags: [a, b]\n---\n\nBody.\n"
-        )
-        fm, body = _parse_frontmatter(content)
-        assert fm["metadata"]["hermes"]["tags"] == ["a", "b"]
-
-    def test_malformed_yaml_fallback(self):
-        """Malformed YAML falls back to simple key:value parsing."""
-        content = "---\nname: test\ndescription: desc\n: invalid\n---\n\nBody.\n"
-        fm, body = _parse_frontmatter(content)
-        # Should still parse what it can via fallback
-        assert "name" in fm
-
-    def test_utf8_bom_frontmatter(self):
-        """A leading UTF-8 BOM (Windows Notepad / PowerShell ``>`` save) must
-        not drop the frontmatter. Confirms the fix reaches the tools/ surface
-        via the _parse_frontmatter re-export."""
-        bom = chr(0xFEFF)
-        content = bom + "---\nname: test\ndescription: A test.\n---\n\n# Body\n"
-        fm, body = _parse_frontmatter(content)
-        assert fm["name"] == "test"
-        assert fm["description"] == "A test."
-        assert not body.startswith(bom)
 
 
 # ---------------------------------------------------------------------------

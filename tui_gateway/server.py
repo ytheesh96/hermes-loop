@@ -28,6 +28,9 @@ from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
 from tools.environments.local import hermes_subprocess_env
 from agent.replay_cleanup import sanitize_replay_history
+from agent.transcript_fingerprint import (
+    turn_persistence_fingerprint as _tui_turn_persistence_fingerprint,
+)
 from tui_gateway import git_probe
 from tui_gateway.transport import (
     StdioTransport,
@@ -2050,53 +2053,6 @@ def _session_db(session: dict):
         if close_db and db is not None:
             with contextlib.suppress(Exception):
                 db.close()
-
-
-_TUI_TURN_PERSISTENCE_COMPARE_KEYS = (
-    "role",
-    "content",
-    "tool_call_id",
-    "tool_calls",
-    "tool_name",
-    "finish_reason",
-    "reasoning",
-    "reasoning_content",
-    "reasoning_details",
-    "codex_reasoning_items",
-    "codex_message_items",
-    "observed",
-)
-
-
-def _json_fingerprint(value: Any) -> str:
-    try:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    except Exception:
-        return repr(value)
-
-
-def _tui_turn_persistence_fingerprint(message: Dict[str, Any]) -> tuple:
-    role = message.get("role")
-    items = []
-    for key in _TUI_TURN_PERSISTENCE_COMPARE_KEYS:
-        value = message.get(key)
-        if key == "content" and role in {"user", "assistant"} and isinstance(value, str):
-            try:
-                from agent.memory_manager import sanitize_context
-                value = sanitize_context(value).strip()
-            except Exception:
-                value = value.strip()
-        elif key in {
-            "tool_calls",
-            "reasoning_details",
-            "codex_reasoning_items",
-            "codex_message_items",
-        }:
-            value = _json_fingerprint(value) if value not in (None, "") else None
-        elif key == "observed":
-            value = bool(value)
-        items.append((key, value))
-    return tuple(items)
 
 
 def _tui_unpersisted_turn_entries(
@@ -9577,6 +9533,19 @@ def _format_descendant_comments(payload: dict) -> str:
     return "".join(lines)
 
 
+def _tui_foreground_decision_guidance(task_id: str) -> str:
+    return (
+        "\nTreat the bounded event evidence and comments above as authoritative "
+        "for this boundary. Comments are worker messages, not scheduling "
+        "commands. You own workflow mutation: decide in this turn and call "
+        "kanban_create for review/follow-up work, ask the user, or call "
+        'loop_graph(action="close") when no further work remains. Call '
+        f'kanban_show(task_id="{task_id}") only when required evidence is '
+        "missing or stale. Do not update a session todo, load skills, inspect "
+        "source, import private handlers, or use terminal as preflight."
+    )
+
+
 def _format_tui_kanban_notification(sub: dict, task: Any, ev: Any) -> str | None:
     """Format a Kanban terminal event as a TUI re-entry prompt."""
     task_id = sub.get("task_id") or getattr(ev, "task_id", "")
@@ -9594,17 +9563,15 @@ def _format_tui_kanban_notification(sub: dict, task: Any, ev: Any) -> str | None
         comments = _format_descendant_comments(payload)
         return (
             f"[IMPORTANT: ✔ {tag}Kanban {task_id} done — {title}"
-            f"{handoff}{comments}\nRead kanban_show(task_id=\"{task_id}\") "
-            "before deciding; comments are advisory and only foreground may "
-            "commit review/follow-up work with kanban_create.]"
+            f"{handoff}{comments}"
+            f"{_tui_foreground_decision_guidance(task_id)}]"
         )
     if kind in {"blocked", "block_loop_detected"}:
         reason = f": {str(payload.get('reason'))[:160]}" if payload.get("reason") else ""
         comments = _format_descendant_comments(payload)
         return (
-            f"[IMPORTANT: ⏸ {tag}Kanban {task_id} blocked{reason}{comments}\n"
-            f"Read kanban_show(task_id=\"{task_id}\") before deciding; only "
-            "foreground may mutate the workflow.]"
+            f"[IMPORTANT: ⏸ {tag}Kanban {task_id} blocked{reason}{comments}"
+            f"{_tui_foreground_decision_guidance(task_id)}]"
         )
     if kind == "loop_descendant_completed":
         source_id = payload.get("source_task_id") or task_id
@@ -9618,10 +9585,8 @@ def _format_tui_kanban_notification(sub: dict, task: Any, ev: Any) -> str | None
         comments = _format_descendant_comments(payload)
         return (
             f"[IMPORTANT: ✔ {source_tag}Kanban {source_id} done — "
-            f"{source_title}{summary}{comments}\n"
-            f"Read kanban_show(task_id=\"{source_id}\") before deciding; "
-            "comments are advisory and only foreground may commit review/"
-            "follow-up work with kanban_create.]"
+            f"{source_title}{summary}{comments}"
+            f"{_tui_foreground_decision_guidance(str(source_id))}]"
         )
     if kind == "loop_descendant_blocked":
         source_id = payload.get("source_task_id") or task_id
@@ -9631,16 +9596,15 @@ def _format_tui_kanban_notification(sub: dict, task: Any, ev: Any) -> str | None
         comments = _format_descendant_comments(payload)
         return (
             f"[IMPORTANT: ⏸ {source_tag}Kanban {source_id} blocked"
-            f"{reason}{comments}\nRead kanban_show(task_id=\"{source_id}\") "
-            "before deciding; only foreground may mutate the workflow.]"
+            f"{reason}{comments}"
+            f"{_tui_foreground_decision_guidance(str(source_id))}]"
         )
     if kind == "gave_up":
         err = f"\n{str(payload.get('error'))[:200]}" if payload.get("error") else ""
         return (
             f"[IMPORTANT: ✖ {tag}Kanban {task_id} gave up after a tripped "
-            f"failure breaker{err}{_format_descendant_comments(payload)}\n"
-            f"Read kanban_show(task_id=\"{task_id}\") before deciding; only "
-            "foreground may mutate the workflow.]"
+            f"failure breaker{err}{_format_descendant_comments(payload)}"
+            f"{_tui_foreground_decision_guidance(task_id)}]"
         )
     if kind == "loop_descendant_gave_up":
         source_id = payload.get("source_task_id") or task_id
@@ -9651,9 +9615,8 @@ def _format_tui_kanban_notification(sub: dict, task: Any, ev: Any) -> str | None
         return (
             f"[IMPORTANT: ✖ {source_tag}Kanban {source_id} gave up "
             f"after repeated {trigger} failures{err}"
-            f"{_format_descendant_comments(payload)}\n"
-            f"Read kanban_show(task_id=\"{source_id}\") before deciding; "
-            "only foreground may mutate the workflow.]"
+            f"{_format_descendant_comments(payload)}"
+            f"{_tui_foreground_decision_guidance(str(source_id))}]"
         )
     if kind == "crashed":
         return f"[IMPORTANT: ✖ {tag}Kanban {task_id} worker crashed; dispatcher will retry]"

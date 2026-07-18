@@ -29,7 +29,10 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from hermes_constants import get_bundled_skills_dir, get_hermes_home, get_optional_skills_dir
-from agent.skill_utils import is_excluded_skill_path
+from agent.skill_utils import (
+    is_excluded_skill_path,
+    read_skill_name as _read_skill_name,
+)
 from typing import Dict, List, Optional, Set, Tuple
 from utils import atomic_replace
 
@@ -178,27 +181,6 @@ def _write_manifest(entries: Dict[str, str]):
             raise
     except Exception as e:
         logger.debug("Failed to write skills manifest %s: %s", MANIFEST_FILE, e, exc_info=True)
-
-
-def _read_skill_name(skill_md: Path, fallback: str) -> str:
-    """Read the name field from SKILL.md YAML frontmatter, falling back to *fallback*."""
-    try:
-        content = skill_md.read_text(encoding="utf-8", errors="replace")[:4000]
-    except OSError:
-        return fallback
-    in_frontmatter = False
-    for line in content.split("\n"):
-        stripped = line.strip()
-        if stripped == "---":
-            if in_frontmatter:
-                break
-            in_frontmatter = True
-            continue
-        if in_frontmatter and stripped.startswith("name:"):
-            value = stripped.split(":", 1)[1].strip().strip("\"'")
-            if value:
-                return value
-    return fallback
 
 
 def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:

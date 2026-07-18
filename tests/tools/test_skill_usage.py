@@ -58,6 +58,15 @@ description: test skill
     return d
 
 
+def test_read_skill_name_uses_canonical_frontmatter_and_fallback(tmp_path):
+    from tools.skill_usage import _read_skill_name
+
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text("---\nname: >-\n  curator skill\n---\n", encoding="utf-8")
+    assert _read_skill_name(skill_md, "fallback") == "curator skill"
+    assert _read_skill_name(tmp_path / "missing.md", "fallback") == "fallback"
+
+
 # ---------------------------------------------------------------------------
 # Round-trip
 # ---------------------------------------------------------------------------

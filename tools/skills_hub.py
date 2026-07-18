@@ -27,12 +27,11 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import windows_hide_flags
-from agent.skill_utils import is_excluded_skill_path
+from agent.skill_utils import is_excluded_skill_path, parse_frontmatter, yaml_load
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import unquote, urljoin, urlparse, urlsplit, urlunparse
 
 import httpx
-import yaml
 
 from tools.skills_guard import (
     ScanResult, content_hash, TRUSTED_REPOS,
@@ -41,6 +40,23 @@ from tools.url_safety import is_safe_url
 from tools.website_policy import check_website_access
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_hub_frontmatter(content: str) -> dict:
+    """Parse valid skill YAML without the local parser's malformed-YAML fallback."""
+    frontmatter, body = parse_frontmatter(content)
+    normalized = content[1:] if content.startswith("\ufeff") else content
+    framed_end = len(normalized) - len(body)
+    if framed_end <= 3:
+        return frontmatter
+    closing = normalized.rfind("\n---", 3, framed_end)
+    if closing < 0:
+        return frontmatter
+    try:
+        yaml_load(normalized[3:closing])
+    except Exception:
+        return {}
+    return frontmatter
 
 
 # ---------------------------------------------------------------------------
@@ -709,7 +725,7 @@ class GitHubSource(SkillSource):
         if not content:
             return None
 
-        fm = self._parse_frontmatter_quick(content)
+        fm = _parse_hub_frontmatter(content)
         skill_name = fm.get("name", skill_path.split("/")[-1])
         description = fm.get("description", "")
 
@@ -1162,23 +1178,6 @@ class GitHubSource(SkillSource):
             "extra": meta.extra,
         }
 
-    @staticmethod
-    def _parse_frontmatter_quick(content: str) -> dict:
-        """Parse YAML frontmatter from SKILL.md content."""
-        content = content.lstrip("\ufeff")  # tolerate UTF-8 BOM (Windows editors)
-        if not content.startswith("---"):
-            return {}
-        match = re.search(r'\n---\s*\n', content[3:])
-        if not match:
-            return {}
-        yaml_text = content[3:match.start() + 3]
-        try:
-            parsed = yaml.safe_load(yaml_text)
-            return parsed if isinstance(parsed, dict) else {}
-        except yaml.YAMLError:
-            return {}
-
-
 # ---------------------------------------------------------------------------
 # Well-known Agent Skills endpoint source adapter
 # ---------------------------------------------------------------------------
@@ -1238,7 +1237,7 @@ class WellKnownSkillSource(SkillSource):
         if skill_md is None:
             return None
 
-        fm = GitHubSource._parse_frontmatter_quick(skill_md)
+        fm = _parse_hub_frontmatter(skill_md)
         description = str(fm.get("description") or entry.get("description") or "")
         name = str(fm.get("name") or parsed["skill_name"])
         return SkillMeta(
@@ -1463,7 +1462,7 @@ class UrlSource(SkillSource):
         text = self._fetch_text(url)
         if text is None:
             return None
-        fm = GitHubSource._parse_frontmatter_quick(text)
+        fm = _parse_hub_frontmatter(text)
         name = self._resolve_skill_name(fm, url)
         description = str(fm.get("description") or "")
         tags: List[str] = []
@@ -1493,7 +1492,7 @@ class UrlSource(SkillSource):
         if text is None:
             return None
 
-        fm = GitHubSource._parse_frontmatter_quick(text)
+        fm = _parse_hub_frontmatter(text)
         name = self._resolve_skill_name(fm, url)
         referenced = _referenced_support_paths(text)
         if referenced is None:
@@ -3289,7 +3288,7 @@ class OptionalSkillSource(SkillSource):
             except (OSError, UnicodeDecodeError):
                 continue
 
-            fm = self._parse_frontmatter(content)
+            fm = _parse_hub_frontmatter(content)
             name = fm.get("name", parent.name)
             desc = fm.get("description", "")
             tags = []
@@ -3314,23 +3313,6 @@ class OptionalSkillSource(SkillSource):
             ))
 
         return results
-
-    @staticmethod
-    def _parse_frontmatter(content: str) -> dict:
-        """Parse YAML frontmatter from SKILL.md content."""
-        content = content.lstrip("\ufeff")  # tolerate UTF-8 BOM (Windows editors)
-        if not content.startswith("---"):
-            return {}
-        match = re.search(r'\n---\s*\n', content[3:])
-        if not match:
-            return {}
-        yaml_text = content[3:match.start() + 3]
-        try:
-            parsed = yaml.safe_load(yaml_text)
-            return parsed if isinstance(parsed, dict) else {}
-        except yaml.YAMLError:
-            return {}
-
 
 # ---------------------------------------------------------------------------
 # Shared cache helpers (used by multiple adapters)

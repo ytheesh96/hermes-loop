@@ -157,6 +157,23 @@ class TestReadSkillName:
         skill_md.write_text('---\nname: "serving-llms-vllm"\n---\n')
         assert _read_skill_name(skill_md, "vllm") == "serving-llms-vllm"
 
+    def test_uses_canonical_yaml_frontmatter_parser(self, tmp_path):
+        skill_md = tmp_path / "SKILL.md"
+        skill_md.write_text("---\nname: >-\n  multi line skill\n---\n")
+        assert _read_skill_name(skill_md, "fallback") == "multi line skill"
+
+    def test_unreadable_file_uses_fallback(self, tmp_path):
+        assert _read_skill_name(tmp_path / "missing.md", "fallback") == "fallback"
+
+    def test_reads_frontmatter_with_closing_fence_after_4kb(self, tmp_path):
+        skill_md = tmp_path / "SKILL.md"
+        skill_md.write_text(
+            "---\nname: long-frontmatter\nnotes: |\n  "
+            + ("x" * 5000)
+            + "\n---\n# Skill\n"
+        )
+        assert _read_skill_name(skill_md, "fallback") == "long-frontmatter"
+
     def test_discover_uses_frontmatter_name(self, tmp_path):
         skill_dir = tmp_path / "category" / "audiocraft"
         skill_dir.mkdir(parents=True)

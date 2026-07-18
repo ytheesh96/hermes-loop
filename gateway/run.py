@@ -56,6 +56,10 @@ from agent.account_usage import fetch_account_usage, render_account_usage_lines
 from agent.async_utils import safe_schedule_threadsafe
 from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 from agent.i18n import t
+from agent.skill_utils import parse_frontmatter, skill_command_slug
+from agent.transcript_fingerprint import (
+    turn_persistence_fingerprint as _turn_persistence_fingerprint,
+)
 from hermes_cli.config import cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
 
@@ -1245,55 +1249,6 @@ def _collect_auto_append_media_tags(
     return media_tags, has_voice_directive
 
 
-_TURN_PERSISTENCE_COMPARE_KEYS = (
-    "role",
-    "content",
-    "tool_call_id",
-    "tool_calls",
-    "tool_name",
-    "finish_reason",
-    "reasoning",
-    "reasoning_content",
-    "reasoning_details",
-    "codex_reasoning_items",
-    "codex_message_items",
-    "observed",
-)
-
-
-def _json_fingerprint(value: Any) -> str:
-    try:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    except Exception:
-        return repr(value)
-
-
-def _turn_persistence_fingerprint(message: Dict[str, Any]) -> tuple:
-    """Return a stable DB-facing fingerprint for transcript de-dupe."""
-    role = message.get("role")
-    items = []
-    for key in _TURN_PERSISTENCE_COMPARE_KEYS:
-        value = message.get(key)
-        if key == "content" and role in {"user", "assistant"} and isinstance(value, str):
-            try:
-                from agent.memory_manager import sanitize_context
-
-                value = sanitize_context(value).strip()
-            except Exception:
-                value = value.strip()
-        elif key in {
-            "tool_calls",
-            "reasoning_details",
-            "codex_reasoning_items",
-            "codex_message_items",
-        }:
-            value = _json_fingerprint(value) if value not in (None, "") else None
-        elif key == "observed":
-            value = bool(value)
-        items.append((key, value))
-    return tuple(items)
-
-
 async def _persisted_turn_prefix_len(
     db_handle: Any,
     session_id: str,
@@ -2449,29 +2404,12 @@ def _skill_slug_from_frontmatter(skill_md: Path) -> tuple[str | None, str | None
         content = skill_md.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return None, None
-    content = content.lstrip("\ufeff")  # tolerate UTF-8 BOM (Windows editors)
-    if not content.startswith("---"):
+    frontmatter, _ = parse_frontmatter(content)
+    declared_name = frontmatter.get("name")
+    if not isinstance(declared_name, str) or not declared_name.strip():
         return None, None
-    end = content.find("\n---", 3)
-    if end < 0:
-        return None, None
-    declared_name: str | None = None
-    for line in content[3:end].splitlines():
-        line = line.strip()
-        if line.startswith("name:"):
-            raw = line.split(":", 1)[1].strip()
-            # Strip YAML quote wrappers if present
-            if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
-                raw = raw[1:-1]
-            declared_name = raw.strip()
-            break
-    if not declared_name:
-        return None, None
-    slug = declared_name.lower().replace(" ", "-").replace("_", "-")
-    # Mirror _SKILL_INVALID_CHARS and _SKILL_MULTI_HYPHEN from skill_commands
-    import re as _re
-    slug = _re.sub(r"[^a-z0-9-]", "", slug)
-    slug = _re.sub(r"-{2,}", "-", slug).strip("-")
+    declared_name = declared_name.strip()
+    slug = skill_command_slug(declared_name)
     if not slug:
         return None, declared_name
     return slug, declared_name

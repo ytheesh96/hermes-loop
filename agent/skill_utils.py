@@ -48,6 +48,8 @@ EXCLUDED_SKILL_DIRS = frozenset(
 # be scanned for active SKILL.md/DESCRIPTION.md entries, even if a Curator or
 # archive workflow preserves a complete old skill package under references/.
 SKILL_SUPPORT_DIRS = frozenset(("references", "templates", "assets", "scripts"))
+_SKILL_COMMAND_INVALID_CHARS = re.compile(r"[^a-z0-9-]")
+_SKILL_COMMAND_MULTI_HYPHEN = re.compile(r"-{2,}")
 
 
 def is_excluded_skill_path(path) -> bool:
@@ -167,6 +169,30 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
             frontmatter[key.strip()] = value.strip()
 
     return frontmatter, body
+
+
+def read_skill_name(skill_md: Path, fallback: str) -> str:
+    """Return a skill's declared frontmatter name or *fallback*.
+
+    The ``OSError`` fallback preserves the long-standing discovery behavior
+    shared by the curator and bundled-skill synchronizer. Frontmatter parsing
+    itself stays canonical through :func:`parse_frontmatter`; reading the full
+    file ensures a valid closing fence after a long metadata block is visible.
+    """
+    try:
+        content = skill_md.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return fallback
+    frontmatter, _ = parse_frontmatter(content)
+    name = frontmatter.get("name")
+    return name if isinstance(name, str) and name else fallback
+
+
+def skill_command_slug(name: str) -> str:
+    """Normalize a declared skill name to its auto-generated slash slug."""
+    slug = name.lower().replace(" ", "-").replace("_", "-")
+    slug = _SKILL_COMMAND_INVALID_CHARS.sub("", slug)
+    return _SKILL_COMMAND_MULTI_HYPHEN.sub("-", slug).strip("-")
 
 
 # ── Platform matching ─────────────────────────────────────────────────────

@@ -136,6 +136,40 @@ def test_slug_normalization_strips_non_alnum(
     assert "disabled" in msg.lower()
 
 
+def test_slug_uses_canonical_yaml_frontmatter_parser(tmp_path: Path) -> None:
+    from gateway import run as gateway_run
+
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text(
+        "---\nname: >-\n  Stable Diffusion Image Generation\n---\n",
+        encoding="utf-8",
+    )
+
+    assert gateway_run._skill_slug_from_frontmatter(skill_md) == (
+        "stable-diffusion-image-generation",
+        "Stable Diffusion Image Generation",
+    )
+    assert gateway_run._skill_slug_from_frontmatter(tmp_path / "missing.md") == (
+        None,
+        None,
+    )
+
+
+def test_slug_normalizer_parity_with_quoted_bom_frontmatter(tmp_path: Path) -> None:
+    from gateway import run as gateway_run
+
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text(
+        '\ufeff---\nname: "C++__Code   Review"\n---\n',
+        encoding="utf-8",
+    )
+
+    assert gateway_run._skill_slug_from_frontmatter(skill_md) == (
+        "c-code-review",
+        "C++__Code   Review",
+    )
+
+
 def test_optional_skill_uses_frontmatter_slug(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

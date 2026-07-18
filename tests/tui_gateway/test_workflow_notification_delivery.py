@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -45,6 +46,122 @@ def _workflow_sub(conn, workflow_id: str) -> dict[str, Any]:
     rows = kb.list_workflow_notify_subs(conn, workflow_id)
     assert len(rows) == 1
     return rows[0]
+
+
+@pytest.mark.parametrize(
+    ("kind", "payload", "expected_task_id", "expected_evidence"),
+    [
+        (
+            "completed",
+            {"summary": "implementation complete"},
+            "task-direct",
+            "implementation complete",
+        ),
+        (
+            "blocked",
+            {"reason": "waiting for input"},
+            "task-direct",
+            "waiting for input",
+        ),
+        (
+            "gave_up",
+            {"error": "worker failed repeatedly"},
+            "task-direct",
+            "worker failed repeatedly",
+        ),
+        (
+            "loop_descendant_completed",
+            {
+                "source_task_id": "task-child",
+                "summary": "review complete",
+                "title": "Review the change",
+            },
+            "task-child",
+            "review complete",
+        ),
+        (
+            "loop_descendant_blocked",
+            {
+                "source_task_id": "task-child",
+                "reason": "dependency unavailable",
+            },
+            "task-child",
+            "dependency unavailable",
+        ),
+        (
+            "loop_descendant_gave_up",
+            {
+                "source_task_id": "task-child",
+                "error": "reviewer failed repeatedly",
+            },
+            "task-child",
+            "reviewer failed repeatedly",
+        ),
+    ],
+)
+def test_tui_boundary_prompts_use_authoritative_evidence_fast_path(
+    kind,
+    payload,
+    expected_task_id,
+    expected_evidence,
+):
+    payload["comments"] = [
+        {"author": "worker", "body": "Use this bounded handoff evidence."}
+    ]
+    message = server._format_tui_kanban_notification(
+        {},
+        SimpleNamespace(
+            title="Direct task",
+            assignee="worker",
+            result="result fallback",
+        ),
+        SimpleNamespace(kind=kind, task_id="task-direct", payload=payload),
+    )
+
+    assert message is not None
+    assert expected_evidence in message
+    assert "comment from worker: Use this bounded handoff evidence." in message
+    assert (
+        "Treat the bounded event evidence and comments above as authoritative"
+        in message
+    )
+    assert "decide in this turn and call kanban_create" in message
+    assert 'loop_graph(action="close")' in message
+    assert (
+        f'Call kanban_show(task_id="{expected_task_id}") only when required '
+        "evidence is missing or stale."
+    ) in message
+    assert (
+        "Do not update a session todo, load skills, inspect source, import "
+        "private handlers, or use terminal as preflight."
+    ) in message
+    assert "Read kanban_show" not in message
+    assert "comments are advisory" not in message
+
+
+def test_tui_boundary_prompt_bounds_authoritative_comments():
+    comments = [
+        {"author": f"worker-{index}", "body": f"comment-{index}"} for index in range(4)
+    ]
+    message = server._format_tui_kanban_notification(
+        {},
+        SimpleNamespace(title="Bound evidence", assignee="worker", result=None),
+        SimpleNamespace(
+            kind="completed",
+            task_id="task-bounded",
+            payload={
+                "summary": f"{'s' * 250}\nsecond line is not foreground evidence",
+                "comments": comments,
+            },
+        ),
+    )
+
+    assert message is not None
+    assert "s" * 200 in message
+    assert "s" * 201 not in message
+    assert "second line is not foreground evidence" not in message
+    assert "comment-0" not in message
+    assert all(f"comment-{index}" in message for index in range(1, 4))
 
 
 def test_dispatch_isolates_workflows_then_falls_back_to_legacy_task(

@@ -34,7 +34,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import get_hermes_home
-from agent.skill_utils import is_excluded_skill_path, is_external_skill_path
+from agent.skill_utils import (
+    is_excluded_skill_path,
+    is_external_skill_path,
+    read_skill_name as _read_skill_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -393,27 +397,6 @@ def list_archived_skill_names() -> List[str]:
     if not archive_root.exists():
         return []
     return sorted({p.name for p in archive_root.iterdir() if p.is_dir()})
-
-
-def _read_skill_name(skill_md: Path, fallback: str) -> str:
-    """Parse the `name:` field from a SKILL.md YAML frontmatter."""
-    try:
-        text = skill_md.read_text(encoding="utf-8", errors="replace")[:4000]
-    except OSError:
-        return fallback
-    in_frontmatter = False
-    for line in text.split("\n"):
-        stripped = line.strip()
-        if stripped == "---":
-            if in_frontmatter:
-                break
-            in_frontmatter = True
-            continue
-        if in_frontmatter and stripped.startswith("name:"):
-            value = stripped.split(":", 1)[1].strip().strip("\"'")
-            if value:
-                return value
-    return fallback
 
 
 def is_agent_created(skill_name: str) -> bool:

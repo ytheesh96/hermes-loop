@@ -7,7 +7,6 @@ can invoke skills via /skill-name commands.
 import json
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -22,9 +21,6 @@ logger = logging.getLogger(__name__)
 
 _skill_commands: Dict[str, Dict[str, Any]] = {}
 _skill_commands_platform: Optional[str] = None
-# Patterns for sanitizing skill names into clean hyphen-separated slugs.
-_SKILL_INVALID_CHARS = re.compile(r"[^a-z0-9-]")
-_SKILL_MULTI_HYPHEN = re.compile(r"-{2,}")
 
 # ---------------------------------------------------------------------------
 # Skill-scaffolding markers and the canonical extractor.
@@ -327,8 +323,13 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     _skill_commands_platform = _resolve_skill_commands_platform()
     _skill_commands = {}
     try:
-        from tools.skills_tool import SKILLS_DIR, _parse_frontmatter, skill_matches_platform, skill_matches_environment, _get_disabled_skill_names
-        from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
+        from tools.skills_tool import SKILLS_DIR, skill_matches_platform, skill_matches_environment, _get_disabled_skill_names
+        from agent.skill_utils import (
+            get_external_skills_dirs,
+            iter_skill_index_files,
+            parse_frontmatter,
+            skill_command_slug,
+        )
         from hermes_cli.commands import resolve_command
         disabled = _get_disabled_skill_names()
         seen_names: set = set()
@@ -345,7 +346,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     continue
                 try:
                     content = skill_md.read_text(encoding='utf-8')
-                    frontmatter, body = _parse_frontmatter(content)
+                    frontmatter, body = parse_frontmatter(content)
                     # Skip skills incompatible with the current OS platform
                     if not skill_matches_platform(frontmatter):
                         continue
@@ -370,9 +371,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     # Normalize to hyphen-separated slug, stripping
                     # non-alnum chars (e.g. +, /) to avoid invalid
                     # Telegram command names downstream.
-                    cmd_name = name.lower().replace(' ', '-').replace('_', '-')
-                    cmd_name = _SKILL_INVALID_CHARS.sub('', cmd_name)
-                    cmd_name = _SKILL_MULTI_HYPHEN.sub('-', cmd_name).strip('-')
+                    cmd_name = skill_command_slug(name)
                     if not cmd_name:
                         continue
                     # Skip if this skill's auto-generated /command collides

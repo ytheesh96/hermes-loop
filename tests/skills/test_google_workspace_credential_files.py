@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+from agent.skill_utils import parse_frontmatter
+
 
 SKILL_MD = (
     Path(__file__).resolve().parents[2]
@@ -20,17 +22,10 @@ SKILL_MD = (
 _EXPECTED_PATHS = {"google_token.json", "google_client_secret.json"}
 
 
-def _parse_frontmatter(content: str) -> dict:
-    from agent.skill_utils import parse_frontmatter
-
-    fm, _ = parse_frontmatter(content)
-    return fm
-
-
 class TestGoogleWorkspaceCredentialFiles:
     def test_required_credential_files_present_in_skill_md(self):
         content = SKILL_MD.read_text(encoding="utf-8")
-        fm = _parse_frontmatter(content)
+        fm, _ = parse_frontmatter(content)
         entries = fm.get("required_credential_files")
         assert entries, "required_credential_files missing from google-workspace SKILL.md"
         assert isinstance(entries, list), "required_credential_files must be a list"
@@ -57,7 +52,7 @@ class TestGoogleWorkspaceCredentialFiles:
         clear_credential_files()
         try:
             content = SKILL_MD.read_text(encoding="utf-8")
-            fm = _parse_frontmatter(content)
+            fm, _ = parse_frontmatter(content)
             entries = fm.get("required_credential_files", [])
 
             with patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}):
@@ -86,7 +81,7 @@ class TestGoogleWorkspaceCredentialFiles:
         clear_credential_files()
         try:
             content = SKILL_MD.read_text(encoding="utf-8")
-            fm = _parse_frontmatter(content)
+            fm, _ = parse_frontmatter(content)
             entries = fm.get("required_credential_files", [])
 
             with patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}):
