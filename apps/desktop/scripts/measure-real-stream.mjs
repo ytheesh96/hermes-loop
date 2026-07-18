@@ -9,55 +9,14 @@
 // Detects REAL stream by waiting for assistant-message DOM count to grow past baseline.
 // Does NOT cancel — lets the stream run to completion or hits TIMEOUT_MS.
 
-const CDP_HTTP = 'http://127.0.0.1:9222'
+import { connectCDP, findRenderer } from './cdp.mjs'
+
 const PROMPT = process.env.PROMPT || 'count from 1 to 80, one number per line'
 const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 60000)
 
-async function getTarget() {
-  const list = await (await fetch(`${CDP_HTTP}/json`)).json()
-  const t = list.find((t) => t.type === 'page' && /5174/.test(t.url))
-  if (!t) throw new Error('renderer not found')
-  return t
-}
-
-class CDP {
-  constructor(ws) { this.ws = ws; this.id = 0; this.pending = new Map() }
-  static async open(url) {
-    const ws = new WebSocket(url)
-    await new Promise((r, j) => {
-      ws.addEventListener('open', r, { once: true })
-      ws.addEventListener('error', (e) => j(e), { once: true })
-    })
-    const cdp = new CDP(ws)
-    ws.addEventListener('message', (event) => {
-      const m = JSON.parse(event.data.toString())
-      if (m.id != null && cdp.pending.has(m.id)) {
-        const { resolve, reject } = cdp.pending.get(m.id)
-        cdp.pending.delete(m.id)
-        if (m.error) reject(new Error(m.error.message))
-        else resolve(m.result)
-      }
-    })
-    return cdp
-  }
-  send(method, params) {
-    const id = ++this.id
-    return new Promise((res, rej) => {
-      this.pending.set(id, { resolve: res, reject: rej })
-      this.ws.send(JSON.stringify({ id, method, params }))
-    })
-  }
-  async eval(expr) {
-    const r = await this.send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true })
-    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || 'eval')
-    return r.result.value
-  }
-  close() { this.ws.close() }
-}
-
 async function main() {
-  const target = await getTarget()
-  const cdp = await CDP.open(target.webSocketDebuggerUrl)
+  const target = await findRenderer({ urlPattern: /5174/ })
+  const cdp = await connectCDP(target.webSocketDebuggerUrl)
 
   // Install recorders.
   await cdp.eval(`

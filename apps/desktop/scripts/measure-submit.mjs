@@ -15,6 +15,7 @@
 //       you care about — use a throwaway session.
 
 import { writeFileSync } from 'node:fs'
+import { connectCDP, evalInPage, findRenderer } from './cdp.mjs'
 
 const args = Object.fromEntries(
   process.argv.slice(2).flatMap(s => {
@@ -25,47 +26,8 @@ const args = Object.fromEntries(
 const PORT = Number(args.port ?? 9222)
 const ROUNDS = Number(args.rounds ?? 3)
 
-async function pickRenderer() {
-  const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json()
-  return list.find(t => t.type === 'page' && t.url.startsWith('http'))
-}
-
-function connect(url) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url)
-    let id = 0
-    const pending = new Map()
-    ws.addEventListener('open', () =>
-      resolve({
-        send(method, params = {}) {
-          const myId = ++id
-          ws.send(JSON.stringify({ id: myId, method, params }))
-          return new Promise((res, rej) => pending.set(myId, { res, rej }))
-        },
-        close: () => ws.close()
-      })
-    )
-    ws.addEventListener('error', reject)
-    ws.addEventListener('message', ev => {
-      const m = JSON.parse(typeof ev.data === 'string' ? ev.data : ev.data.toString('utf8'))
-      if (m.id != null) {
-        const p = pending.get(m.id)
-        if (!p) return
-        pending.delete(m.id)
-        m.error ? p.rej(new Error(m.error.message)) : p.res(m.result)
-      }
-    })
-  })
-}
-
-async function evalP(cdp, expr) {
-  const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true })
-  if (r.exceptionDetails) throw new Error(r.exceptionDetails.text)
-  return r.result.value
-}
-
 async function focusAndType(cdp, text) {
-  await evalP(cdp, `
+  await evalInPage(cdp, `
     (() => {
       const el = document.querySelector('[data-slot="composer-rich-input"]')
       if (!el) return
@@ -87,7 +49,7 @@ async function focusAndType(cdp, text) {
 async function submitAndMeasure(cdp, timeoutMs = 5000) {
   // Install observers, record submit time as performance.now() inside the page,
   // and wait for all milestones.
-  return await evalP(cdp, `
+  return await evalInPage(cdp, `
     new Promise((resolve) => {
       const composer = document.querySelector('[data-slot="composer-rich-input"]')
       const threadRoot = document.querySelector('[data-slot="aui_thread-content"]') ||
@@ -148,9 +110,9 @@ async function submitAndMeasure(cdp, timeoutMs = 5000) {
 }
 
 async function main() {
-  const tgt = await pickRenderer()
+  const tgt = await findRenderer({ port: PORT })
   console.log('target', tgt.url)
-  const cdp = await connect(tgt.webSocketDebuggerUrl)
+  const cdp = await connectCDP(tgt.webSocketDebuggerUrl)
   await cdp.send('Runtime.enable')
 
   const samples = []

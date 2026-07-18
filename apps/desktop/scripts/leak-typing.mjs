@@ -12,6 +12,7 @@
 //   node apps/desktop/scripts/leak-typing.mjs [--rounds=6] [--chars=200] [--cps=40] [--port=9222]
 
 import { writeFileSync } from 'node:fs'
+import { connectCDP, evalInPage, findRenderer } from './cdp.mjs'
 
 const args = Object.fromEntries(
   process.argv.slice(2).flatMap(s => {
@@ -25,52 +26,6 @@ const CHARS = Number(args.chars ?? 200)
 const CPS = Number(args.cps ?? 40)
 
 const log = (...m) => console.log('[leak]', ...m)
-
-async function pickRenderer() {
-  const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json()
-  return list.find(t => t.type === 'page' && t.url.startsWith('http'))
-}
-
-function connect(url) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url)
-    let id = 0
-    const pending = new Map()
-    const events = new Map()
-    ws.addEventListener('open', () =>
-      resolve({
-        send(method, params = {}) {
-          const myId = ++id
-          ws.send(JSON.stringify({ id: myId, method, params }))
-          return new Promise((res, rej) => pending.set(myId, { res, rej }))
-        },
-        on(method, h) {
-          if (!events.has(method)) events.set(method, [])
-          events.get(method).push(h)
-        },
-        close: () => ws.close()
-      })
-    )
-    ws.addEventListener('error', reject)
-    ws.addEventListener('message', ev => {
-      const m = JSON.parse(typeof ev.data === 'string' ? ev.data : ev.data.toString('utf8'))
-      if (m.id != null) {
-        const p = pending.get(m.id)
-        if (!p) return
-        pending.delete(m.id)
-        m.error ? p.rej(new Error(m.error.message)) : p.res(m.result)
-      } else if (m.method) {
-        ;(events.get(m.method) ?? []).forEach(h => h(m.params))
-      }
-    })
-  })
-}
-
-async function evalInPage(cdp, expr) {
-  const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true })
-  if (r.exceptionDetails) throw new Error(r.exceptionDetails.text)
-  return r.result.value
-}
 
 async function forceGCAndSettle(cdp) {
   for (let i = 0; i < 3; i++) {
@@ -158,9 +113,9 @@ function genText(n) {
 
 async function main() {
   log(`port ${PORT} · ${ROUNDS} rounds × ${CHARS} chars @ ${CPS} cps`)
-  const tgt = await pickRenderer()
+  const tgt = await findRenderer({ port: PORT })
   log(`target ${tgt.url}`)
-  const cdp = await connect(tgt.webSocketDebuggerUrl)
+  const cdp = await connectCDP(tgt.webSocketDebuggerUrl)
   await cdp.send('Runtime.enable')
   await cdp.send('Performance.enable')
   await cdp.send('DOM.enable')

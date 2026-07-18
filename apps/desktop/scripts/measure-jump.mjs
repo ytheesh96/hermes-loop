@@ -11,30 +11,10 @@
 //
 // Usage:  node apps/desktop/scripts/measure-jump.mjs
 
-const list = await (await fetch('http://127.0.0.1:9222/json/list')).json()
-const tgt = list.find(t => t.type === 'page' && t.url.startsWith('http'))
-const ws = new WebSocket(tgt.webSocketDebuggerUrl)
-let id = 0
-const pending = new Map()
-ws.addEventListener('message', ev => {
-  const m = JSON.parse(ev.data)
-  if (m.id != null && pending.has(m.id)) {
-    pending.get(m.id)(m)
-    pending.delete(m.id)
-  }
-})
-await new Promise(r => ws.addEventListener('open', r))
-const send = (m, p = {}) =>
-  new Promise(r => {
-    const i = ++id
-    pending.set(i, r)
-    ws.send(JSON.stringify({ id: i, method: m, params: p }))
-  })
-const evalP = async expr => {
-  const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true })
-  if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.text)
-  return r.result.result.value
-}
+import { connectRenderer, evalInPage } from './cdp.mjs'
+
+const { client: cdp } = await connectRenderer()
+const evalP = expr => evalInPage(cdp, expr)
 
 // Scroll to bottom
 await evalP(`(() => {
@@ -53,7 +33,7 @@ await evalP(`(() => {
 
 const text = 'short follow-up message'
 for (const c of text) {
-  await send('Input.dispatchKeyEvent', { type: 'char', text: c, unmodifiedText: c })
+  await cdp.send('Input.dispatchKeyEvent', { type: 'char', text: c, unmodifiedText: c })
   await new Promise(r => setTimeout(r, 10))
 }
 await new Promise(r => setTimeout(r, 300))
@@ -80,10 +60,10 @@ await evalP(`(() => {
 })()`)
 
 // Fire Enter
-await send('Input.dispatchKeyEvent', {
+await cdp.send('Input.dispatchKeyEvent', {
   type: 'rawKeyDown', windowsVirtualKeyCode: 13, key: 'Enter', code: 'Enter', text: '\r', unmodifiedText: '\r'
 })
-await send('Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: 13, key: 'Enter', code: 'Enter' })
+await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: 13, key: 'Enter', code: 'Enter' })
 
 await new Promise(r => setTimeout(r, 2200))
 
@@ -105,4 +85,4 @@ await evalP(`(() => {
   return 'no-stop'
 })()`).then(r => console.log('\ncancel:', r))
 
-ws.close()
+cdp.close()

@@ -15,8 +15,8 @@
 // Output is plain text suitable for terminal + a JSON sidecar for diffing across runs.
 
 import { writeFileSync } from 'node:fs'
+import { connectCDP, findRenderer } from './cdp.mjs'
 
-const CDP_HTTP = 'http://127.0.0.1:9222'
 const TOKENS = Number(process.env.TOKENS || 300)
 const INTERVAL_MS = Number(process.env.INTERVAL_MS || 16)
 // Upstream flush throttle to apply in the synthetic driver. Mirrors what the
@@ -28,48 +28,6 @@ const TYPE_WHILE_STREAMING = process.env.TYPE_WHILE_STREAMING === '1'
 const LABEL = process.env.LABEL || 'baseline'
 const OUT = process.env.OUT || `frame-times-${LABEL}.json`
 
-async function getTarget() {
-  const list = await (await fetch(`${CDP_HTTP}/json`)).json()
-  const t = list.find((t) => t.type === 'page' && /5174/.test(t.url))
-  if (!t) throw new Error('renderer not found')
-  return t
-}
-
-class CDP {
-  constructor(ws) { this.ws = ws; this.id = 0; this.pending = new Map() }
-  static async open(url) {
-    const ws = new WebSocket(url)
-    await new Promise((r, j) => {
-      ws.addEventListener('open', r, { once: true })
-      ws.addEventListener('error', (e) => j(e), { once: true })
-    })
-    const cdp = new CDP(ws)
-    ws.addEventListener('message', (ev) => {
-      const m = JSON.parse(ev.data.toString())
-      if (m.id != null && cdp.pending.has(m.id)) {
-        const { resolve, reject } = cdp.pending.get(m.id)
-        cdp.pending.delete(m.id)
-        if (m.error) reject(new Error(m.error.message))
-        else resolve(m.result)
-      }
-    })
-    return cdp
-  }
-  send(method, params) {
-    const id = ++this.id
-    return new Promise((res, rej) => {
-      this.pending.set(id, { resolve: res, reject: rej })
-      this.ws.send(JSON.stringify({ id, method, params }))
-    })
-  }
-  async eval(expr) {
-    const r = await this.send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true })
-    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || 'eval')
-    return r.result.value
-  }
-  close() { this.ws.close() }
-}
-
 function pct(arr, p) {
   if (!arr.length) return 0
   const i = Math.min(arr.length - 1, Math.floor(arr.length * p))
@@ -77,8 +35,8 @@ function pct(arr, p) {
 }
 
 async function main() {
-  const target = await getTarget()
-  const cdp = await CDP.open(target.webSocketDebuggerUrl)
+  const target = await findRenderer({ urlPattern: /5174/ })
+  const cdp = await connectCDP(target.webSocketDebuggerUrl)
 
   // Sanity check driver is loaded.
   const probeOk = await cdp.eval('!!window.__PERF_DRIVE__ && !!window.__PERF_DRIVE__.stream')

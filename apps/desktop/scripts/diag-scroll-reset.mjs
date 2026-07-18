@@ -24,40 +24,23 @@
 // with enough history to scroll (the longer / more code+tool blocks, the
 // better the repro). Then:  node apps/desktop/scripts/diag-scroll-reset.mjs
 
+import { connectRenderer, evalInPage } from './cdp.mjs'
+
 const NOTCHES = 14 // wheel-up ticks per sweep
 const NOTCH_PX = 120 // Windows wheel notch ≈ 120px
 const NOTCH_GAP_MS = 130 // let each smooth-scroll animation settle
 const REVERSE_JUMP_PX = 6 // tracked turn moving UP while scrolling up = wrong way
 const LURCH_PX = 60 // single-frame on-screen jump that reads as a "reset"
 
-const list = await (await fetch('http://127.0.0.1:9222/json/list')).json()
-const tgt = list.find(t => t.type === 'page' && t.url.startsWith('http'))
-if (!tgt) {
+let cdp
+try {
+  const connection = await connectRenderer()
+  cdp = connection.client
+} catch {
   console.error('No page target on :9222. Is the desktop app running with --remote-debugging-port=9222?')
   process.exit(1)
 }
-const ws = new WebSocket(tgt.webSocketDebuggerUrl)
-let id = 0
-const pending = new Map()
-ws.addEventListener('message', ev => {
-  const m = JSON.parse(ev.data)
-  if (m.id != null && pending.has(m.id)) {
-    pending.get(m.id)(m)
-    pending.delete(m.id)
-  }
-})
-await new Promise(r => ws.addEventListener('open', r))
-const send = (m, p = {}) =>
-  new Promise(r => {
-    const i = ++id
-    pending.set(i, r)
-    ws.send(JSON.stringify({ id: i, method: m, params: p }))
-  })
-const evalP = async expr => {
-  const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true })
-  if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.text)
-  return r.result.result.value
-}
+const evalP = expr => evalInPage(cdp, expr)
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 // Install per-sweep instrumentation. `mode` is the overflow-anchor value to
@@ -148,7 +131,7 @@ async function wheelUpSweep() {
   })()`)
 
   for (let i = 0; i < NOTCHES; i++) {
-    await send('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: 0, deltaY: -NOTCH_PX })
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: 0, deltaY: -NOTCH_PX })
     await sleep(NOTCH_GAP_MS)
   }
   await sleep(400)
@@ -226,4 +209,4 @@ if (a.reverseJumps + a.lurches > 0 && b.reverseJumps + b.lurches < a.reverseJump
   console.log('    raise NOTCHES, and ensure you start scrolled up from the bottom.')
 }
 
-ws.close()
+cdp.close()

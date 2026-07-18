@@ -20,6 +20,7 @@
 // Zero deps — uses Node 24's global WebSocket + fetch.
 
 import { writeFileSync } from 'node:fs'
+import { connectCDP, findRenderer } from './cdp.mjs'
 
 const args = Object.fromEntries(
   process.argv.slice(2).flatMap(s => {
@@ -38,53 +39,6 @@ const CUSTOM_TEXT = args.text === undefined || args.text === true ? null : Strin
 
 const log = (...m) => console.log('[profile]', ...m)
 const banner = m => console.log(`\n========== ${m} ==========`)
-
-async function pickRenderer() {
-  const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json()
-  const pages = list.filter(t => t.type === 'page' && t.url.startsWith('http'))
-  if (!pages.length) {
-    console.error('No renderer page. Targets:')
-    list.forEach(t => console.error(' ', t.type, t.url))
-    process.exit(2)
-  }
-  return pages[0]
-}
-
-function connect(url) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url)
-    let id = 0
-    const pending = new Map()
-    const events = new Map()
-    ws.addEventListener('open', () =>
-      resolve({
-        send(method, params = {}) {
-          const myId = ++id
-          ws.send(JSON.stringify({ id: myId, method, params }))
-          return new Promise((res, rej) => pending.set(myId, { res, rej }))
-        },
-        on(method, h) {
-          if (!events.has(method)) events.set(method, [])
-          events.get(method).push(h)
-        },
-        close: () => ws.close()
-      })
-    )
-    ws.addEventListener('error', reject)
-    ws.addEventListener('message', ev => {
-      const txt = typeof ev.data === 'string' ? ev.data : ev.data.toString('utf8')
-      const m = JSON.parse(txt)
-      if (m.id != null) {
-        const p = pending.get(m.id)
-        if (!p) return
-        pending.delete(m.id)
-        m.error ? p.rej(new Error(m.error.message)) : p.res(m.result)
-      } else if (m.method) {
-        ;(events.get(m.method) ?? []).forEach(h => h(m.params))
-      }
-    })
-  })
-}
 
 async function captureHeap(cdp, path) {
   log(`heap snapshot → ${path}`)
@@ -160,9 +114,9 @@ async function typeText(cdp, text, cps) {
 
 async function main() {
   log(`CDP port ${PORT}, out ${OUT}`)
-  const target = await pickRenderer()
+  const target = await findRenderer({ port: PORT })
   log(`target ${target.url}`)
-  const cdp = await connect(target.webSocketDebuggerUrl)
+  const cdp = await connectCDP(target.webSocketDebuggerUrl)
   await cdp.send('Runtime.enable')
   await cdp.send('Page.enable')
   await cdp.send('Profiler.enable')

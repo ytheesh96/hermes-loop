@@ -4,6 +4,7 @@
 // a per-100ms frame counter so we can see if FPS sags as the message grows.
 
 import { writeFileSync } from 'node:fs'
+import { connectCDP, evalInPage, findRenderer } from './cdp.mjs'
 
 const args = Object.fromEntries(
   process.argv.slice(2).flatMap(s => {
@@ -15,55 +16,16 @@ const PORT = Number(args.port ?? 9222)
 const OUT = String(args.out ?? `/tmp/hermes-long-stream-${Date.now()}`)
 const STREAM_SEC = Number(args.seconds ?? 25)
 
-async function pickRenderer() {
-  const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json()
-  return list.find(t => t.type === 'page' && t.url.startsWith('http'))
-}
-
-function connect(url) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url)
-    let id = 0
-    const pending = new Map()
-    ws.addEventListener('open', () =>
-      resolve({
-        send(method, params = {}) {
-          const myId = ++id
-          ws.send(JSON.stringify({ id: myId, method, params }))
-          return new Promise((res, rej) => pending.set(myId, { res, rej }))
-        },
-        close: () => ws.close()
-      })
-    )
-    ws.addEventListener('error', reject)
-    ws.addEventListener('message', ev => {
-      const m = JSON.parse(typeof ev.data === 'string' ? ev.data : ev.data.toString('utf8'))
-      if (m.id != null) {
-        const p = pending.get(m.id)
-        if (!p) return
-        pending.delete(m.id)
-        m.error ? p.rej(new Error(m.error.message)) : p.res(m.result)
-      }
-    })
-  })
-}
-
-async function evalP(cdp, expr) {
-  const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true })
-  if (r.exceptionDetails) throw new Error(r.exceptionDetails.text)
-  return r.result.value
-}
-
 async function main() {
-  const tgt = await pickRenderer()
+  const tgt = await findRenderer({ port: PORT })
   console.log('target', tgt.url)
-  const cdp = await connect(tgt.webSocketDebuggerUrl)
+  const cdp = await connectCDP(tgt.webSocketDebuggerUrl)
   await cdp.send('Runtime.enable')
   await cdp.send('Profiler.enable')
   await cdp.send('Performance.enable')
 
   // Submit a long-form prompt
-  await evalP(
+  await evalInPage(
     cdp,
     `(() => {
       const el = document.querySelector('[data-slot="composer-rich-input"]')
@@ -86,7 +48,7 @@ async function main() {
   console.log('waiting for assistant…')
   let streaming = false
   for (let i = 0; i < 100; i++) {
-    const c = await evalP(cdp, `document.querySelectorAll('[data-slot="aui_assistant-message-root"]').length`)
+    const c = await evalInPage(cdp, `document.querySelectorAll('[data-slot="aui_assistant-message-root"]').length`)
     if (c > 0) { streaming = true; break }
     await new Promise(r => setTimeout(r, 100))
   }
@@ -97,7 +59,7 @@ async function main() {
   }
 
   // Install a per-rAF frame counter
-  await evalP(
+  await evalInPage(
     cdp,
     `(() => {
       window.__fpsSamples = []
@@ -142,13 +104,13 @@ async function main() {
   await new Promise(r => setTimeout(r, STREAM_SEC * 1000))
 
   const { profile } = await cdp.send('Profiler.stop')
-  await evalP(cdp, `clearInterval(window.__fpsBucket)`)
+  await evalInPage(cdp, `clearInterval(window.__fpsBucket)`)
 
   writeFileSync(`${OUT}.cpuprofile`, JSON.stringify(profile))
   console.log(`cpu profile → ${OUT}.cpuprofile`)
 
   // Pull fps histogram
-  const hist = JSON.parse(await evalP(cdp, `JSON.stringify(window.__fpsHistogram || [])`))
+  const hist = JSON.parse(await evalInPage(cdp, `JSON.stringify(window.__fpsHistogram || [])`))
   writeFileSync(`${OUT}.fps.json`, JSON.stringify(hist, null, 2))
 
   console.log(`\n=== FPS over time ===`)
@@ -174,7 +136,7 @@ async function main() {
     console.log(`  ${(r.self * intMs).toFixed(1).padStart(7)}ms  (${String(r.self).padStart(4)} samp)  ${r.fn.padEnd(45)} ${url}:${r.line}`)
   }
 
-  await evalP(cdp, `
+  await evalInPage(cdp, `
     (() => {
       for (const b of document.querySelectorAll('button')) {
         if ((b.getAttribute('aria-label') || '').toLowerCase().includes('stop')) { b.click(); return }
