@@ -1,5 +1,10 @@
 {
   // This file is not used in compilation. It is here just for a nice editor experience.
   "extends": "@docusaurus/tsconfig",
+  "compilerOptions": {
+    // Docusaurus 3.9 still inherits baseUrl from its shared config. Keep the
+    // editor config usable on TypeScript 6 until Docusaurus removes it.
+    "ignoreDeprecations": "6.0"
+  },
   "exclude": [".docusaurus", "build"]
 }
