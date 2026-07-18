@@ -287,11 +287,8 @@ def _expected_sha256(checksum_file: Path, asset_name: str) -> str:
 
 
 def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
     with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
+        return hashlib.file_digest(f, "sha256").hexdigest()
 
 
 def _pick_zip_member(zf: zipfile.ZipFile, binary_name: str) -> str:

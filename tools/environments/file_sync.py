@@ -116,11 +116,8 @@ def unique_parent_dirs(files: list[tuple[str, str]]) -> list[str]:
 
 def _sha256_file(path: str) -> str:
     """Return hex SHA-256 digest of a file."""
-    h = hashlib.sha256()
     with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
+        return hashlib.file_digest(f, "sha256").hexdigest()
 
 
 _SYNC_BACK_MAX_RETRIES = 3
