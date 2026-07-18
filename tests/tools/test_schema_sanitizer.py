@@ -8,8 +8,10 @@ Unrecognized schema: "object"`` errors on local inference backends.
 from __future__ import annotations
 
 import copy
+import json
 
 from tools.schema_sanitizer import (
+    copy_and_strip_xai_unsupported,
     sanitize_tool_schemas,
     strip_pattern_and_format,
     strip_slash_enum,
@@ -513,6 +515,79 @@ def test_nested_allof_preserved():
     nested = out[0]["function"]["parameters"]["properties"]["config"]
     assert "allOf" in nested
     assert nested["allOf"] == [{"required": ["mode"]}]
+
+
+def test_copy_and_strip_xai_unsupported_matches_legacy_pipeline():
+    tools = [
+        _tool(
+            "openai_shape",
+            {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "target": {
+                        "type": "string",
+                        "enum": ["local", "owner/model"],
+                        "pattern": "^[a-z/]+$",
+                        "format": "regex",
+                    },
+                    "choice": {
+                        "anyOf": [
+                            {"type": "string", "enum": ["plain"]},
+                            {"type": "string", "enum": ["org/name"]},
+                        ]
+                    },
+                },
+            },
+        ),
+        {
+            "type": "function",
+            "name": "responses_shape",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "timestamp": {"type": "string", "format": "date-time"},
+                },
+            },
+        },
+    ]
+    original = copy.deepcopy(tools)
+    expected = copy.deepcopy(tools)
+    expected, pattern_count = strip_pattern_and_format(expected)
+    expected, enum_count = strip_slash_enum(expected)
+
+    actual, stripped = copy_and_strip_xai_unsupported(tools)
+
+    actual_json = json.dumps(
+        actual,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    expected_json = json.dumps(
+        expected,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    assert actual_json == expected_json
+    assert stripped == pattern_count + enum_count
+    assert tools == original
+    assert actual is not tools
+    assert actual[0]["function"]["parameters"] is not tools[0]["function"]["parameters"]
+    # A property literally named "pattern" remains part of the schema.
+    assert "pattern" in actual[0]["function"]["parameters"]["properties"]
+
+
+def test_copy_and_strip_xai_unsupported_copies_clean_schema():
+    tools = [_tool("clean", {"type": "object", "properties": {}})]
+
+    actual, stripped = copy_and_strip_xai_unsupported(tools)
+
+    assert stripped == 0
+    assert actual == tools
+    assert actual is not tools
+    assert actual[0]["function"]["parameters"] is not tools[0]["function"]["parameters"]
 
 
 def test_strip_responses_format_tools():

@@ -122,6 +122,21 @@ class TestEstimateMessagesTokensRough:
 
 
 class TestEstimateRequestTokensRough:
+    def test_accepts_precomputed_message_tokens(self):
+        messages = [{"role": "user", "content": "hello"}]
+
+        with patch(
+            "agent.model_metadata.estimate_messages_tokens_rough",
+            side_effect=AssertionError("message list should not be rescanned"),
+        ):
+            assert (
+                estimate_request_tokens_rough(
+                    messages,
+                    messages_tokens=17,
+                )
+                == 17
+            )
+
     def test_caches_tools_estimate(self):
         messages = [{"role": "user", "content": "hello"}]
         tools = [

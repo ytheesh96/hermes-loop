@@ -1025,11 +1025,16 @@ def run_conversation(
         # separate field. Add tools back for compression decisions so long
         # tool-heavy turns do not creep up to the context ceiling and leave
         # no room for the model's final answer.
-        total_chars = sum(len(str(msg)) for msg in api_messages)
         approx_tokens = estimate_messages_tokens_rough(api_messages)
         request_pressure_tokens = estimate_request_tokens_rough(
-            api_messages, tools=agent.tools or None
+            api_messages,
+            tools=agent.tools or None,
+            messages_tokens=approx_tokens,
         )
+        # The exact repr-based character count is diagnostic-only. Desktop,
+        # gateway, and other quiet turns do not display it, so defer the O(n)
+        # walk unless console logging or a pre_api_request hook consumes it.
+        total_chars = None
 
         _runtime_context_error = _ollama_context_limit_error(
             agent, request_pressure_tokens
@@ -1130,6 +1135,7 @@ def run_conversation(
         thinking_spinner = None
         
         if not agent.quiet_mode:
+            total_chars = sum(len(str(msg)) for msg in api_messages)
             agent._vprint(f"\n{agent.log_prefix}🔄 Making API call #{api_call_count}/{agent.max_iterations}...")
             agent._vprint(f"{agent.log_prefix}   📊 Request size: {len(api_messages)} messages, ~{approx_tokens:,} tokens (~{total_chars:,} chars)")
             agent._vprint(f"{agent.log_prefix}   🔧 Available tools: {len(agent.tools) if agent.tools else 0}")
@@ -1273,6 +1279,8 @@ def run_conversation(
                         invoke_hook as _invoke_hook,
                     )
                     if has_hook("pre_api_request"):
+                        if total_chars is None:
+                            total_chars = sum(len(str(msg)) for msg in api_messages)
                         request_messages = api_kwargs.get("messages")
                         if not isinstance(request_messages, list):
                             request_messages = api_kwargs.get("input")
