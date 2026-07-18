@@ -2618,6 +2618,7 @@ def estimate_request_tokens_rough(
     *,
     system_prompt: str = "",
     tools: Optional[List[Dict[str, Any]]] = None,
+    messages_tokens: Optional[int] = None,
 ) -> int:
     """Rough token estimate for a full chat-completions request.
 
@@ -2631,7 +2632,11 @@ def estimate_request_tokens_rough(
     if system_prompt:
         total += (len(system_prompt) + 3) // 4
     if messages:
-        total += estimate_messages_tokens_rough(messages)
+        total += (
+            messages_tokens
+            if messages_tokens is not None
+            else estimate_messages_tokens_rough(messages)
+        )
     if tools:
         total += _estimate_tools_tokens_rough(tools)
     return total

@@ -361,6 +361,92 @@ def _sanitize_node(node: Any, path: str) -> Any:
 _STRIP_ON_RECOVERY_KEYS = frozenset({"pattern", "format"})
 
 
+def copy_and_strip_xai_unsupported(
+    tools: list[dict],
+) -> tuple[list[dict], int]:
+    """Copy tools while stripping schema keywords rejected by xAI Responses.
+
+    This is the non-mutating equivalent of ``deepcopy(tools)`` followed by
+    :func:`strip_pattern_and_format` and :func:`strip_slash_enum`.  Cloning and
+    sanitizing in one traversal keeps the returned request isolated from the
+    shared tool registry without walking every nested schema three times.
+    """
+    if not tools:
+        return tools, 0
+
+    stripped = 0
+
+    def _clone(node: Any, *, sanitize: bool) -> Any:
+        nonlocal stripped
+        if isinstance(node, list):
+            return [_clone(item, sanitize=sanitize) for item in node]
+        if not isinstance(node, dict):
+            # Tool schemas are JSON values, so ordinary scalar leaves are
+            # immutable. Retain deepcopy's behavior for an unexpected leaf.
+            if node is None or isinstance(node, (str, int, float, bool)):
+                return node
+            return copy.deepcopy(node)
+
+        is_schema_node = sanitize and (
+            "type" in node
+            or "anyOf" in node
+            or "oneOf" in node
+            or "allOf" in node
+        )
+        enum_val = node.get("enum") if sanitize else None
+        strip_enum = isinstance(enum_val, list) and any(
+            isinstance(value, str) and "/" in value for value in enum_val
+        )
+
+        out = {}
+        for key, value in node.items():
+            if is_schema_node and key in _STRIP_ON_RECOVERY_KEYS:
+                stripped += 1
+                continue
+            if sanitize and key == "enum" and strip_enum:
+                stripped += 1
+                continue
+            out[key] = _clone(value, sanitize=sanitize)
+        return out
+
+    copied: list[dict] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            copied.append(copy.deepcopy(tool))
+            continue
+
+        out = {}
+        fn = tool.get("function")
+        has_openai_parameters = (
+            isinstance(fn, dict) and isinstance(fn.get("parameters"), dict)
+        )
+        for key, value in tool.items():
+            if key == "function" and isinstance(value, dict):
+                out[key] = {
+                    fn_key: _clone(
+                        fn_value,
+                        sanitize=fn_key == "parameters"
+                        and isinstance(fn_value, dict),
+                    )
+                    for fn_key, fn_value in value.items()
+                }
+            else:
+                out[key] = _clone(
+                    value,
+                    sanitize=key == "parameters"
+                    and isinstance(value, dict)
+                    and not has_openai_parameters,
+                )
+        copied.append(out)
+
+    if stripped:
+        logger.info(
+            "schema_sanitizer: stripped %d xAI-unsupported schema keyword(s)",
+            stripped,
+        )
+    return copied, stripped
+
+
 def strip_pattern_and_format(tools: list[dict]) -> tuple[list[dict], int]:
     """Strip ``pattern`` and ``format`` JSON Schema keywords from tool schemas.
 

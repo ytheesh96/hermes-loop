@@ -43,7 +43,10 @@ logger = logging.getLogger(__name__)
 # lifetime of the process — Python install state doesn't change
 # mid-session in any way that would matter for the system prompt.
 _CACHE_LOCK = threading.Lock()
+_CACHE_CONDITION = threading.Condition(_CACHE_LOCK)
 _CACHED_LINE: Optional[str] = None  # None = not probed yet; "" = probed, nothing to say.
+_CACHE_GENERATION = 0
+_IN_FLIGHT_GENERATION: Optional[int] = None
 
 # Remote backends — keep in sync with agent/prompt_builder.py:_REMOTE_TERMINAL_BACKENDS.
 # Duplicated rather than imported to avoid a circular import (prompt_builder
@@ -221,24 +224,40 @@ def get_environment_probe_line(*, force_refresh: bool = False) -> str:
 
     ``force_refresh`` is for tests; real callers should never need it.
     """
-    global _CACHED_LINE
-    if force_refresh:
-        with _CACHE_LOCK:
+    global _CACHED_LINE, _CACHE_GENERATION, _IN_FLIGHT_GENERATION
+    with _CACHE_CONDITION:
+        if force_refresh:
+            _CACHE_GENERATION += 1
             _CACHED_LINE = None
+            _CACHE_CONDITION.notify_all()
 
-    if _CACHED_LINE is not None:
-        return _CACHED_LINE
+        while True:
+            if _CACHED_LINE is not None:
+                return _CACHED_LINE
+            generation = _CACHE_GENERATION
+            if _IN_FLIGHT_GENERATION != generation:
+                _IN_FLIGHT_GENERATION = generation
+                break
+            # Share the warm thread's result. Building the probe outside the
+            # lock lets resets and other callers make progress, while waiting
+            # here preserves the first system prompt's deterministic guidance.
+            _CACHE_CONDITION.wait()
 
-    with _CACHE_LOCK:
-        if _CACHED_LINE is not None:  # raced
-            return _CACHED_LINE
-        try:
-            line = _build_probe_line()
-        except Exception as exc:  # never let probe failure block prompt build
-            logger.debug("env_probe failed: %s", exc)
-            line = ""
-        _CACHED_LINE = line
-        return line
+    # Subprocess probes can be slow or become stuck during interpreter/process
+    # teardown. Never hold the cache lock while they run.
+    try:
+        line = _build_probe_line()
+    except Exception as exc:  # never let probe failure block prompt build
+        logger.debug("env_probe failed: %s", exc)
+        line = ""
+
+    with _CACHE_CONDITION:
+        if _CACHE_GENERATION == generation:
+            _CACHED_LINE = line
+        if _IN_FLIGHT_GENERATION == generation:
+            _IN_FLIGHT_GENERATION = None
+        _CACHE_CONDITION.notify_all()
+        return _CACHED_LINE if _CACHE_GENERATION == generation else ""
 
 
 _warm_started = False
@@ -250,26 +269,32 @@ def warm_environment_probe_async() -> None:
     (python3/pip/PEP-668 version checks) on the time-to-first-token
     critical path.
 
-    Idempotent and fail-safe.  The prompt-build call to
-    ``get_environment_probe_line`` takes the same ``_CACHE_LOCK``, so it
-    blocks only for whatever remains of an in-flight warm instead of
-    recomputing.  Called from agent init (all platforms); safe to call
-    from anywhere.
+    Idempotent and fail-safe. Prompt construction shares an in-flight result
+    instead of launching duplicate probes. Called from agent init (all
+    platforms); safe to call from anywhere.
     """
     global _warm_started
-    if _warm_started or _CACHED_LINE is not None:
-        return
-    _warm_started = True
-    threading.Thread(
-        target=get_environment_probe_line,
-        name="env-probe-warm",
-        daemon=True,
-    ).start()
+    with _CACHE_LOCK:
+        if _warm_started or _CACHED_LINE is not None:
+            return
+        _warm_started = True
+    try:
+        threading.Thread(
+            target=get_environment_probe_line,
+            name="env-probe-warm",
+            daemon=True,
+        ).start()
+    except RuntimeError:
+        with _CACHE_LOCK:
+            _warm_started = False
 
 
 def _reset_cache_for_tests() -> None:
     """Test helper — clear the cache between probe scenarios."""
-    global _CACHED_LINE, _warm_started
-    with _CACHE_LOCK:
+    global _CACHED_LINE, _CACHE_GENERATION, _IN_FLIGHT_GENERATION, _warm_started
+    with _CACHE_CONDITION:
+        _CACHE_GENERATION += 1
         _CACHED_LINE = None
+        _IN_FLIGHT_GENERATION = None
         _warm_started = False
+        _CACHE_CONDITION.notify_all()

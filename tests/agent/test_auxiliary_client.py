@@ -4688,7 +4688,7 @@ class TestCodexAuxiliaryToolMessageConversion:
     no Responses request ever includes a raw ``role="tool"`` input item.
     """
 
-    def _capture_input(self, messages):
+    def _capture_input(self, messages, *, tools=None, base_url=None):
         from agent.auxiliary_client import _CodexCompletionsAdapter
 
         class _FakeCreateStream:
@@ -4719,8 +4719,10 @@ class TestCodexAuxiliaryToolMessageConversion:
                 return _FakeCreateStream()
 
         fake_client = SimpleNamespace(responses=FakeResponses())
+        if base_url is not None:
+            fake_client.base_url = base_url
         adapter = _CodexCompletionsAdapter(fake_client, "gpt-5.5")
-        adapter.create(messages=messages, model="gpt-5.5")
+        adapter.create(messages=messages, model="gpt-5.5", tools=tools)
         return fake_client.responses.kwargs
 
     def test_tool_history_never_leaks_role_tool(self):
@@ -4772,6 +4774,41 @@ class TestCodexAuxiliaryToolMessageConversion:
         assert "user" in roles and "assistant" in roles
         assert not any(it.get("role") == "tool" for it in input_items)
         assert kwargs["instructions"] == "sys"
+
+    def test_xai_tool_copy_sanitizes_without_mutating_source(self):
+        import copy
+
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "pick_model",
+                "description": "Pick a model",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "model": {
+                            "type": "string",
+                            "enum": ["local", "owner/model"],
+                            "pattern": "^[a-z/]+$",
+                            "format": "regex",
+                        },
+                    },
+                },
+            },
+        }]
+        original = copy.deepcopy(tools)
+
+        kwargs = self._capture_input(
+            [{"role": "user", "content": "pick"}],
+            tools=tools,
+            base_url="https://api.x.ai/v1",
+        )
+
+        assert tools == original
+        params = kwargs["tools"][0]["parameters"]["properties"]["model"]
+        assert "enum" not in params
+        assert "pattern" not in params
+        assert "format" not in params
 
 
 class TestCodexAuxiliaryAdapterNullOutputRecovery:

@@ -1,6 +1,7 @@
 """Tests for tools/env_probe.py — local Python toolchain probe."""
 
 import sys
+import threading
 
 import pytest
 
@@ -141,6 +142,68 @@ class TestCaching:
         # Only the first call probes — caller-counting confirms it.
         # Two calls (python3 + python) on first invocation, zero after.
         assert len(calls) == 2
+
+    def test_inflight_warm_shares_result(self, monkeypatch):
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        waiter_started = threading.Event()
+        waiter_finished = threading.Event()
+        results = []
+        calls = 0
+
+        def slow_probe():
+            nonlocal calls
+            calls += 1
+            started.set()
+            release.wait(timeout=5)
+            finished.set()
+            return "shared warm result"
+
+        monkeypatch.setattr(env_probe, "_build_probe_line", slow_probe)
+        env_probe.warm_environment_probe_async()
+        assert started.wait(timeout=1)
+
+        def wait_for_probe():
+            waiter_started.set()
+            results.append(env_probe.get_environment_probe_line())
+            waiter_finished.set()
+
+        waiter = threading.Thread(target=wait_for_probe)
+        waiter.start()
+        assert waiter_started.wait(timeout=1)
+        assert not waiter_finished.wait(timeout=0.05)
+        release.set()
+        assert finished.wait(timeout=1)
+        assert waiter_finished.wait(timeout=1)
+        waiter.join(timeout=1)
+
+        assert calls == 1
+        assert results == ["shared warm result"]
+        assert env_probe._CACHED_LINE == "shared warm result"
+
+    def test_reset_discards_inflight_result(self, monkeypatch):
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def slow_probe():
+            started.set()
+            release.wait(timeout=5)
+            finished.set()
+            return "stale warm result"
+
+        monkeypatch.setattr(env_probe, "_build_probe_line", slow_probe)
+        worker = threading.Thread(target=env_probe.get_environment_probe_line)
+        worker.start()
+        assert started.wait(timeout=1)
+
+        env_probe._reset_cache_for_tests()
+        release.set()
+        assert finished.wait(timeout=1)
+        worker.join(timeout=1)
+        assert not worker.is_alive()
+        assert env_probe._CACHED_LINE is None
 
 
 class TestRobustness:

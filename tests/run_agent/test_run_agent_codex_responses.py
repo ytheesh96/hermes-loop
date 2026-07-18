@@ -622,6 +622,50 @@ def test_build_api_kwargs_xai_is_idempotent_across_repeated_calls(monkeypatch):
     ) == ["application/json", "*/*"]
 
 
+def test_build_api_kwargs_xai_preserves_request_bytes_and_cache_prefix(monkeypatch):
+    """The one-pass copy emits the legacy tool bytes and stable cache prefix."""
+    import copy
+    import json
+
+    from agent.codex_responses_adapter import _responses_tools
+    from tools.schema_sanitizer import strip_pattern_and_format, strip_slash_enum
+
+    agent = _build_xai_agent_with_slash_enum_tool(monkeypatch)
+    legacy_tools = copy.deepcopy(agent.tools)
+    legacy_tools, _ = strip_pattern_and_format(legacy_tools)
+    legacy_tools, _ = strip_slash_enum(legacy_tools)
+    expected_wire_tools = _responses_tools(legacy_tools)
+
+    first = agent._build_api_kwargs(
+        [
+            {"role": "system", "content": "You are Hermes."},
+            {"role": "user", "content": "first"},
+        ]
+    )
+    second = agent._build_api_kwargs(
+        [
+            {"role": "system", "content": "You are Hermes."},
+            {"role": "user", "content": "second"},
+        ]
+    )
+
+    first_tools = json.dumps(
+        first["tools"],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    expected_tools = json.dumps(
+        expected_wire_tools,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert first_tools == expected_tools
+    first_cache_key = (first.get("extra_body") or {}).get("prompt_cache_key")
+    second_cache_key = (second.get("extra_body") or {}).get("prompt_cache_key")
+    assert first_cache_key
+    assert first_cache_key == second_cache_key
+
+
 def test_run_codex_stream_returns_collected_items_when_stream_ends_without_terminal(monkeypatch):
     """The event-driven path tolerates streams that end without a terminal frame.
 
