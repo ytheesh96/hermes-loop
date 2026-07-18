@@ -11502,10 +11502,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         context = build_session_context(source, self.config, session_entry)
 
         # Set session context variables for tools (task-local, concurrency-safe)
-        _session_env_tokens = self._set_session_env(
-            context,
-            workflow_id=_workflow_id_from_event(event),
-        )
+        _session_env_tokens = self._set_session_env(context)
+        from gateway.session_context import set_current_workflow_id
+
+        set_current_workflow_id(_workflow_id_from_event(event))
 
         # Read privacy.redact_pii from config (re-read per message)
         _redact_pii = False
@@ -15676,12 +15676,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return delivered
 
-    def _set_session_env(
-        self,
-        context: SessionContext,
-        *,
-        workflow_id: str = "",
-    ) -> list:
+    def _set_session_env(self, context: SessionContext) -> list:
         """Set session context variables for the current async task.
 
         Uses ``contextvars`` instead of ``os.environ`` so that concurrent
@@ -15713,7 +15708,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,
-            workflow_id=workflow_id,
         )
 
     def _clear_session_env(self, tokens: list) -> None:

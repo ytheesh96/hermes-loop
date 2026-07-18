@@ -365,6 +365,11 @@ def get_current_workflow_id(default: str = "") -> str:
     return str(value or "")
 
 
+def set_current_workflow_id(workflow_id: str = "") -> None:
+    """Bind trusted internal workflow identity for the current turn."""
+    _SESSION_WORKFLOW_ID.set(str(workflow_id or "").strip())
+
+
 def get_logical_session_id(default: Any = "") -> Any:
     """Return the user-facing session key before the internal runtime id."""
     return (

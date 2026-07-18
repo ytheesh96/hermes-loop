@@ -88,7 +88,8 @@ async def test_gateway_session_binding_propagates_workflow_to_executor():
         session_key="agent:main:telegram:dm:123",
     )
 
-    tokens = runner._set_session_env(context, workflow_id="workflow-123")
+    tokens = runner._set_session_env(context)
+    session_context.set_current_workflow_id("workflow-123")
     try:
         assert session_context.get_current_workflow_id() == "workflow-123"
         propagated = await runner._run_in_executor_with_context(
