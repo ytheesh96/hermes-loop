@@ -29,9 +29,9 @@ happens to be installed.
 from __future__ import annotations
 
 import logging
-import threading
-from typing import Dict, List, Optional
+from typing import List, Optional
 
+from agent.provider_registry import ProviderRegistry
 from agent.tts_provider import TTSProvider
 
 logger = logging.getLogger(__name__)
@@ -60,8 +60,15 @@ _BUILTIN_NAMES = frozenset({
 })
 
 
-_providers: Dict[str, TTSProvider] = {}
-_lock = threading.Lock()
+_registry = ProviderRegistry(
+    TTSProvider,
+    label="TTS",
+    logger=logger,
+    normalize_name=lambda name: name.strip().lower(),
+    normalize_lookup=lambda name: name.strip().lower(),
+    reserved_names=_BUILTIN_NAMES,
+    reserved_label="Built-in TTS providers",
+)
 
 
 def register_provider(provider: TTSProvider) -> None:
@@ -78,42 +85,12 @@ def register_provider(provider: TTSProvider) -> None:
     logs a debug message — makes hot-reload scenarios (tests, dev
     loops) behave predictably.
     """
-    if not isinstance(provider, TTSProvider):
-        raise TypeError(
-            f"register_provider() expects a TTSProvider instance, "
-            f"got {type(provider).__name__}"
-        )
-    name = provider.name
-    if not isinstance(name, str) or not name.strip():
-        raise ValueError("TTS provider .name must be a non-empty string")
-    key = name.strip().lower()
-    if key in _BUILTIN_NAMES:
-        logger.warning(
-            "TTS provider '%s' shadows a built-in name; registration ignored. "
-            "Built-in TTS providers (%s) always win — pick a different name.",
-            key, ", ".join(sorted(_BUILTIN_NAMES)),
-        )
-        return
-    with _lock:
-        existing = _providers.get(key)
-        _providers[key] = provider
-    if existing is not None:
-        logger.debug(
-            "TTS provider '%s' re-registered (was %r)",
-            key, type(existing).__name__,
-        )
-    else:
-        logger.debug(
-            "Registered TTS provider '%s' (%s)",
-            key, type(provider).__name__,
-        )
+    _registry.register(provider)
 
 
 def list_providers() -> List[TTSProvider]:
     """Return all registered providers, sorted by name."""
-    with _lock:
-        items = list(_providers.values())
-    return sorted(items, key=lambda p: p.name)
+    return _registry.list()
 
 
 def get_provider(name: str) -> Optional[TTSProvider]:
@@ -123,12 +100,9 @@ def get_provider(name: str) -> Optional[TTSProvider]:
     how ``tools.tts_tool._get_provider`` normalizes the configured
     ``tts.provider`` value.
     """
-    if not isinstance(name, str):
-        return None
-    return _providers.get(name.strip().lower())
+    return _registry.get(name)
 
 
 def _reset_for_tests() -> None:
     """Clear the registry. **Test-only.**"""
-    with _lock:
-        _providers.clear()
+    _registry.clear()

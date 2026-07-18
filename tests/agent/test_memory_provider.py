@@ -665,6 +665,56 @@ class TestUserInstalledProviderDiscovery:
         assert p is not None
         assert p.name == "nestedimpl"
 
+    def test_failed_user_plugin_can_reload_rewritten_child(
+        self, tmp_path, monkeypatch
+    ):
+        """A failed package import can be retried after its source is fixed."""
+        import sys
+        import plugins.memory as memory_plugins
+        from plugins.provider_discovery import register_synthetic_package
+
+        namespace = "_test_hermes_user_memory"
+        plugin_dir = tmp_path / "plugins" / "brokenimport"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "helper.py").write_text("VALUE = 1\n")
+        register_synthetic_package(namespace, [])
+        (plugin_dir / "__init__.py").write_text(
+            "import sys\n"
+            "from . import helper\n"
+            "parent, child = __package__.rsplit('.', 1)\n"
+            "setattr(sys.modules[parent], child, sys.modules[__package__])\n"
+            "raise RuntimeError('broken')\n"
+        )
+        monkeypatch.setattr(memory_plugins, "_USER_NAMESPACE", namespace)
+
+        try:
+            assert memory_plugins._load_provider_from_dir(plugin_dir) is None
+            assert f"{namespace}.brokenimport" not in sys.modules
+            assert not hasattr(sys.modules[namespace], "brokenimport")
+
+            (plugin_dir / "helper.py").write_text("VALUE = 200\n")
+            (plugin_dir / "__init__.py").write_text(
+                "from agent.memory_provider import MemoryProvider\n"
+                "from . import helper\n"
+                "class RetryProvider(MemoryProvider):\n"
+                "    @property\n"
+                "    def name(self): return f'retry-{helper.VALUE}'\n"
+                "    def is_available(self): return True\n"
+                "    def initialize(self, **kw): pass\n"
+                "    def sync_turn(self, *a, **kw): pass\n"
+                "    def get_tool_schemas(self): return []\n"
+                "    def handle_tool_call(self, *a, **kw): return '{}'\n"
+            )
+
+            provider = memory_plugins._load_provider_from_dir(plugin_dir)
+            assert provider is not None
+            assert provider.name == "retry-200"
+            assert sys.modules[f"{namespace}.brokenimport.helper"].VALUE == 200
+        finally:
+            for module_name in tuple(sys.modules):
+                if module_name == namespace or module_name.startswith(f"{namespace}."):
+                    sys.modules.pop(module_name, None)
+
 
 class TestUserInstalledProviderCli:
     """CLI commands of user-installed providers must be discoverable.

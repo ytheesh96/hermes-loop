@@ -691,18 +691,10 @@ def cmd_remove(name: str) -> None:
 
 
 def _get_disabled_set() -> set:
-    """Read the disabled plugins set from config.yaml.
+    """Backward-compatible patch point for the canonical config reader."""
+    from hermes_cli.plugins import get_disabled_plugins
 
-    An explicit deny-list. A plugin name here never loads, even if also
-    listed in ``plugins.enabled``.
-    """
-    try:
-        from hermes_cli.config import load_config
-        config = load_config()
-        disabled = cfg_get(config, "plugins", "disabled", default=[])
-        return set(disabled) if isinstance(disabled, list) else set()
-    except Exception:
-        return set()
+    return get_disabled_plugins()
 
 
 def _save_disabled_set(disabled: set) -> None:

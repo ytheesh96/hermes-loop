@@ -224,7 +224,7 @@ def _env_enabled(name: str) -> bool:
     return env_var_enabled(name)
 
 
-def _get_disabled_plugins() -> set:
+def get_disabled_plugins() -> set:
     """Read the disabled plugins list from config.yaml.
 
     Kept for backward compat and explicit deny-list semantics. A plugin
@@ -238,6 +238,11 @@ def _get_disabled_plugins() -> set:
         return set(disabled) if isinstance(disabled, list) else set()
     except Exception:
         return set()
+
+
+def _get_disabled_plugins() -> set:
+    """Backward-compatible patch point for existing plugin-loader callers."""
+    return get_disabled_plugins()
 
 
 def _get_enabled_plugins() -> Optional[set]:

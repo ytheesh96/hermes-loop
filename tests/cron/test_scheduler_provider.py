@@ -235,6 +235,43 @@ def test_load_unknown_cron_scheduler_returns_none():
     assert load_cron_scheduler("does-not-exist-xyz") is None
 
 
+def test_load_user_cron_scheduler_with_relative_import(tmp_path, monkeypatch):
+    """User scheduler packages retain the import shape used by dotted patches."""
+    import sys
+    import plugins.cron_providers as cron_plugins
+
+    namespace = "_test_hermes_user_cron"
+    plugin_dir = tmp_path / "plugins" / "relativecron"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "helper.py").write_text("NAME = 'relativecron'\n")
+    (plugin_dir / "__init__.py").write_text(
+        "from cron.scheduler_provider import CronScheduler\n"
+        "from . import helper\n"
+        "class UserCron(CronScheduler):\n"
+        "    @property\n"
+        "    def name(self): return helper.NAME\n"
+        "    def start(self, stop_event, **kwargs): pass\n"
+    )
+    monkeypatch.setattr(cron_plugins, "_USER_NAMESPACE", namespace)
+    monkeypatch.setattr(
+        cron_plugins,
+        "_get_user_plugins_dir",
+        lambda: tmp_path / "plugins",
+    )
+
+    try:
+        provider = cron_plugins.load_cron_scheduler("relativecron")
+        module = sys.modules[f"{namespace}.relativecron"]
+        assert provider is not None
+        assert provider.name == "relativecron"
+        assert getattr(sys.modules[namespace], "relativecron") is module
+        assert module.helper.NAME == "relativecron"
+    finally:
+        for module_name in tuple(sys.modules):
+            if module_name == namespace or module_name.startswith(f"{namespace}."):
+                sys.modules.pop(module_name, None)
+
+
 def test_cron_provider_package_does_not_shadow_core_cron_package(monkeypatch):
     """Putting plugins/ first on sys.path must not hide the core cron package."""
     from importlib.machinery import PathFinder

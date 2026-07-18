@@ -21,16 +21,15 @@ If unset, :func:`get_active_provider` applies fallback logic:
 from __future__ import annotations
 
 import logging
-import threading
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from agent.image_gen_provider import ImageGenProvider
+from agent.provider_registry import ProviderRegistry
 
 logger = logging.getLogger(__name__)
 
 
-_providers: Dict[str, ImageGenProvider] = {}
-_lock = threading.Lock()
+_registry = ProviderRegistry(ImageGenProvider, label="Image gen", logger=logger)
 
 
 def register_provider(provider: ImageGenProvider) -> None:
@@ -40,36 +39,17 @@ def register_provider(provider: ImageGenProvider) -> None:
     a debug message — this makes hot-reload scenarios (tests, dev loops)
     behave predictably.
     """
-    if not isinstance(provider, ImageGenProvider):
-        raise TypeError(
-            f"register_provider() expects an ImageGenProvider instance, "
-            f"got {type(provider).__name__}"
-        )
-    name = provider.name
-    if not isinstance(name, str) or not name.strip():
-        raise ValueError("Image gen provider .name must be a non-empty string")
-    with _lock:
-        existing = _providers.get(name)
-        _providers[name] = provider
-    if existing is not None:
-        logger.debug("Image gen provider '%s' re-registered (was %r)", name, type(existing).__name__)
-    else:
-        logger.debug("Registered image gen provider '%s' (%s)", name, type(provider).__name__)
+    _registry.register(provider)
 
 
 def list_providers() -> List[ImageGenProvider]:
     """Return all registered providers, sorted by name."""
-    with _lock:
-        items = list(_providers.values())
-    return sorted(items, key=lambda p: p.name)
+    return _registry.list()
 
 
 def get_provider(name: str) -> Optional[ImageGenProvider]:
     """Return the provider registered under *name*, or None."""
-    if not isinstance(name, str):
-        return None
-    with _lock:
-        return _providers.get(name.strip())
+    return _registry.get(name)
 
 
 def get_active_provider() -> Optional[ImageGenProvider]:
@@ -102,8 +82,7 @@ def get_active_provider() -> Optional[ImageGenProvider]:
     except Exception as exc:
         logger.debug("Could not read image_gen.provider from config: %s", exc)
 
-    with _lock:
-        snapshot = dict(_providers)
+    snapshot = _registry.snapshot()
 
     def _is_available_safe(p: ImageGenProvider) -> bool:
         """Wrap ``is_available()`` so a buggy provider doesn't kill resolution."""
@@ -141,5 +120,4 @@ def get_active_provider() -> Optional[ImageGenProvider]:
 
 def _reset_for_tests() -> None:
     """Clear the registry. **Test-only.**"""
-    with _lock:
-        _providers.clear()
+    _registry.clear()

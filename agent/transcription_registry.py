@@ -20,9 +20,9 @@ re-checked at dispatch time in
 from __future__ import annotations
 
 import logging
-import threading
-from typing import Dict, List, Optional
+from typing import List, Optional
 
+from agent.provider_registry import ProviderRegistry
 from agent.transcription_provider import TranscriptionProvider
 
 logger = logging.getLogger(__name__)
@@ -49,8 +49,15 @@ _BUILTIN_NAMES = frozenset({
 })
 
 
-_providers: Dict[str, TranscriptionProvider] = {}
-_lock = threading.Lock()
+_registry = ProviderRegistry(
+    TranscriptionProvider,
+    label="Transcription",
+    logger=logger,
+    normalize_name=lambda name: name.strip().lower(),
+    normalize_lookup=lambda name: name.strip().lower(),
+    reserved_names=_BUILTIN_NAMES,
+    reserved_label="Built-in STT providers",
+)
 
 
 def register_provider(provider: TranscriptionProvider) -> None:
@@ -67,43 +74,12 @@ def register_provider(provider: TranscriptionProvider) -> None:
     logs a debug message — makes hot-reload scenarios (tests, dev
     loops) behave predictably.
     """
-    if not isinstance(provider, TranscriptionProvider):
-        raise TypeError(
-            f"register_provider() expects a TranscriptionProvider instance, "
-            f"got {type(provider).__name__}"
-        )
-    name = provider.name
-    if not isinstance(name, str) or not name.strip():
-        raise ValueError("Transcription provider .name must be a non-empty string")
-    key = name.strip().lower()
-    if key in _BUILTIN_NAMES:
-        logger.warning(
-            "Transcription provider '%s' shadows a built-in name; registration "
-            "ignored. Built-in STT providers (%s) always win — pick a different "
-            "name.",
-            key, ", ".join(sorted(_BUILTIN_NAMES)),
-        )
-        return
-    with _lock:
-        existing = _providers.get(key)
-        _providers[key] = provider
-    if existing is not None:
-        logger.debug(
-            "Transcription provider '%s' re-registered (was %r)",
-            key, type(existing).__name__,
-        )
-    else:
-        logger.debug(
-            "Registered transcription provider '%s' (%s)",
-            key, type(provider).__name__,
-        )
+    _registry.register(provider)
 
 
 def list_providers() -> List[TranscriptionProvider]:
     """Return all registered providers, sorted by name."""
-    with _lock:
-        items = list(_providers.values())
-    return sorted(items, key=lambda p: p.name)
+    return _registry.list()
 
 
 def get_provider(name: str) -> Optional[TranscriptionProvider]:
@@ -113,12 +89,9 @@ def get_provider(name: str) -> Optional[TranscriptionProvider]:
     how ``tools.transcription_tools._get_provider`` normalizes the
     configured ``stt.provider`` value.
     """
-    if not isinstance(name, str):
-        return None
-    return _providers.get(name.strip().lower())
+    return _registry.get(name)
 
 
 def _reset_for_tests() -> None:
     """Clear the registry. **Test-only.**"""
-    with _lock:
-        _providers.clear()
+    _registry.clear()
