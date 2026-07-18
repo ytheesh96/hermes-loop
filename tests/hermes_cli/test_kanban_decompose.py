@@ -65,18 +65,25 @@ def _patch_extra_body():
 
 def _patch_list_profiles(names: list[str]):
     """Pretend the named profiles exist. The decomposer uses
-    profiles_mod.list_profiles() to build the roster + valid-set, and
+    profiles_mod.profiles_to_serve() plus profile metadata to build the
+    roster + valid-set, and
     profiles_mod.profile_exists() to resolve orchestrator/default."""
-    from types import SimpleNamespace
-    fake_profiles = [
-        SimpleNamespace(
-            name=n, is_default=(i == 0), description=f"desc for {n}",
-            description_auto=False, model="m", provider="p", skill_count=1,
-        )
-        for i, n in enumerate(names)
-    ]
+    fake_profiles = [(name, Path.cwd()) for name in names]
     return [
-        patch("hermes_cli.profiles.list_profiles", return_value=fake_profiles),
+        patch(
+            "hermes_cli.profiles.profiles_to_serve",
+            return_value=fake_profiles,
+        ),
+        patch(
+            "hermes_cli.profiles.read_profile_meta",
+            side_effect=[
+                {
+                    "description": f"desc for {name}",
+                    "description_auto": False,
+                }
+                for name in names
+            ],
+        ),
         patch("hermes_cli.profiles.profile_exists", side_effect=lambda x: x in names),
         patch("hermes_cli.profiles.get_active_profile_name", return_value=names[0] if names else "default"),
     ]
@@ -97,6 +104,49 @@ def _create_live_skeleton(title: str = "Foreground-authored shell") -> tuple[str
             needs_specification=True,
         )
     return workflow_id, skeleton
+
+
+def test_build_roster_matches_full_profile_routing_projection(
+    kanban_home,
+):
+    from hermes_cli import profiles as profiles_mod
+
+    profiles_mod.write_profile_meta(
+        kanban_home,
+        description="Default routing profile.",
+    )
+    profiles_root = kanban_home / "profiles"
+    engineer_home = profiles_root / "engineer"
+    undescribed_home = profiles_root / "undescribed"
+    engineer_home.mkdir(parents=True)
+    undescribed_home.mkdir()
+    profiles_mod.write_profile_meta(
+        engineer_home,
+        description="Engineering implementation profile.",
+    )
+
+    full_profiles = profiles_mod.list_profiles()
+    expected = [
+        {
+            "name": profile.name,
+            "description": (
+                (profile.description or "").strip()
+                or f"(no description; profile named {profile.name!r})"
+            ),
+            "has_description": bool((profile.description or "").strip()),
+        }
+        for profile in full_profiles
+    ]
+
+    with patch.object(
+        profiles_mod,
+        "list_profiles",
+        side_effect=AssertionError("full profile projection is not needed"),
+    ):
+        roster, valid = decomp._build_roster()
+
+    assert roster == expected
+    assert valid == {profile["name"] for profile in expected}
 
 
 def test_decompose_with_fanout_creates_children(kanban_home):

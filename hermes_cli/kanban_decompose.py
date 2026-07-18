@@ -372,18 +372,29 @@ def _build_roster() -> tuple[list[dict], set[str]]:
     roster: list[dict] = []
     valid: set[str] = set()
     try:
-        all_profiles = profiles_mod.list_profiles()
+        # The decomposer only needs routing identity + description. Reuse the
+        # gateway's lightweight, validated profile projection instead of
+        # ``list_profiles()``, which also probes gateway processes and scans
+        # every profile's config, distribution metadata, aliases, and skills.
+        # Those presentation fields added seconds to every specification.
+        routing_profiles = [
+            (name, profiles_mod.read_profile_meta(profile_dir))
+            for name, profile_dir in profiles_mod.profiles_to_serve(
+                multiplex=True
+            )
+            if profile_dir.is_dir()
+        ]
     except Exception as exc:
         logger.warning("decompose: failed to list profiles: %s", exc)
         return roster, valid
-    for p in all_profiles:
-        desc = (p.description or "").strip()
+    for name, metadata in routing_profiles:
+        desc = str(metadata.get("description") or "").strip()
         roster.append({
-            "name": p.name,
-            "description": desc or f"(no description; profile named {p.name!r})",
+            "name": name,
+            "description": desc or f"(no description; profile named {name!r})",
             "has_description": bool(desc),
         })
-        valid.add(p.name)
+        valid.add(name)
     return roster, valid
 
 

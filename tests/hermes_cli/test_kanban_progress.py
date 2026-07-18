@@ -8,6 +8,8 @@ launching a worker.
 from __future__ import annotations
 
 import json
+import logging
+import re
 import threading
 import time
 from contextlib import nullcontext
@@ -122,7 +124,79 @@ def test_disabled_auto_decompose_leaves_shells_and_dispatches_only_ready_tasks()
     assert result["specification_task_ids"] == ["durable-shell"]
     assert result["decomposition"] == []
     assert result["candidate_task_ids"] == ["ready-now"]
-    assert any("automatic decomposition is disabled" in warning for warning in result["warnings"])
+    assert any(
+        "automatic decomposition is disabled" in warning
+        for warning in result["warnings"]
+    )
+
+
+def test_decompose_and_dispatch_emits_pipeline_timing(caplog):
+    dispatch_payload = {
+        "candidate_task_ids": ["specified", "child"],
+        "dispatch": {"spawned": ["child"]},
+        "warnings": [],
+    }
+
+    with (
+        caplog.at_level(logging.INFO, logger=progress.__name__),
+        patch.object(
+            progress,
+            "_load_kanban_config",
+            return_value=(
+                {
+                    "auto_decompose": True,
+                    "specification_concurrency": 1,
+                },
+                None,
+            ),
+        ),
+        patch(
+            "hermes_cli.kanban_decompose.decompose_task",
+            return_value=_outcome(
+                "specified",
+                child_ids=["child"],
+                fanout=True,
+            ),
+        ),
+        patch.object(
+            progress,
+            "dispatch_candidates",
+            return_value=dispatch_payload,
+        ),
+    ):
+        result = progress.decompose_and_dispatch(
+            ["specified"],
+            board="loop-board",
+            conn=MagicMock(),
+        )
+
+    assert result["dispatch"]["spawned"] == ["child"]
+    timing_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == progress.__name__
+        and record.getMessage().startswith("kanban progress timing:")
+    ]
+    assert len(timing_messages) == 1
+    message = timing_messages[0]
+    assert "board=loop-board" in message
+    assert "specification_tasks=1" in message
+    assert "candidate_tasks=2" in message
+    assert "spawned=1" in message
+    timings = {
+        name: float(value)
+        for name, value in re.findall(
+            r"(setup_ms|specification_ms|dispatch_ms|total_ms)=([0-9.]+)",
+            message,
+        )
+    }
+    assert set(timings) == {
+        "setup_ms",
+        "specification_ms",
+        "dispatch_ms",
+        "total_ms",
+    }
+    assert all(value >= 0 for value in timings.values())
 
 
 @pytest.mark.parametrize(
@@ -534,15 +608,6 @@ def test_real_decomposer_and_dispatcher_advance_only_the_new_skeleton(
             }
         )
         response.choices[0].finish_reason = "stop"
-        profile = SimpleNamespace(
-            name="engineer",
-            is_default=True,
-            description="implementation",
-            description_auto=False,
-            model="test",
-            provider="test",
-            skill_count=0,
-        )
         spawned: list[str] = []
 
         def fake_spawn(task, _workspace, board=None):
@@ -559,7 +624,17 @@ def test_real_decomposer_and_dispatcher_advance_only_the_new_skeleton(
                 ),
             ),
             patch("agent.auxiliary_client.call_llm", return_value=response),
-            patch("hermes_cli.profiles.list_profiles", return_value=[profile]),
+            patch(
+                "hermes_cli.profiles.profiles_to_serve",
+                return_value=[("engineer", Path.cwd())],
+            ),
+            patch(
+                "hermes_cli.profiles.read_profile_meta",
+                return_value={
+                    "description": "implementation",
+                    "description_auto": False,
+                },
+            ),
             patch("hermes_cli.profiles.profile_exists", return_value=True),
             patch(
                 "hermes_cli.profiles.get_active_profile_name",

@@ -8,12 +8,16 @@ ready work.
 
 from __future__ import annotations
 
+import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 from hermes_cli import kanban_db as kb
 
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_SPECIFICATION_CONCURRENCY = 2
 _MAX_SPECIFICATION_CONCURRENCY = 3
@@ -216,6 +220,9 @@ def decompose_and_dispatch(
 ) -> dict[str, Any]:
     """Compile exact eligible skeletons, then dispatch their ready frontier."""
 
+    started_at = time.perf_counter()
+    specification_started_at: float | None = None
+    specification_finished_at: float | None = None
     specification_ids = _task_ids(specification_task_ids)
     candidates = _task_ids(ready_task_ids)
     outcomes: list[dict[str, Any]] = []
@@ -243,6 +250,7 @@ def decompose_and_dispatch(
     elif specification_ids:
         from hermes_cli import kanban_decompose
 
+        specification_started_at = time.perf_counter()
         scoped_board = str(board or kb.get_current_board()).strip()
 
         def decompose_one(task_id: str) -> Any:
@@ -313,19 +321,50 @@ def decompose_and_dispatch(
             if outcome.ok:
                 candidates.append(outcome.task_id)
                 candidates.extend(outcome.child_ids or [])
+        specification_finished_at = time.perf_counter()
 
+    dispatch_started_at = time.perf_counter()
     dispatched = dispatch_candidates(
         candidates,
         board=board,
         conn=conn,
         policy=policy,
     )
+    finished_at = time.perf_counter()
     warnings.extend(dispatched["warnings"])
+    # This is synchronous coordinator setup, not time waiting on the recovery
+    # watcher: config/policy work before model specification starts.
+    setup_finished_at = (
+        specification_started_at
+        if specification_started_at is not None
+        else dispatch_started_at
+    )
+    specification_ms = (
+        (specification_finished_at - specification_started_at) * 1000
+        if specification_started_at is not None
+        and specification_finished_at is not None
+        else 0.0
+    )
+    dispatch_payload = dispatched["dispatch"]
+    logger.info(
+        "kanban progress timing: board=%s specification_tasks=%d "
+        "candidate_tasks=%d spawned=%d warnings=%d setup_ms=%.3f "
+        "specification_ms=%.3f dispatch_ms=%.3f total_ms=%.3f",
+        str(board or "<current>").strip(),
+        len(specification_ids),
+        len(dispatched["candidate_task_ids"]),
+        len(dispatch_payload.get("spawned") or []),
+        len(warnings),
+        (setup_finished_at - started_at) * 1000,
+        specification_ms,
+        (finished_at - dispatch_started_at) * 1000,
+        (finished_at - started_at) * 1000,
+    )
     return {
         "specification_task_ids": specification_ids,
         "decomposition": outcomes,
         "candidate_task_ids": dispatched["candidate_task_ids"],
-        "dispatch": dispatched["dispatch"],
+        "dispatch": dispatch_payload,
         "warnings": list(dict.fromkeys(warnings)),
     }
 
