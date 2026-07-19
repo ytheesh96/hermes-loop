@@ -69,14 +69,7 @@ import {
 import { $terminalTakeover, setTerminalTakeover } from '../right-sidebar/store'
 import { $workspaceIsPage } from '../routes'
 
-import {
-  $loopPanelController,
-  FilesPane,
-  LogsPane,
-  LoopRailPane,
-  PreviewRailPane,
-  ReviewPaneContent
-} from './panes'
+import { $loopPanelController, FilesPane, LogsPane, LoopPane, PreviewRailPane, ReviewPaneContent } from './panes'
 import { ContribWiring, WiredPane } from './wiring'
 
 /**
@@ -218,13 +211,13 @@ registry.registerMany([
     area: 'panes',
     title: 'Loop',
     data: {
-      placement: 'right',
-      dock: { pane: 'files', pos: 'left' },
+      placement: 'main',
+      dock: { pane: 'workspace', pos: 'right' },
       width: 'clamp(24rem, 36vw, 34rem)',
       minWidth: WORK_RAIL_MIN_WIDTH,
       maxWidth: WORK_RAIL_MAX_WIDTH
     },
-    render: () => <LoopRailPane />
+    render: () => <LoopPane />
   },
   {
     id: 'review',
@@ -344,7 +337,12 @@ const DEFAULT_TREE = split(
   'row',
   [
     group(['sessions'], { id: 'grp-sessions' }),
-    group(['workspace'], { id: 'grp-main' }),
+    split(
+      'row',
+      [group(['workspace'], { id: 'grp-main' }), group(['loop'], { id: 'grp-loop' })],
+      [2, 3],
+      'spl-main-loop'
+    ),
     split(
       'column',
       [
@@ -370,14 +368,18 @@ const DEFAULT_TREE = split(
 
 const FOCUS_TREE = split(
   'row',
-  [group(['sessions']), group(['workspace', 'files', 'preview', 'review', 'terminal'])],
+  [group(['sessions']), group(['workspace', 'loop', 'files', 'preview', 'review', 'terminal'])],
   [1, 4.6]
 )
 
 const TERMINAL_TREE = split(
   'column',
   [
-    split('row', [group(['sessions']), group(['workspace']), group(['files', 'preview', 'review'])], [1, 3.2, 1.2]),
+    split(
+      'row',
+      [group(['sessions']), group(['workspace', 'loop']), group(['files', 'preview', 'review'])],
+      [1, 3.2, 1.2]
+    ),
     group(['terminal'])
   ],
   [3, 1]
@@ -386,7 +388,7 @@ const TERMINAL_TREE = split(
 const QUAD_TREE = split(
   'column',
   [
-    split('row', [group(['sessions', 'files']), group(['workspace'])], [1, 3]),
+    split('row', [group(['sessions', 'files']), group(['workspace', 'loop'])], [1, 3]),
     split('row', [group(['terminal']), group(['preview', 'review', 'logs'])], [1.4, 1])
   ],
   [3, 1]
@@ -575,12 +577,14 @@ bindPaneVisibility('preview', $previewVisible, closeRightRail)
 
 const $loopVisible = computed($loopPanelController, loop => Boolean(loop?.open && !loop.hidden))
 
-bindPaneVisibility(
-  'loop',
-  $loopVisible,
-  () => $loopPanelController.get()?.onHide(),
-  () => $loopPanelController.get()?.onOpen()
-)
+const syncLoopPaneVisibility = (visible: boolean) => {
+  setTreePaneHidden('loop', !visible)
+}
+
+syncLoopPaneVisibility($loopVisible.get())
+$loopVisible.listen(syncLoopPaneVisibility)
+registerPaneCloser('loop', () => $loopPanelController.get()?.onHide())
+registerPaneOpener('loop', () => $loopPanelController.get()?.onOpen())
 
 // Logs are optional chrome: off by default, toggled from ⌘K, persisted.
 const $logsOpen = persistentAtom('hermes.desktop.logsOpen', false, Codecs.bool)

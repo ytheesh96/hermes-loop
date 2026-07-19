@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => {
   interface MockLoopController {
+    canvasScopeKey: string
     focusedTaskId: null | string
     focusRequestKey: number
     hidden: boolean
@@ -37,6 +38,7 @@ const mocks = vi.hoisted(() => {
   const submitText = vi.fn(async () => true)
 
   const defaultLoopController = (): MockLoopController => ({
+    canvasScopeKey: 'logical-origin',
     focusedTaskId: null,
     focusRequestKey: 0,
     hidden: false,
@@ -105,7 +107,7 @@ vi.mock('./chat', () => ({
       <button onClick={() => onOpenKanbanTask?.('t_delegated_loop')} type="button">
         Open delegated Loop row
       </button>
-      <button onClick={onOpenLoop} type="button">
+      <button onClick={() => onOpenLoop?.()} type="button">
         Open Loop canvas
       </button>
     </>
@@ -260,7 +262,17 @@ vi.mock('./updates-overlay', () => ({ UpdatesOverlay: () => null }))
 
 import './contrib/controller'
 
-import { $collapsedTreeSides, $hiddenTreePanes } from '../components/pane-shell/tree/store'
+import { findGroupOfPane } from '../components/pane-shell/tree/model'
+import {
+  $collapsedTreeSides,
+  $hiddenTreePanes,
+  $layoutTree,
+  activateTreePane,
+  closeTreePane,
+  moveTreePane,
+  resetLayoutTree,
+  setTreePaneHidden
+} from '../components/pane-shell/tree/store'
 import { $fileBrowserOpen, setFileBrowserOpen } from '../store/layout'
 import {
   $activeSessionId,
@@ -316,6 +328,7 @@ describe('ContribWiring Loop session-source wiring', () => {
     mocks.submitText.mockClear()
     mocks.useLoopPanelController.mockReset()
     mocks.useLoopPanelController.mockImplementation(mocks.defaultLoopController)
+    resetLayoutTree()
   })
 
   afterEach(() => {
@@ -340,13 +353,37 @@ describe('ContribWiring Loop session-source wiring', () => {
     )
     expect(screen.getByTestId('loop-controller-open').textContent).toBe('true')
 
+    const initialTree = $layoutTree.get()
+    const workspaceGroup = initialTree ? findGroupOfPane(initialTree, 'workspace') : null
+
+    expect(workspaceGroup).not.toBeNull()
+    expect(initialTree && findGroupOfPane(initialTree, 'loop')?.id).not.toBe(workspaceGroup?.id)
+
+    act(() => {
+      setTreePaneHidden('loop', true)
+      activateTreePane(workspaceGroup!.id, 'workspace')
+    })
+    expect($layoutTree.get() && findGroupOfPane($layoutTree.get()!, 'workspace')?.active).toBe('workspace')
+
     fireEvent.click(screen.getByRole('button', { name: /open delegated loop row/i }))
 
-    expect(mocks.selectLoopTask).toHaveBeenCalledWith('t_delegated_loop')
+    expect(mocks.openLoop).toHaveBeenNthCalledWith(1, 't_delegated_loop')
+    expect($hiddenTreePanes.get().has('loop')).toBe(false)
 
     fireEvent.click(screen.getByRole('button', { name: 'Open Loop canvas' }))
 
-    expect(mocks.openLoop).toHaveBeenCalledTimes(1)
+    expect(mocks.openLoop).toHaveBeenCalledTimes(2)
+    expect(mocks.openLoop).toHaveBeenNthCalledWith(2, undefined)
+    expect($layoutTree.get() && findGroupOfPane($layoutTree.get()!, 'loop')?.active).toBe('loop')
+
+    act(() => {
+      const controller = $loopPanelController.get()
+
+      $loopPanelController.set(null)
+      $loopPanelController.set(controller)
+    })
+
+    expect($hiddenTreePanes.get().has('loop')).toBe(false)
   })
 
   it('does not render a visible Loop rail placeholder when the mounted session-source controller is empty', () => {
@@ -370,6 +407,79 @@ describe('ContribWiring Loop session-source wiring', () => {
       })
     )
     expect(screen.getByTestId('loop-controller-open').textContent).toBe('false')
+  })
+
+  it('fronts controller-owned auto-open requests once without stealing focus on controller refresh', () => {
+    const tree = $layoutTree.get()
+    const workspaceGroup = tree ? findGroupOfPane(tree, 'workspace') : null
+
+    expect(workspaceGroup).not.toBeNull()
+
+    act(() => {
+      moveTreePane('loop', { groupId: workspaceGroup!.id, pos: 'center' })
+      setTreePaneHidden('loop', true)
+      activateTreePane(workspaceGroup!.id, 'workspace')
+    })
+
+    mocks.useLoopPanelController.mockReturnValue({
+      ...mocks.defaultLoopController(),
+      focusRequestKey: 1
+    })
+
+    renderController()
+
+    expect($layoutTree.get() && findGroupOfPane($layoutTree.get()!, 'loop')?.active).toBe('loop')
+
+    act(() => {
+      activateTreePane(workspaceGroup!.id, 'workspace')
+      $currentCwd.set('/tmp/hermes-loop-project/refreshed')
+    })
+
+    expect($layoutTree.get() && findGroupOfPane($layoutTree.get()!, 'workspace')?.active).toBe('workspace')
+  })
+
+  it('closes Loop through its controller and reopens the same split from the launcher', () => {
+    const controller = mocks.defaultLoopController()
+
+    const onHide = vi.fn(() => {
+      const current = $loopPanelController.get()
+
+      if (current) {
+        $loopPanelController.set({ ...current, hidden: true })
+      }
+    })
+
+    const onOpen = vi.fn(() => {
+      const current = $loopPanelController.get()
+
+      if (current) {
+        $loopPanelController.set({ ...current, hidden: false })
+      }
+    })
+
+    controller.onHide = onHide
+    controller.onOpen = onOpen
+    mocks.useLoopPanelController.mockReturnValue(controller)
+
+    renderController()
+
+    const before = $layoutTree.get()
+    const loopGroupId = before ? findGroupOfPane(before, 'loop')?.id : null
+
+    expect(loopGroupId).toBeTruthy()
+    expect($hiddenTreePanes.get().has('loop')).toBe(false)
+
+    act(() => closeTreePane('loop'))
+
+    expect(onHide).toHaveBeenCalledTimes(1)
+    expect($hiddenTreePanes.get().has('loop')).toBe(true)
+    expect($layoutTree.get() && findGroupOfPane($layoutTree.get()!, 'loop')?.id).toBe(loopGroupId)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Loop canvas' }))
+
+    expect(onOpen).toHaveBeenCalledTimes(1)
+    expect($hiddenTreePanes.get().has('loop')).toBe(false)
+    expect($layoutTree.get() && findGroupOfPane($layoutTree.get()!, 'loop')?.id).toBe(loopGroupId)
   })
 
   it('renders an explicitly opened Loop canvas before session-source data exists', () => {

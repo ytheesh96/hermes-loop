@@ -19,6 +19,7 @@ import { DesktopInstallOverlay } from '@/components/desktop-install-overlay'
 import { GatewayConnectingOverlay } from '@/components/gateway-connecting-overlay'
 import { NotificationStack } from '@/components/notifications'
 import { DesktopOnboardingOverlay } from '@/components/onboarding'
+import { revealTreePane } from '@/components/pane-shell/tree/store'
 import { FloatingPet } from '@/components/pet/floating-pet'
 import { RemoteDisplayBanner } from '@/components/remote-display-banner'
 import { emitGatewayEvent } from '@/contrib/events'
@@ -515,6 +516,35 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     loopSourceSessionId
   })
 
+  const lastLoopFocusRequestRef = useRef('')
+
+  const loopFocusRequestId =
+    loopController.focusRequestKey > 0 ? `${loopController.canvasScopeKey}:${loopController.focusRequestKey}` : ''
+
+  useEffect(() => {
+    if (
+      !loopFocusRequestId ||
+      !loopController.open ||
+      loopController.hidden ||
+      lastLoopFocusRequestRef.current === loopFocusRequestId
+    ) {
+      return
+    }
+
+    lastLoopFocusRequestRef.current = loopFocusRequestId
+    revealTreePane('loop')
+  }, [loopController.hidden, loopController.open, loopFocusRequestId])
+
+  const openLoop = loopController.onOpen
+
+  const openLoopPanel = useCallback(
+    (taskId?: string) => {
+      openLoop(taskId)
+      revealTreePane('loop')
+    },
+    [openLoop]
+  )
+
   useEffect(() => {
     $loopPanelController.set(loopController)
 
@@ -560,7 +590,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     getRuntimeIdForStoredSession,
     getRouteToken,
     handleSkinCommand,
-    onOpenLoop: loopController.onOpen,
+    onOpenLoop: openLoopPanel,
     openMemoryGraph: openStarmap,
     refreshSessions,
     requestGateway,
@@ -779,8 +809,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     onPickFiles: () => void composer.pickContextPaths('file'),
     onPickFolders: () => void composer.pickContextPaths('folder'),
     onPickImages: () => void composer.pickImages(),
-    onOpenLoop: loopController.onOpen,
-    onOpenKanbanTask: loopController.onSelectTaskId,
+    onOpenLoop: openLoopPanel,
+    onOpenKanbanTask: openLoopPanel,
     onReload: reloadFromMessage,
     onRemoveAttachment: id => void composer.removeAttachment(id),
     onRestoreToMessage: restoreToMessage,

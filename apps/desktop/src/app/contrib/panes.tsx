@@ -78,7 +78,7 @@ export const $restartPreviewServer = atom<((url: string, context?: string) => Pr
  * rendered layout-tree pane. The atom breaks the wiring↔pane import cycle. */
 export const $loopPanelController = atom<LoopPanelController | null>(null)
 
-export function LoopRailPane() {
+export function LoopPane() {
   const loop = useStore($loopPanelController)
 
   if (!loop) {

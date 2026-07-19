@@ -43,17 +43,57 @@ import { rootChildSide } from './renderer/track-model'
 // v2: v1 trees were saved against placeholder panes with index-order zone
 // assignment (chat could land in a corner cell). Retire them wholesale.
 const STORAGE_KEY = 'hermes.desktop.layoutTree.v2'
+const USER_PLACED_KEY = 'hermes.desktop.userPlacedPanes.v1'
+const DISMISSED_KEY = 'hermes.desktop.dismissedPanes.v1'
+const LOOP_WORKSPACE_SPLIT_MIGRATION_KEY = 'hermes.desktop.layoutMigration.loopWorkspaceSplit.v1'
 
 writeKey('hermes.desktop.layoutTree.v1', null)
 
 let defaultTree: LayoutNode | null = null
+
+/**
+ * Loop is a main-workspace pane now, with a native split beside chat by
+ * default. Move only automatic/legacy placement into that split. A
+ * user-dragged or dismissed Loop pane wins, and the one-shot marker prevents
+ * later presets/customization from being reinterpreted as legacy placement.
+ */
+function migrateLoopToWorkspaceSplit(tree: LayoutNode | null): LayoutNode | null {
+  if (readKey(LOOP_WORKSPACE_SPLIT_MIGRATION_KEY) === 'done') {
+    return tree
+  }
+
+  let migrated = tree
+  const userPlaced = new Set(readJson<string[]>(USER_PLACED_KEY) ?? [])
+  const dismissed = new Set(readJson<string[]>(DISMISSED_KEY) ?? [])
+  const activePresetId = readKey('hermes.desktop.layoutPreset.active') ?? 'default'
+  const loopGroup = tree ? findGroupOfPane(tree, 'loop') : null
+  const workspaceGroup = tree ? findGroupOfPane(tree, 'workspace') : null
+  const migrateAutomaticPlacement = activePresetId === 'default' || activePresetId === 'custom'
+
+  if (tree && workspaceGroup && migrateAutomaticPlacement && !userPlaced.has('loop') && !dismissed.has('loop')) {
+    const withoutLoop = loopGroup ? removePane(tree, 'loop') : tree
+
+    const inserted = withoutLoop
+      ? insertAtGroup(withoutLoop, workspaceGroup.id, 'loop', 'right', undefined, false)
+      : null
+
+    if (inserted) {
+      migrated = inserted
+      writeJson(STORAGE_KEY, migrated)
+    }
+  }
+
+  writeKey(LOOP_WORKSPACE_SPLIT_MIGRATION_KEY, 'done')
+
+  return migrated
+}
 
 function loadPersisted(): LayoutNode | null {
   const parsed = readJson<unknown>(STORAGE_KEY)
 
   // Canonicalize on load: strips stale attributes older code persisted
   // (e.g. explicit headerHidden on lone-pane zones) and re-flattens.
-  return isLayoutNode(parsed) ? normalize(parsed) : null
+  return migrateLoopToWorkspaceSplit(isLayoutNode(parsed) ? normalize(parsed) : null)
 }
 
 function persist(tree: LayoutNode | null) {
@@ -174,8 +214,6 @@ function frontPaneInGroup(paneId: string) {
  *    from the tree and remembered so adoption doesn't re-add it. Reveal
  *    intent (a preview target, ⌘G) or a layout reset un-dismisses.
  */
-const DISMISSED_KEY = 'hermes.desktop.dismissedPanes.v1'
-
 function loadDismissed(): ReadonlySet<string> {
   return new Set(readJson<string[]>(DISMISSED_KEY) ?? [])
 }
@@ -637,8 +675,6 @@ export function revealTreePane(paneId: string) {
 
   if (hiddenNow.has(paneId)) {
     setTreePaneHidden(paneId, false)
-
-    return
   }
 
   const tree = $layoutTree.get()
@@ -726,24 +762,45 @@ export const $sessionTileEdgeHover = computed(
 
 /**
  * Adopt panes present in `source` but missing from `target`: each joins the
- * group its source siblings map to in the target (first group as a last
- * resort). Layout changes never lose panes.
+ * group its source siblings map to in the target, then its declared dock
+ * anchor, then the first group as a last resort. A dismissed pane stays
+ * absent until an explicit reveal clears its dismissal.
  */
 function adoptMissingPanes(target: LayoutNode, source: LayoutNode): LayoutNode {
   const have = new Set(allPaneIds(target))
+  const dismissed = $dismissedPanes.get()
   let next = target
 
   for (const paneId of allPaneIds(source)) {
-    if (have.has(paneId)) {
+    if (have.has(paneId) || dismissed.has(paneId)) {
       continue
     }
 
     const sibling = findGroupOfPane(source, paneId)?.panes.find(p => have.has(p))
-    const targetId = (sibling ? findGroupOfPane(next, sibling)?.id : undefined) ?? groupLeafIds(next)[0]
+
+    const dock = (
+      registry.getArea('panes').find(c => c.id === paneId)?.data as { dock?: PaneDockHint } | undefined
+    )?.dock
+
+    const dockAnchor = dock && have.has(dock.pane) ? dock.pane : undefined
+
+    const targetId =
+      (sibling ? findGroupOfPane(next, sibling)?.id : undefined) ??
+      (dockAnchor ? findGroupOfPane(next, dockAnchor)?.id : undefined) ??
+      groupLeafIds(next)[0]
 
     if (targetId) {
+      const targetGroup = findGroup(next, targetId)
+      const pos = sibling || !dockAnchor ? 'center' : dock!.pos
+      const before = sibling || !dockAnchor ? null : dock!.before
+
       // Silent adoption: don't steal the target zone's active tab (logs).
-      next = insertAtGroup(next, targetId, paneId, 'center', null, false) ?? next
+      const inserted = insertAtGroup(next, targetId, paneId, pos, before, false)
+
+      if (inserted) {
+        next = targetGroup ? setGroupHeaderHiddenOp(inserted, targetId, targetGroup.headerHidden) : inserted
+      }
+
       have.add(paneId)
     }
   }
@@ -882,8 +939,6 @@ function commit(next: LayoutNode | null) {
 // docking (dockPaneBeside) only steers panes the user hasn't touched.
 // Presets and resets hand placement back to the app.
 // ---------------------------------------------------------------------------
-
-const USER_PLACED_KEY = 'hermes.desktop.userPlacedPanes.v1'
 
 export const $userPlacedPanes = atom<ReadonlySet<string>>(new Set(readJson<string[]>(USER_PLACED_KEY) ?? []))
 

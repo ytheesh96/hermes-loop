@@ -511,7 +511,7 @@ export function setGroupMinimized(root: LayoutNode, groupId: string, minimized: 
   return mapGroups(root, g => (g.id === groupId ? { ...g, minimized } : g))
 }
 
-export function setGroupHeaderHidden(root: LayoutNode, groupId: string, headerHidden: boolean): LayoutNode {
+export function setGroupHeaderHidden(root: LayoutNode, groupId: string, headerHidden: boolean | undefined): LayoutNode {
   return mapGroups(root, g => (g.id === groupId ? { ...g, headerHidden } : g))
 }
 

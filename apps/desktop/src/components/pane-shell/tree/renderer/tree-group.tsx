@@ -277,6 +277,9 @@ export function TreeGroup({
   // chevron + tap gesture, routed so ⌃`/the titlebar toggle stay truthful.
   const toggleCollapse = () => (node.minimized ? restoreTreePane(activeId) : collapseTreePane(activeId))
 
+  const closeButtonPane =
+    shown.length === 1 && !isCollapsePane(activeId) && !paneChrome(active).uncloseable ? activeId : undefined
+
   // Same menu on the header strip and the edit veil — one prop bag.
   const zoneMenu = {
     closable,
@@ -467,6 +470,17 @@ export function TreeGroup({
                 type="button"
               >
                 <Codicon name={node.minimized ? 'chevron-down' : 'chevron-up'} size="0.75rem" />
+              </button>
+            )}
+            {closeButtonPane && (
+              <button
+                aria-label={`${t.common.close} ${paneFor(closeButtonPane)?.title ?? closeButtonPane}`}
+                className="mr-1 grid size-5 shrink-0 place-items-center self-center rounded-md text-(--ui-text-tertiary) opacity-70 transition hover:bg-(--ui-control-hover-background) hover:text-foreground hover:opacity-100"
+                onClick={() => closeTab(closeButtonPane)}
+                onPointerDown={e => e.stopPropagation()}
+                type="button"
+              >
+                <Codicon name="close" size="0.75rem" />
               </button>
             )}
             <StripDropCaret groupId={node.id} stripRef={stripRef} />
