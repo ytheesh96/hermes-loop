@@ -47,7 +47,9 @@ def _make_agent(monkeypatch, tmp_path, *, config: str = "", task_id: str = ""):
 def test_unscoped_loop_foreground_selects_bounded_guidance(monkeypatch, tmp_path):
     agent = _make_agent(monkeypatch, tmp_path)
 
-    assert "kanban_create" in agent.valid_tool_names
+    assert "delegate_task" in agent.valid_tool_names
+    assert "kanban_unblock" in agent.valid_tool_names
+    assert "kanban_create" not in agent.valid_tool_names
     assert "kanban_decompose" not in agent.valid_tool_names
     assert agent._kanban_worker_guidance == KANBAN_FOREGROUND_GUIDANCE
 

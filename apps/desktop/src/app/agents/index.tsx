@@ -1,7 +1,6 @@
 import { useStore } from '@nanostores/react'
 import { type ReactNode, useEffect, useMemo, useState } from 'react'
 
-import { useElapsedSeconds } from '@/components/chat/activity-timer'
 import { ActivityTimerText } from '@/components/chat/activity-timer-text'
 import { Codicon } from '@/components/ui/codicon'
 import { FadeText } from '@/components/ui/fade-text'
@@ -35,6 +34,16 @@ const humanToolLabel = (name: string): string =>
     .map(part => part[0]!.toUpperCase() + part.slice(1))
     .join(' ') || name
 
+const compactWorkerPreview = (value: string | undefined, max = 160): string | undefined => {
+  const text = value?.replace(/\s+/g, ' ').trim()
+
+  if (!text) {
+    return undefined
+  }
+
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text
+}
+
 const needsAttentionText = (text: string): boolean =>
   text.includes('review-required') ||
   text.includes('review required') ||
@@ -43,9 +52,12 @@ const needsAttentionText = (text: string): boolean =>
 
 function loopagentNeedsAttention(agent: LoopagentActivity): boolean {
   const status = normalized(agent.status)
-  const taskStatus = normalized(agent.taskStatus)
 
-  const text = [agent.errorPreview, agent.summaryPreview, agent.sourceEvent, agent.taskStatus]
+  if (status === 'queued' || status === 'running') {
+    return false
+  }
+
+  const text = [agent.errorPreview, agent.summaryPreview, agent.sourceEvent]
     .filter(Boolean)
     .join(' ')
     .toLowerCase()
@@ -54,7 +66,6 @@ function loopagentNeedsAttention(agent: LoopagentActivity): boolean {
     status === 'blocked' ||
     status === 'failed' ||
     status === 'interrupted' ||
-    taskStatus === 'blocked' ||
     needsAttentionText(text)
   )
 }
@@ -93,50 +104,49 @@ function loopagentStatus(agent: LoopagentActivity): SubagentStatus {
 
 function loopagentContextLabel(agent: LoopagentActivity): string | undefined {
   const profile = agent.profile?.trim()
-  const currentTool = agent.currentTool ? humanToolLabel(agent.currentTool) : undefined
-  const session = agent.workerSessionId?.trim()
-  const label = [profile, currentTool, session].filter(Boolean).join(' · ')
 
-  return label || undefined
+  return profile || undefined
 }
 
 function loopagentStream(agent: LoopagentActivity, status: SubagentStatus): SubagentStreamEntry[] {
   const at = agent.updatedAt || Date.now()
   const currentTool = agent.currentTool ? humanToolLabel(agent.currentTool) : ''
+  const failed = status === 'failed' || status === 'interrupted'
+  const failurePreview = failed ? compactWorkerPreview(agent.errorPreview || agent.summaryPreview) : undefined
+  const stream = [...(agent.stream ?? [])]
 
-  if (agent.errorPreview) {
-    return [{ at, isError: true, kind: 'progress', text: agent.errorPreview }]
+  if (failurePreview && !stream.some(entry => entry.isError && entry.kind === 'summary')) {
+    stream.push({ at, isError: true, kind: 'summary', text: failurePreview })
   }
 
-  if (agent.summaryPreview) {
-    return [{ at, kind: status === 'completed' ? 'summary' : 'progress', text: agent.summaryPreview }]
+  if (stream.length > 0) {
+    return stream
   }
 
-  if (currentTool) {
-    return [{ at, kind: 'tool', text: currentTool }]
-  }
-
-  return []
+  return currentTool ? [{ at, kind: 'tool', text: currentTool }] : []
 }
 
 function loopagentToSubagent(agent: LoopagentActivity): SubagentProgress {
   const status = loopagentStatus(agent)
+  const failed = status === 'failed' || status === 'interrupted'
+  const failurePreview = failed ? compactWorkerPreview(agent.errorPreview || agent.summaryPreview) : undefined
 
   return {
     currentTool: agent.currentTool,
     filesRead: [],
-    filesWritten: [],
+    filesWritten: agent.filesWritten ?? [],
     goal: agent.title || agent.taskId,
     id: agent.id,
     model: loopagentContextLabel(agent),
     parentId: null,
     sessionId: agent.workerSessionId,
-    startedAt: agent.updatedAt,
+    startedAt: agent.startedAt ?? agent.updatedAt,
     status,
     stream: loopagentStream(agent, status),
-    summary: agent.summaryPreview || agent.errorPreview,
+    summary: failurePreview,
     taskCount: 1,
     taskIndex: 0,
+    toolCount: agent.toolCount,
     updatedAt: agent.updatedAt
   }
 }
@@ -148,14 +158,16 @@ const allLoopagentWorkers = (bySession: Record<string, LoopagentActivity[]>): Su
 
 function statusItemToSubagent(item: ComposerStatusItem): SubagentProgress {
   const at = Date.now()
-  const label = [item.profile, item.currentTool, item.sessionId].filter(Boolean).join(' · ') || undefined
+  const label = item.profile?.trim() || undefined
   const status: SubagentStatus = item.state === 'failed' ? 'failed' : item.state === 'done' ? 'completed' : 'running'
+  const failurePreview = status === 'failed' ? compactWorkerPreview(item.output) : undefined
+  const stream: SubagentStreamEntry[] = [...(item.activity ?? [])]
 
-  const stream: SubagentStreamEntry[] = item.output
-    ? [{ at, isError: item.state === 'failed', kind: 'progress', text: item.output }]
-    : item.currentTool
-      ? [{ at, kind: 'tool', text: item.currentTool }]
-      : []
+  if (failurePreview && !stream.some(entry => entry.isError && entry.kind === 'summary')) {
+    stream.push({ at, isError: true, kind: 'summary', text: failurePreview })
+  } else if (stream.length === 0 && item.currentTool) {
+    stream.push({ at, kind: 'tool', text: item.currentTool })
+  }
 
   return {
     currentTool: item.currentTool,
@@ -166,13 +178,14 @@ function statusItemToSubagent(item: ComposerStatusItem): SubagentProgress {
     model: label,
     parentId: null,
     sessionId: item.sessionId,
-    startedAt: at,
+    startedAt: item.startedAt ?? at,
     status,
     stream,
-    summary: item.output,
+    summary: failurePreview,
     taskCount: 1,
     taskIndex: 0,
-    updatedAt: at
+    toolCount: item.toolCount,
+    updatedAt: item.updatedAt ?? at
   }
 }
 
@@ -495,10 +508,11 @@ function StreamLine({
 function SubagentRow({ node, depth = 0, nowMs }: { node: SubagentNode; depth?: number; nowMs: number }) {
   const { t } = useI18n()
   const running = node.status === 'running' || node.status === 'queued'
-  const elapsed = useElapsedSeconds(running, `subagent:${node.id}`)
 
   const durationSeconds =
-    typeof node.durationSeconds === 'number' ? Math.max(0, Math.round(node.durationSeconds)) : elapsed
+    typeof node.durationSeconds === 'number'
+      ? Math.max(0, Math.round(node.durationSeconds))
+      : Math.max(0, Math.round(((running ? nowMs : node.updatedAt) - node.startedAt) / 1000))
 
   const [open, setOpen] = useState(() => running || depth < 2)
   const enterRef = useEnterAnimation(true, `subagent-row:${node.id}`)

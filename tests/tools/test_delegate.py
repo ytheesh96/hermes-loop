@@ -139,6 +139,10 @@ class TestDelegateRequirements(unittest.TestCase):
         props = fn["parameters"]["properties"]
         self.assertNotIn("decompose", props)
         self.assertNotIn("decompose", props["tasks"]["items"]["properties"])
+        blocks = props["tasks"]["items"]["properties"]["blocks"]
+        self.assertEqual(blocks["type"], "array")
+        self.assertEqual(blocks["items"], {"type": "string"})
+        self.assertIn("new task -> existing task", blocks["description"])
 
 
 class TestChildSystemPrompt(unittest.TestCase):

@@ -1989,7 +1989,11 @@ export const zh: Translations = {
   statusStack: {
     agents: '代理',
     background: count => `${count} 个后台任务`,
+    blockedTasks: count => `${count} 个受阻任务`,
+    completedTasks: count => `${count} 个已完成任务`,
+    loop: 'Loop',
     loopWorkers: count => `${count} 个 Kanban 代理`,
+    pendingTasks: count => `${count} 个待处理任务`,
     subagents: count => `${count} 个子代理`,
     todos: (done, total) => `任务 ${done}/${total}`,
     running: '运行中',

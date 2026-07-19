@@ -1,11 +1,15 @@
 import { atom } from 'nanostores'
 
+import type { SubagentStreamEntry } from './subagents'
+
 export type LoopagentStatus = 'blocked' | 'completed' | 'failed' | 'interrupted' | 'queued' | 'running'
 
 export interface LoopagentActivity {
   board?: string
   currentTool?: string
+  endedAt?: number
   errorPreview?: string
+  filesWritten?: string[]
   id: string
   /** Legacy live-event compatibility only. Canonical grouping uses workflowId. */
   isRootTask?: boolean
@@ -15,13 +19,17 @@ export interface LoopagentActivity {
   profile?: string
   revision?: number
   runId?: number
+  sequence?: number
   sourceEvent: string
+  startedAt?: number
   status: LoopagentStatus
+  stream?: SubagentStreamEntry[]
   summaryPreview?: string
   taskId: string
   taskStatus?: string
   tenant?: string
   title: string
+  toolCount?: number
   updatedAt: number
   workerSessionId?: string
   workflowId?: string
@@ -32,6 +40,8 @@ export type LoopagentPayload = Record<string, unknown>
 export const $loopagentsBySession = atom<Record<string, LoopagentActivity[]>>({})
 
 const TERMINAL: ReadonlySet<LoopagentStatus> = new Set(['completed', 'failed', 'interrupted'])
+const MAX_STREAM = 24
+const TOOL_PREVIEW_MAX = 96
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value && typeof value === 'object' && !Array.isArray(value))
@@ -60,13 +70,14 @@ const compact = (value: unknown, max = 220): string | undefined => {
 const statusFromPayload = (payload: LoopagentPayload, eventType: string): LoopagentStatus => {
   const worker = record(payload.worker)
 
+  const workerCandidates = [payload.status, payload.run_status, worker.status, payload.outcome, worker.outcome].filter(
+    Boolean
+  )
+
   const candidates = [
-    payload.status,
-    payload.run_status,
-    worker.status,
-    payload.task_status,
-    payload.outcome,
-    worker.outcome,
+    ...(kindOf(payload, eventType) === 'worker' && workerCandidates.length > 0
+      ? workerCandidates
+      : [payload.status, payload.task_status, payload.outcome]),
     payload.event,
     eventType
   ]
@@ -111,6 +122,8 @@ const revisionOf = (payload: LoopagentPayload): number | undefined =>
 const latestTaskEventIdOf = (payload: LoopagentPayload): number | undefined =>
   num(payload.latest_task_event_id) ?? num(payload.latestTaskEventId)
 
+const sequenceOf = (payload: LoopagentPayload): number | undefined => num(payload.sequence)
+
 const kindOf = (payload: LoopagentPayload, eventType: string): 'task' | 'worker' =>
   eventType.includes('.task.') || str(payload.event).includes('.task.') ? 'task' : 'worker'
 
@@ -145,7 +158,116 @@ const newerThan = (payload: LoopagentPayload, prev: LoopagentActivity | undefine
     return latestTaskEventId >= prev.latestTaskEventId
   }
 
+  const sequence = sequenceOf(payload)
+
+  if (sequence !== undefined && prev.sequence !== undefined) {
+    return sequence > prev.sequence
+  }
+
   return true
+}
+
+const timestampMs = (...values: unknown[]): number | undefined => {
+  for (const value of values) {
+    const numeric = num(value)
+
+    if (numeric !== undefined) {
+      return numeric >= 1_000_000_000_000 ? numeric : numeric * 1000
+    }
+
+    const text = str(value)
+    const parsed = text ? Date.parse(text) : Number.NaN
+
+    if (Number.isFinite(parsed)) {
+      return parsed
+    }
+  }
+
+  return undefined
+}
+
+const toolLabel = (name: string): string =>
+  name
+    .split('_')
+    .filter(Boolean)
+    .map(part => part[0]!.toUpperCase() + part.slice(1))
+    .join(' ') || name
+
+const formatTool = (name: string, preview = ''): string => {
+  const snippet = compact(preview, TOOL_PREVIEW_MAX)
+
+  return snippet ? `${toolLabel(name)}("${snippet}")` : toolLabel(name)
+}
+
+const appendStream = (stream: SubagentStreamEntry[], entry: SubagentStreamEntry): SubagentStreamEntry[] => {
+  const last = stream.at(-1)
+
+  if (last?.kind === entry.kind && last.text === entry.text && last.isError === entry.isError) {
+    return stream
+  }
+
+  return [...stream, entry].slice(-MAX_STREAM)
+}
+
+const activityEntriesFromPayload = (
+  payload: LoopagentPayload,
+  status: LoopagentStatus,
+  eventType: string,
+  at: number
+): SubagentStreamEntry[] => {
+  const entries: SubagentStreamEntry[] = []
+  const source = normalized(str(payload.event) || eventType)
+  const tool = str(payload.tool_name) || str(payload.current_tool) || str(payload.currentTool)
+  const toolContext = compact(payload.tool_context, TOOL_PREVIEW_MAX)
+  const toolPreview = compact(payload.tool_preview, TOOL_PREVIEW_MAX)
+  const progress = compact(payload.progress_text)
+  const thinking = compact(payload.text)
+  const exitCode = num(payload.exit_code)
+  const toolFailed = payload.success === false || (exitCode !== undefined && exitCode !== 0)
+  const toolStarted = source.endsWith('tool_start') || eventType.endsWith('tool_start')
+  const heartbeat = source.endsWith('heartbeat') || eventType.endsWith('heartbeat')
+
+  if (tool && (toolContext || toolStarted || (heartbeat && !progress && !toolPreview))) {
+    entries.push({ at, kind: 'tool', text: formatTool(tool, toolContext) })
+  }
+
+  if (progress) {
+    const current = num(payload.progress_current)
+    const total = num(payload.progress_total)
+    const unit = str(payload.unit)
+    const count = current !== undefined && total !== undefined ? ` · ${current}/${total}${unit ? ` ${unit}` : ''}` : ''
+
+    entries.push({ at, kind: 'progress', text: `${progress}${count}` })
+  }
+
+  if (thinking && (source.endsWith('thinking') || typeof payload.redacted === 'boolean')) {
+    entries.push({ at, kind: 'thinking', text: thinking })
+  }
+
+  if (tool && toolPreview) {
+    entries.push({ at, isError: toolFailed, kind: 'tool', text: formatTool(tool, toolPreview) })
+  }
+
+  const error =
+    compact(payload.error_preview) ??
+    compact(payload.error) ??
+    (status === 'blocked' ? compact(payload.block_reason) : undefined)
+
+  if (error && (toolFailed || status === 'blocked' || status === 'failed' || status === 'interrupted')) {
+    entries.push({ at, isError: true, kind: 'summary', text: error })
+  } else if (TERMINAL.has(status) || status === 'blocked') {
+    const summary =
+      compact(payload.safe_summary) ??
+      compact(payload.safe_preview) ??
+      compact(payload.summary_preview) ??
+      compact(payload.summary)
+
+    if (summary) {
+      entries.push({ at, isError: status !== 'completed', kind: 'summary', text: summary })
+    }
+  }
+
+  return entries
 }
 
 const toActivity = (
@@ -164,17 +286,29 @@ const toActivity = (
   const task = record(payload.task)
   const worker = record(payload.worker)
   const kind = kindOf(payload, eventType)
+  const eventAt = timestampMs(payload.created_at) ?? at
+
+  const stream = activityEntriesFromPayload(payload, status, eventType, eventAt).reduce(
+    appendStream,
+    prev?.stream ?? []
+  )
 
   const summaryPreview =
     compact(payload.summary_preview) ??
     compact(payload.safe_summary) ??
+    compact(payload.safe_preview) ??
+    compact(payload.block_reason) ??
     compact(payload.summary) ??
     compact(worker.summary_preview) ??
     compact(worker.summary) ??
     prev?.summaryPreview
 
   const errorPreview =
-    compact(payload.error_preview) ?? compact(payload.error) ?? compact(worker.error_preview) ?? prev?.errorPreview
+    compact(payload.error_preview) ??
+    compact(payload.error) ??
+    compact(worker.error_preview) ??
+    (status === 'blocked' ? compact(payload.block_reason) : undefined) ??
+    prev?.errorPreview
 
   const parentTaskIds = strings(payload.parent_task_ids).length
     ? strings(payload.parent_task_ids)
@@ -185,6 +319,15 @@ const toActivity = (
   const workflowId =
     str(payload.workflow_id) || str(task.workflow_id) || str(worker.workflow_id) || prev?.workflowId
 
+  const filesWritten = strings(payload.changed_files_preview).length
+    ? strings(payload.changed_files_preview)
+    : strings(worker.changed_files_preview).length
+      ? strings(worker.changed_files_preview)
+      : (prev?.filesWritten ?? [])
+
+  const sourceEvent = str(payload.event) || eventType
+  const toolStarted = sourceEvent.endsWith('tool_start') || eventType.endsWith('tool_start')
+
   return {
     board: str(payload.board) || prev?.board,
     currentTool:
@@ -193,7 +336,9 @@ const toActivity = (
       str(payload.tool_name) ||
       str(worker.current_tool) ||
       prev?.currentTool,
+    endedAt: timestampMs(payload.ended_at, worker.ended_at) ?? prev?.endedAt,
     errorPreview,
+    filesWritten,
     id: prev?.id ?? idOf(payload, eventType),
     isRootTask: workflowId
       ? undefined
@@ -206,13 +351,18 @@ const toActivity = (
     profile: str(payload.profile) || prev?.profile,
     revision: revisionOf(payload) ?? prev?.revision,
     runId: runIdOf(payload) ?? prev?.runId,
-    sourceEvent: str(payload.event) || eventType,
+    sequence: sequenceOf(payload) ?? prev?.sequence,
+    sourceEvent,
+    startedAt:
+      prev?.startedAt ?? timestampMs(payload.started_at, worker.started_at, payload.created_at) ?? at,
     status,
+    stream,
     summaryPreview,
     taskId,
     taskStatus: str(payload.task_status) || str(task.status) || prev?.taskStatus,
     tenant: str(payload.tenant) || prev?.tenant,
     title: str(payload.task_title) || str(payload.title) || str(task.title) || prev?.title || taskId,
+    toolCount: (prev?.toolCount ?? 0) + (toolStarted ? 1 : 0),
     updatedAt: at,
     workerSessionId: str(payload.worker_session_id) || prev?.workerSessionId,
     workflowId

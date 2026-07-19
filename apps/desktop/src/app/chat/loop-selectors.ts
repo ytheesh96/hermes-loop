@@ -36,13 +36,7 @@ export function isGraphActiveLoopRow(row: LoopRow): boolean {
   const status = normalizedLoopValue(row.status)
   const runStatus = normalizedLoopValue(row.latestRun?.status)
 
-  return (
-    row.active ||
-    (row.activeDecompositionChildCount || 0) > 0 ||
-    status === 'running' ||
-    status === 'in_progress' ||
-    runStatus === 'running'
-  )
+  return row.active || status === 'running' || status === 'in_progress' || runStatus === 'running'
 }
 
 export function loopAttentionText(row: LoopRow): string {

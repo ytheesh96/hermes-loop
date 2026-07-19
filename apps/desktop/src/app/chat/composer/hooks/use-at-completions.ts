@@ -7,8 +7,8 @@ import { normalize } from '@/lib/text'
 import type { CompletionEntry, CompletionPayload } from './use-live-completion-adapter'
 import { useLiveCompletionAdapter } from './use-live-completion-adapter'
 
-const KIND_RE = /^@(file|folder|url|image|tool|git):(.*)$/
-const REF_STARTERS = new Set(['file', 'folder', 'url', 'image', 'tool', 'git'])
+const KIND_RE = /^@(file|folder|url|image|tool|git|task):(.*)$/
+const REF_STARTERS = new Set(['file', 'folder', 'url', 'image', 'tool', 'git', 'task'])
 
 const STARTER_META: Record<string, string> = {
   file: 'Attach a file reference',
@@ -16,11 +16,13 @@ const STARTER_META: Record<string, string> = {
   url: 'Attach a URL reference',
   image: 'Attach an image reference',
   tool: 'Attach a tool reference',
-  git: 'Attach git context'
+  git: 'Attach git context',
+  task: 'attach task'
 }
 
-function starterEntries(query: string): CompletionEntry[] {
-  const q = normalize(query)
+export function starterEntries(query: string): CompletionEntry[] {
+  const normalized = normalize(query)
+  const q = normalized === 'task:' ? 'task' : normalized
   const kinds = Array.from(REF_STARTERS)
   const filtered = q ? kinds.filter(kind => kind.startsWith(q)) : kinds
 
@@ -29,6 +31,17 @@ function starterEntries(query: string): CompletionEntry[] {
     display: `@${kind}:`,
     meta: STARTER_META[kind] || ''
   }))
+}
+
+export function mergeGatewayAtCompletions(items: CompletionEntry[], starters: CompletionEntry[]): CompletionEntry[] {
+  if (!items.length) {
+    return starters
+  }
+
+  const texts = new Set(items.map(item => item.text))
+  const requiredClientStarters = starters.filter(item => item.text === '@task:' && !texts.has(item.text))
+
+  return [...items, ...requiredClientStarters]
 }
 
 interface AtItemMetadata extends Record<string, string> {
@@ -105,7 +118,7 @@ export function useAtCompletions(options: {
         const result = await gateway.request<{ items?: CompletionEntry[] }>('complete.path', params)
         const items = result.items ?? []
 
-        return { items: items.length > 0 ? items : starters, query }
+        return { items: mergeGatewayAtCompletions(items, starters), query }
       } catch {
         return { items: starters, query }
       }

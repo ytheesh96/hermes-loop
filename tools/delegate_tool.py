@@ -2512,21 +2512,25 @@ def _loop_task_alias(task: dict[str, Any], index: int) -> tuple[Optional[str], O
     return task_id_alias or client_id_alias or None, None
 
 
-def _loop_depends_on(task: dict[str, Any], index: int) -> tuple[list[str], Optional[str]]:
-    raw = task.get("depends_on") or []
+def _loop_task_refs(
+    task: dict[str, Any],
+    index: int,
+    field: str,
+) -> tuple[list[str], Optional[str]]:
+    raw = task.get(field) or []
     if isinstance(raw, str):
         raw = [raw]
     if not isinstance(raw, (list, tuple, set)):
-        return [], f"Task {index} depends_on must be a list of aliases or task ids."
-    deps: list[str] = []
+        return [], f"Task {index} {field} must be a list of task references."
+    refs: list[str] = []
     seen: set[str] = set()
-    for dep in raw:
-        dep_id = str(dep).strip()
-        if not dep_id or dep_id in seen:
+    for value in raw:
+        ref = str(value).strip()
+        if not ref or ref in seen:
             continue
-        seen.add(dep_id)
-        deps.append(dep_id)
-    return deps, None
+        seen.add(ref)
+        refs.append(ref)
+    return refs, None
 
 
 def _loop_skeleton_delegation_result(
@@ -2552,9 +2556,16 @@ def _loop_skeleton_delegation_result(
             return tool_error(
                 f"Task {index} requires an id or client_id in Loop graph mode."
             )
-        dependencies, dependency_error = _loop_depends_on(task, index)
+        dependencies, dependency_error = _loop_task_refs(
+            task,
+            index,
+            "depends_on",
+        )
         if dependency_error:
             return tool_error(dependency_error)
+        blocks, blocks_error = _loop_task_refs(task, index, "blocks")
+        if blocks_error:
+            return tool_error(blocks_error)
         title = str(task.get("goal") or task.get("title") or "").strip()
         if not title:
             return tool_error(f"Task {index} is missing a 'goal' or 'title'.")
@@ -2565,6 +2576,8 @@ def _loop_skeleton_delegation_result(
         }
         if task.get("context") is not None:
             node["context"] = task["context"]
+        if blocks:
+            node["blocks"] = blocks
         nodes.append(node)
 
     origin_session_id = get_source_session_id()
@@ -3589,7 +3602,7 @@ def _build_top_level_description() -> str:
         f"2. Batch (parallel): provide 'tasks' array with up to {max_children} "
         f"items concurrently for this user (configured via "
         f"delegation.max_concurrent_children in config.yaml). {nesting_clause}\n"
-        "3. Live Loop graph: use mode='loop' with brief id/title/depends_on "
+        "3. Live Loop graph: use mode='loop' with brief id/title/depends_on/blocks "
         "rows. Creation submits the graph immediately; its size is independent "
         "of ephemeral concurrency, and the auto-decomposer decides whether "
         "each ready task needs specification or fan-out, then owns routing.\n\n"
@@ -3657,6 +3670,9 @@ def _build_tasks_param_description() -> str:
         "For mode='loop'/'durable', each item must include id/client_id as a "
         "batch-local alias and may include depends_on as a list of aliases or "
         "existing Kanban task ids; dependencies become parent->child task_links. "
+        "Use tasks[].blocks with existing pending downstream task ids when the "
+        "new task must complete before those tasks can resume; this creates "
+        "new->existing dependency edges. "
         "Top-level context is shared by every Loop task, while tasks[].context "
         "adds task-specific details. The ephemeral concurrency cap does not "
         "apply to Loop graphs: creation immediately submits the durable graph, "
@@ -3802,6 +3818,15 @@ DELEGATE_TASK_SCHEMA = {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Loop/durable dependency parents: batch aliases or existing Kanban task ids.",
+                        },
+                        "blocks": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Loop/durable reverse dependencies: existing pending "
+                                "downstream task ids that must wait for this new task "
+                                "(new task -> existing task)."
+                            ),
                         },
                         "context": {
                             "type": "string",

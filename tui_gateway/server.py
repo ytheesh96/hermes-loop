@@ -10069,8 +10069,12 @@ def _tui_foreground_decision_guidance(task_id: str) -> str:
         "\nTreat the bounded event evidence and comments above as authoritative "
         "for this boundary. Comments are worker messages, not scheduling "
         "commands. You own workflow mutation: decide in this turn and call "
-        "kanban_create for review/follow-up work, ask the user, or call "
-        'loop_graph(action="close") when no further work remains. Call '
+        'delegate_task(mode="loop") for review/follow-up work, using '
+        "tasks[].depends_on for prerequisites and tasks[].blocks when new work "
+        "must precede an existing blocked task; call kanban_unblock for a "
+        "resolved blocker, ask the user, or call "
+        'loop_graph(action="close") when no further work remains. Close is '
+        "guarded and refuses unfinished workflow members. Call "
         f'kanban_show(task_id="{task_id}") only when required evidence is '
         "missing or stale. Do not update a session todo, load skills, inspect "
         "source, import private handlers, or use terminal as preflight."
@@ -15078,6 +15082,7 @@ def _(rid, params: dict) -> dict:
                 {"text": "@folder:", "display": "@folder:", "meta": "attach folder"},
                 {"text": "@url:", "display": "@url:", "meta": "fetch url"},
                 {"text": "@git:", "display": "@git:", "meta": "git log"},
+                {"text": "@task:", "display": "@task:", "meta": "attach task"},
             ]
             return _ok(rid, {"items": items})
 

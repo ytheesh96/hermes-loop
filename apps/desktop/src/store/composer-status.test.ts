@@ -252,7 +252,9 @@ describe('reconcileKanbanSessionSource', () => {
           profile: 'reviewer-qa',
           status: 'done',
           task_status: 'blocked',
-          summary: 'review-required: needs eyes',
+          error_preview: 'review-required: needs eyes',
+          log_tail: 'raw review worker transcript',
+          summary: 'less useful summary',
           recent_task_events: [{ kind: 'heartbeat', payload: { tool_name: 'apply_patch' } }]
         },
         {
@@ -282,10 +284,18 @@ describe('reconcileKanbanSessionSource', () => {
         item.taskProgress
       ])
     ).toEqual([
-      ['kanban-task:t_root', 't_root', 'in_progress', 'Loop', 'failed', 'attention', { completed: 1, total: 5 }]
+      [
+        'kanban-task:t_root',
+        't_root',
+        'in_progress',
+        'Loop',
+        'failed',
+        'attention',
+        { blocked: 1, completed: 1, pending: 3, total: 5 }
+      ]
     ])
     expect(groups[1]!.items.map(item => [item.id, item.state, item.sessionId, item.output, item.profile, item.currentTool])).toEqual([
-      ['kanban-agent:t_running:7', 'running', 'worker-session-7', 'worker log tail', 'peacock', 'Terminal'],
+      ['kanban-agent:t_running:7', 'running', 'worker-session-7', undefined, 'peacock', 'Terminal'],
       ['kanban-agent:t_review:8', 'failed', undefined, 'review-required: needs eyes', 'reviewer-qa', 'Apply Patch']
     ])
     expect(items.map(item => item.kanbanTaskId)).not.toContain('t_queued')
@@ -328,6 +338,40 @@ describe('reconcileKanbanSessionSource', () => {
       ['kanban-task:t_root', 'todo', 't_root', undefined, undefined, 'Loop'],
       ['kanban-agent:t_root:42', 'subagent', 't_root', 'worker-session-root', 'default', 'Search Files']
     ])
+  })
+
+  it('keeps a running worker active when its task is blocked', () => {
+    reconcileKanbanSessionSource(SID, {
+      session_id: SID,
+      workflow_id: 't_root',
+      tasks: [
+        {
+          id: 't_root',
+          session_id: SID,
+          status: 'blocked',
+          title: 'Blocked task with a live worker',
+          included_parent_ids: [],
+          included_child_ids: []
+        }
+      ],
+      workers: [
+        {
+          current_tool: 'terminal',
+          profile: 'default',
+          run_id: 44,
+          summary_preview: 'review-required: stale prior summary',
+          status: 'running',
+          task_id: 't_root',
+          task_status: 'blocked',
+          task_title: 'Blocked task with a live worker',
+          worker_session_id: 'worker-session-blocked-task'
+        }
+      ]
+    })
+
+    const worker = ($kanbanStatusBySession.get()[SID] ?? []).find(item => item.type === 'subagent')
+
+    expect([worker?.state, worker?.statusIndicator]).toEqual(['running', 'active'])
   })
 
   it('keeps a subscribed workflow in Tasks when a member has an active worker and graph links', () => {
@@ -822,11 +866,12 @@ describe('reconcileKanbanSessionSource', () => {
         item.type,
         item.kanbanWorkflowId,
         item.kanbanTaskId,
-        item.state
+        item.state,
+        item.statusIndicator
       ])
     ).toEqual([
-      ['kanban-workflow:wf_dynamic', 'todo', 'wf_dynamic', 't_build', 'failed'],
-      ['kanban-agent:t_review:9', 'subagent', undefined, 't_review', 'failed']
+      ['kanban-workflow:wf_dynamic', 'todo', 'wf_dynamic', 't_build', 'failed', 'attention'],
+      ['kanban-agent:t_review:9', 'subagent', undefined, 't_review', 'running', 'active']
     ])
   })
 
@@ -848,7 +893,7 @@ describe('reconcileKanbanSessionSource', () => {
       $statusItemsBySession
         .get()['runtime-tip']
         ?.map(item => [item.id, item.kanbanWorkflowId, item.taskProgress])
-    ).toEqual([['kanban-workflow:wf_dynamic', 'wf_dynamic', { completed: 1, total: 1 }]])
+    ).toEqual([['kanban-workflow:wf_dynamic', 'wf_dynamic', { blocked: 0, completed: 1, pending: 0, total: 1 }]])
 
     upsertLoopagent(
       ['runtime-tip'],
@@ -867,6 +912,44 @@ describe('reconcileKanbanSessionSource', () => {
       $statusItemsBySession
         .get()['runtime-tip']
         ?.map(item => [item.id, item.kanbanWorkflowId, item.taskProgress])
-    ).toEqual([['kanban-workflow:wf_dynamic', 'wf_dynamic', { completed: 1, total: 2 }]])
+    ).toEqual([['kanban-workflow:wf_dynamic', 'wf_dynamic', { blocked: 0, completed: 1, pending: 1, total: 2 }]])
+
+    upsertLoopagent(
+      ['runtime-tip'],
+      {
+        event: 'loopagent.task.upsert',
+        revision: 3,
+        task_id: 't_review',
+        task_status: 'blocked',
+        task_title: 'Review implementation',
+        workflow_id: 'wf_dynamic'
+      },
+      'loopagent.task.upsert'
+    )
+
+    expect(
+      $statusItemsBySession
+        .get()['runtime-tip']
+        ?.map(item => [item.id, item.kanbanWorkflowId, item.taskProgress])
+    ).toEqual([['kanban-workflow:wf_dynamic', 'wf_dynamic', { blocked: 1, completed: 1, pending: 0, total: 2 }]])
+
+    upsertLoopagent(
+      ['runtime-tip'],
+      {
+        event: 'loopagent.task.upsert',
+        revision: 4,
+        task_id: 't_review',
+        task_status: 'done',
+        task_title: 'Review implementation',
+        workflow_id: 'wf_dynamic'
+      },
+      'loopagent.task.upsert'
+    )
+
+    expect(
+      $statusItemsBySession
+        .get()['runtime-tip']
+        ?.map(item => [item.id, item.kanbanWorkflowId, item.taskProgress])
+    ).toEqual([['kanban-workflow:wf_dynamic', 'wf_dynamic', { blocked: 0, completed: 2, pending: 0, total: 2 }]])
   })
 })

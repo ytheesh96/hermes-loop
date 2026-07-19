@@ -3765,19 +3765,55 @@ describe('LoopPanel', () => {
           needs_specification: false,
           status: 'running',
           title: 'Generated child'
+        },
+        {
+          id: 't_done_review',
+          needs_specification: false,
+          review_kind: 'review',
+          status: 'done',
+          title: 'Completed review'
         }
       ]
     })!
 
     render(<LoopTaskGraph fullPanel onTaskAction={vi.fn()} rows={state.rows} workflowId="t_planning" />)
 
-    expect(screen.getByTestId('loop-task-graph-phase-t_planning').textContent).toBe('Planning')
-    expect(screen.getByTestId('loop-task-graph-phase-t_specifying').textContent).toBe('Specifying')
-    expect(screen.getByTestId('loop-task-graph-phase-t_waiting').textContent).toBe('Waiting for dependencies')
-    expect(screen.getByTestId('loop-task-graph-phase-t_running').textContent).toBe('Running')
-    expect(screen.getByTestId('loop-task-graph-phase-t_spec_failed').textContent).toBe('Specification failed')
-    expect(screen.getByTestId('loop-task-graph-phase-t_spec_retrying').textContent).toBe('Retrying specification')
-    expect(screen.getByTestId('loop-task-graph-phase-t_compiled_shell').textContent).toBe('Running')
+    const node = (taskId: string) => screen.getByTestId(`loop-task-graph-node-${taskId}`)
+    const rail = (taskId: string) => screen.getByTestId(`loop-task-graph-status-rail-${taskId}`)
+
+    const expectRail = (taskId: string, kind: string, className: string) => {
+      expect(node(taskId).getAttribute('data-status-kind')).toBe(kind)
+      expect(rail(taskId).className).toContain(className)
+      expect(rail(taskId).getAttribute('aria-hidden')).toBe('true')
+    }
+
+    for (const taskId of [
+      't_planning',
+      't_specifying',
+      't_waiting',
+      't_running',
+      't_spec_failed',
+      't_spec_retrying',
+      't_compiled_shell'
+    ]) {
+      expect(screen.queryByTestId(`loop-task-graph-phase-${taskId}`)).toBeNull()
+      expect(within(node(taskId)).queryByRole('img', { name: /^Status:/i })).toBeNull()
+    }
+
+    expectRail('t_planning', 'pending', 'bg-(--ui-stroke-secondary)')
+    expectRail('t_specifying', 'triage', 'bg-(--ui-text-tertiary)/60')
+    expectRail('t_waiting', 'pending', 'bg-(--ui-stroke-secondary)')
+    expectRail('t_running', 'active', 'bg-sky-500/70')
+    expectRail('t_spec_failed', 'failed', 'bg-destructive/70')
+    expectRail('t_spec_retrying', 'attention', 'bg-amber-500/75')
+    expectRail('t_compiled_shell', 'pending', 'bg-(--ui-stroke-secondary)')
+    expectRail('t_done_review', 'done', 'bg-emerald-500/70')
+
+    expect(screen.getByRole('button', { name: /Select Running task .*Status: Running/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Select Waiting task .*Status: Waiting for dependencies/i })).toBeTruthy()
+    expect(
+      screen.getByRole('button', { name: /Select Compiled shell .*Status: Waiting for dependencies/i })
+    ).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Connect a prerequisite into Compiled shell' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Connect a follow-up from Compiled shell' })).toBeNull()
     fireEvent.mouseEnter(screen.getByTestId('loop-task-graph-node-t_compiled_shell'))
@@ -3936,7 +3972,7 @@ describe('LoopPanel', () => {
     expect(canvas.getAttribute('data-view-y')).not.toBe('0')
   })
 
-  it('shows the assignee pill instead of a redundant status pill on rich nodes', () => {
+  it('uses one accessible status rail while preserving useful node metadata', () => {
     const state = quickActionGraphState()
 
     render(<LoopPanel onTaskAction={vi.fn()} open selectedTaskId="t_root" state={state} />)
@@ -3944,10 +3980,16 @@ describe('LoopPanel', () => {
     const canvas = within(screen.getByTestId('loop-workflow-canvas')).getByTestId('loop-task-graph')
     const todoNode = within(canvas).getByTestId('loop-task-graph-node-t_todo')
 
-    expect(todoNode.getAttribute('data-task-kind')).toBe('task')
+    expect(todoNode.getAttribute('data-status-kind')).toBe('pending')
     expect(within(todoNode).queryByText('Todo')).toBeNull()
+    expect(within(todoNode).queryByText('Waiting for dependencies')).toBeNull()
+    expect(within(todoNode).queryByRole('img', { name: /^Status:/i })).toBeNull()
+    expect(within(todoNode).getByTestId('loop-task-graph-status-rail-t_todo').className).toContain(
+      'bg-(--ui-stroke-secondary)'
+    )
+    expect(todoNode.getAttribute('aria-label')).toMatch(/Status: Waiting for dependencies/i)
     expect(within(todoNode).getByText('peacock').className).toContain('rounded-[0.2rem]')
-    expect(within(todoNode).getByLabelText('1 dependency')).toBeTruthy()
+    expect(within(todoNode).queryByLabelText(/dependenc/i)).toBeNull()
     expect(within(todoNode).getByLabelText('2 comments')).toBeTruthy()
   })
 
@@ -4086,7 +4128,6 @@ describe('LoopPanel', () => {
     const leftJoinPath = pathNumbers(leftJoin)
     const rightJoinPath = pathNumbers(rightJoin)
 
-    expect(within(leftParent).getByLabelText('3 dependencies')).toBeTruthy()
     expect((leftParentX - rightParentX) * (leftLeafX - rightLeafX)).toBeGreaterThan(0)
     expect((rootLeftPath[0]! - rootRightPath[0]!) * (leftParentX - rightParentX)).toBeGreaterThan(0)
     expect((leftJoinPath.at(-2)! - rightJoinPath.at(-2)!) * (leftParentX - rightParentX)).toBeGreaterThan(0)

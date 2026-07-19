@@ -1488,7 +1488,11 @@ export interface Translations {
   statusStack: {
     agents: string
     background: (count: number) => string
+    blockedTasks: (count: number) => string
+    completedTasks: (count: number) => string
+    loop: string
     loopWorkers: (count: number) => string
+    pendingTasks: (count: number) => string
     subagents: (count: number) => string
     todos: (done: number, total: number) => string
     running: string

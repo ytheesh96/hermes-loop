@@ -70,6 +70,21 @@ describe('insertInlineRefsIntoEditor', () => {
     expect(editor.querySelector(':scope > div')).toBeNull()
     expect(composerPlainText(editor)).toBe('@file:`src/foo.ts` ')
   })
+
+  it('inserts Loop tasks as inline chips with their title as the visible label', () => {
+    const editor = document.createElement('div')
+    editor.dataset.slot = RICH_INPUT_SLOT
+
+    insertInlineRefsIntoEditor(editor, [{ kind: 'task', label: 'Review the merge candidate', value: 't_review' }])
+
+    const chip = editor.querySelector<HTMLElement>('[data-ref-kind="task"]')
+
+    expect(chip?.dataset.refText).toBe('@task:`t_review`')
+    expect(chip?.dataset.refId).toBe('t_review')
+    expect(chip?.textContent).toBe('Review the merge candidate')
+    expect(chip?.className).toContain('inline-flex')
+    expect(composerPlainText(editor)).toBe('@task:`t_review` ')
+  })
 })
 
 describe('insertPlainTextAtCaret', () => {

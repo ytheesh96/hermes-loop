@@ -1366,7 +1366,11 @@ def test_kanban_notifier_batches_two_child_boundaries_into_one_foreground_wake(
     assert blocked_child in wake.text
     assert "Please create a focused review task for the parser." in wake.text
     assert "Need the foreground to choose the compatibility target." in wake.text
-    assert "kanban_create" in wake.text
+    assert "delegate_task" in wake.text
+    assert "depends_on" in wake.text
+    assert "blocks" in wake.text
+    assert "kanban_unblock" in wake.text
+    assert "kanban_create" not in wake.text
 
 
 @pytest.mark.parametrize(

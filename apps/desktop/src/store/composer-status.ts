@@ -22,6 +22,8 @@ export type StatusItemState = 'done' | 'failed' | 'running'
 export type StatusItemType = 'background' | 'kanban-agent' | 'subagent' | 'todo'
 
 export interface ComposerStatusItem {
+  /** Structured activity retained for the Spawn tree; never raw worker logs. */
+  activity?: SubagentProgress['stream']
   /** background: non-zero exit shown inline when failed. */
   exitCode?: number
   /** subagent/Loop task: secondary status label shown on the right. */
@@ -35,6 +37,8 @@ export interface ComposerStatusItem {
   kanbanWorkflowId?: string
   /** Kanban worker run id for the durable agent row. */
   runId?: number
+  /** Actual worker run start, used by the Spawn tree timer. */
+  startedAt?: number
   /** subagent: its own stored session id — ordinary subagent and Loop worker
    *  rows open that session window (livestreamed by the gateway's child-session
    *  mirror). Workflow/task rows still prefer kanbanTaskId so the user lands
@@ -44,11 +48,15 @@ export interface ComposerStatusItem {
   /** Shared leading glyph grammar for Loop/Kanban rows. */
   statusIndicator?: StatusIndicatorKind
   /** Aggregate task progress carried by a single Loop workflow summary row. */
-  taskProgress?: { completed: number; total: number }
+  taskProgress?: { blocked: number; completed: number; pending: number; total: number }
   title: string
+  /** Number of structured tool starts observed for this worker run. */
+  toolCount?: number
   /** todo: the full four-state status driving the row's checkmark glyph. */
   todoStatus?: TodoStatus
   type: StatusItemType
+  /** Last semantic worker update or heartbeat. */
+  updatedAt?: number
   /** assignee profile name (e.g. coder, researcher) */
   profile?: string
 }
@@ -233,6 +241,26 @@ const taskIsDone = (task: TenantLoopTask): boolean => DONE_KANBAN_TASK_STATUSES.
 
 const taskIsTriage = (task: TenantLoopTask): boolean => normalized(task.status) === 'triage'
 
+const kanbanTaskProgress = (
+  tasks: readonly TenantLoopTask[]
+): NonNullable<ComposerStatusItem['taskProgress']> =>
+  tasks.reduce<NonNullable<ComposerStatusItem['taskProgress']>>(
+    (progress, task) => {
+      if (taskNeedsAttention(task)) {
+        progress.blocked += 1
+      } else if (taskIsDone(task)) {
+        progress.completed += 1
+      } else {
+        progress.pending += 1
+      }
+
+      progress.total += 1
+
+      return progress
+    },
+    { blocked: 0, completed: 0, pending: 0, total: 0 }
+  )
+
 const workerAttentionText = (worker: LoopWorkerActivity): string =>
   [
     worker.summary,
@@ -250,11 +278,13 @@ const workerAttentionText = (worker: LoopWorkerActivity): string =>
 const workerNeedsForegroundAttention = (worker: LoopWorkerActivity): boolean => {
   const status = normalized(worker.status)
   const outcome = normalized(worker.outcome)
-  const taskStatus = normalized(worker.task_status)
   const text = workerAttentionText(worker)
 
+  if (workerIsActive(worker)) {
+    return false
+  }
+
   return (
-    taskStatus === 'blocked' ||
     status === 'blocked' ||
     outcome === 'blocked' ||
     FAILED_KANBAN_RUN_STATES.has(status) ||
@@ -267,31 +297,29 @@ const workerIsActive = (worker: LoopWorkerActivity): boolean => {
   const status = normalized(worker.status)
   const taskStatus = normalized(worker.task_status)
 
-  return ACTIVE_KANBAN_TASK_STATUSES.has(status) || ACTIVE_KANBAN_TASK_STATUSES.has(taskStatus)
+  return ACTIVE_KANBAN_TASK_STATUSES.has(status) || (!status && ACTIVE_KANBAN_TASK_STATUSES.has(taskStatus))
 }
 
 const workerStatusIndicator = (worker: LoopWorkerActivity): StatusIndicatorKind => {
   const status = normalized(worker.status)
   const outcome = normalized(worker.outcome)
-  const taskStatus = normalized(worker.task_status)
   const text = workerAttentionText(worker)
+
+  if (workerIsActive(worker)) {
+    return 'active'
+  }
 
   if (needsAttentionText(text)) {
     return 'attention'
   }
 
   if (
-    taskStatus === 'blocked' ||
     status === 'blocked' ||
     outcome === 'blocked' ||
     FAILED_KANBAN_RUN_STATES.has(status) ||
     FAILED_KANBAN_RUN_STATES.has(outcome)
   ) {
     return 'failed'
-  }
-
-  if (workerIsActive(worker)) {
-    return 'active'
   }
 
   return 'done'
@@ -346,6 +374,47 @@ const kanbanWorkerCurrentTool = (worker: LoopWorkerActivity): string | undefined
   return undefined
 }
 
+const epochMs = (value: unknown): number | undefined => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return undefined
+  }
+
+  return value >= 1_000_000_000_000 ? value : value * 1000
+}
+
+const kanbanWorkerActivity = (worker: LoopWorkerActivity): SubagentProgress['stream'] => {
+  const entries: SubagentProgress['stream'] = []
+
+  for (const event of worker.recent_task_events ?? []) {
+    const tool = currentToolFromRecord(recordFrom(event.payload))
+
+    if (!tool || entries.at(-1)?.text === tool) {
+      continue
+    }
+
+    entries.push({
+      at: epochMs(event.created_at) ?? Date.now(),
+      kind: 'tool',
+      text: tool
+    })
+  }
+
+  return entries.slice(-8)
+}
+
+const kanbanWorkerUpdatedAt = (worker: LoopWorkerActivity): number | undefined => {
+  const recent = (worker.recent_task_events ?? [])
+    .map(event => epochMs(event.created_at))
+    .filter((value): value is number => value !== undefined)
+
+  return (
+    epochMs(worker.ended_at) ??
+    epochMs(worker.last_heartbeat_at) ??
+    (recent.length > 0 ? Math.max(...recent) : undefined) ??
+    epochMs(worker.started_at)
+  )
+}
+
 const kanbanWorkerActivityLabel = (worker: LoopWorkerActivity): string | undefined => {
   const profile = textValue(worker.profile)
   const currentTool = kanbanWorkerCurrentTool(worker)
@@ -360,18 +429,21 @@ const kanbanWorkerActivityLabel = (worker: LoopWorkerActivity): string | undefin
 }
 
 const kanbanWorkerToItem = (worker: LoopWorkerActivity): ComposerStatusItem => ({
+  activity: kanbanWorkerActivity(worker),
   currentTool: kanbanWorkerCurrentTool(worker),
   profile: textValue(worker.profile),
   id: `kanban-agent:${worker.task_id}:${worker.run_id}`,
   kanbanTaskId: worker.task_id,
   output:
-    worker.log_tail || worker.summary || worker.summary_preview || worker.error || worker.error_preview || undefined,
+    worker.error_preview || worker.error || worker.summary_preview || worker.summary || undefined,
   runId: worker.run_id,
   sessionId: worker.worker_session_id || undefined,
+  startedAt: epochMs(worker.started_at),
   state: kanbanWorkerState(worker),
   statusIndicator: workerStatusIndicator(worker),
   title: worker.task_title || worker.task_id,
-  type: 'subagent'
+  type: 'subagent',
+  updatedAt: kanbanWorkerUpdatedAt(worker)
 })
 
 const kanbanTaskAggregate = (
@@ -421,10 +493,7 @@ const kanbanTaskToItem = (
     kanbanWorkflowId: workflowId,
     state: aggregate.state,
     statusIndicator: aggregate.statusIndicator,
-    taskProgress: {
-      completed: tasks.filter(taskIsDone).length,
-      total: tasks.length
-    },
+    taskProgress: kanbanTaskProgress(tasks),
     title: task.title || task.id,
     todoStatus: aggregate.todoStatus,
     type: 'todo'
@@ -435,6 +504,10 @@ const loopagentNeedsForegroundAttention = (agent: LoopagentActivity): boolean =>
   const status = normalized(agent.status)
   const taskStatus = normalized(agent.taskStatus)
 
+  if (agent.kind === 'worker' && loopagentIsActive(agent)) {
+    return false
+  }
+
   const text = [agent.errorPreview, agent.summaryPreview, agent.sourceEvent, agent.taskStatus]
     .filter(Boolean)
     .join(' ')
@@ -442,7 +515,7 @@ const loopagentNeedsForegroundAttention = (agent: LoopagentActivity): boolean =>
 
   return (
     status === 'blocked' ||
-    taskStatus === 'blocked' ||
+    (agent.kind === 'task' && taskStatus === 'blocked') ||
     FAILED_KANBAN_RUN_STATES.has(status) ||
     needsAttentionText(text)
   )
@@ -452,12 +525,11 @@ const loopagentIsActive = (agent: LoopagentActivity): boolean => {
   const status = normalized(agent.status)
   const taskStatus = normalized(agent.taskStatus)
 
-  return (
-    agent.status === 'queued' ||
-    agent.status === 'running' ||
-    ACTIVE_KANBAN_TASK_STATUSES.has(status) ||
-    ACTIVE_KANBAN_TASK_STATUSES.has(taskStatus)
-  )
+  if (agent.kind === 'task') {
+    return ACTIVE_KANBAN_TASK_STATUSES.has(status) || ACTIVE_KANBAN_TASK_STATUSES.has(taskStatus)
+  }
+
+  return ACTIVE_KANBAN_TASK_STATUSES.has(status) || (!status && ACTIVE_KANBAN_TASK_STATUSES.has(taskStatus))
 }
 
 const loopagentStatusIndicator = (agent: LoopagentActivity): StatusIndicatorKind => {
@@ -469,11 +541,19 @@ const loopagentStatusIndicator = (agent: LoopagentActivity): StatusIndicatorKind
     .join(' ')
     .toLowerCase()
 
+  if (agent.kind === 'worker' && loopagentIsActive(agent)) {
+    return 'active'
+  }
+
   if (needsAttentionText(text)) {
     return 'attention'
   }
 
-  if (status === 'blocked' || taskStatus === 'blocked' || FAILED_KANBAN_RUN_STATES.has(status)) {
+  if (
+    status === 'blocked' ||
+    (agent.kind === 'task' && taskStatus === 'blocked') ||
+    FAILED_KANBAN_RUN_STATES.has(status)
+  ) {
     return 'failed'
   }
 
@@ -553,6 +633,7 @@ const loopagentToItem = (agent: LoopagentActivity): ComposerStatusItem => {
   }
 
   return {
+    activity: agent.stream,
     currentTool: agent.currentTool ? humanToolLabel(agent.currentTool) : undefined,
     profile: textValue(agent.profile),
     id: `kanban-agent:${agent.taskId}:${agent.runId ?? agent.workerSessionId ?? 'activity'}`,
@@ -560,10 +641,13 @@ const loopagentToItem = (agent: LoopagentActivity): ComposerStatusItem => {
     output: agent.errorPreview || agent.summaryPreview,
     runId: agent.runId,
     sessionId: agent.workerSessionId,
+    startedAt: agent.startedAt,
     state: loopagentState(agent),
     statusIndicator: loopagentStatusIndicator(agent),
     title: agent.title || agent.taskId,
-    type: 'subagent'
+    toolCount: agent.toolCount,
+    type: 'subagent',
+    updatedAt: agent.updatedAt
   }
 }
 
@@ -606,6 +690,23 @@ const loopagentWorkflowTaskToItem = (
         ? 'pending'
         : 'in_progress'
 
+  const taskProgress = agents.reduce<NonNullable<ComposerStatusItem['taskProgress']>>(
+    (progress, agent) => {
+      if (loopagentNeedsForegroundAttention(agent)) {
+        progress.blocked += 1
+      } else if (loopagentTaskTodoStatus(agent) === 'completed') {
+        progress.completed += 1
+      } else {
+        progress.pending += 1
+      }
+
+      progress.total += 1
+
+      return progress
+    },
+    { blocked: 0, completed: 0, pending: 0, total: 0 }
+  )
+
   return {
     currentTool: 'Loop',
     id: `kanban-workflow:${workflowId}`,
@@ -618,10 +719,7 @@ const loopagentWorkflowTaskToItem = (
           ? 'failed'
           : 'running',
     statusIndicator,
-    taskProgress: {
-      completed: agents.filter(agent => loopagentTaskTodoStatus(agent) === 'completed').length,
-      total: agents.length
-    },
+    taskProgress,
     title: representative.title || representative.taskId,
     todoStatus,
     type: 'todo'

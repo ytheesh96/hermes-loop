@@ -111,13 +111,13 @@ def _check_kanban_mode() -> bool:
 
 
 def _check_kanban_orchestrator_mode() -> bool:
-    """Board-routing tools (kanban_list, kanban_unblock) are intentionally
-    hidden from task workers.
+    """Board-wide routing tools are reserved for explicit orchestrators.
 
     Dispatcher-spawned workers should close their own task via the
     lifecycle tools (complete/block/heartbeat), not enumerate or unblock
-    board state. Profiles that explicitly opt into the kanban toolset
-    and are NOT scoped to a single task are the orchestrator surface.
+    board state. Ordinary Loop foregrounds use the smaller delegate/unblock
+    surface; profiles that explicitly opt into the Kanban toolset and are not
+    scoped to one task retain list/create controls.
     """
     if os.environ.get("HERMES_KANBAN_TASK"):
         return False
@@ -2277,7 +2277,7 @@ registry.register(
     toolset="kanban",
     schema=KANBAN_CREATE_SCHEMA,
     handler=_handle_create,
-    check_fn=_check_kanban_foreground_mode,
+    check_fn=_check_kanban_orchestrator_mode,
     emoji="➕",
 )
 

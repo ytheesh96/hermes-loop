@@ -295,7 +295,6 @@ export function loopTaskPhase(row: LoopRow): LoopTaskPhase | null {
     .replaceAll('-', '_')
 
   if (
-    (row.activeDecompositionChildCount || 0) > 0 ||
     ['claimed', 'in_progress', 'running'].includes(status) ||
     ['claimed', 'in_progress', 'running'].includes(runStatus)
   ) {

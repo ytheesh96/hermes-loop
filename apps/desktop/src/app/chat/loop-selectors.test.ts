@@ -26,9 +26,10 @@ describe('Loop active-row selectors', () => {
     expect(isPanelActiveLoopRow(row({ latestRun: { status: 'running' } }))).toBe(false)
   })
 
-  it('preserves the graph definition of active work', () => {
+  it("limits graph activity to the task's own work", () => {
     expect(isGraphActiveLoopRow(row({ active: true }))).toBe(true)
     expect(isGraphActiveLoopRow(row({ latestRun: { status: 'running' } }))).toBe(true)
+    expect(isGraphActiveLoopRow(row({ activeDecompositionChildCount: 1 }))).toBe(false)
     expect(isGraphActiveLoopRow(row({ status: 'claimed' }))).toBe(false)
   })
 })

@@ -80,6 +80,118 @@ describe('loopagent store', () => {
     })
   })
 
+  it('retains safe structured worker activity, real timing, tool count, and changed files', () => {
+    const base = {
+      created_at: '2026-07-19T00:00:00Z',
+      profile: 'peacock',
+      run_id: 7,
+      run_status: 'running',
+      source_session_id: 'source-root',
+      task_id: 't_loop',
+      task_title: 'Wire Loop activity',
+      worker_session_id: 'worker-session-7'
+    }
+
+    upsertLoopagent(
+      ['source-root'],
+      {
+        ...base,
+        event: 'kanban.worker.tool_start',
+        sequence: 1,
+        tool_call_id: 'call-1',
+        tool_context: 'example.txt',
+        tool_name: 'read_file'
+      },
+      'kanban.worker.tool_start'
+    )
+
+    // The canonical mirror carries the same sequence. It updates no history
+    // because the raw structured event was already accepted.
+    upsertLoopagent(
+      ['source-root'],
+      {
+        ...base,
+        current_tool: 'read_file',
+        event: 'loopagent.worker.upsert',
+        sequence: 1,
+        summary_preview: 'duplicate mirror'
+      },
+      'loopagent.worker.upsert'
+    )
+
+    upsertLoopagent(
+      ['source-root'],
+      {
+        ...base,
+        event: 'kanban.worker.tool_progress',
+        progress_current: 12,
+        progress_text: 'read 12 lines',
+        progress_total: 12,
+        sequence: 2,
+        tool_name: 'read_file',
+        unit: 'lines'
+      },
+      'kanban.worker.tool_progress'
+    )
+
+    upsertLoopagent(
+      ['source-root'],
+      {
+        ...base,
+        event: 'kanban.worker.thinking',
+        redacted: false,
+        sequence: 3,
+        text: 'checking edge cases'
+      },
+      'kanban.worker.thinking'
+    )
+
+    upsertLoopagent(
+      ['source-root'],
+      {
+        ...base,
+        event: 'kanban.worker.tool_complete',
+        sequence: 4,
+        success: true,
+        tool_name: 'terminal',
+        tool_preview: 'terminal exited 0'
+      },
+      'kanban.worker.tool_complete'
+    )
+
+    upsertLoopagent(
+      ['source-root'],
+      {
+        changed_files_preview: ['apps/desktop/src/store/loopagents.ts'],
+        created_at: '2026-07-19T00:01:00Z',
+        event: 'loopagent.worker.upsert',
+        revision: 5,
+        run_id: 7,
+        run_status: 'completed',
+        safe_summary: 'implemented structured activity',
+        task_id: 't_loop'
+      },
+      'loopagent.worker.upsert'
+    )
+
+    const worker = $loopagentsBySession.get()['source-root']?.[0]
+
+    expect(worker).toMatchObject({
+      filesWritten: ['apps/desktop/src/store/loopagents.ts'],
+      startedAt: Date.parse('2026-07-19T00:00:00Z'),
+      status: 'completed',
+      toolCount: 1
+    })
+    expect(worker?.stream?.map(entry => [entry.kind, entry.text, entry.isError])).toEqual([
+      ['tool', 'Read File("example.txt")', undefined],
+      ['progress', 'read 12 lines · 12/12 lines', undefined],
+      ['thinking', 'checking edge cases', undefined],
+      ['tool', 'Terminal("terminal exited 0")', false],
+      ['summary', 'implemented structured activity', false]
+    ])
+    expect(worker?.summaryPreview).toBe('implemented structured activity')
+  })
+
   it('allows newer revisions to move a previously terminal task back to active', () => {
     upsertLoopagent(
       ['s1'],
@@ -144,6 +256,28 @@ describe('loopagent store', () => {
     ])
     expect($loopagentsBySession.get().s1?.map(item => item.workflowId)).toEqual(['wf_loop', 'wf_loop'])
     expect($loopagentsBySession.get().s1?.map(item => item.isRootTask)).toEqual([undefined, undefined])
+  })
+
+  it("keeps a worker's live run status separate from its blocked task", () => {
+    upsertLoopagent(
+      ['s1'],
+      {
+        event: 'loopagent.worker.upsert',
+        run_id: 7,
+        run_status: 'running',
+        task_id: 't_blocked',
+        task_status: 'blocked',
+        task_title: 'Blocked task with a live worker'
+      },
+      'loopagent.worker.upsert'
+    )
+
+    expect($loopagentsBySession.get().s1?.[0]).toMatchObject({
+      kind: 'worker',
+      status: 'running',
+      taskId: 't_blocked',
+      taskStatus: 'blocked'
+    })
   })
 
   it('keeps is_root_task only as a legacy fallback when workflow_id is absent', () => {

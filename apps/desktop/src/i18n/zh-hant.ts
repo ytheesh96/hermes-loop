@@ -1679,7 +1679,11 @@ export const zhHant = defineLocale({
   statusStack: {
     agents: '代理',
     background: count => `${count} 個背景任務`,
+    blockedTasks: count => `${count} 個受阻任務`,
+    completedTasks: count => `${count} 個已完成任務`,
+    loop: 'Loop',
     loopWorkers: count => `${count} 個 Kanban 代理`,
+    pendingTasks: count => `${count} 個待處理任務`,
     subagents: count => `${count} 個子代理`,
     todos: (done, total) => `任務 ${done}/${total}`,
     running: '執行中',

@@ -10552,7 +10552,11 @@ def test_notification_poller_batches_descendant_boundaries_into_one_tui_turn(
         assert "compatibility target is unresolved" in prompt
         assert "Follow up with a focused review of the parser." in prompt
         assert "Foreground must choose the supported compatibility target." in prompt
-        assert "kanban_create" in prompt
+        assert "delegate_task" in prompt
+        assert "depends_on" in prompt
+        assert "blocks" in prompt
+        assert "kanban_unblock" in prompt
+        assert "kanban_create" not in prompt
         status_calls = [args for args in emitted if args[0] == "status.update"]
         assert len(status_calls) == 1
         assert status_calls[0][2]["kind"] == "kanban"

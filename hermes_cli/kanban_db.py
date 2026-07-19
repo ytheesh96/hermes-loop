@@ -3666,10 +3666,11 @@ def create_loop_skeleton_graph(
     The workflow is coordination metadata, not a graph node: multiple sinks
     are legal and no synthetic task or sink-to-root closure edge is created.
     Validation, workflow creation, and all task/link inserts share one write
-    transaction, so a malformed final node cannot leave a partial executable
-    graph behind. ``root_task_id`` is a temporary read-compatibility alias for
-    legacy callers; it resolves that task's workflow and never restores root
-    semantics.
+    transaction, including ``blocks`` edges from a new node to an existing
+    blocked workflow member. A malformed final node therefore cannot leave a
+    partial executable graph behind. ``root_task_id`` is a temporary
+    read-compatibility alias for legacy callers; it resolves that task's
+    workflow and never restores root semantics.
     """
     if not isinstance(nodes, list) or not nodes:
         raise ValueError("nodes must be a non-empty list")
@@ -3719,20 +3720,32 @@ def create_loop_skeleton_graph(
                 dependencies.append(dependency)
         if client_id in dependencies:
             raise ValueError(f"node {client_id} cannot depend on itself")
+        raw_blocks = raw.get("blocks") or []
+        if isinstance(raw_blocks, str):
+            raw_blocks = [raw_blocks]
+        if not isinstance(raw_blocks, (list, tuple)):
+            raise ValueError(f"node[{index}].blocks must be a list")
+        blocks: list[str] = []
+        for value in raw_blocks:
+            blocked_task_id = str(value or "").strip()
+            if blocked_task_id and blocked_task_id not in blocks:
+                blocks.append(blocked_task_id)
         context = raw.get("context")
         if context is not None and not isinstance(context, str):
             raise ValueError(f"node[{index}].context must be a string")
-        normalized.append(
-            {
-                "client_id": client_id,
-                "title": title,
-                "depends_on": dependencies,
-                "context": context.strip() or None if isinstance(context, str) else None,
-                # Foreground graph construction owns only stable titles and
-                # topology. Routing is assigned later by the JIT decomposer.
-                "assignee": None,
-            }
-        )
+        node = {
+            "client_id": client_id,
+            "title": title,
+            "depends_on": dependencies,
+            "context": context.strip() or None if isinstance(context, str) else None,
+            # Foreground graph construction owns only stable titles and
+            # topology. Routing is assigned later by the JIT decomposer.
+            "assignee": None,
+        }
+        # Keep the normalized shape stable for existing no-blocks retries.
+        if blocks:
+            node["blocks"] = blocks
+        normalized.append(node)
         alias_to_index[client_id] = index
 
     # Validate the alias-only subgraph before opening the write transaction.
@@ -3741,6 +3754,7 @@ def create_loop_skeleton_graph(
     indegree = [0] * len(normalized)
     adjacency: list[list[int]] = [[] for _ in normalized]
     external_parent_ids: set[str] = set()
+    external_child_ids: set[str] = set()
     for index, node in enumerate(normalized):
         for dependency in node["depends_on"]:
             parent_index = alias_to_index.get(dependency)
@@ -3749,6 +3763,13 @@ def create_loop_skeleton_graph(
             else:
                 adjacency[parent_index].append(index)
                 indegree[index] += 1
+        for blocked_task_id in node.get("blocks", []):
+            if blocked_task_id in alias_to_index:
+                raise ValueError(
+                    f"node {node['client_id']} blocks must reference existing "
+                    "task ids; use depends_on for batch-local aliases"
+                )
+            external_child_ids.add(blocked_task_id)
     queue = [index for index, degree in enumerate(indegree) if degree == 0]
     topological_order: list[int] = []
     while queue:
@@ -3787,13 +3808,39 @@ def create_loop_skeleton_graph(
     item_ids: dict[str, str] = {}
     reused: dict[str, bool] = {}
     resolved_parents: dict[str, list[str]] = {}
+    reverse_edge_pairs: list[tuple[str, str]] = []
     edge_pairs: list[tuple[str, str]] = []
+    external_relation_ids = external_parent_ids | external_child_ids
 
     with write_txn(conn):
-        missing = _find_missing_parents(conn, external_parent_ids)
-        if missing:
+        related_tasks = {}
+        if external_relation_ids:
+            rows = conn.execute(
+                "SELECT id, workflow_id FROM tasks WHERE id IN "
+                "(" + ",".join("?" for _ in external_relation_ids) + ")",
+                tuple(external_relation_ids),
+            ).fetchall()
+            related_tasks = {str(row["id"]): row for row in rows}
+        missing_parents = sorted(external_parent_ids - related_tasks.keys())
+        if missing_parents:
             raise ValueError(
-                "unknown dependency alias or task id: " + ", ".join(sorted(missing))
+                "unknown dependency alias or task id: "
+                + ", ".join(missing_parents)
+            )
+        missing_children = sorted(external_child_ids - related_tasks.keys())
+        if missing_children:
+            raise ValueError(
+                "unknown blocked task id: " + ", ".join(missing_children)
+            )
+        unowned_blocked_targets = sorted(
+            task_id
+            for task_id in external_child_ids
+            if not str(related_tasks[task_id]["workflow_id"] or "").strip()
+        )
+        if unowned_blocked_targets:
+            raise ValueError(
+                "blocks targets must be workflow members: "
+                + ", ".join(unowned_blocked_targets)
             )
 
         if idempotency_scope is None:
@@ -3823,13 +3870,9 @@ def create_loop_skeleton_graph(
 
         external_workflows = {
             str(row["workflow_id"]).strip()
-            for row in conn.execute(
-                "SELECT workflow_id FROM tasks WHERE id IN "
-                "(" + ",".join("?" for _ in external_parent_ids) + ")",
-                tuple(external_parent_ids),
-            ).fetchall()
+            for row in related_tasks.values()
             if row["workflow_id"] is not None and str(row["workflow_id"]).strip()
-        } if external_parent_ids else set()
+        }
         if len(external_workflows) > 1:
             raise ValueError(
                 "external dependencies belong to different workflows: "
@@ -4032,6 +4075,30 @@ def create_loop_skeleton_graph(
                 reused[client_id] = False
             item_ids[client_id] = task_id
 
+        mutable_block_target_statuses = frozenset(
+            {"triage", "scheduled", "todo", "blocked"}
+        )
+        for node in normalized:
+            client_id = node["client_id"]
+            task_id = item_ids[client_id]
+            for blocked_task_id in node.get("blocks", []):
+                existing_edge = conn.execute(
+                    "SELECT 1 FROM task_links WHERE parent_id = ? AND child_id = ?",
+                    (task_id, blocked_task_id),
+                ).fetchone()
+                if reused[client_id] and existing_edge is None:
+                    raise ValueError(
+                        f"reused alias {client_id!r} has different durable blocks; "
+                        "use the revision-guarded Loop graph patch API"
+                    )
+                if existing_edge is None:
+                    _require_mutable_child_status(
+                        conn,
+                        blocked_task_id,
+                        mutable_block_target_statuses,
+                    )
+                reverse_edge_pairs.append((task_id, blocked_task_id))
+
         for index in topological_order:
             node = normalized[index]
             client_id = node["client_id"]
@@ -4119,6 +4186,7 @@ def create_loop_skeleton_graph(
                 (parent_id, child_id)
                 for parent_id in resolved_parents[node["client_id"]]
             )
+        edge_pairs.extend(reverse_edge_pairs)
 
         for parent_id, child_id in edge_pairs:
             if parent_id == child_id or _would_cycle(conn, parent_id, child_id):

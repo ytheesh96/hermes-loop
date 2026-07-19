@@ -149,6 +149,7 @@ export const ChatRoutesSurface = memo(function ChatRoutesSurface({
       onDismissError={actions.onDismissError}
       onEdit={actions.onEdit}
       onOpenKanbanTask={actions.onOpenKanbanTask}
+      onOpenLoop={actions.onOpenLoop}
       onPasteClipboardImage={actions.onPasteClipboardImage}
       onPickFiles={actions.onPickFiles}
       onPickFolders={actions.onPickFolders}

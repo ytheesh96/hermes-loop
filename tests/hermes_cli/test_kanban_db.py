@@ -628,6 +628,215 @@ def test_create_loop_skeleton_graph_replay_is_idempotent(kanban_home):
     assert len(links) == 1
 
 
+def _loop_storage_counts(conn):
+    return {
+        table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in ("workflows", "tasks", "task_events", "task_links")
+    }
+
+
+def _create_blocked_workflow_task(
+    conn,
+    *,
+    workflow_id,
+    title="Blocked downstream task",
+):
+    task_id = kb.create_task(
+        conn,
+        title=title,
+        assignee="worker",
+        workflow_id=workflow_id,
+    )
+    assert kb.claim_task(conn, task_id, claimer="worker:blocked-target")
+    assert kb.block_task(conn, task_id, reason="Needs upstream resolution")
+    return task_id
+
+
+def test_create_loop_skeleton_graph_unknown_blocks_target_is_atomic(kanban_home):
+    with kb.connect() as conn:
+        before = _loop_storage_counts(conn)
+
+        with pytest.raises(ValueError, match="unknown blocked task id"):
+            kb.create_loop_skeleton_graph(
+                conn,
+                nodes=[
+                    {
+                        "client_id": "resolution",
+                        "title": "Resolve blocker",
+                        "blocks": ["t_missing_downstream"],
+                    }
+                ],
+            )
+
+        assert _loop_storage_counts(conn) == before
+
+
+def test_create_loop_skeleton_graph_mixed_direction_cycle_is_atomic(kanban_home):
+    with kb.connect() as conn:
+        workflow_id = kb.create_workflow(conn, title="Cycle-safe workflow")
+        downstream_id = _create_blocked_workflow_task(
+            conn,
+            workflow_id=workflow_id,
+        )
+        before = _loop_storage_counts(conn)
+
+        with pytest.raises(ValueError, match="would create a cycle"):
+            kb.create_loop_skeleton_graph(
+                conn,
+                workflow_id=workflow_id,
+                nodes=[
+                    {
+                        "client_id": "resolution",
+                        "title": "Impossible resolution",
+                        "depends_on": [downstream_id],
+                        "blocks": [downstream_id],
+                    }
+                ],
+            )
+
+        assert _loop_storage_counts(conn) == before
+        assert kb.parent_ids(conn, downstream_id) == []
+        assert kb.child_ids(conn, downstream_id) == []
+
+
+def test_create_loop_skeleton_graph_rejects_blocks_across_workflows_atomically(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        workflow_a = kb.create_workflow(conn, title="Workflow A")
+        workflow_b = kb.create_workflow(conn, title="Workflow B")
+        target_a = _create_blocked_workflow_task(
+            conn,
+            workflow_id=workflow_a,
+            title="Workflow A target",
+        )
+        target_b = _create_blocked_workflow_task(
+            conn,
+            workflow_id=workflow_b,
+            title="Workflow B target",
+        )
+        before = _loop_storage_counts(conn)
+
+        with pytest.raises(ValueError, match="different workflows"):
+            kb.create_loop_skeleton_graph(
+                conn,
+                nodes=[
+                    {
+                        "client_id": "cross-workflow",
+                        "title": "Invalid shared predecessor",
+                        "blocks": [target_a, target_b],
+                    }
+                ],
+            )
+
+        assert _loop_storage_counts(conn) == before
+        assert kb.parent_ids(conn, target_a) == []
+        assert kb.parent_ids(conn, target_b) == []
+
+
+@pytest.mark.parametrize("target_status", ["running", "done"])
+def test_create_loop_skeleton_graph_rejects_unsafe_blocks_target_atomically(
+    kanban_home,
+    target_status,
+):
+    with kb.connect() as conn:
+        workflow_id = kb.create_workflow(conn, title="Immutable target workflow")
+        target_id = kb.create_task(
+            conn,
+            title="Already advancing target",
+            assignee="worker",
+            workflow_id=workflow_id,
+        )
+        assert kb.claim_task(conn, target_id, claimer="worker:immutable-target")
+        if target_status == "done":
+            assert kb.complete_task(conn, target_id, summary="Already complete")
+        before = _loop_storage_counts(conn)
+
+        with pytest.raises(
+            kb.TaskStatusConflictError,
+            match=rf"status changed to '{target_status}'",
+        ):
+            kb.create_loop_skeleton_graph(
+                conn,
+                workflow_id=workflow_id,
+                nodes=[
+                    {
+                        "client_id": "late-predecessor",
+                        "title": "Too late to become a predecessor",
+                        "blocks": [target_id],
+                    }
+                ],
+            )
+
+        assert _loop_storage_counts(conn) == before
+        target = kb.get_task(conn, target_id)
+
+    assert target is not None
+    assert target.status == target_status
+
+
+def test_create_loop_skeleton_graph_blocks_replay_survives_target_advancing(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        workflow_id = kb.create_workflow(conn, title="Replay-safe workflow")
+        target_id = _create_blocked_workflow_task(
+            conn,
+            workflow_id=workflow_id,
+        )
+        nodes = [
+            {
+                "client_id": "refresh",
+                "title": "Refresh verified candidate",
+                "blocks": [target_id],
+            }
+        ]
+        first = kb.create_loop_skeleton_graph(
+            conn,
+            workflow_id=workflow_id,
+            nodes=nodes,
+            idempotency_scope="refresh-candidate",
+        )
+        refresh_id = first["items"][0]["task_id"]
+        assert kb.specify_triage_task(
+            conn,
+            refresh_id,
+            body="Refresh and verify the candidate.",
+        )
+        assert kb.claim_task(conn, refresh_id, claimer="worker:refresh")
+        assert kb.complete_task(conn, refresh_id, summary="Candidate refreshed")
+        assert kb.unblock_task(conn, target_id)
+        assert kb.claim_task(conn, target_id, claimer="worker:publishing")
+        linked_before = [
+            event
+            for event in kb.list_events(conn, target_id)
+            if event.kind == "linked" and event.payload.get("parent") == refresh_id
+        ]
+
+        replay = kb.create_loop_skeleton_graph(
+            conn,
+            workflow_id=workflow_id,
+            nodes=nodes,
+            idempotency_scope="refresh-candidate",
+        )
+        target = kb.get_task(conn, target_id)
+        linked_after = [
+            event
+            for event in kb.list_events(conn, target_id)
+            if event.kind == "linked" and event.payload.get("parent") == refresh_id
+        ]
+
+    assert replay["items"][0]["task_id"] == refresh_id
+    assert replay["items"][0]["reused"] is True
+    assert replay["edges"] == [
+        {"parent_id": refresh_id, "child_id": target_id}
+    ]
+    assert target is not None
+    assert target.status == "running"
+    assert len(linked_before) == 1
+    assert len(linked_after) == 1
+
+
 def test_new_workflow_graph_idempotency_is_scoped_to_origin_session(kanban_home):
     nodes = [{"client_id": "work", "title": "Same title"}]
     with kb.connect() as conn:

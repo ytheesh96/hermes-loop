@@ -55,6 +55,7 @@ import {
 import { useComposerScope } from './scope'
 import { ComposerStatusStack } from './status-stack'
 import { CodingStatusRow } from './status-stack/coding-row'
+import { LoopLauncherRow } from './status-stack/loop-launcher-row'
 import { extractClipboardImageBlobs } from './text-utils'
 import { ComposerTriggerPopover } from './trigger-popover'
 import type { ChatBarProps } from './types'
@@ -72,6 +73,7 @@ export function ChatBar({
   sessionId,
   state,
   onCancel,
+  onOpenLoop,
   onOpenKanbanTask,
   onAddUrl,
   onAttachDroppedItems,
@@ -941,15 +943,18 @@ export function ChatBar({
                   composerSurfaceGlass
                 )}
               />
-              <CodingStatusRow
-                onBranchOff={handleBranchOff}
-                onConvertBranch={handleConvertBranch}
-                onListBranches={handleListBranches}
-                onOpen={toggleReview}
-                onOpenWorktree={openInWorktree}
-                onSwitchBranch={handleSwitchBranch}
-                repoPath={cwd}
-              />
+              <div className="min-w-0 overflow-hidden rounded-t-[inherit]" data-slot="composer-status-rows">
+                <LoopLauncherRow onOpen={onOpenLoop} sessionId={statusSessionId} />
+                <CodingStatusRow
+                  onBranchOff={handleBranchOff}
+                  onConvertBranch={handleConvertBranch}
+                  onListBranches={handleListBranches}
+                  onOpen={toggleReview}
+                  onOpenWorktree={openInWorktree}
+                  onSwitchBranch={handleSwitchBranch}
+                  repoPath={cwd}
+                />
+              </div>
               <div
                 className={cn(
                   'relative z-1 flex min-h-0 w-full flex-col gap-(--composer-row-gap) overflow-hidden rounded-[inherit] px-(--composer-surface-pad-x) py-(--composer-surface-pad-y) transition-opacity duration-200 ease-out',

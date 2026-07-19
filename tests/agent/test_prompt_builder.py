@@ -81,7 +81,8 @@ class TestGuidanceConstants:
         ) in KANBAN_GUIDANCE
         assert "Foreground = decision-maker" in KANBAN_GUIDANCE
         assert (
-            "`kanban_create` = committed workflow mutation, owned by foreground"
+            "`delegate_task(mode=\"loop\")` = committed workflow mutation, "
+            "owned by foreground"
             in KANBAN_GUIDANCE
         )
         assert "does not wake or interrupt another running agent" in KANBAN_GUIDANCE
@@ -103,7 +104,11 @@ class TestGuidanceConstants:
             in KANBAN_FOREGROUND_GUIDANCE
         )
         assert "read every changed task" not in KANBAN_FOREGROUND_GUIDANCE
-        assert "`kanban_create(...)`" in KANBAN_FOREGROUND_GUIDANCE
+        assert (
+            '`delegate_task(mode="loop", tasks=[...])`'
+            in KANBAN_FOREGROUND_GUIDANCE
+        )
+        assert "`kanban_create(...)`" not in KANBAN_FOREGROUND_GUIDANCE
         assert "directly in the first model round" in KANBAN_FOREGROUND_GUIDANCE
         assert "built-in foreground contract is complete" in (
             KANBAN_FOREGROUND_GUIDANCE
@@ -113,7 +118,9 @@ class TestGuidanceConstants:
         assert "unless the direct native call is blocked" in (
             KANBAN_FOREGROUND_GUIDANCE
         )
-        assert "parents=[...]" in KANBAN_FOREGROUND_GUIDANCE
+        assert "tasks[].depends_on" in KANBAN_FOREGROUND_GUIDANCE
+        assert "tasks[].blocks" in KANBAN_FOREGROUND_GUIDANCE
+        assert "`kanban_unblock(task_id=...)`" in KANBAN_FOREGROUND_GUIDANCE
         assert "coalesced until automatic work reaches" in KANBAN_FOREGROUND_GUIDANCE
         assert "closure refuses unfinished members" in KANBAN_FOREGROUND_GUIDANCE
         assert "Call `loop_graph` directly" in KANBAN_FOREGROUND_GUIDANCE
@@ -123,15 +130,11 @@ class TestGuidanceConstants:
             in KANBAN_FOREGROUND_GUIDANCE
         )
         assert "same model round" in KANBAN_FOREGROUND_GUIDANCE
-        assert "let its assigned worker execute it" in KANBAN_FOREGROUND_GUIDANCE
-        assert "Unknown assignees remain ready and never dispatch" in KANBAN_FOREGROUND_GUIDANCE
-        assert (
-            "explicitly supplied by the user is already confirmed"
-            in KANBAN_FOREGROUND_GUIDANCE
+        assert "let the auto-routed worker execute it" in KANBAN_FOREGROUND_GUIDANCE
+        assert "runnable resolution work ahead of a blocked task" in (
+            KANBAN_FOREGROUND_GUIDANCE
         )
-        assert "never run `hermes profile list` for it" in KANBAN_FOREGROUND_GUIDANCE
-        assert "Never use a blocked task as a parent" in KANBAN_FOREGROUND_GUIDANCE
-        assert "resolution/review work without parents" in KANBAN_FOREGROUND_GUIDANCE
+        assert "blocked downstream task" in KANBAN_FOREGROUND_GUIDANCE
 
     def test_kanban_orchestrator_guidance_preserves_full_board_routing(self):
         assert KANBAN_FOREGROUND_GUIDANCE in KANBAN_ORCHESTRATOR_GUIDANCE

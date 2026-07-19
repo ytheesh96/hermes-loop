@@ -1568,6 +1568,7 @@ class SlashCommandCompleter(Completer):
             ("@file:", "Attach a file"),
             ("@folder:", "Attach a folder"),
             ("@git:", "Git log with diffs (e.g. @git:5)"),
+            ("@task:", "Attach task"),
             ("@url:", "Fetch web content"),
         )
         for candidate, meta in _STATIC_REFS:

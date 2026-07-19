@@ -7,7 +7,7 @@ import { openSessionInNewWindow } from '@/store/windows'
 
 import { useSlashCommand } from '../session/hooks/use-prompt-actions/slash'
 
-import { onComposerSubmitRequest } from './composer/focus'
+import { onComposerInsertRefsRequest, onComposerSubmitRequest } from './composer/focus'
 import { useLoopPanelController } from './use-loop-panel-controller'
 
 const hermesMocks = vi.hoisted(() => ({
@@ -94,8 +94,7 @@ function renderControllerHarness({ gatewayOpen = false }: { gatewayOpen?: boolea
     const controller = useLoopPanelController({
       activeSessionId: 'session-1',
       gatewayOpen,
-      loopSourceSessionId: 'session-1',
-      onAddContextRef: vi.fn()
+      loopSourceSessionId: 'session-1'
     })
 
     const activeSessionIdRef = useRef<string | null>('session-1')
@@ -114,7 +113,7 @@ function renderControllerHarness({ gatewayOpen = false }: { gatewayOpen?: boolea
       onOpenLoop: controller.onOpen,
       openMemoryGraph: vi.fn(),
       refreshSessions: async () => undefined,
-      requestGateway: vi.fn(async () => ({} as never)),
+      requestGateway: vi.fn(async () => ({}) as never),
       resumeStoredSession: vi.fn(),
       selectedStoredSessionIdRef,
       startFreshSessionDraft: vi.fn(),
@@ -190,6 +189,9 @@ function renderControllerHarness({ gatewayOpen = false }: { gatewayOpen?: boolea
         </button>
         <button onClick={() => pendingRow && controller.onTaskAction('archive', pendingRow)} type="button">
           Archive pending child
+        </button>
+        <button onClick={() => pendingRow && controller.onTaskAction('ask-hermes', pendingRow)} type="button">
+          Attach pending child
         </button>
         <button onClick={() => rootRow && controller.onTaskAction('block', rootRow)} type="button">
           Block Loop workflow
@@ -306,6 +308,24 @@ describe('useLoopPanelController', () => {
 
     expect(screen.getByTestId('loop-open').textContent).toBe('true')
     expect(screen.getByTestId('loop-selected').textContent).toBe('t_root')
+  })
+
+  it('attaches a Loop task without inserting a canned chat prompt', async () => {
+    const onInsertRefs = vi.fn()
+    const unsubscribe = onComposerInsertRefsRequest(onInsertRefs)
+
+    renderControllerHarness({ gatewayOpen: true })
+
+    await waitFor(() => expect(screen.getByTestId('loop-root').textContent).toBe('LIVE DISPOSABLE DEMO'))
+    fireEvent.click(screen.getByRole('button', { name: /attach pending child/i }))
+
+    await waitFor(() =>
+      expect(onInsertRefs).toHaveBeenCalledWith({
+        refs: [{ kind: 'task', label: 'Loop draft', value: 'Loop draft' }],
+        target: 'main'
+      })
+    )
+    unsubscribe()
   })
 
   it('opens the Loop canvas without selecting or creating a task', () => {

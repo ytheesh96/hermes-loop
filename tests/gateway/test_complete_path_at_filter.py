@@ -102,7 +102,7 @@ def test_bare_at_still_shows_static_refs(tmp_path, monkeypatch):
 
     texts = [t for t, _, _ in _items("@")]
 
-    for expected in ("@diff", "@staged", "@file:", "@folder:", "@url:", "@git:"):
+    for expected in ("@diff", "@staged", "@file:", "@folder:", "@url:", "@git:", "@task:"):
         assert expected in texts, f"missing static ref {expected!r} in {texts!r}"
 
 

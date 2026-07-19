@@ -32,6 +32,7 @@ const mocks = vi.hoisted(() => {
   }
 
   const selectLoopTask = vi.fn()
+  const openLoop = vi.fn()
   const createLoopTask = vi.fn(async () => 't_created')
   const submitText = vi.fn(async () => true)
 
@@ -43,7 +44,7 @@ const mocks = vi.hoisted(() => {
     onCreateTask: createLoopTask,
     onFocusTaskId: vi.fn(),
     onHide: vi.fn(),
-    onOpen: vi.fn(),
+    onOpen: openLoop,
     onSelectTaskId: selectLoopTask,
     onTaskAction: vi.fn(),
     open: true,
@@ -56,7 +57,7 @@ const mocks = vi.hoisted(() => {
 
   const useLoopPanelController = vi.fn(defaultLoopController)
 
-  return { createLoopTask, defaultLoopController, selectLoopTask, submitText, useLoopPanelController }
+  return { createLoopTask, defaultLoopController, openLoop, selectLoopTask, submitText, useLoopPanelController }
 })
 
 vi.mock('@/components/pane-shell', () => ({
@@ -93,10 +94,21 @@ vi.mock('../hermes', () => ({
 vi.mock('../store/windows', () => ({ isSecondaryWindow: () => false }))
 
 vi.mock('./chat', () => ({
-  ChatView: ({ onOpenKanbanTask }: { onOpenKanbanTask?: (taskId: string) => void }) => (
-    <button onClick={() => onOpenKanbanTask?.('t_delegated_loop')} type="button">
-      Open delegated Loop row
-    </button>
+  ChatView: ({
+    onOpenKanbanTask,
+    onOpenLoop
+  }: {
+    onOpenKanbanTask?: (taskId: string) => void
+    onOpenLoop?: () => void
+  }) => (
+    <>
+      <button onClick={() => onOpenKanbanTask?.('t_delegated_loop')} type="button">
+        Open delegated Loop row
+      </button>
+      <button onClick={onOpenLoop} type="button">
+        Open Loop canvas
+      </button>
+    </>
   )
 }))
 
@@ -299,6 +311,7 @@ describe('ContribWiring Loop session-source wiring', () => {
     $currentCwd.set('/tmp/hermes-loop-project')
     setFileBrowserOpen(true)
     mocks.selectLoopTask.mockClear()
+    mocks.openLoop.mockClear()
     mocks.createLoopTask.mockClear()
     mocks.submitText.mockClear()
     mocks.useLoopPanelController.mockReset()
@@ -330,6 +343,10 @@ describe('ContribWiring Loop session-source wiring', () => {
     fireEvent.click(screen.getByRole('button', { name: /open delegated loop row/i }))
 
     expect(mocks.selectLoopTask).toHaveBeenCalledWith('t_delegated_loop')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Loop canvas' }))
+
+    expect(mocks.openLoop).toHaveBeenCalledTimes(1)
   })
 
   it('does not render a visible Loop rail placeholder when the mounted session-source controller is empty', () => {

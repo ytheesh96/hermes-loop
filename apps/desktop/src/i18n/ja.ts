@@ -1730,7 +1730,11 @@ export const ja = defineLocale({
   statusStack: {
     agents: 'エージェント',
     background: count => `バックグラウンド ${count} 件`,
+    blockedTasks: count => `ブロック中のタスク ${count} 件`,
+    completedTasks: count => `完了したタスク ${count} 件`,
+    loop: 'Loop',
     loopWorkers: count => `Kanban エージェント ${count} 件`,
+    pendingTasks: count => `保留中のタスク ${count} 件`,
     subagents: count => `サブエージェント ${count} 件`,
     todos: (done, total) => `タスク ${done}/${total}`,
     running: '実行中',

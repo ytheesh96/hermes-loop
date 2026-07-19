@@ -201,7 +201,7 @@ export function useComposerTrigger({
     // No pill while expanding — the bare command stays plain text until an arg
     // is picked, at which point a single pill is emitted for the full command.
     const slashKind = !expandsToArgs && trigger.kind === '/' ? slashChipKindForItem(item) : null
-    const keepTriggerOpen = starter || expandsToArgs
+    const keepTriggerOpen = (starter && serialized !== '@task:') || expandsToArgs
 
     const finish = () => {
       draftRef.current = composerPlainText(editor)

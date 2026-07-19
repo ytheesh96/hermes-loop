@@ -36,7 +36,6 @@ describe('visibleComposerStatusItems', () => {
   }
 
   const kanbanPending: ComposerStatusItem = {
-    currentTool: 'Loop',
     id: 'kanban-task:t_pending',
     kanbanTaskId: 't_pending',
     state: 'running',
@@ -45,14 +44,27 @@ describe('visibleComposerStatusItems', () => {
     type: 'todo'
   }
 
-  it('hides only open local checklist rows while the turn is idle', () => {
-    const items = [localPending, localRunning, localCompleted, kanbanPending]
+  const loopWorker: ComposerStatusItem = {
+    id: 'kanban-agent:t_pending:1',
+    kanbanTaskId: 't_pending',
+    state: 'running',
+    title: 'Durable Loop worker',
+    type: 'subagent'
+  }
+
+  it('always hides Loop todos while preserving local todos and Loop workers', () => {
+    const items = [localPending, localRunning, localCompleted, kanbanPending, loopWorker]
 
     expect(visibleComposerStatusItems(items, false).map(item => item.id)).toEqual([
       'todo:local-completed',
-      'kanban-task:t_pending'
+      'kanban-agent:t_pending:1'
     ])
-    expect(visibleComposerStatusItems(items, true).map(item => item.id)).toEqual(items.map(item => item.id))
+    expect(visibleComposerStatusItems(items, true).map(item => item.id)).toEqual([
+      'todo:local-pending',
+      'todo:local-running',
+      'todo:local-completed',
+      'kanban-agent:t_pending:1'
+    ])
   })
 })
 

@@ -23,8 +23,8 @@ import { notify, notifyError } from '@/store/notifications'
 import { $activeGatewayProfile } from '@/store/profile'
 import { openSessionInNewWindow } from '@/store/windows'
 
-import { requestComposerInsert, requestComposerSubmit } from './composer/focus'
-import { buildLoopChatDraft, buildLoopTriageDraft } from './loop-intake'
+import { requestComposerInsert, requestComposerInsertRefs, requestComposerSubmit } from './composer/focus'
+import { buildLoopTriageDraft } from './loop-intake'
 import type { LoopTaskAction, LoopTaskCreateOptions } from './loop-panel'
 import { loopSessionSourceRefetchInterval } from './loop-refresh'
 import {
@@ -41,7 +41,6 @@ interface LoopPanelControllerOptions {
   ensureLoopSourceSessionId?: () => Promise<null | string>
   gatewayOpen: boolean
   loopSourceSessionId: string
-  onAddContextRef: (refText: string, label?: string, detail?: string) => void
 }
 
 const LIVE_LOOP_GRAPH_BACKEND_REQUIRED =
@@ -115,8 +114,7 @@ export function useLoopPanelController({
   activeSessionId,
   ensureLoopSourceSessionId,
   gatewayOpen,
-  loopSourceSessionId,
-  onAddContextRef
+  loopSourceSessionId
 }: LoopPanelControllerOptions) {
   const activeGatewayProfile = useStore($activeGatewayProfile)
   const queryClient = useQueryClient()
@@ -161,8 +159,15 @@ export function useLoopPanelController({
   const loopSourceBoard = loopSourceQuery.data?.board || undefined
 
   const loopCanvasPositionsQuery = useQuery({
-    queryKey: ['loop-canvas-positions', activeGatewayProfile, loopSourceBoard, loopPanelWorkflowKey, loopSourceSessionId],
-    queryFn: () => getLoopCanvasPositions(loopPanelWorkflowKey, activeGatewayProfile, loopSourceBoard, loopSourceSessionId),
+    queryKey: [
+      'loop-canvas-positions',
+      activeGatewayProfile,
+      loopSourceBoard,
+      loopPanelWorkflowKey,
+      loopSourceSessionId
+    ],
+    queryFn: () =>
+      getLoopCanvasPositions(loopPanelWorkflowKey, activeGatewayProfile, loopSourceBoard, loopSourceSessionId),
     enabled: gatewayOpen && Boolean(loopPanelWorkflowKey),
     staleTime: 2_000
   })
@@ -467,14 +472,7 @@ export function useLoopPanelController({
           throw new Error('Select tasks from one workflow before editing dependencies.')
         }
 
-        await linkLoopTasks(
-          parentId,
-          childId,
-          activeGatewayProfile,
-          loopSourceBoard,
-          workflowId,
-          loopSourceSessionId
-        )
+        await linkLoopTasks(parentId, childId, activeGatewayProfile, loopSourceBoard, workflowId, loopSourceSessionId)
         await queryClient.invalidateQueries({
           queryKey: ['loop-session-source', activeGatewayProfile, loopSourceSessionId]
         })
@@ -554,9 +552,9 @@ export function useLoopPanelController({
       }
 
       if (action === 'ask-hermes') {
-        onAddContextRef(`@task:${row.taskId}`, row.title || row.taskId, `Loop task ${row.taskId}`)
-
-        requestComposerInsert(buildLoopChatDraft(row), { mode: 'block', target: 'main' })
+        requestComposerInsertRefs([{ kind: 'task', label: row.title || row.taskId, value: row.taskId }], {
+          target: 'main'
+        })
 
         return
       }
@@ -603,13 +601,7 @@ export function useLoopPanelController({
 
       loopTaskStatusMutation.mutate({ status: nextStatus, taskId: row.taskId })
     },
-    [
-      handleSelectLoopTaskId,
-      loopPanelState,
-      loopTaskArchiveMutation,
-      loopTaskStatusMutation,
-      onAddContextRef
-    ]
+    [handleSelectLoopTaskId, loopPanelState, loopTaskArchiveMutation, loopTaskStatusMutation]
   )
 
   return {

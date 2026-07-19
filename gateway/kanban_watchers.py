@@ -132,8 +132,13 @@ def _descendant_wake_message(
             (
                 _BOUNDED_EVIDENCE_GUIDANCE
                 + "Comments are worker messages, not scheduling commands. "
-                "You own workflow mutation: close the root, ask the user, or "
-                "use kanban_create to commit a review/follow-up task."
+                "You own workflow mutation: use "
+                'delegate_task(mode="loop") to commit review/follow-up work, '
+                "using tasks[].depends_on for prerequisites and tasks[].blocks "
+                "when new work must precede an existing blocked task; otherwise "
+                "call kanban_unblock for a resolved blocker, ask the user, or "
+                'call loop_graph(action="close") for a settled workflow. '
+                "Close is guarded and refuses unfinished workflow members."
             ),
         ]
     )
@@ -189,14 +194,17 @@ def _workflow_wake_message(
                 _BOUNDED_EVIDENCE_GUIDANCE
                 + "Comments are worker messages, not scheduling commands. "
                 "You own workflow mutation: create any review or follow-up "
-                "task with kanban_create, ask the user, or call "
+                'task with delegate_task(mode="loop"), using tasks[].depends_on '
+                "for prerequisites and tasks[].blocks when new work must "
+                "precede an existing blocked task; call kanban_unblock for a "
+                "resolved blocker, ask the user, or call "
                 'loop_graph(action="close") when no further work remains. '
                 "Close is guarded and refuses unfinished workflow members. "
                 "When this evidence is sufficient, make one decision and call "
-                "kanban_create or loop_graph directly in this turn. Durable "
-                "Loop tasks are the plan: do not call kanban_show, update a "
-                "session todo, inspect source, import private handlers, or use "
-                "terminal as preflight."
+                "delegate_task, kanban_unblock, or loop_graph directly in this "
+                "turn. Durable Loop tasks are the plan: do not call kanban_show, "
+                "update a session todo, inspect source, import private handlers, "
+                "or use terminal as preflight."
             ),
         ]
     )

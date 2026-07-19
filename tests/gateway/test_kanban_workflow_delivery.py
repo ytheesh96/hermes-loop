@@ -316,9 +316,12 @@ async def test_two_member_boundaries_coalesce_into_one_workflow_wake_with_commen
     assert "authoritative for this boundary" in wake.text
     assert "Call kanban_show only when required evidence is missing" in wake.text
     assert (
-        "make one decision and call kanban_create or loop_graph directly"
-        in wake.text
-    )
+        "make one decision and call delegate_task, kanban_unblock, or loop_graph "
+        "directly"
+    ) in wake.text
+    assert "depends_on" in wake.text
+    assert "blocks" in wake.text
+    assert "kanban_create" not in wake.text
     assert "Durable Loop tasks are the plan" in wake.text
     assert "update a session todo" in wake.text
     assert "inspect source" in wake.text

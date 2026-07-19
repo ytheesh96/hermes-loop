@@ -82,13 +82,14 @@ function loopRowStatusIndicator(row: LoopRow): StatusIndicatorKind {
   return 'unknown'
 }
 
-function LoopStatusIndicator({ row }: { row: LoopRow }) {
-  return (
-    <StatusIndicator
-      ariaLabel={`Status: ${loopTaskPhaseLabel(row) || row.status}`}
-      kind={loopRowStatusIndicator(row)}
-    />
-  )
+const LOOP_STATUS_RAIL_CLASS: Record<StatusIndicatorKind, string> = {
+  active: 'bg-sky-500/70',
+  attention: 'bg-amber-500/75',
+  done: 'bg-emerald-500/70',
+  failed: 'bg-destructive/70',
+  pending: 'bg-(--ui-stroke-secondary)',
+  triage: 'bg-(--ui-text-tertiary)/60',
+  unknown: 'bg-(--ui-stroke-tertiary)'
 }
 
 interface LoopTaskGraphEdge {
@@ -309,10 +310,6 @@ function loopTaskGraphNodeKind(row: LoopRow): LoopTaskGraphNodeKind {
   }
 
   return 'task'
-}
-
-function loopTaskGraphDependencyCount(row: LoopRow): number {
-  return new Set([...row.parents, ...row.children]).size
 }
 
 function loopTaskGraphEdges(rows: LoopRow[]): LoopTaskGraphEdge[] {
@@ -899,8 +896,9 @@ function LoopTaskGraphNode({
   const currentTool = isGraphActiveLoopRow(row) ? loopWorkerCurrentTool(row) : undefined
   const assignee = loopTextValue(row.assignee)
   const nodeKind = loopTaskGraphNodeKind(row)
-  const dependencyCount = loopTaskGraphDependencyCount(row)
   const phaseLabel = loopTaskPhaseLabel(row)
+  const statusKind = loopRowStatusIndicator(row)
+  const statusLabel = phaseLabel || row.status || 'Unknown'
   const dependenciesEditable = inputEnabled ?? loopTaskAllowsDependencyEdits(row)
 
   return (
@@ -919,7 +917,7 @@ function LoopTaskGraphNode({
       }}
     >
       <button
-        aria-label={`${selected ? 'Selected' : 'Select'} ${row.title} (${row.taskId})`}
+        aria-label={`${selected ? 'Selected' : 'Select'} ${row.title} (${row.taskId}). Status: ${statusLabel}.`}
         aria-pressed={selected}
         className={cn(
           'relative flex h-full w-full flex-col gap-1 overflow-hidden rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-surface-background) py-2 pl-3 pr-2 text-left shadow-none transition-colors hover:border-(--ui-stroke-primary) hover:bg-(--ui-row-hover-background) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
@@ -934,6 +932,7 @@ function LoopTaskGraphNode({
         data-dimmed={dimmed ? 'true' : 'false'}
         data-path-connected={pathConnected ? 'true' : 'false'}
         data-selected={selected ? 'true' : 'false'}
+        data-status-kind={statusKind}
         data-task-kind={nodeKind}
         data-testid={`loop-task-graph-node-${row.taskId}`}
         onClick={event => onActivate?.(row, event)}
@@ -951,34 +950,21 @@ function LoopTaskGraphNode({
           )
         }}
         onPointerDown={event => onDragStart?.(layout, event)}
+        title={`Status: ${statusLabel}`}
         type="button"
       >
         <span
           aria-hidden="true"
-          className={cn(
-            'absolute inset-y-0 left-0 w-1',
-            nodeKind === 'worker' && 'bg-sky-500/70',
-            nodeKind === 'review' && 'bg-amber-500/75',
-            nodeKind === 'blocker' && 'bg-red-500/70',
-            nodeKind === 'task' && 'bg-(--ui-stroke-tertiary)'
-          )}
+          className={cn('absolute inset-y-0 left-0 w-1', LOOP_STATUS_RAIL_CLASS[statusKind])}
+          data-testid={`loop-task-graph-status-rail-${row.taskId}`}
         />
-        <div className="flex min-w-0 items-start gap-2">
-          <LoopStatusIndicator row={row} />
+        <div className="flex min-w-0 items-start">
           <span className="min-w-0 flex-1 truncate text-[0.7rem] font-medium leading-4 text-(--ui-text-primary)">
             {row.title}
           </span>
         </div>
-        {phaseLabel || assignee || currentTool ? (
+        {assignee || currentTool ? (
           <div className="flex min-w-0 items-center gap-1.5">
-            {phaseLabel ? (
-              <span
-                className="min-w-0 truncate rounded-[0.2rem] bg-(--ui-fill-quaternary) px-1.5 py-0.5 text-[0.58rem] font-medium text-(--ui-text-tertiary)"
-                data-testid={`loop-task-graph-phase-${row.taskId}`}
-              >
-                {phaseLabel}
-              </span>
-            ) : null}
             {assignee ? (
               <span className="min-w-0 max-w-full truncate rounded-[0.2rem] bg-(--ui-bg-secondary) px-1.5 py-0.5 text-[0.58rem] font-medium text-(--ui-text-tertiary)">
                 {assignee}
@@ -991,26 +977,15 @@ function LoopTaskGraphNode({
             ) : null}
           </div>
         ) : null}
-        {(dependencyCount > 0 || row.commentCount > 0) && (
+        {row.commentCount > 0 && (
           <div className="flex min-w-0 items-center gap-2 text-[0.58rem] text-(--ui-text-quaternary)">
-            {dependencyCount > 0 ? (
-              <span
-                aria-label={loopGraphCountLabel(dependencyCount, 'dependency', 'dependencies')}
-                className="inline-flex items-center gap-1"
-              >
-                <Codicon aria-hidden name="git-merge" size="0.62rem" />
-                {dependencyCount}
-              </span>
-            ) : null}
-            {row.commentCount > 0 ? (
-              <span
-                aria-label={loopGraphCountLabel(row.commentCount, 'comment')}
-                className="inline-flex items-center gap-1"
-              >
-                <Codicon aria-hidden name="comment" size="0.62rem" />
-                {row.commentCount}
-              </span>
-            ) : null}
+            <span
+              aria-label={loopGraphCountLabel(row.commentCount, 'comment')}
+              className="inline-flex items-center gap-1"
+            >
+              <Codicon aria-hidden name="comment" size="0.62rem" />
+              {row.commentCount}
+            </span>
           </div>
         )}
       </button>

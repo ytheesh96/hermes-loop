@@ -1813,7 +1813,11 @@ export const en: Translations = {
   statusStack: {
     agents: 'Agents',
     background: count => `${count} Background`,
+    blockedTasks: count => `${count} blocked task${count === 1 ? '' : 's'}`,
+    completedTasks: count => `${count} completed task${count === 1 ? '' : 's'}`,
+    loop: 'Loop',
     loopWorkers: count => `${count} Kanban agent${count === 1 ? '' : 's'}`,
+    pendingTasks: count => `${count} pending task${count === 1 ? '' : 's'}`,
     subagents: count => `${count} Subagent${count === 1 ? '' : 's'}`,
     todos: (done, total) => `Tasks ${done}/${total}`,
     running: 'Running',

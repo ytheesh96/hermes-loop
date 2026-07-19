@@ -512,8 +512,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     activeSessionId,
     ensureLoopSourceSessionId,
     gatewayOpen: chatOpen && gatewayState === 'open',
-    loopSourceSessionId,
-    onAddContextRef: composer.addContextRefAttachment
+    loopSourceSessionId
   })
 
   useEffect(() => {
@@ -780,6 +779,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     onPickFiles: () => void composer.pickContextPaths('file'),
     onPickFolders: () => void composer.pickContextPaths('folder'),
     onPickImages: () => void composer.pickImages(),
+    onOpenLoop: loopController.onOpen,
     onOpenKanbanTask: loopController.onSelectTaskId,
     onReload: reloadFromMessage,
     onRemoveAttachment: id => void composer.removeAttachment(id),

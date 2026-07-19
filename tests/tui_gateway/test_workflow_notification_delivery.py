@@ -125,7 +125,11 @@ def test_tui_boundary_prompts_use_authoritative_evidence_fast_path(
         "Treat the bounded event evidence and comments above as authoritative"
         in message
     )
-    assert "decide in this turn and call kanban_create" in message
+    assert "decide in this turn and call delegate_task" in message
+    assert "depends_on" in message
+    assert "blocks" in message
+    assert "kanban_unblock" in message
+    assert "kanban_create" not in message
     assert 'loop_graph(action="close")' in message
     assert (
         f'Call kanban_show(task_id="{expected_task_id}") only when required '

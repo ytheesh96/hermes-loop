@@ -118,7 +118,7 @@ class TestKanbanGuidanceSelection:
                 "kanban_show",
                 "kanban_complete",
                 "kanban_comment",
-                "kanban_create",
+                "delegate_task",
                 "kanban_unblock",
             ]
         )

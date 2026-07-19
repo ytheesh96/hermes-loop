@@ -36,11 +36,11 @@ const BACKGROUND_POLL_MS = 5_000
 // letting dead URLs pile up. File previews (a real on-disk artifact) stand alone.
 const isLocalhostPreview = (target: string): boolean => /\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0)\b/i.test(target)
 
-// Real codicons per group (no sparkles): a checklist for todos, the agent glyph
-// for subagents, a background process glyph for background tasks.
+// Real codicons per group (no sparkles): a checklist for todos, the organization
+// glyph for subagents, and a background process glyph for background tasks.
 const GROUP_ICON: Record<StatusGroup['type'], string> = {
   todo: 'checklist',
-  subagent: 'agent',
+  subagent: 'organization',
   background: 'server-process'
 }
 
@@ -78,16 +78,16 @@ function isOpenLocalTodo(item: ComposerStatusItem): boolean {
   )
 }
 
+function isLoopTodo(item: ComposerStatusItem): boolean {
+  return item.type === 'todo' && Boolean(item.kanbanTaskId)
+}
+
 function isWorkerSessionRow(item: ComposerStatusItem): boolean {
   return item.type === 'subagent' || item.type === 'kanban-agent'
 }
 
 export function visibleComposerStatusItems(items: readonly ComposerStatusItem[], busy: boolean): ComposerStatusItem[] {
-  if (busy) {
-    return [...items]
-  }
-
-  return items.filter(item => !isOpenLocalTodo(item))
+  return items.filter(item => !isLoopTodo(item) && (busy || !isOpenLocalTodo(item)))
 }
 
 /**

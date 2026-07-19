@@ -132,6 +132,7 @@ def test_delegate_task_loop_skeleton_batch_uses_minimal_live_graph_contract(
                 "edges": [
                     {"parent_id": "t_research", "child_id": "t_build"},
                     {"parent_id": "t_build", "child_id": "t_verify"},
+                    {"parent_id": "t_verify", "child_id": "t_blocked"},
                 ],
                 "dispatch": {"spawned": []},
                 "subscribed": True,
@@ -157,6 +158,7 @@ def test_delegate_task_loop_skeleton_batch_uses_minimal_live_graph_contract(
                     "id": "verify",
                     "title": "Verify end to end",
                     "depends_on": ["build"],
+                    "blocks": ["t_blocked"],
                 },
             ],
             parent_agent=DummyParent(),
@@ -167,7 +169,11 @@ def test_delegate_task_loop_skeleton_batch_uses_minimal_live_graph_contract(
     assert out["count"] == 3
     assert out["workflow_id"] == "wf_existing"
     assert "root_task_id" not in out
-    assert out["edges"] == [["t_research", "t_build"], ["t_build", "t_verify"]]
+    assert out["edges"] == [
+        ["t_research", "t_build"],
+        ["t_build", "t_verify"],
+        ["t_verify", "t_blocked"],
+    ]
     assert all(item["needs_specification"] for item in out["items"])
     assert "immediately" in out["note"]
     assert len(captured) == 1
@@ -189,6 +195,7 @@ def test_delegate_task_loop_skeleton_batch_uses_minimal_live_graph_contract(
             "client_id": "verify",
             "title": "Verify end to end",
             "depends_on": ["build"],
+            "blocks": ["t_blocked"],
         },
     ]
     assert all("assignee" not in node and "context" not in node for node in captured[0]["nodes"])
@@ -303,11 +310,15 @@ def test_delegate_task_loop_schema_and_prompt_explain_live_graph_ownership():
     assert "goal_max_turns" not in properties
     assert "goal_max_turns" not in task_properties
     assert "title" in task_properties
+    assert "blocks" in task_properties
     assert "auto-decomposer decides" in _build_top_level_description()
     assert "ephemeral concurrency cap does not apply" in _build_tasks_param_description()
     assert "tasks[].context" in _build_tasks_param_description()
+    assert "tasks[].blocks" in _build_tasks_param_description()
     assert "You own workflow decisions and graph mutation" in KANBAN_FOREGROUND_GUIDANCE
-    assert "`kanban_create(...)`" in KANBAN_FOREGROUND_GUIDANCE
+    assert '`delegate_task(mode="loop", tasks=[...])`' in KANBAN_FOREGROUND_GUIDANCE
+    assert "`tasks[].blocks`" in KANBAN_FOREGROUND_GUIDANCE
+    assert "`kanban_create(...)`" not in KANBAN_FOREGROUND_GUIDANCE
 
 
 def test_delegate_task_loop_batch_bypasses_ephemeral_concurrency_without_flag(
@@ -833,6 +844,65 @@ def test_delegate_task_loop_mode_depends_on_existing_task_id(loop_delegate_env):
 
     assert child is not None
     assert child.status == "todo"
+
+
+def test_delegate_task_loop_mode_blocks_existing_task_and_infers_workflow(
+    loop_delegate_env,
+):
+    from hermes_cli import kanban_db as kb
+    from tools import delegate_tool
+
+    with kb.connect() as conn:
+        workflow_id = kb.create_workflow(conn, title="Publication workflow")
+        publication_id = kb.create_task(
+            conn,
+            title="Publish verified candidate",
+            assignee="publisher",
+            workflow_id=workflow_id,
+        )
+        assert kb.claim_task(
+            conn,
+            publication_id,
+            claimer="publisher:stale-candidate",
+        )
+        assert kb.block_task(
+            conn,
+            publication_id,
+            reason="Candidate must be refreshed",
+        )
+
+    out = json.loads(
+        delegate_tool.delegate_task(
+            tasks=[
+                {
+                    "client_id": "refresh",
+                    "goal": "Refresh the verified candidate",
+                    "blocks": [publication_id],
+                }
+            ],
+            mode="loop",
+            parent_agent=DummyParent(),
+        )
+    )
+    refresh_id = out["loop_item_id"]
+
+    assert out["status"] == "dispatched"
+    assert out["workflow_id"] == workflow_id
+    assert out["parents"] == []
+    assert out["edges"] == [[refresh_id, publication_id]]
+    assert out["subscribed"] is True
+    assert out["auto_reentry"] is True
+
+    with kb.connect() as conn:
+        refresh = kb.get_task(conn, refresh_id)
+        publication = kb.get_task(conn, publication_id)
+        assert kb.parent_ids(conn, publication_id) == [refresh_id]
+        assert kb.child_ids(conn, refresh_id) == [publication_id]
+
+    assert refresh is not None
+    assert refresh.workflow_id == workflow_id
+    assert publication is not None
+    assert publication.status == "blocked"
 
 
 def test_delegate_task_loop_mode_unknown_dependency_creates_no_tasks(loop_delegate_env):

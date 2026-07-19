@@ -9,7 +9,7 @@ import { ZoomableImage } from '@/components/chat/zoomable-image'
 import { extractEmbeddedImages } from '@/lib/embedded-images'
 import { gatewayMediaDataUrl, isRemoteGateway } from '@/lib/media'
 
-const HERMES_REF_TYPES = ['file', 'folder', 'url', 'image', 'tool', 'line', 'terminal', 'session'] as const
+const HERMES_REF_TYPES = ['file', 'folder', 'url', 'image', 'tool', 'line', 'terminal', 'session', 'task'] as const
 type HermesRefType = (typeof HERMES_REF_TYPES)[number]
 
 /** Single source of truth for chip icon glyphs (Tabler outline @ 24×24).
@@ -44,6 +44,12 @@ const ICON_PATHS: Record<HermesRefType, string[]> = {
     'M8 9h8',
     'M8 13h6',
     'M18 4a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-5l-5 3v-3h-2a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3z'
+  ],
+  task: [
+    'M9 5h6',
+    'M9 3v4',
+    'M9 13l2 2l4 -4',
+    'M7 5h-1a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-12a2 2 0 0 0 -2 -2h-1'
   ]
 }
 

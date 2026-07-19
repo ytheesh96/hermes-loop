@@ -33,11 +33,11 @@ def test_loop_foreground_gets_reentry_controls(monkeypatch, tmp_path):
     schema = registry.get_definitions(set(resolve_toolset("hermes-cli")), quiet=True)
     names = {s["function"].get("name") for s in schema if "function" in s}
     kanban = {n for n in names if n and n.startswith("kanban_")}
+    assert "delegate_task" in names
     assert kanban == {
         "kanban_show",
         "kanban_complete",
         "kanban_comment",
-        "kanban_create",
         "kanban_unblock",
     }
 
@@ -135,9 +135,9 @@ def test_loop_capable_posture_keeps_foreground_reentry_controls(
         "kanban_show",
         "kanban_complete",
         "kanban_comment",
-        "kanban_create",
         "kanban_unblock",
     } <= names
+    assert "kanban_create" not in names
     assert "kanban_link" not in names
 
 
@@ -2267,7 +2267,8 @@ def test_kanban_guidance_in_worker_prompt(monkeypatch, tmp_path):
     assert "kanban_show()" in prompt
     assert "kanban_complete" in prompt
     assert "kanban_block" in prompt
-    assert "kanban_create" in prompt
+    assert 'delegate_task(mode="loop")' in prompt
+    assert "kanban_create" not in prompt
     assert "State concrete blocker" in prompt
     assert "do not classify it as user or orchestrator" in prompt
     assert "`kanban_comment` = worker message" in prompt
@@ -2276,7 +2277,10 @@ def test_kanban_guidance_in_worker_prompt(monkeypatch, tmp_path):
         "delivery trigger"
     ) in prompt
     assert "Foreground = decision-maker" in prompt
-    assert "`kanban_create` = committed workflow mutation, owned by foreground" in prompt
+    assert (
+        '`delegate_task(mode="loop")` = committed workflow mutation, '
+        "owned by foreground"
+    ) in prompt
     assert "Do not create, link, review-route, or assign follow-up tasks" in prompt
     assert "the orchestrator/operator decides whether user input is required" in prompt
     for retired in (

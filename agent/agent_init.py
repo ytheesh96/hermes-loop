@@ -1234,9 +1234,9 @@ def init_agent(
 
     # Kanban guidance is session-static. ``kanban_decompose`` is exclusive to
     # profiles that explicitly enabled the full board surface; bounded Loop
-    # foreground sessions have kanban_create without it, and leaf workers have
-    # kanban_show without graph control. Select once at init so later prompt
-    # rebuilds remain byte-stable.
+    # foreground sessions have delegate_task + kanban_unblock without it, and
+    # leaf workers have kanban_show without graph control. Select once at init
+    # so later prompt rebuilds remain byte-stable.
     from agent.prompt_builder import (
         KANBAN_FOREGROUND_GUIDANCE,
         KANBAN_GUIDANCE,
@@ -1244,7 +1244,10 @@ def init_agent(
     )
     if "kanban_decompose" in agent.valid_tool_names:
         agent._kanban_worker_guidance = KANBAN_ORCHESTRATOR_GUIDANCE
-    elif "kanban_create" in agent.valid_tool_names:
+    elif (
+        "delegate_task" in agent.valid_tool_names
+        and "kanban_unblock" in agent.valid_tool_names
+    ):
         agent._kanban_worker_guidance = KANBAN_FOREGROUND_GUIDANCE
     elif "kanban_show" in agent.valid_tool_names:
         agent._kanban_worker_guidance = KANBAN_GUIDANCE
