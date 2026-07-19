@@ -12,8 +12,26 @@ https://github.com/user-attachments/assets/48ea333a-3fe8-4a4a-b2e5-66af5b055fee
 
 ## Installation
 
-Hermes Loop uses the upstream Hermes Agent installers: `scripts/install.sh` on
-macOS/Linux and `scripts/install.ps1` in Windows PowerShell.
+### macOS (Apple silicon)
+
+1. Open the [latest Hermes Loop release](https://github.com/ytheesh96/hermes-loop/releases/latest).
+2. Download the file ending in `mac-arm64.dmg`.
+3. Open the DMG, drag **Hermes** to **Applications**, and launch it.
+
+The first public installer is for Apple-silicon Macs (`arm64`). Windows, Linux,
+and Intel Mac installers have not been published yet.
+
+> [!IMPORTANT]
+> The upstream `install.sh`, `install.ps1`, and `hermes desktop` commands install
+> or launch Nous Research's upstream Hermes Agent. They do **not** install this
+> Hermes Loop fork. Use this repository's [Releases](https://github.com/ytheesh96/hermes-loop/releases)
+> page when you want the Loop desktop experience.
+
+> [!NOTE]
+> The current macOS build does not carry an Apple Developer ID signature and is
+> not Apple-notarized. If macOS blocks the first launch, Control-click **Hermes**
+> in Applications, choose **Open**, then confirm **Open**. You only need to do
+> this once.
 
 ## What this fork adds
 
@@ -74,73 +92,11 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), OpenR
 
 ---
 
-## Quick Install
+## Install Hermes Loop
 
-### Linux, macOS, WSL2, Termux
-
-```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-```
-
-### Windows (native, PowerShell)
-
-> **Heads up:** Native Windows runs Hermes without WSL — CLI, gateway, TUI, and tools all work natively. If you'd rather use WSL2, the Linux/macOS one-liner above works there too. Found a bug? Please [file issues](https://github.com/NousResearch/hermes-agent/issues).
-
-Run this in PowerShell:
-
-```powershell
-iex (irm https://hermes-agent.nousresearch.com/install.ps1)
-```
-
-The installer handles everything: uv, Python 3.11, Node.js, ripgrep, ffmpeg, **and a portable Git Bash** (MinGit, unpacked to `%LOCALAPPDATA%\hermes\git` — no admin required, completely isolated from any system Git install). Hermes uses this bundled Git Bash to run shell commands.
-
-If you already have Git installed, the installer detects it and uses that instead. Otherwise a ~45MB MinGit download is all you need — it won't touch or interfere with any system Git.
-
-> **Android / Termux:** The tested manual path is documented in the [Termux guide](https://hermes-agent.nousresearch.com/docs/getting-started/termux). On Termux, Hermes installs a curated `.[termux]` extra because the full `.[all]` extra currently pulls Android-incompatible voice dependencies.
->
-> **Windows:** Native Windows is fully supported — the PowerShell one-liner above installs everything. If you'd rather use WSL2, the Linux command works there too. Native Windows install lives under `%LOCALAPPDATA%\hermes`; WSL2 installs under `~/.hermes` as on Linux.
-
-After installation:
-
-```bash
-source ~/.bashrc    # reload shell (or: source ~/.zshrc)
-hermes              # start chatting!
-```
-
-### Troubleshooting
-
-#### Windows Defender or antivirus flags `uv.exe` as malware
-
-If your antivirus (Bitdefender, Windows Defender, etc.) quarantines `uv.exe` from the Hermes `bin` folder (`%LOCALAPPDATA%\hermes\bin\uv.exe`), this is a **false positive**. The file is Astral's `uv` — the Rust Python package manager Hermes bundles to manage its Python environment. ML-based antivirus engines commonly flag unsigned Rust binaries that download and install packages.
-
-**To verify your copy is authentic:**
-
-```powershell
-# Install GitHub CLI if needed
-winget install --id GitHub.cli
-
-# Login to GitHub
-gh auth login
-
-# Run verification
-$uv = "$env:LOCALAPPDATA\hermes\bin\uv.exe"
-$ver = (& $uv --version).Split(' ')[1]
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$zip = "$env:TEMP\uv.zip"
-Invoke-WebRequest "https://github.com/astral-sh/uv/releases/download/$ver/uv-x86_64-pc-windows-msvc.zip" -OutFile $zip -UseBasicParsing
-gh attestation verify $zip --repo astral-sh/uv
-Expand-Archive $zip "$env:TEMP\uv_x" -Force
-(Get-FileHash "$env:TEMP\uv_x\uv.exe").Hash -eq (Get-FileHash $uv).Hash
-```
-
-If attestation says "Verification succeeded" and the last line prints `True`, you're good.
-
-**To whitelist Hermes:**
-- **Windows Defender:** Run PowerShell as Admin → `Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\hermes\bin"`
-- **Bitdefender:** Add an exception in the Bitdefender console (Protection > Antivirus > Settings > Manage Exceptions)
-- Whitelist the **folder**, not the file hash — Hermes updates `uv` and the hash changes every version
-
-For more context, see the upstream Astral reports: [astral-sh/uv#13553](https://github.com/astral-sh/uv/issues/13553), [astral-sh/uv#15011](https://github.com/astral-sh/uv/issues/15011), [astral-sh/uv#10079](https://github.com/astral-sh/uv/issues/10079).
+Use the [Hermes Loop installation instructions](#installation) above. The
+installer commands in the upstream Hermes Agent documentation target
+`NousResearch/hermes-agent`, not this fork.
 
 ---
 
@@ -260,26 +216,14 @@ See `hermes claw migrate --help` for all options, or use the `openclaw-migration
 
 We welcome contributions! See the [Contributing Guide](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing) for development setup, code style, and PR process.
 
-Quick start for contributors — use the standard installer, then work from the
-full git checkout it creates at `$HERMES_HOME/hermes-agent` (usually
-`~/.hermes/hermes-agent`). This matches the layout used by `hermes update`, the
-managed venv, lazy dependencies, gateway, and docs tooling.
+Clone this fork directly for development. Create the venv outside the cloned
+source tree — a venv inside the directory the agent operates from can be wiped
+by a relative-path command the agent runs against its own checkout, destroying
+the running runtime mid-session.
 
 ```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-cd "${HERMES_HOME:-$HOME/.hermes}/hermes-agent"
-uv pip install -e ".[all,dev]"
-scripts/run_tests.sh
-```
-
-Manual clone fallback (for throwaway clones/CI where you intentionally do not
-want the managed install layout):
-
-Create the venv outside the cloned source tree — a venv inside the directory
-the agent operates from can be wiped by a relative-path command the agent runs
-against its own checkout, destroying the running runtime mid-session.
-
-```bash
+git clone https://github.com/ytheesh96/hermes-loop.git
+cd hermes-loop
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv venv ~/.hermes/venvs/hermes-dev --python 3.11
 source ~/.hermes/venvs/hermes-dev/bin/activate

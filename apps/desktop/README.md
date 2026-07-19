@@ -1,13 +1,13 @@
 # Hermes Desktop ☤
 
 <p align="center">
-  <a href="https://github.com/NousResearch/hermes-agent/releases"><img src="https://img.shields.io/badge/Download-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-FFD700?style=for-the-badge" alt="Download"></a>
+  <a href="https://github.com/ytheesh96/hermes-loop/releases/latest"><img src="https://img.shields.io/badge/Download-macOS%20(Apple%20silicon)-FFD700?style=for-the-badge" alt="Download Hermes Loop for macOS"></a>
   <a href="https://hermes-agent.nousresearch.com/docs/"><img src="https://img.shields.io/badge/Docs-hermes--agent.nousresearch.com-FFD700?style=for-the-badge" alt="Documentation"></a>
   <a href="https://discord.gg/NousResearch"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://github.com/NousResearch/hermes-agent/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License: MIT"></a>
 </p>
 
-**The native desktop app for [Hermes Agent](../../README.md) — the self-improving AI agent from [Nous Research](https://nousresearch.com).** Same agent, same skills, same memory as the CLI and gateway, in a polished native window — chat with streaming tool output, side-by-side previews, a file browser, voice, and settings, no terminal required. Available for **macOS, Windows, and Linux**.
+**The native desktop app for [Hermes Loop](../../README.md), built on the self-improving Hermes Agent from [Nous Research](https://nousresearch.com).** Same agent, same skills, same memory as the CLI and gateway, in a polished native window — chat with streaming tool output, side-by-side previews, a file browser, voice, settings, and the durable Loop task graph. The current public Hermes Loop installer supports **Apple-silicon Macs**.
 
 <table>
 <tr><td><b>Chat with the full agent</b></td><td>Streaming responses, live tool activity, structured tool summaries, and the same conversation history as every other Hermes surface.</td></tr>
@@ -22,19 +22,19 @@
 
 ## Install
 
-### Install with Hermes (recommended)
+### macOS (Apple silicon)
 
-Already have the Hermes CLI? Just run:
+1. Open the [latest Hermes Loop release](https://github.com/ytheesh96/hermes-loop/releases/latest).
+2. Download the file ending in `mac-arm64.dmg`.
+3. Open the DMG, drag **Hermes** to **Applications**, and launch it.
 
-```bash
-hermes desktop
-```
+The current build does not carry an Apple Developer ID signature and is not
+Apple-notarized. If macOS blocks the first launch, Control-click **Hermes** in
+Applications, choose **Open**, then confirm **Open**.
 
-It builds and launches the GUI against your existing install — same config, keys, sessions, and skills. On first launch Hermes walks you through picking a provider and model; nothing else to configure.
-
-### Prebuilt installers
-
-Prebuilt installers are built and distributed via [the Hermes Desktop website.](https://hermes-agent.nousresearch.com/).
+> The upstream `hermes desktop` command launches the upstream Hermes Desktop
+> checkout; it does not install this Hermes Loop fork. Windows, Linux, and Intel
+> Mac Hermes Loop installers have not been published yet.
 
 ---
 
@@ -83,7 +83,10 @@ npm run dist:linux   # AppImage + deb + rpm
 npm run pack         # unpacked app under release/ (no installer)
 ```
 
-Installers are built and uploaded to GitHub Releases manually. macOS/Windows signing & notarization happen automatically when the relevant credentials are present in the environment (`CSC_LINK` / `CSC_KEY_PASSWORD` / `APPLE_*` for macOS, `WIN_CSC_*` for Windows).
+Installers are built and uploaded to GitHub Releases manually. The current
+Hermes Loop macOS release is built without an Apple Developer ID identity or
+notarization credentials; do not describe it as signed, notarized, or accepted
+by Gatekeeper.
 
 ### How it works
 
