@@ -3,6 +3,7 @@ import { useCallback } from 'react'
 
 import { getGlobalModelInfo, getGlobalModelOptions } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { manualPickRemoved } from '@/lib/model-options'
 import { repairStaleModelProviderSelection } from '@/lib/model-provider-compat'
 import { notifyError } from '@/store/notifications'
 import {
@@ -59,20 +60,41 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
         return
       }
 
-      if (!force && $currentModel.get()) {
-        if (getCurrentModelSource() === 'manual') {
-          return
+      // A manual pick stays sticky UNLESS it was removed from the catalog (its
+      // model no longer exists on the provider), in which case keeping it would
+      // 404 every new chat — fall through to reseed from the profile default.
+      // Reads the model-options cache the composer already populated; an
+      // unknown/not-yet-loaded catalog conservatively preserves the pick.
+      const keepManualPick = () => {
+        if (force || !$currentModel.get() || getCurrentModelSource() !== 'manual') {
+          return false
         }
 
+        const options = queryClient.getQueryData<ModelOptionsResponse>(['model-options', 'global'])
+
+        return !manualPickRemoved(options?.providers, $currentProvider.get(), $currentModel.get())
+      }
+
+      if (keepManualPick()) {
+        return
+      }
+
+      if (!force && $currentModel.get() && getCurrentModelSource() !== 'manual') {
         const currentModel = $currentModel.get().trim()
         const currentProvider = $currentProvider.get().trim()
 
         if (currentModel && currentProvider) {
           const options = await getGlobalModelOptions()
+
+          if ($activeSessionId.get() || getCurrentModelSource() === 'manual') {
+            return
+          }
+
           const repaired = repairStaleModelProviderSelection(options, {
             model: currentModel,
             provider: currentProvider
           })
+
           const selectionChanged = repaired.model !== currentModel || repaired.provider !== currentProvider
 
           if (repaired.model !== currentModel) {
@@ -94,7 +116,7 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
 
       const result = await getGlobalModelInfo()
 
-      if ($activeSessionId.get() || (!force && $currentModel.get() && getCurrentModelSource() === 'manual')) {
+      if ($activeSessionId.get() || keepManualPick()) {
         return
       }
 
@@ -112,7 +134,7 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
     } catch {
       // The delayed session.info event still updates this once the agent is ready.
     }
-  }, [])
+  }, [queryClient])
 
   // Returns whether the switch succeeded so callers can await it before applying
   // follow-up changes. The composer model is plain UI state: with no live
