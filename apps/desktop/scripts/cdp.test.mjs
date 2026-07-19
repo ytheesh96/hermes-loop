@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+
+import { afterEach, test } from 'vitest'
 
 import { CDPClient, connectRenderer, selectRenderer } from './cdp.mjs'
+
+const originalFetch = globalThis.fetch
+const originalWebSocket = globalThis.WebSocket
+
+afterEach(() => {
+  globalThis.fetch = originalFetch
+  globalThis.WebSocket = originalWebSocket
+})
 
 test('selectRenderer chooses the first matching page', () => {
   const targets = [
@@ -18,14 +27,7 @@ test('selectRenderer returns undefined when no page matches', () => {
   assert.equal(selectRenderer([{ type: 'worker', url: 'http://127.0.0.1:5174/' }]), undefined)
 })
 
-test('connectRenderer discovers the target and opens its debugger socket', async t => {
-  const originalFetch = globalThis.fetch
-  const originalWebSocket = globalThis.WebSocket
-  t.after(() => {
-    globalThis.fetch = originalFetch
-    globalThis.WebSocket = originalWebSocket
-  })
-
+test('connectRenderer discovers the target and opens its debugger socket', async () => {
   globalThis.fetch = async url => {
     assert.equal(url, 'http://127.0.0.1:9333/json/list')
     return {

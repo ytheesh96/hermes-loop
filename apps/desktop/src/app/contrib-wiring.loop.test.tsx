@@ -79,6 +79,11 @@ vi.mock('../hermes', () => ({
   getProfiles: vi.fn(async () => []),
   getSessionMessages: vi.fn(async () => ({ messages: [] })),
   listAllProfileSessions: vi.fn(async () => ({ sessions: [], total: 0 })),
+  listSidebarSessions: vi.fn(async () => ({
+    cron: { sessions: [], total: 0 },
+    messaging: { sessions: [], total: 0 },
+    recents: { profile_totals: {}, sessions: [], total: 0 }
+  })),
   restartGateway: vi.fn(async () => undefined),
   setApiRequestProfile: vi.fn(),
   updateHermes: vi.fn(async () => undefined),

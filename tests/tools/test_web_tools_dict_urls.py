@@ -37,9 +37,8 @@ class _FakeExtractProvider(WebSearchProvider):
 
 @pytest.fixture
 def extract_provider(monkeypatch):
-    with web_search_registry._lock:
-        previous = dict(web_search_registry._providers)
-        web_search_registry._providers.clear()
+    previous = web_search_registry.list_providers()
+    web_search_registry._reset_for_tests()
 
     provider = _FakeExtractProvider()
     web_search_registry.register_provider(provider)
@@ -56,9 +55,9 @@ def extract_provider(monkeypatch):
     monkeypatch.setattr(web_tools, "async_is_safe_url", _safe)
     yield provider
 
-    with web_search_registry._lock:
-        web_search_registry._providers.clear()
-        web_search_registry._providers.update(previous)
+    web_search_registry._reset_for_tests()
+    for registered_provider in previous:
+        web_search_registry.register_provider(registered_provider)
 
 
 @pytest.mark.asyncio

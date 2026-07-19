@@ -336,14 +336,13 @@ class TestDispatchersTriggerPluginDiscovery:
         snapshot is restored even when the dispatcher under test raises."""
         from agent import web_search_registry
 
-        with web_search_registry._lock:
-            original = dict(web_search_registry._providers)
-            web_search_registry._providers.clear()
+        original = web_search_registry.list_providers()
+        web_search_registry._reset_for_tests()
 
         def _restore():
-            with web_search_registry._lock:
-                web_search_registry._providers.clear()
-                web_search_registry._providers.update(original)
+            web_search_registry._reset_for_tests()
+            for provider in original:
+                web_search_registry.register_provider(provider)
 
         return _restore
 
@@ -504,14 +503,13 @@ class TestDisabledPluginDiagnostic:
     def _clear_registry(self):
         from agent import web_search_registry
 
-        with web_search_registry._lock:
-            original = dict(web_search_registry._providers)
-            web_search_registry._providers.clear()
+        original = web_search_registry.list_providers()
+        web_search_registry._reset_for_tests()
 
         def _restore():
-            with web_search_registry._lock:
-                web_search_registry._providers.clear()
-                web_search_registry._providers.update(original)
+            web_search_registry._reset_for_tests()
+            for provider in original:
+                web_search_registry.register_provider(provider)
 
         return _restore
 

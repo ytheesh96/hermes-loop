@@ -136,7 +136,7 @@ for the full workflow.
 | `kanban_comment` | Add a durable, non-waking message to the task thread. A later completion, genuine non-dependency block, or system give-up boundary carries recent comments to foreground. | worker, enabled Loop foreground, or `kanban` profile |
 | `kanban_create` | Create committed review/follow-up work. Foreground/orchestrator-only; parent membership or the active foreground wake supplies the internal workflow identity. | enabled Loop foreground or `kanban` profile |
 | `kanban_link` | Link tasks with a parent → child dependency edge. Foreground/orchestrator-only. | profile with `kanban` toolset |
-| `kanban_unblock` | Return a blocked task to `ready`. Hidden from dispatcher-spawned task workers. | enabled Loop foreground or `kanban` profile |
+| `kanban_unblock` | Return a blocked task to `ready` when all parents are done, or `todo` while a parent remains open. Hidden from dispatcher-spawned task workers. | enabled Loop foreground or `kanban` profile |
 | `kanban_decompose` | Canonically decompose a triage task into routed work. Hidden from dispatcher-spawned task workers and the bounded Loop foreground surface. | profile with `kanban` toolset |
 ## `project` toolset
 

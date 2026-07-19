@@ -73,27 +73,21 @@ class TestPluginTTSProviders:
         assert row["tts_provider"] == "cartesia"
         assert row["tts_plugin_name"] == "cartesia"
 
-    def test_filters_builtin_shadow_defensively(self):
+    def test_filters_builtin_shadow_defensively(self, monkeypatch):
         """Even if a plugin slipped past the registry's built-in check
         (e.g. via direct ``agent.tts_registry.register_provider`` rather
         than the ``ctx.register_tts_provider`` hook), the picker layer
         filters it out so the picker invariant holds."""
-        # Use lower-level call to bypass the warning + skip in
-        # register_provider (the registry's built-in guard).
-        # Note: this is intentionally pathological — production code
-        # paths go through the hook which catches this first.
         provider = _FakeTTSProvider(name="edge")
-        tts_registry._providers["edge"] = provider  # type: ignore[index]
-        try:
-            rows = tools_config._plugin_tts_providers()
-            assert rows == [], (
-                "Picker must filter built-in name shadows even when the "
-                "registry has been bypassed."
-            )
-        finally:
-            tts_registry._providers.pop("edge", None)  # type: ignore[arg-type]
+        monkeypatch.setattr(tts_registry, "list_providers", lambda: [provider])
 
-    def test_skips_providers_with_no_name(self):
+        rows = tools_config._plugin_tts_providers()
+        assert rows == [], (
+            "Picker must filter built-in name shadows even when the "
+            "registry has been bypassed."
+        )
+
+    def test_skips_providers_with_no_name(self, monkeypatch):
         """Defense in depth: a provider with no .name attribute is skipped
         rather than crashing the picker."""
 
@@ -102,13 +96,11 @@ class TestPluginTTSProviders:
             def get_setup_schema(self):
                 return {"name": "Bogus"}
 
-        tts_registry._providers["bogus"] = _NoName()  # type: ignore[assignment]
-        try:
-            rows = tools_config._plugin_tts_providers()
-            # Provider has no .name so the picker filters it out
-            assert all(r.get("tts_plugin_name") != "bogus" for r in rows)
-        finally:
-            tts_registry._providers.pop("bogus", None)  # type: ignore[arg-type]
+        monkeypatch.setattr(tts_registry, "list_providers", lambda: [_NoName()])
+
+        rows = tools_config._plugin_tts_providers()
+        # Provider has no .name so the picker filters it out
+        assert all(r.get("tts_plugin_name") != "bogus" for r in rows)
 
     def test_skips_providers_whose_schema_raises(self):
         class _ExplodingSchema(_FakeTTSProvider):
