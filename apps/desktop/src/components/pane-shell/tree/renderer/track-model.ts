@@ -213,6 +213,35 @@ export function subtreeGone(node: LayoutNode, ctx: TrackContext): boolean {
 }
 
 /**
+ * True when every visible leaf is a minimized group whose OWN parent split
+ * collapses across `axis`. Its 28px strip has no extent along the outer axis,
+ * so a composite subtree made only from those leaves must not reserve an empty
+ * outer track. Same-axis minimized leaves remain real restore rails.
+ */
+export function subtreeOnlyCrossAxisMinimized(
+  node: LayoutNode,
+  axis: 'row' | 'column',
+  ctx: TrackContext
+): boolean {
+  const walk = (current: LayoutNode, parentAxis?: 'row' | 'column'): boolean => {
+    if (current.type === 'group') {
+      return (
+        shownPaneIds(current, ctx).length > 0 &&
+        Boolean(current.minimized) &&
+        parentAxis !== undefined &&
+        parentAxis !== axis
+      )
+    }
+
+    const visible = current.children.filter(child => allPaneIds(child).some(id => !ctx.paneGone(id)))
+
+    return visible.length > 0 && visible.every(child => walk(child, current.orientation))
+  }
+
+  return walk(node)
+}
+
+/**
  * Which chrome toggle owns a root-row child — SEMANTIC, not positional:
  * ⌘B is the sessions/nav column (any `placement: 'left'` pane) wherever a
  * flip or drag puts it; ⌘J is every other side column. `null` = contains

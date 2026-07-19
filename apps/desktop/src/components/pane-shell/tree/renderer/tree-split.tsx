@@ -37,6 +37,7 @@ import {
   rootChildSide,
   shownPaneIds,
   subtreeGone,
+  subtreeOnlyCrossAxisMinimized,
   type TrackContext
 } from './track-model'
 import { TreeNode } from './tree-node'
@@ -113,10 +114,14 @@ export function TreeSplit({ node, root, rootRow }: { node: SplitNode; root?: boo
   // display:none (content stays MOUNTED — toggling back is instant), and its
   // siblings absorb the space. Narrow-collapse UNMOUNTS instead, so the edge
   // overlay owns the single live instance of the pane's content.
+  // A direct minimized GROUP stays visible as its restore rail. A composite
+  // SPLIT whose only visible leaf groups are minimized does not: without a
+  // visible sibling inside that deck, retaining its outer track produces an
+  // empty edge strip. The nested renderer still keeps the rail whenever a
+  // non-minimized sibling (for example Files above Terminal/Logs) is visible.
   // EMPTY zones only exist in editor-authored trees (normalize prunes them on
   // every structural op) — they take space in edit mode as drop targets.
   const isEmptyZone = (child: LayoutNode) => child.type === 'group' && child.panes.length === 0
-  const isCollapsed = (child: LayoutNode) => subtreeGone(child, trackCtx) || (isEmptyZone(child) && !editMode)
 
   // Min/max clamps come from a direct GROUP child's panes (the same clamps
   // the app's Pane props express) — but ONLY when they can speak for the
@@ -385,13 +390,20 @@ export function TreeSplit({ node, root, rootRow }: { node: SplitNode; root?: boo
   // and narrow-unmount flag. fixedTrackSize + subtreeGone each re-walk the
   // subtree, so resolve them ONCE here instead of per read below.
   const tracks = node.children.map((child, i) => {
+    const gone = subtreeGone(child, trackCtx)
     const minimized = isMinimized(child)
-    const collapsed = isCollapsed(child) || sideGone(i)
+
+    const railOnly =
+      !editMode &&
+      child.type === 'split' &&
+      subtreeOnlyCrossAxisMinimized(child, axis, trackCtx)
+
+    const collapsed = gone || railOnly || (isEmptyZone(child) && !editMode) || sideGone(i)
     const track = minimized || collapsed ? null : fixedTrackSize(child, axis, trackCtx)
     const sizing = minimized || collapsed ? null : sizingFor(child, track)
     // Narrow-collapse UNMOUNTS (the edge overlay owns the live instance) — but
     // only for panes the breakpoint collapsed, not ones a chrome toggle hid.
-    const narrowCollapsed = narrow && collapsed && allPaneIds(child).some(id => !hiddenPanes.has(id))
+    const narrowCollapsed = narrow && gone && allPaneIds(child).some(id => !hiddenPanes.has(id))
 
     return { child, collapsed, minimized, narrowCollapsed, sizing, track }
   })
