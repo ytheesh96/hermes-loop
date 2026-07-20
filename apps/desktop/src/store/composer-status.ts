@@ -7,6 +7,7 @@ import {
 } from '@/app/chat/loop-state'
 import type { StatusIndicatorKind } from '@/components/chat/status-indicator'
 import { translateNow } from '@/i18n'
+import { stableArray } from '@/lib/stable-array'
 import type { TodoItem, TodoStatus } from '@/lib/todos'
 
 import { $gateway } from './gateway'
@@ -90,22 +91,24 @@ export const $kanbanStatusBySession = atom<Record<string, ComposerStatusItem[]>>
 // $backgroundStatusBySession is keyed by RUNTIME session id (gateway events
 // and process.list both speak that); the sidebar row knows only the STORED id.
 // $sessionStates bridges the two: runtime id → state.storedSessionId.
+// Perf: recomputes on every $sessionStates change (message deltas, tens/sec),
+// but the background-running set rarely moves. `stableArray` keeps the prior
+// reference when unchanged so rows reading this don't re-render per token.
+let backgroundRunningIds: readonly string[] = []
 export const $backgroundRunningSessionIds = computed([$backgroundStatusBySession, $sessionStates], (bg, states) => {
   const ids = new Set<string>()
 
   for (const [runtimeId, items] of Object.entries(bg)) {
-    if (!items.some(i => i.state === 'running')) {
-      continue
-    }
+    if (items.some(i => i.state === 'running')) {
+      const storedId = states[runtimeId]?.storedSessionId
 
-    const storedId = states[runtimeId]?.storedSessionId
-
-    if (storedId) {
-      ids.add(storedId)
+      if (storedId) {
+        ids.add(storedId)
+      }
     }
   }
 
-  return [...ids]
+  return (backgroundRunningIds = stableArray(backgroundRunningIds, [...ids]))
 })
 
 // Rows the user X-ed away. The registry keeps finished processes around for a

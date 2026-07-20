@@ -15,6 +15,7 @@ describe('gateway event routing', () => {
     // output, and dropping them loses the live response until a refetch (#42178).
     expect(gatewayEventRequiresSessionId('message.delta')).toBe(false)
     expect(gatewayEventRequiresSessionId('message.complete')).toBe(false)
+    expect(gatewayEventRequiresSessionId('message.interim')).toBe(false)
     expect(gatewayEventRequiresSessionId('reasoning.delta')).toBe(false)
     expect(gatewayEventRequiresSessionId('tool.start')).toBe(false)
     expect(gatewayEventRequiresSessionId('approval.request')).toBe(false)

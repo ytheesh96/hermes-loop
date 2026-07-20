@@ -25,12 +25,15 @@ def test_loop_foreground_gets_reentry_controls(monkeypatch, tmp_path):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
 
-    import tools.kanban_tools  # ensure registered
-    from tools.registry import invalidate_check_fn_cache, registry
-    from toolsets import resolve_toolset
+    from model_tools import _clear_tool_defs_cache, get_tool_definitions
+    from tools.registry import invalidate_check_fn_cache
 
     invalidate_check_fn_cache()
-    schema = registry.get_definitions(set(resolve_toolset("hermes-cli")), quiet=True)
+    _clear_tool_defs_cache()
+    schema = get_tool_definitions(
+        enabled_toolsets=["hermes-cli"],
+        quiet_mode=True,
+    )
     names = {s["function"].get("name") for s in schema if "function" in s}
     kanban = {n for n in names if n and n.startswith("kanban_")}
     assert "delegate_task" in names
@@ -847,7 +850,9 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
     # Mock the judge to reject the completion. The gate only runs when a
     # judge is reachable, so force the availability probe True as well.
     def mock_judge_goal(goal, last_response, *, timeout=30.0, subgoals=None):
-        return "continue", "missing verification evidence", False
+        # Match the real judge_goal contract:
+        # (verdict, reason, parse_failed, wait_directive, transport_failed)
+        return "continue", "missing verification evidence", False, None, False
 
     monkeypatch.setattr("tools.kanban_tools.judge_goal", mock_judge_goal)
     monkeypatch.setattr("tools.kanban_tools._goal_judge_available", lambda: True)
