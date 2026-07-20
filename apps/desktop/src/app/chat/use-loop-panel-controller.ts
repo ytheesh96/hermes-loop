@@ -18,13 +18,10 @@ import {
   unlinkLoopTasks,
   updateLoopTaskStatus
 } from '@/hermes'
-import {
-  reconcileKanbanSessionSourceForComposer,
-  selectLoopWorkflowForSession
-} from '@/store/composer-status'
+import { reconcileKanbanSessionSourceForComposer, selectLoopWorkflowForSession } from '@/store/composer-status'
 import { notify, notifyError } from '@/store/notifications'
 import { $activeGatewayProfile } from '@/store/profile'
-import { openSessionInNewWindow } from '@/store/windows'
+import { openSessionTab } from '@/store/session-states'
 
 import { requestComposerInsertRefs, requestComposerSubmit } from './composer/focus'
 import { buildLoopTriageDraft } from './loop-intake'
@@ -546,9 +543,11 @@ export function useLoopPanelController({
       const workerProfile = row.workerActivity?.profile || row.latestRun?.profile || row.assignee || undefined
 
       if (action === 'worker-session' && workerSessionId) {
-        void openSessionInNewWindow(
+        openSessionTab(
           workerSessionId,
-          workerProfile ? { profile: workerProfile, watch: true } : { watch: true }
+          workerProfile
+            ? { profile: workerProfile, runningHint: row.active, watch: true }
+            : { runningHint: row.active, watch: true }
         )
 
         return

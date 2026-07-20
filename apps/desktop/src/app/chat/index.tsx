@@ -48,6 +48,7 @@ import { requestComposerInsert } from './composer/focus'
 import { droppedFileInlineRefs } from './composer/inline-refs'
 import { useComposerScope } from './composer/scope'
 import type { ChatBarState } from './composer/types'
+import { WatchComposerStatus } from './composer/watch-status'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { type DragKind, useFileDropZone } from './hooks/use-file-drop-zone'
 import { ProfileTag } from './profile-tag'
@@ -109,7 +110,8 @@ function ChatHeader({
   const profiles = useStore($profiles)
 
   const activeStoredSession =
-    sessions.find(session => sessionMatchesAnyId(session, [selectedSessionId, routedSessionId, activeSessionId])) || null
+    sessions.find(session => sessionMatchesAnyId(session, [selectedSessionId, routedSessionId, activeSessionId])) ||
+    null
 
   const title = activeStoredSession ? sessionTitle(activeStoredSession) : 'New session'
 
@@ -167,6 +169,7 @@ interface ChatRuntimeBoundaryProps {
   onEdit: (message: AppendMessage) => Promise<void>
   onReload: (parentId: string | null) => Promise<void>
   onThreadMessagesChange: (messages: readonly ThreadMessage[]) => void
+  readOnly: boolean
   /** Route points at an unloaded session — render empty until resume swaps in
    *  the new transcript, so the previous session's messages don't linger. */
   suppressMessages: boolean
@@ -191,6 +194,7 @@ function ChatRuntimeBoundary({
   onEdit,
   onReload,
   onThreadMessagesChange,
+  readOnly,
   suppressMessages
 }: ChatRuntimeBoundaryProps) {
   const storeMessages = useStore(useSessionView().$messages)
@@ -198,16 +202,21 @@ function ChatRuntimeBoundary({
   const runtimeMessageRepository = useRuntimeMessageRepository(messages)
 
   const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
+    isDisabled: readOnly,
     messageRepository: runtimeMessageRepository,
     isRunning: busy,
-    setMessages: onThreadMessagesChange,
     onNew: async () => {
       // Submission is handled explicitly by ChatBar.
       // Keeping this no-op avoids duplicate prompt.submit calls.
     },
-    onEdit,
-    onCancel: async () => onCancel(),
-    onReload
+    ...(readOnly
+      ? {}
+      : {
+          setMessages: onThreadMessagesChange,
+          onEdit,
+          onCancel: async () => onCancel(),
+          onReload
+        })
   })
 
   return <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>
@@ -261,8 +270,12 @@ export function ChatView({
   // Per-session (SessionView) reads — a tile IS its session, so these come
   // from the view slice, not the global atoms (which track the primary only).
   const currentCwd = useStore(view.$cwd)
+  const currentFast = useStore(view.$fast)
   const currentModel = useStore(view.$model)
   const currentProvider = useStore(view.$provider)
+  const currentReasoningEffort = useStore(view.$reasoningEffort)
+  const readOnly = useStore(view.$readOnly)
+  const spectator = readOnly || isWatchWindow()
   // A pet anywhere (in-window or popped out) owns the hearts; composer only when none.
   const petActive = useStore($petActive)
   const petOverlayActive = useStore($petOverlayActive)
@@ -321,10 +334,12 @@ export function ChatView({
     !resumeExhausted && isRoutedSessionView && (routeSessionMismatch || (messagesEmpty && !activeSessionId))
 
   const threadLoading = threadLoadingState(loadingSession, busy, awaitingResponse, lastVisibleIsUser)
-  // Hide the composer in the exhausted error state too: there's no live runtime
-  // to send to until a retry rebinds one. Watch windows are pure spectators of a
-  // subagent run driven elsewhere — no composer, transcript is read-only.
-  const showChatBar = !loadingSession && !resumeExhausted && !isWatchWindow()
+  // Hide every composer surface in the exhausted error state: there is no live
+  // runtime until retry rebinds one. Loop worker watch tabs keep the composer's
+  // status/model readout but never mount its input or mutating controls.
+  const showComposerSurface = !loadingSession && !resumeExhausted
+  const showChatBar = showComposerSurface && !spectator
+  const showWatchStatus = showComposerSurface && spectator
   const threadKey = selectedSessionId || activeSessionId || (isRoutedSessionView ? location.pathname : 'new')
 
   const modelOptionsQuery = useQuery<ModelOptionsResponse>({
@@ -343,7 +358,7 @@ export function ChatView({
         explicit_only: true
       })
     },
-    enabled: gatewayOpen
+    enabled: gatewayOpen && !spectator
   })
 
   const quickModels = useMemo(
@@ -448,6 +463,7 @@ export function ChatView({
         onEdit={onEdit}
         onReload={onReload}
         onThreadMessagesChange={onThreadMessagesChange}
+        readOnly={spectator}
         suppressMessages={routeSessionMismatch}
       >
         <div
@@ -461,10 +477,11 @@ export function ChatView({
             gateway={gateway}
             intro={showIntro ? { personality: introPersonality, seed: introSeed } : undefined}
             loading={threadLoading}
-            onBranchInNewChat={onBranchInNewChat}
-            onCancel={onCancel}
+            onBranchInNewChat={spectator ? undefined : onBranchInNewChat}
+            onCancel={spectator ? undefined : onCancel}
             onDismissError={onDismissError}
-            onRestoreToMessage={onRestoreToMessage}
+            onRestoreToMessage={spectator ? undefined : onRestoreToMessage}
+            readOnly={spectator}
             sessionId={activeSessionId}
             sessionKey={threadKey}
           />
@@ -483,7 +500,7 @@ export function ChatView({
               </ErrorState>
             </div>
           )}
-          {showChatBar && <ScrollToBottomButton />}
+          {showComposerSurface && <ScrollToBottomButton />}
           {/* Vibe hearts rise from the composer only when no pet is out (else
               they play on the pet). Fired by the core `reaction` event. */}
           {!petPresent && (
@@ -538,6 +555,15 @@ export function ChatView({
               state={chatBarState}
             />
           </Suspense>
+        )}
+        {showWatchStatus && (
+          <WatchComposerStatus
+            busy={busy}
+            fast={currentFast}
+            model={currentModel}
+            provider={currentProvider}
+            reasoningEffort={currentReasoningEffort}
+          />
         )}
       </ChatRuntimeBoundary>
     </div>

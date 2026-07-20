@@ -41,9 +41,10 @@ export interface ComposerStatusItem {
   /** Actual worker run start, used by the Spawn tree timer. */
   startedAt?: number
   /** subagent: its own stored session id — ordinary subagent and Loop worker
-   *  rows open that session window (livestreamed by the gateway's child-session
-   *  mirror). Workflow/task rows still prefer kanbanTaskId so the user lands
-   *  on the Loop canvas/task first. */
+   *  rows open read-only watch surfaces (ordinary children in a window,
+   *  Loop workers in a tab backed by their durable transcript). Workflow/task
+   *  rows still prefer kanbanTaskId so the user lands on the Loop canvas/task
+   *  first. */
   sessionId?: string
   state: StatusItemState
   /** Shared leading glyph grammar for Loop/Kanban rows. */

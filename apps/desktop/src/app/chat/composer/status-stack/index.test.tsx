@@ -6,10 +6,17 @@ import { I18nProvider } from '@/i18n'
 import { $kanbanStatusBySession, reconcileKanbanSessionSourceForComposer } from '@/store/composer-status'
 import { $loopagentsBySession } from '@/store/loopagents'
 import { $previewStatusBySession } from '@/store/preview-status'
+import { openSessionTab } from '@/store/session-states'
+import { $subagentsBySession } from '@/store/subagents'
 import { $threadScrolledUp } from '@/store/thread-scroll'
 import { openSessionInNewWindow } from '@/store/windows'
 
 import { ComposerStatusStack } from './index'
+
+vi.mock('@/store/session-states', async importOriginal => ({
+  ...(await importOriginal()),
+  openSessionTab: vi.fn()
+}))
 
 vi.mock('@/store/windows', () => ({
   isSecondaryWindow: () => false,
@@ -38,7 +45,9 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
     $kanbanStatusBySession.set({})
     $loopagentsBySession.set({})
     $previewStatusBySession.set({})
+    $subagentsBySession.set({})
     $threadScrolledUp.set(false)
+    vi.mocked(openSessionTab).mockClear()
     vi.mocked(openSessionInNewWindow).mockClear()
   })
 
@@ -89,7 +98,7 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
     expect(screen.getByText('Search Files')).toBeTruthy()
   })
 
-  it('opens Loop worker rows with session ids in watch windows before task drawer fallback', () => {
+  it('opens Loop worker rows in profile-aware watch tabs before task drawer fallback', () => {
     const onOpenKanbanTask = vi.fn()
 
     $kanbanStatusBySession.set({
@@ -111,7 +120,42 @@ describe('ComposerStatusStack Loop/Kanban rows', () => {
     fireEvent.click(screen.getByRole('button', { name: '1 Subagent' }))
     fireEvent.click(screen.getByRole('button', { name: /Root Loop worker/i }))
 
-    expect(openSessionInNewWindow).toHaveBeenCalledWith('worker-session-77', { profile: 'reviewer-qa', watch: true })
+    expect(openSessionTab).toHaveBeenCalledWith('worker-session-77', {
+      profile: 'reviewer-qa',
+      runningHint: true,
+      watch: true
+    })
+    expect(openSessionInNewWindow).not.toHaveBeenCalled()
     expect(onOpenKanbanTask).not.toHaveBeenCalled()
+  })
+
+  it('preserves ordinary subagent watch windows', () => {
+    $subagentsBySession.set({
+      'logical-origin': [
+        {
+          currentTool: 'search_files',
+          filesRead: [],
+          filesWritten: [],
+          goal: 'Ordinary delegated child',
+          id: 'child-1',
+          parentId: 'logical-origin',
+          sessionId: 'child-session-1',
+          startedAt: 1,
+          status: 'running',
+          stream: [],
+          taskCount: 1,
+          taskIndex: 0,
+          updatedAt: 1
+        }
+      ]
+    })
+
+    renderStack('logical-origin')
+
+    fireEvent.click(screen.getByRole('button', { name: '1 Subagent' }))
+    fireEvent.click(screen.getByRole('button', { name: /Ordinary delegated child/i }))
+
+    expect(openSessionInNewWindow).toHaveBeenCalledWith('child-session-1', { watch: true })
+    expect(openSessionTab).not.toHaveBeenCalled()
   })
 })

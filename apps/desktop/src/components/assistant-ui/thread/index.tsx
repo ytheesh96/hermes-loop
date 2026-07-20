@@ -30,6 +30,7 @@ export const Thread: FC<{
   onCancel?: () => Promise<void> | void
   onDismissError?: (messageId: string) => void
   onRestoreToMessage?: (messageId: string, target?: RestoreMessageTarget) => Promise<void> | void
+  readOnly?: boolean
   sessionId?: string | null
   sessionKey?: string | null
 }> = ({
@@ -42,6 +43,7 @@ export const Thread: FC<{
   onCancel,
   onDismissError,
   onRestoreToMessage,
+  readOnly = false,
   sessionId = null,
   sessionKey
 }) => {
@@ -82,6 +84,7 @@ export const Thread: FC<{
         <UserMessage
           onCancel={onCancel}
           onRequestRestoreConfirm={onRestoreToMessage ? requestRestoreConfirm : undefined}
+          readOnly={readOnly}
         />
       )
     }),
@@ -92,6 +95,7 @@ export const Thread: FC<{
       onCancel,
       onDismissError,
       onRestoreToMessage,
+      readOnly,
       requestRestoreConfirm,
       sessionId
     ]

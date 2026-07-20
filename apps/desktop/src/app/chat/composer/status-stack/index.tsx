@@ -21,6 +21,7 @@ import {
   stopBackgroundProcess
 } from '@/store/composer-status'
 import { $previewStatusBySession, dismissPreviewArtifact } from '@/store/preview-status'
+import { openSessionTab } from '@/store/session-states'
 import { $threadScrolledUp } from '@/store/thread-scroll'
 import { openSessionInNewWindow } from '@/store/windows'
 
@@ -82,8 +83,8 @@ function isLoopTodo(item: ComposerStatusItem): boolean {
   return item.type === 'todo' && Boolean(item.kanbanTaskId)
 }
 
-function isWorkerSessionRow(item: ComposerStatusItem): boolean {
-  return item.type === 'subagent' || item.type === 'kanban-agent'
+function isLoopWorkerSessionRow(item: ComposerStatusItem): boolean {
+  return Boolean(item.kanbanTaskId) && (item.type === 'subagent' || item.type === 'kanban-agent')
 }
 
 export function visibleComposerStatusItems(items: readonly ComposerStatusItem[], busy: boolean): ComposerStatusItem[] {
@@ -136,10 +137,13 @@ export function ComposerStatusStack({ busy, queue, sessionId, onOpenKanbanTask }
   const openAgents = () => navigate(AGENTS_ROUTE)
 
   const openStatusItem = (item: ComposerStatusItem) => {
-    const watchOptions = item.profile ? { profile: item.profile, watch: true } : { watch: true }
-
-    if (isWorkerSessionRow(item) && item.sessionId) {
-      void openSessionInNewWindow(item.sessionId, watchOptions)
+    if (isLoopWorkerSessionRow(item) && item.sessionId) {
+      openSessionTab(
+        item.sessionId,
+        item.profile
+          ? { profile: item.profile, runningHint: item.state === 'running', watch: true }
+          : { runningHint: item.state === 'running', watch: true }
+      )
 
       return
     }
@@ -151,7 +155,10 @@ export function ComposerStatusStack({ busy, queue, sessionId, onOpenKanbanTask }
     }
 
     if (item.sessionId) {
-      void openSessionInNewWindow(item.sessionId, watchOptions)
+      void openSessionInNewWindow(
+        item.sessionId,
+        item.profile ? { profile: item.profile, watch: true } : { watch: true }
+      )
 
       return
     }

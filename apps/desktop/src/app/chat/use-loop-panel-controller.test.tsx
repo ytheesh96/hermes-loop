@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { openSessionInNewWindow } from '@/store/windows'
+import { openSessionTab } from '@/store/session-states'
 
 import { useSlashCommand } from '../session/hooks/use-prompt-actions/slash'
 
@@ -37,9 +37,9 @@ const notificationMocks = vi.hoisted(() => ({ notify: vi.fn(), notifyError: vi.f
 vi.mock('@/hermes', () => hermesMocks)
 vi.mock('@/store/notifications', () => notificationMocks)
 
-vi.mock('@/store/windows', () => ({
-  isSecondaryWindow: () => false,
-  openSessionInNewWindow: vi.fn()
+vi.mock('@/store/session-states', async importOriginal => ({
+  ...(await importOriginal()),
+  openSessionTab: vi.fn()
 }))
 
 function demoLoopSource() {
@@ -295,7 +295,7 @@ describe('useLoopPanelController', () => {
 
   afterEach(() => {
     cleanup()
-    vi.mocked(openSessionInNewWindow).mockReset()
+    vi.mocked(openSessionTab).mockReset()
     Object.values(hermesMocks).forEach(mock => mock.mockReset())
     Object.values(notificationMocks).forEach(mock => mock.mockReset())
     window.history.replaceState(null, '', '/')
@@ -747,13 +747,14 @@ describe('useLoopPanelController', () => {
     await waitFor(() => expect(screen.getByTestId('loop-selected').textContent).toBe('t_root'))
   })
 
-  it('opens Loop worker sessions with the worker profile so cross-profile watch windows hydrate', () => {
+  it('opens Loop worker sessions in profile-aware watch tabs', () => {
     renderControllerHarness()
 
     fireEvent.click(screen.getByRole('button', { name: /open worker session/i }))
 
-    expect(openSessionInNewWindow).toHaveBeenCalledWith('worker-session-7', {
+    expect(openSessionTab).toHaveBeenCalledWith('worker-session-7', {
       profile: 'reviewer-qa',
+      runningHint: true,
       watch: true
     })
   })
