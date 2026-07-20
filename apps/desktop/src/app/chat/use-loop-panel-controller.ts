@@ -18,12 +18,15 @@ import {
   unlinkLoopTasks,
   updateLoopTaskStatus
 } from '@/hermes'
-import { reconcileKanbanSessionSourceForComposer } from '@/store/composer-status'
+import {
+  reconcileKanbanSessionSourceForComposer,
+  selectLoopWorkflowForSession
+} from '@/store/composer-status'
 import { notify, notifyError } from '@/store/notifications'
 import { $activeGatewayProfile } from '@/store/profile'
 import { openSessionInNewWindow } from '@/store/windows'
 
-import { requestComposerInsert, requestComposerInsertRefs, requestComposerSubmit } from './composer/focus'
+import { requestComposerInsertRefs, requestComposerSubmit } from './composer/focus'
 import { buildLoopTriageDraft } from './loop-intake'
 import type { LoopTaskAction, LoopTaskCreateOptions } from './loop-panel'
 import { loopSessionSourceRefetchInterval } from './loop-refresh'
@@ -284,6 +287,12 @@ export function useLoopPanelController({
 
   const handleSelectLoopTaskId = useCallback(
     (taskId: string) => {
+      const workflowId = loopPanelState?.rows.find(row => row.taskId === taskId)?.workflowId
+
+      if (activeSessionId && workflowId) {
+        selectLoopWorkflowForSession(activeSessionId, workflowId)
+      }
+
       pendingSelectedLoopTaskIdRef.current = loopPanelState?.rows.some(row => row.taskId === taskId) ? null : taskId
       setSelectedLoopTaskId(taskId)
       setFocusedLoopTaskId(taskId)
@@ -291,7 +300,7 @@ export function useLoopPanelController({
       setLoopPanelOpen(true)
       setLoopPanelHidden(false)
     },
-    [loopPanelState]
+    [activeSessionId, loopPanelState]
   )
 
   const handleOpenLoopPanel = useCallback(

@@ -327,6 +327,42 @@ describe('preserveLocalPendingTurnMessages', () => {
 
     expect(preserveLocalPendingTurnMessages(next, previous)).toBe(next)
   })
+
+  it('drops a committed optimistic prompt when compression shifted its role ordinal', () => {
+    const previous = [
+      msg('compressed-summary', 'assistant', 'Earlier conversation summary'),
+      msg('user-optimistic', 'user', 'new question'),
+      msg('assistant-stream-1', 'assistant', 'partial answer')
+    ]
+
+    const next = [
+      msg('1-user-stored', 'user', 'old question'),
+      msg('2-assistant-stored', 'assistant', 'old answer'),
+      msg('3-user-stored', 'user', 'another old question'),
+      msg('4-assistant-stored', 'assistant', 'another old answer'),
+      msg('5-user-stored', 'user', 'new question'),
+      msg('6-assistant-stored', 'assistant', 'complete answer')
+    ]
+
+    expect(preserveLocalPendingTurnMessages(next, previous)).toBe(next)
+  })
+
+  it('keeps an immediately repeated optimistic prompt while the server is still behind', () => {
+    const next = [msg('1-user', 'user', 'repeat this'), msg('2-assistant', 'assistant', 'first answer')]
+
+    const previous = [
+      ...next,
+      msg('user-optimistic', 'user', 'repeat this'),
+      msg('assistant-stream-1', 'assistant', '', { pending: true })
+    ]
+
+    expect(preserveLocalPendingTurnMessages(next, previous).map(message => message.id)).toEqual([
+      '1-user',
+      '2-assistant',
+      'user-optimistic',
+      'assistant-stream-1'
+    ])
+  })
 })
 
 describe('appendLiveSessionProjection', () => {

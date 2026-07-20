@@ -64,6 +64,18 @@ export interface ComposerStatusItem {
 // Writable source for background work, synced from the gateway's process
 // registry (`terminal(background=true)` spawns) via `process.list`.
 export const $backgroundStatusBySession = atom<Record<string, ComposerStatusItem[]>>({})
+export const $selectedLoopWorkflowBySession = atom<Record<string, string>>({})
+
+export function selectLoopWorkflowForSession(sessionId: string, workflowId: string) {
+  if (!sessionId || !workflowId) {
+    return
+  }
+
+  $selectedLoopWorkflowBySession.set({
+    ...$selectedLoopWorkflowBySession.get(),
+    [sessionId]: workflowId
+  })
+}
 
 // Durable Loop/Kanban activity derived from the kanban dashboard session-source
 // payload. Task rows project as todos; active worker rows join the Subagents

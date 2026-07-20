@@ -2,13 +2,14 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { I18nProvider } from '@/i18n'
-import { $kanbanStatusBySession } from '@/store/composer-status'
+import { $kanbanStatusBySession, $selectedLoopWorkflowBySession } from '@/store/composer-status'
 
 import { LoopLauncherRow } from './loop-launcher-row'
 
 afterEach(() => {
   cleanup()
   $kanbanStatusBySession.set({})
+  $selectedLoopWorkflowBySession.set({})
 })
 
 describe('LoopLauncherRow', () => {
@@ -37,7 +38,7 @@ describe('LoopLauncherRow', () => {
     )
 
     const launcher = screen.getByRole('button', {
-      name: /Loop 3 pending tasks, 5 completed tasks, 2 blocked tasks/
+      name: /Prepare isolated upstream-sync candidate 3 pending tasks, 5 completed tasks, 2 blocked tasks/
     })
 
     expect(launcher.className).toContain('loop-launcher-row')
@@ -45,7 +46,7 @@ describe('LoopLauncherRow', () => {
     expect(launcher.querySelector('.codicon-clock')).toBeTruthy()
     expect(launcher.querySelector('.codicon-check')).toBeTruthy()
     expect(launcher.querySelector('.codicon-circle-slash')).toBeTruthy()
-    expect(screen.queryByText('Prepare isolated upstream-sync candidate')).toBeNull()
+    expect(screen.getByText('Prepare isolated upstream-sync candidate')).toBeTruthy()
 
     fireEvent.click(launcher)
 
@@ -114,9 +115,87 @@ describe('LoopLauncherRow', () => {
 
     expect(
       screen.getByRole('button', {
-        name: /Loop 3 pending tasks, 6 completed tasks, 1 blocked task/
+        name: /First workflow 3 pending tasks, 2 completed tasks, 1 blocked task/
       })
     ).toBeTruthy()
+  })
+
+  it('switches between workflows from the ellipsis menu next to Loop', () => {
+    const onOpen = vi.fn()
+    const onSelectWorkflow = vi.fn()
+
+    $kanbanStatusBySession.set({
+      'runtime-session': [
+        {
+          id: 'kanban-task:t_first',
+          kanbanTaskId: 't_first',
+          kanbanWorkflowId: 'wf_first',
+          state: 'running',
+          taskProgress: { blocked: 0, completed: 2, pending: 1, total: 3 },
+          title: 'Build public Loop website',
+          todoStatus: 'in_progress',
+          type: 'todo'
+        },
+        {
+          id: 'kanban-task:t_second',
+          kanbanTaskId: 't_second',
+          kanbanWorkflowId: 'wf_second',
+          state: 'running',
+          taskProgress: { blocked: 0, completed: 1, pending: 2, total: 3 },
+          title: 'Finish private handoff',
+          todoStatus: 'in_progress',
+          type: 'todo'
+        },
+        {
+          id: 'kanban-task:t_one_off',
+          kanbanTaskId: 't_one_off',
+          kanbanWorkflowId: 'wf_one_off',
+          state: 'done',
+          taskProgress: { blocked: 0, completed: 1, pending: 0, total: 1 },
+          title: 'One-off verification delegation',
+          todoStatus: 'completed',
+          type: 'todo'
+        }
+      ]
+    })
+
+    render(
+      <I18nProvider configClient={null}>
+        <LoopLauncherRow
+          onOpen={onOpen}
+          onSelectWorkflow={onSelectWorkflow}
+          sessionId="runtime-session"
+        />
+      </I18nProvider>
+    )
+
+    const trigger = screen.getByRole('button', { name: 'Switch workflow' })
+
+    expect(trigger.querySelector('.codicon-kebab-vertical')).toBeTruthy()
+
+    fireEvent.pointerDown(trigger, {
+      button: 0,
+      ctrlKey: false
+    })
+    expect(screen.queryByRole('menuitem', { name: /One-off verification delegation/ })).toBeNull()
+    fireEvent.click(screen.getByRole('menuitem', { name: /Finish private handoff/ }))
+
+    expect(onSelectWorkflow).toHaveBeenCalledWith('t_second')
+    expect(onOpen).not.toHaveBeenCalled()
+    expect(
+      screen.getByRole('button', {
+        name: /Finish private handoff 2 pending tasks, 1 completed task/
+      })
+    ).toBeTruthy()
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: /Finish private handoff 2 pending tasks, 1 completed task/
+      })
+    )
+
+    expect(onSelectWorkflow).toHaveBeenLastCalledWith('t_second')
+    expect(onSelectWorkflow).toHaveBeenCalledTimes(2)
   })
 
   it('hides empty counters', () => {
@@ -140,7 +219,7 @@ describe('LoopLauncherRow', () => {
       </I18nProvider>
     )
 
-    const launcher = screen.getByRole('button', { name: 'Loop 4 completed tasks' })
+    const launcher = screen.getByRole('button', { name: 'Completed workflow 4 completed tasks' })
 
     expect(launcher.querySelector('.codicon-check')).toBeTruthy()
     expect(launcher.querySelector('.codicon-clock')).toBeNull()

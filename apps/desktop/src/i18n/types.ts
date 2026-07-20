@@ -1493,8 +1493,10 @@ export interface Translations {
     loop: string
     loopWorkers: (count: number) => string
     pendingTasks: (count: number) => string
+    switchWorkflow: string
     subagents: (count: number) => string
     todos: (done: number, total: number) => string
+    workflows: string
     running: string
     stop: string
     dismiss: string

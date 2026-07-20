@@ -944,7 +944,11 @@ export function ChatBar({
                 )}
               />
               <div className="min-w-0 overflow-hidden rounded-t-[inherit]" data-slot="composer-status-rows">
-                <LoopLauncherRow onOpen={onOpenLoop} sessionId={statusSessionId} />
+                <LoopLauncherRow
+                  onOpen={onOpenLoop}
+                  onSelectWorkflow={onOpenKanbanTask}
+                  sessionId={statusSessionId}
+                />
                 <CodingStatusRow
                   onBranchOff={handleBranchOff}
                   onConvertBranch={handleConvertBranch}

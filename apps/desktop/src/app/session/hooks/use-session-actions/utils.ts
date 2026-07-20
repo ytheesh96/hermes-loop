@@ -281,6 +281,22 @@ export function preserveLocalPendingTurnMessages(
       }
     }
 
+    // Auto-compression can make the live projection and stored transcript have
+    // different counts for every earlier role. The optimistic row is still the
+    // local tail, so its committed counterpart is the final authoritative user
+    // row even when its start-based role ordinal shifted. Without this tail
+    // check, a same-session refresh appends the already-persisted prompt again.
+    if (isOptimisticUser && nextMessages.length >= previousMessages.length) {
+      const finalAuthoritativeUser = nextMessages.findLast(candidate => candidate.role === 'user')
+
+      if (
+        finalAuthoritativeUser &&
+        chatMessageText(finalAuthoritativeUser).trim() === chatMessageText(message).trim()
+      ) {
+        continue
+      }
+    }
+
     preserved.push(message)
   }
 
