@@ -1499,6 +1499,9 @@ def test_session_resume_uses_compression_tip_for_agent_history(monkeypatch):
         def reopen_session(self, target):
             captured["reopened"] = target
 
+        def get_ancestor_display_prefix(self, _sid):
+            return []
+
         def get_messages_as_conversation(
             self,
             target,

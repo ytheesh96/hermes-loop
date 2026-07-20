@@ -325,7 +325,8 @@ class TestCLIJudgeGate:
         fake_conn = MagicMock()
         complete_calls: list = []
 
-        def fake_connect_closing():
+        def fake_connect_closing(*, board=None):
+            assert board == "default"
             from contextlib import contextmanager
             @contextmanager
             def _cm():
@@ -338,6 +339,7 @@ class TestCLIJudgeGate:
 
         monkeypatch.setattr("hermes_cli.kanban.kb.get_task", lambda conn, tid: fake_task)
         monkeypatch.setattr("hermes_cli.kanban.kb.complete_task", fake_complete_task)
+        monkeypatch.setattr("hermes_cli.kanban.kb.get_current_board", lambda: "default")
         monkeypatch.setattr("hermes_cli.kanban.kb.connect_closing", fake_connect_closing)
         monkeypatch.setattr("hermes_cli.kanban._worker_run_id_for", lambda _: None)
 

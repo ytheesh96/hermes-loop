@@ -564,6 +564,9 @@ def test_session_resume_resolves_compression_parent_to_tip(server, monkeypatch):
         def reopen_session(self, sid):
             db_events.append(("reopen", sid))
 
+        def get_ancestor_display_prefix(self, _sid):
+            return []
+
         def get_messages_as_conversation(
             self,
             sid,

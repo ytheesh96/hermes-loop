@@ -84,6 +84,9 @@ class _FakeAgent:
     def _replay_compression_warning(self):
         pass
 
+    def _set_active_turn_persistence_history(self, conversation_history=None):
+        self._active_turn_persistence_history_len = len(conversation_history or [])
+
     def _hydrate_todo_store(self, *_a, **_k):
         pass
 
