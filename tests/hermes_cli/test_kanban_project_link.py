@@ -174,6 +174,47 @@ def test_project_linked_dir_accepts_sibling_worktree(kanban_conn, tmp_path):
     assert kb.resolve_workspace(task) == linked
 
 
+def test_legacy_project_row_without_repo_contract_preserves_generic_dir(
+    kanban_conn, tmp_path, all_assignees_spawnable
+):
+    expected_repo = tmp_path / "expected"
+    generic_dir = tmp_path / "generic"
+    _init_repo(expected_repo)
+    generic_dir.mkdir()
+    proj = _make_project(repo=str(expected_repo))
+    tid = kb.create_task(
+        kanban_conn,
+        title="Legacy project task",
+        assignee="worker",
+        project_id=proj.slug,
+        workspace_kind="dir",
+        workspace_path=str(generic_dir),
+    )
+    kanban_conn.execute(
+        "UPDATE tasks SET project_repo_path = NULL WHERE id = ?",
+        (tid,),
+    )
+    task = kb.get_task(kanban_conn, tid)
+    spawn_calls = []
+
+    def fake_spawn(task, workspace):
+        spawn_calls.append((task.id, workspace))
+        return 4242
+
+    result = kb.dispatch_once(kanban_conn, spawn_fn=fake_spawn)
+
+    assert task.project_id == proj.id
+    assert task.project_repo_path is None
+    assert result.auto_blocked == []
+    assert [
+        spawned_id for spawned_id, _assignee, _workspace in result.spawned
+    ] == [tid]
+    assert spawn_calls == [(tid, str(generic_dir))], (
+        "legacy rows without a captured repository contract must retain the "
+        "generic dir behavior instead of guessing a Git identity"
+    )
+
+
 def test_dispatch_blocks_wrong_project_worktree_before_spawn(
     kanban_conn, tmp_path, all_assignees_spawnable
 ):
