@@ -13,6 +13,8 @@ export interface TimelineEntry {
 
 // Injected as user messages for alternation; not human prompts (thread.tsx).
 const PROCESS_NOTIFICATION_RE = /^\[IMPORTANT: Background process [\s\S]*\]$/
+const KANBAN_REENTRY_RE =
+  /^\[IMPORTANT:(?: A workflow produced a task-boundary batch\b|[^\r\n]*\bKanban\s+\S+\s+(?:done|blocked|gave up|worker crashed|timed out)\b)/
 
 const PREVIEW_MAX = 120
 
@@ -36,7 +38,7 @@ export function deriveTimelineEntries(messages: readonly TimelineSourceMessage[]
 
     const text = message.text.trim()
 
-    if (!text || PROCESS_NOTIFICATION_RE.test(text)) {
+    if (!text || PROCESS_NOTIFICATION_RE.test(text) || KANBAN_REENTRY_RE.test(text)) {
       continue
     }
 

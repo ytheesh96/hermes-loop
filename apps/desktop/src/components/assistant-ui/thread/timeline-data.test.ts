@@ -28,14 +28,32 @@ describe('deriveTimelineEntries', () => {
     ])
   })
 
-  it('drops blanks and background-process notifications', () => {
+  it('drops blanks and injected process notifications', () => {
     expect(
       deriveTimelineEntries([
         { id: 'u1', role: 'user', text: '   ' },
         { id: 'u2', role: 'user', text: '[IMPORTANT: Background process 123 finished]' },
-        { id: 'u3', role: 'user', text: 'real prompt' }
+        {
+          id: 'u3',
+          role: 'user',
+          text:
+            '[IMPORTANT: A workflow produced a task-boundary batch. Handle this workflow in isolation for this foreground turn.]\n\n' +
+            '[IMPORTANT: ✔ @worker Kanban t_1234 done — verify the result]'
+        },
+        {
+          id: 'u4',
+          role: 'user',
+          text: '[IMPORTANT: ✔ @worker Kanban t_5678 done — legacy completion re-entry]'
+        },
+        { id: 'u5', role: 'user', text: 'real prompt' }
       ]).map(e => e.id)
-    ).toEqual(['u3'])
+    ).toEqual(['u5'])
+  })
+
+  it('keeps human prompts that mention completed Kanban work', () => {
+    expect(
+      deriveTimelineEntries([{ id: 'u1', role: 'user', text: 'Summarize the Kanban tasks that are done' }])
+    ).toEqual([{ id: 'u1', preview: 'Summarize the Kanban tasks that are done' }])
   })
 })
 
