@@ -718,3 +718,22 @@ def test_decompose_per_child_workspace_override(kanban_home):
         inh = kb.get_task(conn, child_ids[1])
     assert over.workspace_path == "/other/repo"
     assert inh.workspace_path == proj
+
+
+def test_decompose_inherits_project_repo_contract(kanban_home):
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="project root", triage=True)
+        conn.execute(
+            "UPDATE tasks SET project_id = ?, project_repo_path = ? WHERE id = ?",
+            ("p_project", "/repo/project", root),
+        )
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[{"title": "implementation"}],
+        )
+        child = kb.get_task(conn, child_ids[0])
+
+    assert child.project_id == "p_project"
+    assert child.project_repo_path == "/repo/project"

@@ -131,6 +131,22 @@ def _check_kanban_graph_control_mode() -> bool:
     return _profile_has_kanban_toolset()
 
 
+def get_task_scoped_kanban_tool_names() -> frozenset[str]:
+    """Return the registered Kanban tools exposed to a scoped worker.
+
+    Derive the contract from the registry's actual check functions rather than
+    maintaining a second hand-written tool list. This keeps the dispatcher
+    preflight aligned when task-scoped tools are added or removed while still
+    excluding foreground/orchestrator-only graph mutation tools.
+    """
+    task_scoped_checks = frozenset({_check_kanban_mode, _check_kanban_reentry_mode})
+    return frozenset(
+        entry.name
+        for entry in registry._snapshot_entries()
+        if entry.toolset == "kanban" and entry.check_fn in task_scoped_checks
+    )
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------

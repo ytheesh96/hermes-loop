@@ -166,6 +166,10 @@ class TaskStatusConflictError(RuntimeError):
         super().__init__(message)
 
 
+class KanbanSkillContractError(RuntimeError):
+    """A preloaded worker skill invokes a Kanban tool unavailable to workers."""
+
+
 class WorkflowNotClosableError(RuntimeError):
     """Raised when explicit workflow closure would strand unfinished work."""
 
@@ -956,6 +960,9 @@ class Task:
     tenant: Optional[str]
     branch_name: Optional[str] = None
     project_id: Optional[str] = None
+    # Captured project primary repo. The dispatcher compares its Git common
+    # directory with the selected workspace before starting an agent.
+    project_repo_path: Optional[str] = None
     result: Optional[str] = None
     idempotency_key: Optional[str] = None
     # Unified non-success counter. Incremented on any of:
@@ -1055,6 +1062,9 @@ class Task:
             workspace_path=row["workspace_path"],
             branch_name=row["branch_name"] if "branch_name" in keys else None,
             project_id=row["project_id"] if "project_id" in keys else None,
+            project_repo_path=(
+                row["project_repo_path"] if "project_repo_path" in keys else None
+            ),
             claim_lock=row["claim_lock"],
             claim_expires=row["claim_expires"],
             tenant=row["tenant"] if "tenant" in keys else None,
@@ -1258,6 +1268,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- the task's worktree is anchored under the project's primary repo with a
     -- deterministic branch name instead of a random wt/<task-id> fallback.
     project_id           TEXT,
+    -- Captured primary repo for pre-spawn workspace identity validation.
+    project_repo_path    TEXT,
     claim_lock           TEXT,
     claim_expires        INTEGER,
     tenant               TEXT,
@@ -2351,6 +2363,10 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "tasks", "branch_name", "branch_name TEXT")
     if "project_id" not in cols:
         _add_column_if_missing(conn, "tasks", "project_id", "project_id TEXT")
+    if "project_repo_path" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "project_repo_path", "project_repo_path TEXT"
+        )
     if "idempotency_key" not in cols:
         _add_column_if_missing(
             conn, "tasks", "idempotency_key", "idempotency_key TEXT"
@@ -3271,6 +3287,9 @@ def create_task(
     # path is absolute (profile-independent) and the branch name is pure, so the
     # cross-profile dispatcher needs no projects.db access at dispatch time.
     project_obj = None
+    # Persist the creator profile's primary repo so dispatch-time validation is
+    # profile-independent, just like the concrete worktree path and branch.
+    project_repo_path: Optional[str] = None
     # Primary repo of a project-linked worktree task whose path we still need to
     # derive (a fresh worktree dir under the repo, computed once task_id exists).
     project_repo: Optional[str] = None
@@ -3290,9 +3309,13 @@ def create_task(
             # create the task as an ordinary (scratch) task.
             project_id = None
         else:
-            # Canonicalise (a slug may have been passed) and anchor the
-            # worktree under the project's primary repo.
+            # Canonicalise (a slug may have been passed) and capture the
+            # project repo contract for profile-independent dispatch checks.
             project_id = project_obj.id
+            if project_obj.primary_path:
+                project_repo_path = str(
+                    Path(project_obj.primary_path).expanduser().resolve(strict=False)
+                )
             if workspace_kind == "scratch" and project_obj.primary_path:
                 workspace_kind = "worktree"
             if (
@@ -3570,11 +3593,11 @@ def create_task(
                     INSERT INTO tasks (
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
-                        branch_name, project_id, tenant, idempotency_key,
+                        branch_name, project_id, project_repo_path, tenant, idempotency_key,
                         max_runtime_seconds,
                         skills, max_retries, goal_mode, goal_max_turns, session_id,
                         workflow_id, needs_specification
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3589,6 +3612,7 @@ def create_task(
                         workspace_path,
                         branch_name,
                         project_id,
+                        project_repo_path,
                         tenant,
                         idempotency_key,
                         int(max_runtime_seconds) if max_runtime_seconds is not None else None,
@@ -8147,7 +8171,7 @@ def decompose_triage_task(
             return None
         root_row = conn.execute(
             "SELECT id, status, tenant, workspace_kind, workspace_path, "
-            "session_id, workflow_id "
+            "project_id, project_repo_path, session_id, workflow_id "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -8161,6 +8185,8 @@ def decompose_triage_task(
         child_created_by = author or "decomposer"
         tenant = root_row["tenant"]
         child_session_id = root_row["session_id"]
+        child_project_id = root_row["project_id"]
+        child_project_repo_path = root_row["project_repo_path"]
         root_ws_kind = root_row["workspace_kind"] or "scratch"
         root_ws_path = root_row["workspace_path"]
         if workflow_id:
@@ -8231,9 +8257,9 @@ def decompose_triage_task(
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
-                " workspace_path, tenant, created_at, created_by, session_id, "
-                " workflow_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " workspace_path, project_id, project_repo_path, tenant, "
+                " created_at, created_by, session_id, workflow_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -8242,6 +8268,8 @@ def decompose_triage_task(
                     child_initial_status,
                     child_ws_kind,
                     child_ws_path,
+                    child_project_id,
+                    child_project_repo_path,
                     tenant,
                     now,
                     child_created_by,
@@ -8663,6 +8691,7 @@ def _resolve_worktree_workspace(
                 f"task {task.id} has workspace_kind=worktree but board "
                 f"{board_slug!r} default_workdir {board_default!r} is not inside a git repo"
             )
+        _validate_project_workspace_identity(task, repo_root)
         target = repo_root / ".worktrees" / task.id
         _ensure_git_worktree(repo_root, target, branch_name)
         return target, branch_name
@@ -8676,11 +8705,13 @@ def _resolve_worktree_workspace(
     requested_resolved = requested.resolve(strict=False)
 
     if requested.exists() and _is_linked_worktree_checkout(requested):
+        _validate_project_workspace_identity(task, requested_resolved)
         actual_branch = _git_current_branch(requested)
         return requested_resolved, actual_branch or branch_name
 
     repo_root = _git_toplevel(requested)
     if repo_root is not None and requested_resolved == repo_root:
+        _validate_project_workspace_identity(task, repo_root)
         target = repo_root / ".worktrees" / task.id
         _ensure_git_worktree(repo_root, target, branch_name)
         return target, branch_name
@@ -8691,8 +8722,30 @@ def _resolve_worktree_workspace(
             f"task {task.id} worktree path {task.workspace_path!r} is not inside a git repo "
             "and does not point at a git repo root"
         )
+    _validate_project_workspace_identity(task, repo_root)
     _ensure_git_worktree(repo_root, requested, branch_name)
     return requested, branch_name
+
+
+def _validate_project_workspace_identity(task: Task, workspace: Path) -> None:
+    """Reject a project-linked workspace from another repository.
+
+    Git's common directory is stable across the primary checkout and all linked
+    worktrees, while remaining distinct for unrelated repositories (including
+    repositories that happen to share the same directory name).
+    """
+    if not task.project_id or not task.project_repo_path:
+        return
+    expected_repo = Path(task.project_repo_path).expanduser().resolve(strict=False)
+    expected_common = _git_common_dir(expected_repo)
+    actual_common = _git_common_dir(workspace)
+    if expected_common is not None and actual_common == expected_common:
+        return
+    raise ValueError(
+        f"workspace {workspace} does not belong to project {task.project_id!r}; "
+        f"expected a checkout or linked worktree of {expected_repo}. "
+        "Update the task workspace/project link before retrying."
+    )
 
 
 def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
@@ -8749,10 +8802,12 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
                 f"{task.workspace_path!r}; use an absolute path "
                 f"(relative paths are ambiguous against the dispatcher's CWD)"
             )
+        _validate_project_workspace_identity(task, p)
         p.mkdir(parents=True, exist_ok=True)
         return p
     if kind == "worktree":
         p, _branch_name = _resolve_worktree_workspace(task, board=board)
+        _validate_project_workspace_identity(task, p)
         return p
     raise ValueError(f"unknown workspace_kind: {kind}")
 
@@ -10102,6 +10157,34 @@ def _record_spawn_failure(
     )
 
 
+def _record_spawn_exception(
+    conn: sqlite3.Connection,
+    task_id: str,
+    exc: Exception,
+    *,
+    failure_limit: int,
+) -> bool:
+    """Record a spawn exception, immediately tripping deterministic preflights."""
+    if isinstance(exc, KanbanSkillContractError):
+        return _record_task_failure(
+            conn,
+            task_id,
+            str(exc),
+            outcome="spawn_failed",
+            failure_limit=failure_limit,
+            force_trip=True,
+            release_claim=True,
+            end_run=True,
+            event_payload_extra={"failure_class": "skill_tool_contract"},
+        )
+    return _record_spawn_failure(
+        conn,
+        task_id,
+        str(exc),
+        failure_limit=failure_limit,
+    )
+
+
 def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
     """Record the spawned child's pid + emit a ``spawned`` event.
 
@@ -10801,9 +10884,8 @@ def _dispatch_once_locked(
                     _per_profile_running.get(claimed.assignee, 0) + 1
                 )
         except Exception as exc:
-            auto = _record_spawn_failure(
-                conn, claimed.id, str(exc),
-                failure_limit=failure_limit,
+            auto = _record_spawn_exception(
+                conn, claimed.id, exc, failure_limit=failure_limit
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
@@ -10953,9 +11035,8 @@ def _dispatch_once_locked(
                     _per_profile_running.get(claimed.assignee, 0) + 1
                 )
         except Exception as exc:
-            auto = _record_spawn_failure(
-                conn, claimed.id, str(exc),
-                failure_limit=failure_limit,
+            auto = _record_spawn_exception(
+                conn, claimed.id, exc, failure_limit=failure_limit
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
@@ -11180,6 +11261,126 @@ def _kanban_worker_skill_available(hermes_home: Optional[str]) -> bool:
         return any(p.is_file() for p in skills_root.rglob("kanban-worker/SKILL.md"))
     except OSError:
         return False
+
+
+_KANBAN_TOOL_INVOCATION_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(kanban_[a-z][a-z0-9_]*)\s*\("
+)
+
+
+def _worker_skill_search_roots(hermes_home: Optional[str]) -> list[Path]:
+    """Resolve the same local/external skill roots the worker profile will use."""
+    base = Path(hermes_home) if hermes_home else (Path.home() / ".hermes")
+    try:
+        from agent.skill_utils import get_all_skills_dirs
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        token = set_hermes_home_override(base)
+        try:
+            return list(get_all_skills_dirs())
+        finally:
+            reset_hermes_home_override(token)
+    except Exception:
+        return [base / "skills"]
+
+
+def _resolve_worker_skill_contract_file(
+    identifier: str,
+    roots: Iterable[Path],
+) -> Optional[Path]:
+    """Resolve an unambiguous on-disk skill without loading its instructions.
+
+    The worker's normal preload path remains authoritative for disabled skills,
+    plugin-qualified skills, and collision diagnostics. This resolver only
+    inspects local/external SKILL.md files so the preflight cannot execute skill
+    preprocessing or mutate profile state before spawn.
+    """
+    raw = str(identifier or "").strip()
+    if not raw:
+        return None
+    category_form = raw.replace(":", "/", 1) if ":" in raw else raw
+    candidates: dict[Path, Path] = {}
+    try:
+        from agent.skill_utils import iter_skill_index_files, parse_frontmatter
+    except Exception:
+        iter_skill_index_files = None
+        parse_frontmatter = None
+
+    for root in roots:
+        root = Path(root)
+        for relative in {raw, category_form}:
+            direct = root / relative / "SKILL.md"
+            if direct.is_file():
+                try:
+                    candidates[direct.resolve()] = direct
+                except OSError:
+                    candidates[direct] = direct
+        if iter_skill_index_files is None:
+            iterator = root.rglob("SKILL.md") if root.is_dir() else ()
+        else:
+            iterator = iter_skill_index_files(root, "SKILL.md")
+        for skill_md in iterator:
+            matches = skill_md.parent.name == raw
+            if not matches and parse_frontmatter is not None:
+                try:
+                    frontmatter, _ = parse_frontmatter(
+                        skill_md.read_text(encoding="utf-8")
+                    )
+                    matches = frontmatter.get("name") == raw
+                except (OSError, UnicodeError, ValueError):
+                    matches = False
+            if matches:
+                try:
+                    candidates[skill_md.resolve()] = skill_md
+                except OSError:
+                    candidates[skill_md] = skill_md
+    if len(candidates) != 1:
+        return None
+    return next(iter(candidates.values()))
+
+
+def _validate_kanban_worker_skill_contracts(
+    hermes_home: Optional[str],
+    skill_identifiers: Iterable[str],
+) -> None:
+    """Reject invocation-shaped Kanban references absent from worker tools."""
+    from tools.kanban_tools import get_task_scoped_kanban_tool_names
+
+    available = get_task_scoped_kanban_tool_names()
+    roots = _worker_skill_search_roots(hermes_home)
+    checked: set[Path] = set()
+    issues: list[tuple[Path, list[str]]] = []
+    for identifier in skill_identifiers:
+        skill_md = _resolve_worker_skill_contract_file(identifier, roots)
+        if skill_md is None:
+            continue
+        try:
+            resolved = skill_md.resolve()
+        except OSError:
+            resolved = skill_md
+        if resolved in checked:
+            continue
+        checked.add(resolved)
+        try:
+            content = skill_md.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        referenced = set(_KANBAN_TOOL_INVOCATION_RE.findall(content))
+        unavailable = sorted(referenced - available)
+        if unavailable:
+            issues.append((skill_md, unavailable))
+    if not issues:
+        return
+
+    details = "; ".join(
+        f"{path}: {', '.join(symbols)}" for path, symbols in issues
+    )
+    raise KanbanSkillContractError(
+        "Kanban worker skill/tool contract mismatch before spawn: "
+        f"{details}. Update the skill at that path to use kanban_comment(...) "
+        "then kanban_complete(...), or kanban_block(...) for a genuine blocker; "
+        "the foreground owns review, triage, dependency, and rework routing."
+    )
 
 
 def _worker_terminal_timeout_env(
@@ -11407,6 +11608,14 @@ def _default_spawn(
         if task.model_override:
             cmd.extend(["--model", task.model_override])
     else:
+        preloaded_skills: list[str] = []
+        if _kanban_worker_skill_available(env.get("HERMES_HOME")):
+            preloaded_skills.append("kanban-worker")
+        if task.skills:
+            preloaded_skills.extend(sk for sk in task.skills if sk)
+        _validate_kanban_worker_skill_contracts(
+            env.get("HERMES_HOME"), preloaded_skills
+        )
         cmd = [
             *_resolve_hermes_argv(),
             "-p", profile_arg,
@@ -11418,7 +11627,7 @@ def _default_spawn(
             "--accept-hooks",
         ]
         # Auto-load the kanban-worker skill when it resolves for the worker home.
-        if _kanban_worker_skill_available(env.get("HERMES_HOME")):
+        if "kanban-worker" in preloaded_skills:
             cmd.extend(["--skills", "kanban-worker"])
         # Per-task force-loaded skills. Each name goes in its own `--skills X`
         # pair so process listings remain readable and quoting stays unambiguous.
