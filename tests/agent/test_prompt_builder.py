@@ -87,6 +87,9 @@ class TestGuidanceConstants:
         )
         assert "does not wake or interrupt another running agent" in KANBAN_GUIDANCE
         assert "Do not create, link, review-route, or assign follow-up tasks" in KANBAN_GUIDANCE
+        assert "git status --short --branch" in KANBAN_GUIDANCE
+        assert "do not create a replacement yourself" in KANBAN_GUIDANCE
+        assert "unexplained changes remain" in KANBAN_GUIDANCE
         for retired in (
             "kanban_request_review",
             "kanban_request_decision",

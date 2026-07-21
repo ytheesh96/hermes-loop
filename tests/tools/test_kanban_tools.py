@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 
 import pytest
 
@@ -407,6 +408,115 @@ def test_complete_happy_path(worker_env):
         assert run.metadata == {"files": 2}
     finally:
         conn.close()
+
+
+def _worktree_task(monkeypatch, tmp_path, *, dirty_path=None):
+    """Create a claimed worktree task backed by a real temporary git repo."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Test"],
+        check=True,
+    )
+    (repo / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True
+    )
+    if dirty_path:
+        target = repo / dirty_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("worker output\n", encoding="utf-8")
+
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="worktree hygiene",
+            assignee="test-worker",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+            branch_name="test-worktree",
+        )
+        assert kb.claim_task(conn, tid)
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(repo))
+    return tid, repo
+
+
+def test_complete_rejects_unexplained_dirty_worktree(
+    monkeypatch, tmp_path, worker_env
+):
+    tid, _repo = _worktree_task(
+        monkeypatch, tmp_path, dirty_path="notes/untracked.md"
+    )
+
+    from tools import kanban_tools as kt
+
+    out = json.loads(kt._handle_complete({"summary": "done"}))
+    assert "error" in out
+    assert "worktree hygiene" in out["error"]
+    assert "notes/untracked.md" in out["error"]
+
+    from hermes_cli import kanban_db as kb
+
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).status == "running"
+
+
+def test_complete_stamps_clean_worktree_evidence(
+    monkeypatch, tmp_path, worker_env
+):
+    tid, _repo = _worktree_task(monkeypatch, tmp_path)
+
+    from tools import kanban_tools as kt
+
+    out = json.loads(
+        kt._handle_complete({"summary": "done", "metadata": {"tests": 3}})
+    )
+    assert out["ok"] is True
+
+    from hermes_cli import kanban_db as kb
+
+    with kb.connect() as conn:
+        run = kb.latest_run(conn, tid)
+        assert run.metadata["workspace_status"] == "clean"
+        assert run.metadata["workspace_branch"] in {"main", "master"}
+        assert len(run.metadata["workspace_head"]) == 40
+
+
+def test_complete_allows_only_declared_untracked_artifacts(
+    monkeypatch, tmp_path, worker_env
+):
+    tid, repo = _worktree_task(
+        monkeypatch, tmp_path, dirty_path="artifacts/report.md"
+    )
+    artifact = repo / "artifacts" / "report.md"
+
+    from tools import kanban_tools as kt
+
+    out = json.loads(
+        kt._handle_complete(
+            {"summary": "report ready", "artifacts": [str(artifact)]}
+        )
+    )
+    assert out["ok"] is True
+
+    from hermes_cli import kanban_db as kb
+
+    with kb.connect() as conn:
+        run = kb.latest_run(conn, tid)
+        assert run.metadata["workspace_status"] == "declared_artifacts_only"
+        assert run.metadata["workspace_untracked"] == ["artifacts/report.md"]
 
 
 def test_complete_routes_exact_dependency_transitions_to_progress(

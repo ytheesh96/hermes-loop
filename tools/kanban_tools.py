@@ -30,6 +30,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
+from pathlib import Path
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
@@ -578,6 +580,153 @@ def _handle_list(args: dict, **kw) -> str:
         return tool_error(f"kanban_list: {e}")
 
 
+def _worktree_completion_evidence(
+    task: Any,
+    artifacts: Optional[list[str]],
+) -> tuple[Optional[str], dict[str, Any]]:
+    """Verify a worker-owned worktree is clean or dirty only by declaration.
+
+    This runs only for the scoped worker that owns ``task``. Human/operator
+    completion remains available for recovery because it has no worker task
+    environment. Gitignored dependency/build caches do not make a worktree
+    dirty; lifecycle cleanup can reclaim those once this gate proves there is
+    no uncommitted repository content.
+    """
+    scoped_task = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+    if scoped_task != str(getattr(task, "id", "") or "").strip():
+        return None, {}
+    if str(getattr(task, "workspace_kind", "") or "") != "worktree":
+        return None, {}
+
+    raw_workspace = (
+        os.environ.get("HERMES_KANBAN_WORKSPACE", "").strip()
+        or str(getattr(task, "workspace_path", "") or "").strip()
+    )
+    if not raw_workspace:
+        return (
+            "worktree hygiene check failed: the worker has no resolved workspace "
+            "path. The task remains in-flight; call kanban_block with the "
+            "workspace evidence instead of completing.",
+            {},
+        )
+
+    try:
+        workspace = Path(raw_workspace).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        return (
+            f"worktree hygiene check failed for {raw_workspace!r}: {exc}. "
+            "The task remains in-flight.",
+            {},
+        )
+
+    def _git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(workspace), *args],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+
+    try:
+        root_result = _git("rev-parse", "--show-toplevel")
+        status_result = _git(
+            "status", "--porcelain=v1", "-z", "--untracked-files=all"
+        )
+        head_result = _git("rev-parse", "HEAD")
+        branch_result = _git("symbolic-ref", "--short", "-q", "HEAD")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return (
+            f"worktree hygiene check could not run git in {workspace}: {exc}. "
+            "The task remains in-flight.",
+            {},
+        )
+
+    failed = next(
+        (
+            (name, result)
+            for name, result in (
+                ("repository", root_result),
+                ("status", status_result),
+                ("HEAD", head_result),
+            )
+            if result.returncode != 0
+        ),
+        None,
+    )
+    if failed is not None:
+        name, result = failed
+        detail = (result.stderr or result.stdout or "unknown git error").strip()
+        return (
+            f"worktree hygiene {name} check failed in {workspace}: {detail}. "
+            "The task remains in-flight.",
+            {},
+        )
+
+    try:
+        repo_root = Path(root_result.stdout.strip()).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        return f"worktree hygiene could not resolve repository root: {exc}", {}
+    if repo_root != workspace:
+        return (
+            f"worktree hygiene expected workspace root {workspace}, but git "
+            f"resolved {repo_root}. The task remains in-flight.",
+            {},
+        )
+
+    records = [record for record in status_result.stdout.split("\0") if record]
+    tracked = [record for record in records if not record.startswith("?? ")]
+    if tracked:
+        preview = ", ".join(record.replace("\n", " ") for record in tracked[:8])
+        return (
+            "kanban_complete blocked by worktree hygiene: commit or otherwise "
+            f"resolve tracked/staged changes before completion ({preview}). "
+            "The task remains in-flight; if the changes cannot be resolved, "
+            "comment the exact status and call kanban_block.",
+            {},
+        )
+
+    untracked = [record[3:] for record in records if record.startswith("?? ")]
+    allowed_roots: list[Path] = []
+    for artifact in artifacts or []:
+        try:
+            candidate = Path(artifact).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if candidate == workspace or workspace not in candidate.parents:
+            continue
+        allowed_roots.append(candidate)
+
+    unexpected: list[str] = []
+    for relative in untracked:
+        candidate = (workspace / relative).resolve(strict=False)
+        covered = any(
+            candidate == root or (root.is_dir() and root in candidate.parents)
+            for root in allowed_roots
+        )
+        if not covered:
+            unexpected.append(relative)
+    if unexpected:
+        preview = ", ".join(unexpected[:12])
+        return (
+            "kanban_complete blocked by worktree hygiene: unexplained untracked "
+            f"paths remain ({preview}). Commit intended repository content, pass "
+            "human-facing deliverables through top-level artifacts, remove only "
+            "disposable files created by this task, or comment the exact status "
+            "and call kanban_block. The task remains in-flight.",
+            {},
+        )
+
+    evidence: dict[str, Any] = {
+        "workspace_status": "declared_artifacts_only" if untracked else "clean",
+        "workspace_branch": branch_result.stdout.strip() or "(detached)",
+        "workspace_head": head_result.stdout.strip(),
+    }
+    if untracked:
+        evidence["workspace_untracked"] = sorted(untracked)
+    return None, evidence
+
+
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff."""
     tid = _default_task_id(args.get("task_id"))
@@ -678,7 +827,20 @@ def _handle_complete(args: dict, **kw) -> str:
             # Only enforce when a judge is actually reachable — see
             # _goal_judge_available for why an unavailable judge fails open.
             task = kb.get_task(conn, tid)
-            if task and task.goal_mode and _goal_judge_available():
+            if task is None:
+                return tool_error(f"could not complete {tid} (unknown id)")
+
+            hygiene_error, hygiene_evidence = _worktree_completion_evidence(
+                task, artifacts
+            )
+            if hygiene_error:
+                return tool_error(hygiene_error)
+            if hygiene_evidence:
+                if metadata is None:
+                    metadata = {}
+                metadata.update(hygiene_evidence)
+
+            if task.goal_mode and _goal_judge_available():
                 verdict = "done"
                 reason = ""
                 try:
