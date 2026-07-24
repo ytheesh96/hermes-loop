@@ -2,12 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   activePaneId: null as null | string,
-  closeActiveRightRailTab: vi.fn(),
+  closeActiveRightRailTab: vi.fn(() => true),
+  closeSessionTile: vi.fn(),
   closeActiveTerminal: vi.fn(),
   closeTreePane: vi.fn(),
   closeWorkspaceTab: vi.fn(() => false),
-  filePreviewTarget: null as null | { path: string },
+  filePreviewTabs: [] as unknown[],
   focusSelector: '',
+  nextSessionTileForWorkspace: vi.fn(() => null as null | string),
   previewTarget: null as null | { url: string }
 }))
 
@@ -26,9 +28,14 @@ vi.mock('@/lib/keybinds/combo', () => ({
 }))
 
 vi.mock('@/store/preview', () => ({
-  $filePreviewTarget: { get: () => mocks.filePreviewTarget },
+  $filePreviewTabs: { get: () => mocks.filePreviewTabs },
   $previewTarget: { get: () => mocks.previewTarget },
   closeActiveRightRailTab: mocks.closeActiveRightRailTab
+}))
+
+vi.mock('@/store/session-states', () => ({
+  closeSessionTile: mocks.closeSessionTile,
+  nextSessionTileForWorkspace: mocks.nextSessionTileForWorkspace
 }))
 
 import { closeActiveTab } from './close-tab'
@@ -36,12 +43,16 @@ import { closeActiveTab } from './close-tab'
 beforeEach(() => {
   mocks.activePaneId = null
   mocks.closeActiveRightRailTab.mockClear()
+  mocks.closeActiveRightRailTab.mockReturnValue(true)
+  mocks.closeSessionTile.mockClear()
   mocks.closeActiveTerminal.mockClear()
   mocks.closeTreePane.mockClear()
   mocks.closeWorkspaceTab.mockClear()
   mocks.closeWorkspaceTab.mockReturnValue(false)
-  mocks.filePreviewTarget = null
+  mocks.filePreviewTabs = []
   mocks.focusSelector = ''
+  mocks.nextSessionTileForWorkspace.mockClear()
+  mocks.nextSessionTileForWorkspace.mockReturnValue(null)
   mocks.previewTarget = null
 })
 
@@ -56,13 +67,22 @@ describe('closeActiveTab', () => {
     expect(mocks.closeWorkspaceTab).not.toHaveBeenCalled()
   })
 
-  it('falls through to the preview when the active zone is not a workflow pane', () => {
+  it('falls through to a live preview when the active zone is not a workflow pane', () => {
     mocks.activePaneId = 'workspace'
-    mocks.filePreviewTarget = { path: '/tmp/demo.txt' }
+    mocks.previewTarget = { url: 'http://127.0.0.1:3000' }
 
     expect(closeActiveTab()).toBe(true)
     expect(mocks.closeTreePane).not.toHaveBeenCalled()
     expect(mocks.closeActiveRightRailTab).toHaveBeenCalledTimes(1)
+  })
+
+  it('closes a visible file tab when the active selection is a ghost preview', () => {
+    mocks.activePaneId = 'workspace'
+    mocks.filePreviewTabs = [{}]
+
+    expect(closeActiveTab()).toBe(true)
+    expect(mocks.closeActiveRightRailTab).toHaveBeenCalledTimes(1)
+    expect(mocks.closeWorkspaceTab).not.toHaveBeenCalled()
   })
 
   it('keeps a focused terminal ahead of the active workflow zone', () => {

@@ -76,6 +76,11 @@ interface PaneChrome {
   /** Domain-owned active preference used when a layout is rebuilt around a
    *  hidden structural anchor. */
   preferredActive?: () => boolean
+  /** A lead NODE for this pane's TAB, rendered before the label. A session
+   *  pane (main workspace + tiles) passes its live `SessionStatusDot` here so
+   *  the tab and the sidebar row render status/color from the ONE primitive
+   *  (self-subscribing — it updates without the strip re-registering). */
+  tabLead?: () => React.ReactNode
 }
 
 export const paneChrome = (c: Contribution | undefined) => (c?.data ?? {}) as PaneChrome

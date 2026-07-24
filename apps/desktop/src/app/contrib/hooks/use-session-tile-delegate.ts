@@ -14,6 +14,7 @@ import type { SessionMessage, SessionResumeResponse } from '@/types/hermes'
 
 import { sessionInfoStatePatch } from '../../session/hooks/use-message-stream/utils'
 import type { usePromptActions } from '../../session/hooks/use-prompt-actions'
+import { resolveSessionProfile } from '../../session/hooks/use-session-actions/utils'
 import type { useSessionStateCache } from '../../session/hooks/use-session-state-cache'
 import type { GatewayRequester } from '../types'
 
@@ -310,7 +311,18 @@ export function useSessionTileDelegate({
       resumeTile: async (storedSessionId, options = {}) => {
         const existing = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
         const cached = existing ? sessionStateByRuntimeIdRef.current.get(existing) : undefined
-        const requestedBinding = `${options.profile ?? ''}\u0000${options.watch ? 'watch' : 'interactive'}`
+        const generation = (resumeGenerationsRef.current.get(storedSessionId) ?? 0) + 1
+        resumeGenerationsRef.current.set(storedSessionId, generation)
+
+        // Resolve the owning profile before binding a runtime. Explicit tile
+        // metadata remains the fallback for a row that has not loaded yet.
+        const profile = options.profile ?? (await resolveSessionProfile(storedSessionId))
+
+        if (resumeGenerationsRef.current.get(storedSessionId) !== generation) {
+          throw new SessionTileResumeSupersededError()
+        }
+
+        const requestedBinding = `${profile ?? ''}\u0000${options.watch ? 'watch' : 'interactive'}`
         const cachedBinding = runtimeBindingByStoredSessionIdRef.current.get(storedSessionId)
 
         const bindingCompatible = cachedBinding
@@ -331,19 +343,14 @@ export function useSessionTileDelegate({
           dropSessionState(existing)
         }
 
-        const generation = (resumeGenerationsRef.current.get(storedSessionId) ?? 0) + 1
-        resumeGenerationsRef.current.set(storedSessionId, generation)
-
         const [prefetch, resumed] = await Promise.all([
-          options.watch
-            ? Promise.resolve(null)
-            : getSessionMessages(storedSessionId, options.profile).catch(() => null),
+          options.watch ? Promise.resolve(null) : getSessionMessages(storedSessionId, profile).catch(() => null),
           requestGateway<SessionResumeResponse>('session.resume', {
             session_id: storedSessionId,
             cols: 96,
             source: 'desktop',
             ...(options.watch ? { lazy: true } : {}),
-            ...(options.profile ? { profile: options.profile } : {})
+            ...(profile ? { profile } : {})
           })
         ]).catch((error: unknown) => {
           if (resumeGenerationsRef.current.get(storedSessionId) !== generation) {

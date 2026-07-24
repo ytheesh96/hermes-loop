@@ -61,6 +61,7 @@ function buildSessionWindowUrl(
   if (profileKey) {
     query.set('profile', profileKey)
   }
+
   const route = newSession ? '#/' : `#/${encodeURIComponent(sessionId)}`
 
   if (devServer) {
@@ -70,6 +71,28 @@ function buildSessionWindowUrl(
   }
 
   return `${pathToFileURL(rendererIndexPath).toString()}?${query.toString()}${route}`
+}
+
+// Full "instance" windows (⌘⇧N / the "New Window" command) open a complete app
+// peer, not a compact chat. Cascade each one off its source window's bounds so a
+// new window doesn't land exactly on top of the one it was spawned from. Pure so
+// it's unit-testable; the Electron glue (reading the focused window's bounds,
+// constructing the BrowserWindow) stays in main.ts. `base` is the source
+// window's current bounds, or null when there's no live source window — then the
+// persisted primary geometry (`fallback`) is used as-is.
+const INSTANCE_CASCADE_OFFSET = 32
+
+function instanceWindowBounds(base: { x: number; y: number; width: number; height: number } | null, fallback: any) {
+  if (!base) {
+    return fallback
+  }
+
+  return {
+    width: base.width,
+    height: base.height,
+    x: base.x + INSTANCE_CASCADE_OFFSET,
+    y: base.y + INSTANCE_CASCADE_OFFSET
+  }
 }
 
 // A small registry keyed by sessionId that guarantees one window per chat:
@@ -136,6 +159,7 @@ export {
   buildSessionWindowUrl,
   chatWindowWebPreferences,
   createSessionWindowRegistry,
+  instanceWindowBounds,
   SESSION_WINDOW_MIN_HEIGHT,
   SESSION_WINDOW_MIN_WIDTH
 }

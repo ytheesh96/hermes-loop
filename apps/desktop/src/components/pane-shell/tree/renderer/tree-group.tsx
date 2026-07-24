@@ -46,6 +46,7 @@ import {
   $hiddenTreePanes,
   $layoutTree,
   $narrowViewport,
+  $newSessionTabAction,
   $treeDragging,
   $treeTabFocusRequest,
   activateTreePane,
@@ -174,6 +175,7 @@ export function TreeGroup({
   const hiddenPanes = useStore($hiddenTreePanes)
   const narrow = useStore($narrowViewport)
   const tabFocusRequest = useStore($treeTabFocusRequest)
+  const newSessionTabAction = useStore($newSessionTabAction)
 
   const paneFor = (id: string) => panes.find(p => p.id === id)
 
@@ -197,11 +199,13 @@ export function TreeGroup({
   const activeId = shown.includes(node.active) ? node.active : (shown[0] ?? node.active)
   const active = paneFor(activeId)
 
-  const keptAlive = shown.flatMap(id => {
-    const pane = paneFor(id)
+  const keepAlivePaneIds = new Set(
+    shown.filter(id => {
+      const pane = paneFor(id)
 
-    return pane?.render && paneChrome(pane).keepAliveWhenInactive ? [pane] : []
-  })
+      return Boolean(pane?.render && paneChrome(pane).keepAliveWhenInactive)
+    })
+  )
 
   const isEmpty = node.panes.length === 0
 
@@ -287,6 +291,32 @@ export function TreeGroup({
       return () => window.cancelAnimationFrame(frame)
     }
   }, [activeId, tabFocusRequest])
+
+  // KEEP-ALIVE: every pane that has been ACTIVE in this zone stays mounted —
+  // an inactive tab merely hides (visibility), it does not unmount. Remounting
+  // on every tab switch re-measured and re-scrolled the content from scratch
+  // (the thread visibly layout-shifted each time a session tab was revisited).
+  // Lazy on purpose: a pane first mounts when first activated, so a
+  // boot-restored tab stack doesn't resume every session up front.
+  const everActivePanesRef = useRef<Set<string>>(new Set())
+
+  useEffect(() => {
+    if (!node.minimized && !isEmpty) {
+      everActivePanesRef.current.add(activeId)
+    }
+
+    // Prune panes that left the zone (closed / moved to another group), so a
+    // long-lived zone doesn't pin stale ids forever.
+    for (const id of everActivePanesRef.current) {
+      if (!node.panes.includes(id)) {
+        everActivePanesRef.current.delete(id)
+      }
+    }
+  })
+
+  const keptPanes = shown.filter(
+    id => id === activeId || keepAlivePaneIds.has(id) || everActivePanesRef.current.has(id)
+  )
 
   // ONE header style: the app's compact pane-header. DEFAULT is contextual —
   // a single pane isn't a "tab", so its header auto-hides; a stack shows its
@@ -564,7 +594,9 @@ export function TreeGroup({
                     style={{ cursor: 'grab' }}
                     tabIndex={isActive ? 0 : -1}
                   >
-                    {chrome.accent ? (
+                    {chrome.tabLead ? (
+                      <span className="ml-2 -mr-1 flex shrink-0 items-center">{chrome.tabLead()}</span>
+                    ) : chrome.accent ? (
                       <span
                         aria-hidden="true"
                         className="ml-2 -mr-1 size-1 shrink-0 rounded-full"
@@ -579,6 +611,23 @@ export function TreeGroup({
                 // tile tab); the wrapper needs the key since it's the root.
                 return <Fragment key={paneId}>{chrome.tabWrap ? chrome.tabWrap(tab) : tab}</Fragment>
               })}
+
+              {/* Plain "+" after the last tab of the MAIN strip (the workspace
+                  zone) — always shown, no tab/button chrome, just the glyph.
+                  Creates a new session tab (mirrors ⌘T) via the app-registered
+                  action; hidden when unwired or the zone is minimized. */}
+              {node.panes.includes('workspace') && newSessionTabAction && !node.minimized && (
+                <button
+                  aria-label={t.zones.newSessionTab}
+                  className="grid size-7 shrink-0 place-items-center self-center bg-transparent text-(--ui-text-quaternary) transition-colors hover:text-foreground [-webkit-app-region:no-drag]"
+                  onClick={() => newSessionTabAction()}
+                  onPointerDown={e => e.stopPropagation()}
+                  title={t.zones.newSessionTab}
+                  type="button"
+                >
+                  <Codicon name="add" size="0.8125rem" />
+                </button>
+              )}
             </div>
             {minimizable && (
               <button
@@ -607,39 +656,44 @@ export function TreeGroup({
         </ZoneMenu>
       )}
 
-      {/* Body: normally only the active contribution mounts. Stateful
-          canvases may opt into staying mounted across native tab switches;
-          inactive bodies remain laid out but hidden, inert, and inaccessible. */}
+      {/* Body: the zone's pane content — every kept (ever-active) pane stays
+          mounted in an absolute layer; opt-in canvases mount eagerly so their
+          local view state also survives native tab switches.
+          `visibility` (not display) keeps the hidden pane's layout box, so
+          scroll positions and measurements survive the round-trip. Inactive
+          bodies are inert and excluded from the accessibility tree. */}
       {!node.minimized && (
-        <div className="relative min-h-0 min-w-0 flex-1 overflow-auto">
+        <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
           {isEmpty ? (
             <div className="grid h-full place-items-center">
               {/* Same decode primitive as the CONNECTING boot overlay. */}
               <DecodeText className="text-(--ui-text-quaternary)" cursor prefix={1} text="HERMES" />
             </div>
-          ) : active?.render ? (
-            <>
-              {keptAlive.map(pane => {
-                const isActive = pane.id === activeId
-
-                return (
-                  <div
-                    aria-hidden={isActive ? undefined : true}
-                    className={cn('absolute inset-0 overflow-auto', !isActive && 'invisible pointer-events-none')}
-                    data-tree-pane-body={pane.id}
-                    inert={!isActive}
-                    key={pane.id}
-                  >
-                    <ContribBoundary id={pane.id}>{pane.render!()}</ContribBoundary>
-                  </div>
-                )
-              })}
-              {!paneChrome(active).keepAliveWhenInactive && (
-                <ContribBoundary id={active.id}>{active.render()}</ContribBoundary>
-              )}
-            </>
           ) : (
-            <div className="p-3 font-mono text-[11px] text-(--ui-text-quaternary)">{t.zones.missingPane(activeId)}</div>
+            keptPanes.map(paneId => {
+              const pane = paneFor(paneId)
+              const isActive = paneId === activeId
+
+              return (
+                <div
+                  aria-hidden={isActive ? undefined : true}
+                  className={cn('absolute inset-0 overflow-auto', !isActive && 'pointer-events-none invisible')}
+                  data-tree-pane-body={paneId}
+                  inert={!isActive}
+                  key={paneId}
+                >
+                  {pane?.render ? (
+                    <ContribBoundary id={pane.id}>{pane.render()}</ContribBoundary>
+                  ) : (
+                    isActive && (
+                      <div className="p-3 font-mono text-[11px] text-(--ui-text-quaternary)">
+                        {t.zones.missingPane(paneId)}
+                      </div>
+                    )
+                  )}
+                </div>
+              )
+            })
           )}
         </div>
       )}
