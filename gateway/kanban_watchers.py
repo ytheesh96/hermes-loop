@@ -1366,12 +1366,16 @@ class GatewayKanbanWatchersMixin:
                         sub["chat_id"],
                         sub.get("thread_id") or "",
                     )
+                    from gateway.wake import adapter_supports_push
+
+                    push_capable = adapter_supports_push(adapter)
                     # Once visible delivery has exhausted its bounded retries,
                     # abandon only that side effect. The foreground control
                     # wake still has to run before the durable claim can be
                     # acknowledged and the dead route removed.
                     drop_subscription_after_delivery = (
-                        sub_fail_counts.get(sub_key, 0) >= MAX_SEND_FAILURES
+                        push_capable
+                        and sub_fail_counts.get(sub_key, 0) >= MAX_SEND_FAILURES
                     )
                     for event in d["events"]:
                         if (
@@ -1406,6 +1410,15 @@ class GatewayKanbanWatchersMixin:
                         )
                         if msg is None:
                             continue
+                        if not push_capable:
+                            logger.debug(
+                                "kanban notifier: adapter %s has no push "
+                                "channel; skipping text ping for %s and "
+                                "relying on the foreground wake",
+                                platform_str,
+                                sub["task_id"],
+                            )
+                            continue
                         metadata: dict[str, Any] = {}
                         if sub.get("thread_id"):
                             metadata["thread_id"] = sub["thread_id"]
@@ -1419,23 +1432,10 @@ class GatewayKanbanWatchersMixin:
                                     getattr(send_result, "success", True)
                                 )
                             ):
-                                logger.warning(
-                                    "kanban notifier: visible delivery "
-                                    "returned failure for %s on %s: %s",
-                                    sub["task_id"],
-                                    platform_str,
-                                    getattr(send_result, "error", None)
-                                    or "unknown error",
+                                raise RuntimeError(
+                                    "adapter send() reported failure: "
+                                    f"{getattr(send_result, 'error', None) or 'unknown error'}"
                                 )
-                                await asyncio.to_thread(
-                                    self._kanban_rewind,
-                                    sub,
-                                    d["cursor"],
-                                    d.get("old_cursor", 0),
-                                    d.get("claim_token"),
-                                    board_slug,
-                                )
-                                break
                             logger.debug(
                                 "kanban notifier: delivered %s event for %s to %s/%s on board %s",
                                 kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
@@ -1577,6 +1577,9 @@ class GatewayKanbanWatchersMixin:
                             platform_str=platform_str,
                             route_profile=route_profile,
                             adapter=adapter,
+                            sub_key=sub_key,
+                            fail_counts=sub_fail_counts,
+                            max_send_failures=MAX_SEND_FAILURES,
                         )
                         if not wake_failed:
                             claim_completed = await asyncio.to_thread(
@@ -1617,6 +1620,9 @@ class GatewayKanbanWatchersMixin:
         platform_str: str,
         route_profile: Optional[str],
         adapter: Any,
+        sub_key: tuple,
+        fail_counts: dict[tuple, int],
+        max_send_failures: int,
     ) -> bool:
         """Inject one internal foreground wake; return True when it failed."""
 
@@ -1648,7 +1654,10 @@ class GatewayKanbanWatchersMixin:
         if not triggered_kinds:
             return False
 
+        from gateway.wake import adapter_supports_push, deliver_wake
+
         board_slug = delivery.get("board")
+        push_capable = adapter_supports_push(adapter)
         try:
             descendant_event = next(
                 (
@@ -1706,29 +1715,33 @@ class GatewayKanbanWatchersMixin:
                     board=board_slug,
                 )
             message += _direct_boundary_comment_context(wake_events)
-            from gateway.platforms.base import MessageEvent, MessageType
-            from gateway.session import SessionSource
+            if push_capable:
+                from gateway.session import SessionSource
 
-            chat_type = str(
-                sub.get("chat_type")
-                or ("thread" if sub.get("thread_id") else "group")
-            )
-            source = SessionSource(
-                platform=platform,
-                chat_id=sub["chat_id"],
-                chat_type=chat_type,
-                thread_id=sub.get("thread_id") or None,
-                user_id=sub.get("user_id"),
-                profile=route_profile,
-            )
-            await adapter.handle_message(
-                MessageEvent(
-                    text=message,
-                    message_type=MessageType.TEXT,
-                    source=source,
-                    internal=True,
+                chat_type = str(
+                    sub.get("chat_type")
+                    or ("thread" if sub.get("thread_id") else "group")
                 )
+                source = SessionSource(
+                    platform=platform,
+                    chat_id=sub["chat_id"],
+                    chat_type=chat_type,
+                    thread_id=sub.get("thread_id") or None,
+                    user_id=sub.get("user_id"),
+                    profile=route_profile,
+                )
+            else:
+                source = None
+            await deliver_wake(
+                adapter,
+                text=message,
+                session_id=str(
+                    getattr(task, "session_id", None) or sub["chat_id"]
+                ),
+                source=source,
             )
+            if not push_capable:
+                fail_counts.pop(sub_key, None)
             logger.info(
                 "kanban notifier: woke agent for %s on "
                 "%s/%s profile=%s events=%s",
@@ -1746,6 +1759,17 @@ class GatewayKanbanWatchersMixin:
                 exc,
                 exc_info=True,
             )
+            if not push_capable:
+                failures = fail_counts.get(sub_key, 0) + 1
+                fail_counts[sub_key] = failures
+                if failures >= max_send_failures:
+                    await asyncio.to_thread(
+                        self._kanban_unsub,
+                        sub,
+                        board_slug,
+                    )
+                    fail_counts.pop(sub_key, None)
+                    return True
             await asyncio.to_thread(
                 self._kanban_rewind,
                 sub,

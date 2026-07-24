@@ -117,7 +117,8 @@ function renderControllerHarness({ gatewayOpen = false }: { gatewayOpen?: boolea
       resumeStoredSession: vi.fn(),
       selectedStoredSessionIdRef,
       startFreshSessionDraft: vi.fn(),
-      submitPromptText: async () => true
+      submitPromptText: async () => true,
+      updateSessionState: (_sessionId, updater) => updater({} as never)
     })
 
     const runningRow = controller.state?.rows.find(row => row.taskId === 'Running child')
