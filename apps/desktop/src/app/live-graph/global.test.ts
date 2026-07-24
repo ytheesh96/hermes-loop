@@ -193,4 +193,54 @@ describe('buildGlobalOverviewSnapshot', () => {
     expect(graph.edges).not.toContainEqual(expect.objectContaining({ sourceId: syntheticSessionId }))
     expect(graph.rootId).toBeUndefined()
   })
+
+  it('keeps bounded overview card details and worker tools on task nodes', () => {
+    const detailsBoard: WorkflowOverviewBoard = {
+      links: [],
+      slug: 'alpha',
+      source_revision: 3,
+      tasks: [
+        {
+          assignee: 'reviewer-qa',
+          body: 'Inspect the supplied evidence.',
+          id: 'task-details',
+          latest_summary: 'The review is waiting on one artifact.',
+          priority: 2,
+          result: 'Prior checks passed.',
+          session_id: 'session-1',
+          status: 'blocked',
+          title: 'Review the workflow',
+          workflow_id: 'workflow-1'
+        }
+      ],
+      workers: [{ current_tool: 'kanban_block', run_id: 9, task_id: 'task-details' }],
+      workflows: [{ id: 'workflow-1', origin_session_id: 'session-1', status: 'open', title: 'Workflow 1' }]
+    }
+
+    const response: WorkflowOverviewResponse = {
+      boards: [detailsBoard],
+      errors: [],
+      schema_version: 1,
+      sessions: [
+        {
+          current_session_id: 'session-1',
+          cwd: null,
+          id: 'session-1',
+          lineage_session_ids: ['session-1'],
+          title: 'Session'
+        }
+      ]
+    }
+
+    const graph = buildGlobalOverviewSnapshot(response.boards, response, 'work', [])
+
+    expect(graph.nodes.find(node => node.entityId === 'task-details')).toMatchObject({
+      assignee: 'reviewer-qa',
+      currentTool: 'Kanban Block',
+      detail: 'Inspect the supplied evidence.',
+      priority: 2,
+      result: 'Prior checks passed.',
+      summary: 'The review is waiting on one artifact.'
+    })
+  })
 })

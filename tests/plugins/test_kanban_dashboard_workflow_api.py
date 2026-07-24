@@ -126,7 +126,15 @@ def test_workflow_overview_batches_sessions_and_keeps_unattached_workflows(
 ):
     from hermes_state import SessionDB
 
-    first = _create_draft(workflow_client, "First workflow", session_id="session-one")
+    task_body = "Inspector context " + ("b" * 240)
+    task_result = "Inspector result " + ("r" * 240)
+    run_summary = "Worker summary " + ("s" * 240)
+    first = _create_draft(
+        workflow_client,
+        "First workflow",
+        body=f"{task_body}\nprivate detail outside the card preview",
+        session_id="session-one",
+    )
     child = _create_draft(
         workflow_client,
         "First child",
@@ -143,19 +151,24 @@ def test_workflow_overview_batches_sessions_and_keeps_unattached_workflows(
         with kb.write_txn(conn):
             run_id = conn.execute(
                 "INSERT INTO task_runs "
-                "(task_id, profile, status, metadata, worker_pid, started_at) "
-                "VALUES (?, ?, 'running', ?, ?, ?)",
+                "(task_id, profile, status, metadata, summary, worker_pid, started_at) "
+                "VALUES (?, ?, 'running', ?, ?, ?, ?)",
                 (
                     first["task"]["id"],
                     "reviewer-qa",
-                    json.dumps({"worker_session_id": "worker-session-one"}),
+                    json.dumps({
+                        "current_tool": "kanban_block",
+                        "worker_session_id": "worker-session-one",
+                    }),
+                    run_summary,
                     4321,
                     12345,
                 ),
             ).lastrowid
             conn.execute(
-                "UPDATE tasks SET current_run_id = ? WHERE id = ?",
-                (run_id, first["task"]["id"]),
+                "UPDATE tasks SET current_run_id = ?, priority = ?, result = ? "
+                "WHERE id = ?",
+                (run_id, 2, task_result, first["task"]["id"]),
             )
         worker_event_id = conn.execute(
             "SELECT MAX(id) FROM task_events WHERE task_id = ?",
@@ -203,6 +216,14 @@ def test_workflow_overview_batches_sessions_and_keeps_unattached_workflows(
         task for task in board["tasks"] if task["id"] == child["task"]["id"]
     )
     assert child_payload["included_parent_ids"] == [first["task"]["id"]]
+    first_payload = next(
+        task for task in board["tasks"] if task["id"] == first["task"]["id"]
+    )
+    assert first_payload["body"] == task_body[:200]
+    assert first_payload["priority"] == 2
+    assert first_payload["result"] == task_result[:200]
+    assert first_payload["latest_summary"] == run_summary[:200]
+    assert "worker_activity" not in first_payload
     assert board["workers"] == [
         {
             "task_id": first["task"]["id"],
@@ -216,6 +237,7 @@ def test_workflow_overview_batches_sessions_and_keeps_unattached_workflows(
             "ended_at": None,
             "last_heartbeat_at": None,
             "latest_event_id": worker_event_id,
+            "current_tool": "kanban_block",
         }
     ]
     assert {session["id"] for session in payload["sessions"]} == {

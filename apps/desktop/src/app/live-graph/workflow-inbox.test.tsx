@@ -72,10 +72,14 @@ describe('LiveGraphWorkflowInbox', () => {
       task('running', 'running', {
         assignee: 'builder-with-a-name-long-enough-to-compete-with-the-status',
         currentTool: 'Kanban Block',
+        priority: 2,
         summary: 'Implementing the task inbox.'
       }),
-      task('blocked', 'blocked'),
-      task('failed', 'failed'),
+      task('blocked', 'blocked', {
+        currentTool: 'Review Diff',
+        detail: 'Blocked until the review evidence is complete.'
+      }),
+      task('failed', 'failed', { result: 'The worker reported a bounded failure.' }),
       task('completed', 'done')
     ]
 
@@ -104,12 +108,23 @@ describe('LiveGraphWorkflowInbox', () => {
     expect(runningCard.querySelector('.codicon-tools')).toBeTruthy()
     expect(runningCard.querySelector('.codicon-git-branch')).toBeNull()
     expect(runningCard.querySelector('[data-live-graph-task-tool-call]')?.textContent).toBe('Kanban Block')
+    expect(runningCard.querySelector('[data-live-graph-task-card-description]')?.textContent).toBe(
+      'Implementing the task inbox.'
+    )
+    expect(runningCard.querySelector('[data-live-graph-task-card-metadata]')?.textContent).toContain('P2')
     expect(runningCard.querySelector('[data-live-graph-task-card-metadata]')?.textContent).not.toContain('running')
     expect(runningCard.querySelector('[data-live-graph-task-status="running"]')?.className).toContain('shrink-0')
     expect(blockedCard.querySelector('.codicon-warning')).toBeTruthy()
     expect(blockedCard.textContent).toContain('Blocked')
+    expect(blockedCard.querySelector('[data-live-graph-task-card-description]')?.textContent).toBe(
+      'Blocked until the review evidence is complete.'
+    )
+    expect(blockedCard.querySelector('[data-live-graph-task-tool-call]')?.textContent).toBe('Review Diff')
     expect(failedCard.querySelector('.codicon-error')).toBeTruthy()
     expect(failedCard.textContent).toContain('Failed')
+    expect(failedCard.querySelector('[data-live-graph-task-card-description]')?.textContent).toBe(
+      'The worker reported a bounded failure.'
+    )
 
     expect(
       [...container.querySelectorAll('[data-live-graph-task-card] > button:first-child')].every(element =>

@@ -405,6 +405,7 @@ export function buildSessionLiveGraph(input: SessionLiveGraphInput): LiveGraphSn
     const revision = sourceRevision(source)
     const workflowIds = workflowIdsForSource(source)
     const workflows = new Map((source.workflows || []).map(workflow => [clean(workflow.id), workflow]))
+    const workersByTask = new Map((source.workers || []).map(worker => [worker.task_id, worker]))
     const tasks = [...(source.tasks || [])].sort((left, right) => left.id.localeCompare(right.id))
     const effectiveWorkflowIds = new Set(workflowIds)
 
@@ -443,7 +444,7 @@ export function buildSessionLiveGraph(input: SessionLiveGraphInput): LiveGraphSn
 
       const currentTool = loopWorkerCurrentTool({
         latestRun: task.latest_run,
-        workerActivity: task.worker_activity
+        workerActivity: task.worker_activity || workersByTask.get(task.id)
       })
 
       const context: TaskContext = {

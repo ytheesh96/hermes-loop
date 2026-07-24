@@ -1522,23 +1522,23 @@ def _workflow_overview_workers(
     }
     workers: list[dict[str, Any]] = []
     for task_id, run in sorted(_latest_runs_for_tasks(conn, task_ids).items()):
-        workers.append(
-            {
-                "task_id": task_id,
-                "run_id": run["id"],
-                "profile": run["profile"],
-                "status": run["status"],
-                "outcome": run["outcome"],
-                "worker_session_id": _worker_session_id_from_metadata(
-                    run["metadata"]
-                ),
-                "worker_pid": run["worker_pid"],
-                "started_at": run["started_at"],
-                "ended_at": run["ended_at"],
-                "last_heartbeat_at": run["last_heartbeat_at"],
-                "latest_event_id": latest_event_by_task.get(task_id),
-            }
-        )
+        worker = {
+            "task_id": task_id,
+            "run_id": run["id"],
+            "profile": run["profile"],
+            "status": run["status"],
+            "outcome": run["outcome"],
+            "worker_session_id": _worker_session_id_from_metadata(run["metadata"]),
+            "worker_pid": run["worker_pid"],
+            "started_at": run["started_at"],
+            "ended_at": run["ended_at"],
+            "last_heartbeat_at": run["last_heartbeat_at"],
+            "latest_event_id": latest_event_by_task.get(task_id),
+        }
+        current_tool = _worker_current_tool_from_metadata(run["metadata"])
+        if current_tool:
+            worker["current_tool"] = current_tool
+        workers.append(worker)
     return workers
 
 
@@ -1653,9 +1653,9 @@ def get_workflow_overview(
 
             task_rows = conn.execute(
                 """
-                SELECT id, title, status, assignee, workflow_id, session_id,
-                       project_id, current_run_id, created_at, started_at,
-                       completed_at
+                SELECT id, title, body, status, assignee, workflow_id, session_id,
+                       project_id, priority, result, current_run_id, created_at,
+                       started_at, completed_at
                 FROM tasks
                 WHERE workflow_id IS NOT NULL AND status != 'archived'
                 ORDER BY created_at, id
@@ -1677,14 +1677,27 @@ def get_workflow_overview(
                 parents_by_child.setdefault(link["child_id"], []).append(link["parent_id"])
                 children_by_parent.setdefault(link["parent_id"], []).append(link["child_id"])
 
-            overview_tasks = [
-                {
+            summary_map = kanban_db.latest_summaries(conn, task_ids)
+            workers = _workflow_overview_workers(conn, task_ids)
+            overview_tasks: list[dict[str, Any]] = []
+            for task in tasks:
+                task_id = str(task["id"])
+                item = {
                     **dict(task),
-                    "included_parent_ids": parents_by_child.get(str(task["id"]), []),
-                    "included_child_ids": children_by_parent.get(str(task["id"]), []),
+                    "body": _preview_text(
+                        task["body"], max_chars=_CARD_SUMMARY_PREVIEW_CHARS
+                    ),
+                    "result": _preview_text(
+                        task["result"], max_chars=_CARD_SUMMARY_PREVIEW_CHARS
+                    ),
+                    "latest_summary": _preview_text(
+                        summary_map.get(task_id),
+                        max_chars=_CARD_SUMMARY_PREVIEW_CHARS,
+                    ),
+                    "included_parent_ids": parents_by_child.get(task_id, []),
+                    "included_child_ids": children_by_parent.get(task_id, []),
                 }
-                for task in tasks
-            ]
+                overview_tasks.append(item)
             session_ids.update(
                 str(task["session_id"]) for task in tasks if task["session_id"]
             )
@@ -1706,7 +1719,7 @@ def get_workflow_overview(
                     "workflows": workflows,
                     "tasks": overview_tasks,
                     "links": links,
-                    "workers": _workflow_overview_workers(conn, task_ids),
+                    "workers": workers,
                 }
             )
         except Exception as exc:

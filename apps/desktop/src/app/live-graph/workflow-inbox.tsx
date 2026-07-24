@@ -105,7 +105,7 @@ function TaskCard({ onSelect, reducedMotion, task }: TaskCardProps) {
   const { t } = useI18n()
   const assignee = clean(task.assignee) || t.liveGraph.unassigned
   const currentTool = clean(task.currentTool)
-  const supportingText = clean(task.summary) || clean(task.detail)
+  const supportingText = clean(task.summary) || clean(task.detail) || clean(task.result)
 
   return (
     <motion.article
