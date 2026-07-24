@@ -1,4 +1,4 @@
-import type { ReadableAtom } from 'nanostores'
+import { atom, type ReadableAtom } from 'nanostores'
 import { createContext, useContext } from 'react'
 
 import type { ChatMessage } from '@/lib/chat-messages'
@@ -38,11 +38,15 @@ export interface SessionView {
   $messagesEmpty: ReadableAtom<boolean>
   $lastVisibleIsUser: ReadableAtom<boolean>
   $cwd: ReadableAtom<string>
+  $fast: ReadableAtom<boolean>
   $model: ReadableAtom<string>
   $provider: ReadableAtom<string>
-  $fast: ReadableAtom<boolean>
   $reasoningEffort: ReadableAtom<string>
+  /** Spectator surfaces render the transcript without an interactive composer. */
+  $readOnly: ReadableAtom<boolean>
 }
+
+const $primaryReadOnly = atom(false)
 
 export const PRIMARY_SESSION_VIEW: SessionView = {
   kind: 'primary',
@@ -56,6 +60,7 @@ export const PRIMARY_SESSION_VIEW: SessionView = {
   $model: $currentModel,
   $provider: $currentProvider,
   $reasoningEffort: $currentReasoningEffort,
+  $readOnly: $primaryReadOnly,
   $runtimeId: $activeSessionId,
   $storedId: $selectedStoredSessionId
 }

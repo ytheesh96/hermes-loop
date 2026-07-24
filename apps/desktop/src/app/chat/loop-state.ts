@@ -1,5 +1,18 @@
 export type LoopPanelStatus = 'error' | 'ready' | 'stale'
 
+export interface LoopWorkflowRef {
+  board: string
+  workflowId: string
+}
+
+export function normalizeLoopBoard(board?: null | string): string {
+  return board?.trim() || 'default'
+}
+
+export function loopWorkflowRefKey(ref: LoopWorkflowRef): string {
+  return `${encodeURIComponent(normalizeLoopBoard(ref.board))}:${encodeURIComponent(ref.workflowId.trim())}`
+}
+
 export interface LoopLatestRun {
   error?: null | string
   id?: number
@@ -99,6 +112,27 @@ export interface CompactLoopTask {
   title?: null | string
 }
 
+export interface KanbanBoard {
+  archived?: boolean
+  color?: string
+  counts?: Record<string, number>
+  created_at?: null | number
+  db_path?: string
+  default_workdir?: null | string
+  default_workspace_kind?: string
+  description?: string
+  icon?: string
+  is_current?: boolean
+  name?: string
+  slug: string
+  total?: number
+}
+
+export interface KanbanBoardsResponse {
+  boards: KanbanBoard[]
+  current?: null | string
+}
+
 export interface LoopIntakeState {
   dispatchable?: boolean
   needed: boolean
@@ -142,6 +176,7 @@ export interface TenantLoopTask {
   parent_count?: number
   parents_count?: number
   priority?: number
+  project_id?: null | string
   needs_specification?: boolean
   result?: null | string
   session_id?: null | string
@@ -161,8 +196,19 @@ export interface TenantLoopTask {
   worker_activity?: null | LoopWorkerActivity
 }
 
+export interface TenantLoopWorkflow {
+  created_at?: number
+  id: string
+  origin_session_id?: null | string
+  revision?: number
+  status?: null | string
+  title?: null | string
+  updated_at?: number
+}
+
 export interface TenantLoopSource {
   board?: null | string
+  changed_since?: null | number
   external_links?: { child_id?: string; parent_id?: string }[]
   has_changes_since?: null | boolean
   include_archived?: boolean
@@ -173,11 +219,13 @@ export interface TenantLoopSource {
   /** Deprecated response-read fallback from runtimes predating workflow ids. */
   root_task_id?: null | string
   session_id?: string
+  source_revision?: number
   tasks?: TenantLoopTask[]
   tenant?: null | string
   tenants?: string[]
   workflow_id?: null | string
   workflow_ids?: string[]
+  workflows?: TenantLoopWorkflow[]
   workers?: LoopWorkerActivity[]
 }
 
@@ -233,6 +281,7 @@ export interface LoopRow {
   activeDecompositionChildCount?: number
   assignee?: null | string
   body?: null | string
+  board?: string
   childCount: number
   children: string[]
   commentCount: number
@@ -338,6 +387,7 @@ export function loopTaskPhaseLabel(row: LoopRow): string | null {
 }
 
 export interface LoopPanelState {
+  board?: string
   message: string
   rawJson: string
   revision: number
@@ -346,6 +396,7 @@ export interface LoopPanelState {
   status: LoopPanelStatus
   workflowId: string
   workflowIds: string[]
+  workflowRefs?: LoopWorkflowRef[]
 }
 
 const ARCHIVED_STATUSES = new Set(['archived'])
@@ -527,11 +578,9 @@ export function workflowIdsFromTenantSource(
 ): string[] {
   const canonical = Array.from(
     new Set(
-      [
-        ...(source.workflow_ids || []),
-        source.workflow_id,
-        ...tasks.map(task => task.workflow_id)
-      ].filter((value): value is string => Boolean(value?.trim()))
+      [...(source.workflow_ids || []), source.workflow_id, ...tasks.map(task => task.workflow_id)].filter(
+        (value): value is string => Boolean(value?.trim())
+      )
     )
   )
 
@@ -606,7 +655,8 @@ function tenantRowFromTask(
   task: TenantLoopTask,
   depths: Map<string, number>,
   workers: readonly LoopWorkerActivity[] = [],
-  taskById: ReadonlyMap<string, TenantLoopTask> = new Map()
+  taskById: ReadonlyMap<string, TenantLoopTask> = new Map(),
+  board = 'default'
 ): LoopRow {
   const parents = taskParents(task)
   const children = taskChildren(task)
@@ -622,6 +672,7 @@ function tenantRowFromTask(
     activeDecompositionChildCount: task.active_decomposition_child_count || 0,
     assignee: task.assignee,
     body: task.body,
+    board,
     childCount: children.length || task.child_count || task.children_count || 0,
     children,
     commentCount: task.comment_count || 0,
@@ -673,15 +724,17 @@ export function deriveLoopPanelStateFromTenantSource(
 
   const workflowIds = workflowIdsFromTenantSource(source, tasks)
   const workflowId = source.workflow_id?.trim() || (workflowIds.length === 1 ? workflowIds[0]! : '')
+  const board = normalizeLoopBoard(source.board)
   const depths = depthByTaskId(tasks)
   const taskById = new Map((source.tasks || []).map(task => [task.id, task]))
 
   const rows = tasks.map(task => ({
-    ...tenantRowFromTask(task, depths, source.workers || [], taskById),
+    ...tenantRowFromTask(task, depths, source.workers || [], taskById, board),
     workflowId: task.workflow_id || workflowId || null
   }))
 
   return {
+    board,
     message: '',
     rawJson: rawJson(source),
     revision: source.latest_event_id || 0,
@@ -689,6 +742,41 @@ export function deriveLoopPanelStateFromTenantSource(
     sourceNow: source.now,
     status: 'ready',
     workflowId,
-    workflowIds
+    workflowIds,
+    workflowRefs: workflowIds.map(candidate => ({ board, workflowId: candidate }))
+  }
+}
+
+export function deriveLoopPanelStateFromTenantSources(
+  sources: readonly TenantLoopSource[] | null | undefined
+): LoopPanelState | null {
+  const states = (sources || [])
+    .map(source => deriveLoopPanelStateFromTenantSource(source))
+    .filter((state): state is LoopPanelState => Boolean(state))
+
+  if (!states.length) {
+    return null
+  }
+
+  const workflowRefs = Array.from(
+    new Map(states.flatMap(state => state.workflowRefs || []).map(ref => [loopWorkflowRefKey(ref), ref])).values()
+  )
+
+  const workflowIds = Array.from(new Set(workflowRefs.map(ref => ref.workflowId)))
+
+  return {
+    message: '',
+    rawJson: rawJson(sources),
+    revision: Math.max(0, ...states.map(state => state.revision)),
+    rows: states.flatMap(state => state.rows),
+    sourceNow: Math.max(0, ...states.map(state => state.sourceNow || 0)) || undefined,
+    status: states.some(state => state.status === 'error')
+      ? 'error'
+      : states.some(state => state.status === 'stale')
+        ? 'stale'
+        : 'ready',
+    workflowId: workflowRefs.length === 1 ? workflowRefs[0]!.workflowId : '',
+    workflowIds,
+    workflowRefs
   }
 }

@@ -1,6 +1,7 @@
 import { useStore } from '@nanostores/react'
 import { memo } from 'react'
 
+import { type LoopWorkflowRef, loopWorkflowRefKey } from '@/app/chat/loop-state'
 import { StatusRow } from '@/components/chat/status-row'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -15,18 +16,19 @@ import { useI18n } from '@/i18n'
 import {
   $selectedLoopWorkflowBySession,
   $statusItemsBySession,
+  composerStatusWorkflowRef,
   selectLoopWorkflowForSession
 } from '@/store/composer-status'
 
 interface LoopLauncherRowProps {
   onOpen?: () => void
-  onSelectWorkflow?: (taskId: string) => void
+  onOpenWorkflow?: (workflow: LoopWorkflowRef) => void
   sessionId: null | string
 }
 
 export const LoopLauncherRow = memo(function LoopLauncherRow({
   onOpen,
-  onSelectWorkflow,
+  onOpenWorkflow,
   sessionId
 }: LoopLauncherRowProps) {
   const { t } = useI18n()
@@ -37,14 +39,36 @@ export const LoopLauncherRow = memo(function LoopLauncherRow({
     itemsBySession[sessionId || '']?.filter(item => item.type === 'todo' && Boolean(item.kanbanTaskId)) ?? []
 
   const workflowSummaries = [
-    ...new Map(loopItems.map(item => [item.kanbanWorkflowId || item.kanbanTaskId, item] as const)).values()
+    ...new Map(
+      loopItems.map(item => {
+        const workflow = composerStatusWorkflowRef(item)!
+
+        return [loopWorkflowRefKey(workflow), item] as const
+      })
+    ).values()
   ]
 
   const graphWorkflows = workflowSummaries.filter(item => (item.taskProgress?.total || 0) > 1)
   const workflows = graphWorkflows.length > 0 ? graphWorkflows : workflowSummaries
+  const duplicateWorkflowIds = new Set(
+    workflows
+      .filter((item, index) =>
+        workflows.some(
+          (candidate, candidateIndex) =>
+            candidateIndex !== index &&
+            candidate.kanbanWorkflowId === item.kanbanWorkflowId &&
+            composerStatusWorkflowRef(candidate)?.board !== composerStatusWorkflowRef(item)?.board
+        )
+      )
+      .map(item => item.kanbanWorkflowId)
+  )
 
   const selectedWorkflow =
-    workflows.find(item => item.kanbanWorkflowId === selectedWorkflowsBySession[sessionId || '']) ||
+    workflows.find(item => {
+      const workflow = composerStatusWorkflowRef(item)
+
+      return workflow && loopWorkflowRefKey(workflow) === selectedWorkflowsBySession[sessionId || '']
+    }) ||
     workflows.find(item => item.state !== 'done') ||
     workflows[0]
 
@@ -78,8 +102,10 @@ export const LoopLauncherRow = memo(function LoopLauncherRow({
       className="loop-launcher-row min-h-7 rounded-t-[inherit] rounded-b-none border-b border-(--ui-stroke-tertiary) px-3.5 py-1.5 hover:bg-transparent"
       leading={<Codicon className="text-(--ui-blue)" name="type-hierarchy-sub" size="0.8rem" />}
       onActivate={() => {
-        if (onSelectWorkflow && selectedWorkflow.kanbanTaskId) {
-          onSelectWorkflow(selectedWorkflow.kanbanTaskId)
+        const workflow = composerStatusWorkflowRef(selectedWorkflow)
+
+        if (onOpenWorkflow && workflow) {
+          onOpenWorkflow(workflow)
 
           return
         }
@@ -130,7 +156,7 @@ export const LoopLauncherRow = memo(function LoopLauncherRow({
         <span className="min-w-0 truncate text-xs font-normal text-muted-foreground/92 transition-colors group-hover/status-row:text-foreground/90">
           {selectedWorkflow.title}
         </span>
-        {workflows.length > 0 && onSelectWorkflow && (
+        {workflows.length > 0 && onOpenWorkflow && (
           <span
             className="flex shrink-0 items-center"
             onClick={event => event.stopPropagation()}
@@ -139,7 +165,7 @@ export const LoopLauncherRow = memo(function LoopLauncherRow({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
-                  aria-label={t.statusStack.switchWorkflow}
+                  aria-label={t.statusStack.openWorkflow}
                   className="size-5 shrink-0 text-muted-foreground/65 hover:text-foreground"
                   size="icon-xs"
                   type="button"
@@ -156,20 +182,23 @@ export const LoopLauncherRow = memo(function LoopLauncherRow({
                 sideOffset={6}
               >
                 <DropdownMenuLabel className="text-[0.625rem] font-semibold uppercase tracking-wider text-(--ui-text-tertiary)">
-                  {t.statusStack.switchWorkflow}
+                  {t.statusStack.openWorkflow}
                 </DropdownMenuLabel>
                 {workflows.map(item => (
                   <DropdownMenuItem
                     className="items-start gap-2"
-                    key={item.kanbanWorkflowId || item.kanbanTaskId}
+                    key={loopWorkflowRefKey(composerStatusWorkflowRef(item)!)}
                     onSelect={() => {
-                      selectLoopWorkflowForSession(sessionId || '', item.kanbanWorkflowId || item.kanbanTaskId!)
-                      onSelectWorkflow(item.kanbanTaskId!)
+                      const workflow = composerStatusWorkflowRef(item)!
+
+                      selectLoopWorkflowForSession(sessionId || '', workflow)
+                      onOpenWorkflow(workflow)
                     }}
                   >
                     <Codicon
                       className={
-                        item.kanbanWorkflowId === selectedWorkflow.kanbanWorkflowId
+                        loopWorkflowRefKey(composerStatusWorkflowRef(item)!) ===
+                        loopWorkflowRefKey(composerStatusWorkflowRef(selectedWorkflow)!)
                           ? 'mt-0.5 text-(--ui-green)'
                           : 'mt-0.5 text-transparent'
                       }
@@ -181,6 +210,9 @@ export const LoopLauncherRow = memo(function LoopLauncherRow({
                       {item.kanbanWorkflowId && (
                         <span className="block truncate text-[0.65rem] text-(--ui-text-tertiary)">
                           {item.kanbanWorkflowId}
+                          {duplicateWorkflowIds.has(item.kanbanWorkflowId)
+                            ? ` · ${composerStatusWorkflowRef(item)!.board}`
+                            : ''}
                         </span>
                       )}
                     </span>

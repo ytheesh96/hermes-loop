@@ -80,6 +80,41 @@ describe('loopagent store', () => {
     })
   })
 
+  it('keeps identical task and run ids isolated by board while preserving legacy ids', () => {
+    for (const board of ['alpha', 'beta']) {
+      upsertLoopagent(
+        ['session-one'],
+        {
+          board,
+          event: 'loopagent.worker.upsert',
+          revision: 1,
+          run_id: 7,
+          status: 'running',
+          task_id: 'shared-task'
+        },
+        'loopagent.worker.upsert'
+      )
+    }
+
+    upsertLoopagent(
+      ['session-one'],
+      {
+        event: 'loopagent.worker.upsert',
+        revision: 1,
+        run_id: 7,
+        status: 'running',
+        task_id: 'legacy-task'
+      },
+      'loopagent.worker.upsert'
+    )
+
+    expect($loopagentsBySession.get()['session-one']?.map(activity => activity.id)).toEqual([
+      'loopagent:worker:alpha:shared-task:7',
+      'loopagent:worker:beta:shared-task:7',
+      'loopagent:worker:legacy-task:7'
+    ])
+  })
+
   it('retains safe structured worker activity, real timing, tool count, and changed files', () => {
     const base = {
       created_at: '2026-07-19T00:00:00Z',

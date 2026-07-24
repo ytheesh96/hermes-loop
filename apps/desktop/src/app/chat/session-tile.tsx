@@ -53,7 +53,8 @@ import {
   discardSessionTile,
   patchSessionTile,
   type SessionTile,
-  sessionTileDelegate
+  sessionTileDelegate,
+  SessionTileResumeSupersededError
 } from '@/store/session-states'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -98,6 +99,7 @@ function buildTileView(storedSessionId: string): SessionView {
     $model: computed($state, state => state?.model ?? ''),
     $provider: computed($state, state => state?.provider ?? ''),
     $reasoningEffort: computed($state, state => state?.reasoningEffort ?? ''),
+    $readOnly: computed($sessionTiles, tiles => tiles.find(t => t.storedSessionId === storedSessionId)?.watch === true),
     $runtimeId,
     // Constant for the tile's lifetime — a plain atom, not a computed.
     $storedId: atom(storedSessionId)
@@ -265,11 +267,22 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
     }
 
     resumingRef.current = true
+    let retrySupersededResume = false
 
     delegate
-      .resumeTile(storedSessionId)
+      .resumeTile(storedSessionId, {
+        profile: tile?.profile,
+        runningHint: tile?.runningHint,
+        watch: tile?.watch
+      })
       .then(id => patchSessionTile(storedSessionId, { error: undefined, runtimeId: id }))
       .catch((err: unknown) => {
+        if (err instanceof SessionTileResumeSupersededError) {
+          retrySupersededResume = true
+
+          return
+        }
+
         const message = err instanceof Error ? err.message : String(err)
 
         // A gone session (404 / "Session not found") is terminal — a stale or
@@ -283,8 +296,15 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
       })
       .finally(() => {
         resumingRef.current = false
+
+        if (retrySupersededResume && $sessionTiles.get().some(current => current.storedSessionId === storedSessionId)) {
+          // The semantic tile options changed while the RPC was in flight.
+          // Re-render after the latch drops so the effect resumes with the
+          // current profile/watch contract instead of applying the stale one.
+          patchSessionTile(storedSessionId, { error: undefined, runtimeId: undefined })
+        }
       })
-  }, [gatewayOpen, runtimeId, storedSessionId, tile?.error])
+  }, [gatewayOpen, runtimeId, storedSessionId, tile?.error, tile?.profile, tile?.runningHint, tile?.watch])
 
   // The gateway (re)opening invalidates any latched error — it likely came
   // from a not-yet-open gateway or the previous connection. Clearing it
@@ -348,9 +368,15 @@ export function tileStoredRow(storedSessionId: string): SessionInfo | undefined 
 function tileTitle(storedSessionId: string): string {
   const stored = tileStoredRow(storedSessionId)
 
+  if (stored) {
+    return sessionTitle(stored)
+  }
+
   // A tab-strip "+" tab is unlisted until its first turn persists, so it isn't
   // in $sessions yet — label it "New session" rather than a bare "Session".
-  return stored ? sessionTitle(stored) : 'New session'
+  return $sessionTiles.get().some(tile => tile.storedSessionId === storedSessionId && tile.watch)
+    ? 'Session'
+    : 'New session'
 }
 
 /** The `@session` link payload for a tile tab drag — id + owning profile + title. */
@@ -423,11 +449,10 @@ export function stackSessionTilesIntoMain(): void {
   }
 }
 
-/** A session TAB's context menu: the full session verb set (pin, copy id, new
- *  window, branch, rename, archive, delete) — the SAME menu a sidebar row
- *  gets, targeted through the tile delegate (whose verbs are generic over
- *  stored ids, primary included). The wrapper stops the contextmenu from also
- *  opening the zone strip's menu. Shared by tile tabs AND the main tab. */
+/** A session TAB's context menu: interactive tabs get the full session verb
+ *  set; Loop watch tabs keep only inspection/export and tab-close verbs. The
+ *  wrapper stops the contextmenu from also opening the zone strip's menu.
+ *  Shared by tile tabs AND the main tab. */
 export function SessionTabMenu({
   children,
   onClose,
@@ -444,26 +469,30 @@ export function SessionTabMenu({
   /** Layout-tree pane id — powers the Close-others/right/all verbs. */
   tabPaneId: string
 }) {
-  // Subscribe for reactivity; the row is read imperatively via tileStoredRow
-  // (which spans both sources), so the values themselves are unused here.
+  // Subscribe for reactivity; tileStoredRow spans the recents list and the
+  // project tree, while the tile record carries watch/profile presentation.
   useStore($sessions)
   useStore($projectTree)
+  const tiles = useStore($sessionTiles)
   const pinnedSessionIds = useStore($pinnedSessionIds)
   const stored = tileStoredRow(storedSessionId)
+  const tile = tiles.find(candidate => candidate.storedSessionId === storedSessionId)
+  const readOnly = tile?.watch === true
   const pinId = stored ? sessionPinId(stored) : storedSessionId
   const pinned = pinnedSessionIds.includes(pinId)
 
   return (
     <span className="contents" onContextMenu={event => event.stopPropagation()}>
       <SessionContextMenu
-        onArchive={() => void sessionTileDelegate()?.archiveSession(storedSessionId)}
-        onBranch={() => void sessionTileDelegate()?.branchSession(storedSessionId)}
+        onArchive={readOnly ? undefined : () => void sessionTileDelegate()?.archiveSession(storedSessionId)}
+        onBranch={readOnly ? undefined : () => void sessionTileDelegate()?.branchSession(storedSessionId)}
         onClose={onClose}
-        onDelete={() => void sessionTileDelegate()?.deleteSession(storedSessionId)}
+        onDelete={readOnly ? undefined : () => void sessionTileDelegate()?.deleteSession(storedSessionId)}
         onHideTabBar={onHideTabBar}
-        onPin={() => (pinned ? unpinSession(pinId) : pinSession(pinId))}
+        onPin={readOnly ? undefined : () => (pinned ? unpinSession(pinId) : pinSession(pinId))}
         pinned={pinned}
-        profile={stored?.profile}
+        profile={tile?.profile ?? stored?.profile}
+        readOnly={readOnly}
         sessionId={storedSessionId}
         surface="tab"
         tabPaneId={tabPaneId}

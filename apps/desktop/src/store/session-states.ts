@@ -273,6 +273,14 @@ export type TileDock = 'center' | SplitDir
 export interface SessionTile {
   /** Stored session id — the durable identity (runtime ids are ephemeral). */
   storedSessionId: string
+  /** Owning Hermes profile when the session is outside the active profile. */
+  profile?: string
+  /** Attach to an externally-running session without building another agent. */
+  watch?: boolean
+  /** Ephemeral liveness supplied by the authoritative Loop row when a worker
+   *  watch opens. Never persisted: a saved "running" bit would be stale after
+   *  restart; the durable transcript remains responsible for settling it. */
+  runningHint?: boolean
   /** Dock against `anchor` on adoption (default right; center = stack). */
   dir?: TileDock
   /** Pane to dock against (a drop's target zone) — default the workspace.
@@ -301,13 +309,15 @@ const TILE_PANE_PREFIX = 'session-tile:'
 /** Persisted placement — `dir` + strip slot (`before`) + dock `anchor` so a
  *  restart / profile swap re-adopts tiles in the same order, not all stacked
  *  right of workspace. */
-type StoredTile = Pick<SessionTile, 'anchor' | 'before' | 'dir' | 'storedSessionId'>
+type StoredTile = Pick<SessionTile, 'anchor' | 'before' | 'dir' | 'profile' | 'storedSessionId' | 'watch'>
 
 const toStored = (t: SessionTile): StoredTile => ({
   anchor: t.anchor,
   before: t.before,
   dir: t.dir,
-  storedSessionId: t.storedSessionId
+  profile: typeof t.profile === 'string' && t.profile.trim() ? t.profile.trim() : undefined,
+  storedSessionId: t.storedSessionId,
+  watch: t.watch === true ? true : undefined
 })
 
 function parseTileList(value: unknown): StoredTile[] {
@@ -321,7 +331,9 @@ function parseTileList(value: unknown): StoredTile[] {
             anchor: typeof raw.anchor === 'string' ? raw.anchor : undefined,
             before: typeof raw.before === 'string' || raw.before === null ? raw.before : undefined,
             dir: raw.dir,
-            storedSessionId: raw.storedSessionId
+            profile: typeof raw.profile === 'string' && raw.profile.trim() ? raw.profile.trim() : undefined,
+            storedSessionId: raw.storedSessionId,
+            watch: raw.watch === true ? true : undefined
           }
         })
     : []
@@ -367,6 +379,8 @@ const profileKey = () => normalizeProfileKey($activeGatewayProfile.get())
 // tiles, and no repopulation on a profile switch.
 export const $sessionTiles = atom<SessionTile[]>(isSecondaryWindow() ? [] : [...(tilesByProfile[profileKey()] ?? [])])
 
+let delegate: SessionTileDelegate | null = null
+
 function persistTiles() {
   // Shares the origin's storage; a secondary window holds no tiles, so a write
   // back would only wipe the primary's set.
@@ -409,8 +423,12 @@ export function patchSessionTile(storedSessionId: string, patch: Partial<Session
 export function resetTileRuntimeBindings() {
   const tiles = $sessionTiles.get()
 
-  if (tiles.some(t => t.runtimeId)) {
-    $sessionTiles.set(tiles.map(toStored))
+  for (const tile of tiles) {
+    invalidateSessionTileRuntime(tile.storedSessionId)
+  }
+
+  if (tiles.some(t => t.runtimeId || t.error)) {
+    $sessionTiles.set(tiles.map(tile => ({ ...toStored(tile), runningHint: tile.runningHint })))
   }
 }
 
@@ -432,9 +450,18 @@ export interface SessionTileDelegate {
   executeSlash(rawCommand: string, sessionId: string): Promise<void>
   /** Interrupt a tile's running turn. */
   interruptSession(runtimeId: string): Promise<void>
+  /** Evict a stored session's process-scoped runtime/cache binding. */
+  invalidateRuntime(storedSessionId: string): void
   /** Bind a live runtime id for a stored session (resume without touching
    *  the main view). Returns the runtime id, or throws. */
-  resumeTile(storedSessionId: string): Promise<string>
+  resumeTile(
+    storedSessionId: string,
+    options?: {
+      profile?: string
+      runningHint?: boolean
+      watch?: boolean
+    }
+  ): Promise<string>
   /** Submit a prompt to a tile's live session. */
   submitToSession(runtimeId: string, text: string): Promise<void>
   /** THE session-state write path — routes through the wiring cache so the
@@ -442,7 +469,13 @@ export interface SessionTileDelegate {
   updateSession(runtimeId: string, updater: (state: ClientSessionState) => ClientSessionState): ClientSessionState
 }
 
-let delegate: SessionTileDelegate | null = null
+export class SessionTileResumeSupersededError extends Error {
+  override name = 'SessionTileResumeSupersededError'
+
+  constructor() {
+    super('Session tile binding changed while it was resuming')
+  }
+}
 
 export function setSessionTileDelegate(next: SessionTileDelegate) {
   delegate = next
@@ -502,6 +535,10 @@ function syncTileStripOrder() {
   }
 }
 
+function invalidateSessionTileRuntime(storedSessionId: string): void {
+  delegate?.invalidateRuntime(storedSessionId)
+}
+
 /** Open a tile for a stored session, or MOVE an existing one to the new dock
  *  (`dir`; `center` = stack into the anchor's zone, `before` = strip slot). The
  *  move path is what lets a tile's own TAB be dragged like a sidebar row — drop
@@ -512,7 +549,8 @@ export function openSessionTile(
   storedSessionId: string,
   dir: TileDock = 'right',
   anchor?: string,
-  before?: null | string
+  before?: null | string,
+  options?: Pick<SessionTile, 'profile' | 'runningHint' | 'watch'>
 ) {
   const tiles = $sessionTiles.get()
 
@@ -520,12 +558,41 @@ export function openSessionTile(
     return
   }
 
-  if (!tiles.some(t => t.storedSessionId === storedSessionId)) {
-    saveTiles([...tiles, { anchor, before, dir, storedSessionId }])
-    // Adoption is async via the registry — order sync runs after the move path
-    // below; a brand-new tile's strip slot is already in `before`.
+  const existing = tiles.find(t => t.storedSessionId === storedSessionId)
+
+  if (!existing) {
+    if (options) {
+      invalidateSessionTileRuntime(storedSessionId)
+    }
+
+    saveTiles([...tiles, { anchor, before, dir, storedSessionId, ...(options ?? {}) }])
+    // Adoption is async via the registry — a brand-new tile's strip slot is
+    // already represented by `before`.
 
     return
+  }
+
+  if (options && (existing.profile !== options.profile || existing.watch !== options.watch)) {
+    invalidateSessionTileRuntime(storedSessionId)
+    patchSessionTile(storedSessionId, {
+      ...options,
+      error: undefined,
+      // Profile and watch mode both change resume semantics.
+      runtimeId: undefined
+    })
+  } else if (options && existing.runningHint !== options.runningHint) {
+    patchSessionTile(storedSessionId, { runningHint: options.runningHint })
+
+    // Reopening an already-bound worker from an authoritative active row
+    // should immediately restore its busy readout. Never force idle from a
+    // false hint; a transcript completion is the settling authority.
+    if (options.runningHint && existing.runtimeId) {
+      delegate?.updateSession(existing.runtimeId, state => ({
+        ...state,
+        awaitingResponse: true,
+        busy: true
+      }))
+    }
   }
 
   // Already open: relocate the existing pane to the drop target (pane-mirror
@@ -538,6 +605,17 @@ export function openSessionTile(
     patchSessionTile(storedSessionId, { anchor, before: before ?? undefined, dir })
     syncTileStripOrder()
   }
+}
+
+/** Open a stored session in the main workspace's tab strip. Watch tabs retain
+ *  the worker's profile/lazy-resume contract instead of constructing a second
+ *  agent for an externally-running Loop session. */
+export function openSessionTab(
+  storedSessionId: string,
+  options?: Pick<SessionTile, 'profile' | 'runningHint' | 'watch'>
+): void {
+  openSessionTile(storedSessionId, 'center', undefined, undefined, options)
+  focusOpenSession(storedSessionId)
 }
 
 /** ⌘W on the MAIN tab: the next session tab stacked WITH the workspace, to
@@ -612,7 +690,7 @@ export function closeSessionTile(storedSessionId: string) {
   const tile = $sessionTiles.get().find(t => t.storedSessionId === storedSessionId)
 
   if (tile) {
-    closedStack().push({ anchor: tile.anchor, before: tile.before, dir: tile.dir, storedSessionId })
+    closedStack().push({ ...toStored(tile), anchor: tile.anchor, before: tile.before })
   }
 
   saveTiles($sessionTiles.get().filter(t => t.storedSessionId !== storedSessionId))
@@ -645,7 +723,10 @@ export function reopenLastClosedTile(): void {
     }
 
     if (!$sessionTiles.get().some(t => t.storedSessionId === storedSessionId)) {
-      openSessionTile(storedSessionId, tile.dir, tile.anchor, tile.before)
+      openSessionTile(storedSessionId, tile.dir, tile.anchor, tile.before, {
+        profile: tile.profile,
+        watch: tile.watch
+      })
 
       return
     }

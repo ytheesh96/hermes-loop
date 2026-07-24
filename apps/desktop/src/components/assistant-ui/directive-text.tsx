@@ -9,23 +9,42 @@ import { ZoomableImage } from '@/components/chat/zoomable-image'
 import { extractEmbeddedImages } from '@/lib/embedded-images'
 import { gatewayMediaDataUrl, isRemoteGateway } from '@/lib/media'
 
-const HERMES_REF_TYPES = ['file', 'folder', 'url', 'image', 'tool', 'line', 'terminal', 'session', 'task'] as const
+const HERMES_REF_TYPES = [
+  'file',
+  'folder',
+  'url',
+  'image',
+  'tool',
+  'line',
+  'terminal',
+  'session',
+  'task',
+  'agent',
+  'artifact',
+  'project',
+  'workflow'
+] as const
+
 type HermesRefType = (typeof HERMES_REF_TYPES)[number]
 
 /** Single source of truth for chip icon glyphs (Tabler outline @ 24×24).
  * Used both by the rendered <DirectiveIcon> and the raw SVG markup the
  * contenteditable composer embeds via `directiveIconSvg`. */
+const FILE_ICON_PATHS = [
+  'M14 3v4a1 1 0 0 0 1 1h4',
+  'M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2',
+  'M9 9l1 0',
+  'M9 13l6 0',
+  'M9 17l6 0'
+]
+
+const FOLDER_ICON_PATHS = [
+  'M5 19l2.757 -7.351a1 1 0 0 1 .936 -.649h12.307a1 1 0 0 1 .986 1.164l-.996 5.211a2 2 0 0 1 -1.964 1.625h-14.026a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v2'
+]
+
 const ICON_PATHS: Record<HermesRefType, string[]> = {
-  file: [
-    'M14 3v4a1 1 0 0 0 1 1h4',
-    'M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2',
-    'M9 9l1 0',
-    'M9 13l6 0',
-    'M9 17l6 0'
-  ],
-  folder: [
-    'M5 19l2.757 -7.351a1 1 0 0 1 .936 -.649h12.307a1 1 0 0 1 .986 1.164l-.996 5.211a2 2 0 0 1 -1.964 1.625h-14.026a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v2'
-  ],
+  file: FILE_ICON_PATHS,
+  folder: FOLDER_ICON_PATHS,
   url: [
     'M9 15l6 -6',
     'M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464',
@@ -50,6 +69,23 @@ const ICON_PATHS: Record<HermesRefType, string[]> = {
     'M9 3v4',
     'M9 13l2 2l4 -4',
     'M7 5h-1a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-12a2 2 0 0 0 -2 -2h-1'
+  ],
+  agent: [
+    'M9 4.5v-1.5h6v1.5',
+    'M12 4.5v2.5',
+    'M7 7h10a3 3 0 0 1 3 3v7a3 3 0 0 1 -3 3h-10a3 3 0 0 1 -3 -3v-7a3 3 0 0 1 3 -3',
+    'M9 12v.01',
+    'M15 12v.01',
+    'M9 16h6'
+  ],
+  artifact: FILE_ICON_PATHS,
+  project: FOLDER_ICON_PATHS,
+  workflow: [
+    'M12 3a2 2 0 1 0 0 4a2 2 0 1 0 0 -4',
+    'M5 17a2 2 0 1 0 0 4a2 2 0 1 0 0 -4',
+    'M19 17a2 2 0 1 0 0 4a2 2 0 1 0 0 -4',
+    'M12 7v3a2 2 0 0 1 -2 2h-3a2 2 0 0 0 -2 2v3',
+    'M12 7v3a2 2 0 0 0 2 2h3a2 2 0 0 1 2 2v3'
   ]
 }
 
@@ -165,7 +201,7 @@ export const DIRECTIVE_CHIP_CLASS =
 const CANONICAL_DIRECTIVE_RE = /:([\w-]{1,64})\[([^\]\n]{1,1024})\](?:\{name=([^}\n]{1,1024})\})?/g
 
 const HERMES_DIRECTIVE_RE = new RegExp(
-  '@(file|folder|url|image|tool|line|terminal|session|task):(' +
+  '@(file|folder|url|image|tool|line|terminal|session|task|agent|artifact|project|workflow):(' +
     '`[^`\\n]+`' +
     '|"[^"\\n]+"' +
     "|'[^'\\n]+'" +

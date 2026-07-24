@@ -85,6 +85,23 @@ describe('insertInlineRefsIntoEditor', () => {
     expect(chip?.className).toContain('inline-flex')
     expect(composerPlainText(editor)).toBe('@task:`t_review` ')
   })
+
+  it('round-trips workflow context chips inserted from the graph', () => {
+    const editor = document.createElement('div')
+    editor.dataset.slot = RICH_INPUT_SLOT
+
+    insertInlineRefsIntoEditor(editor, [{ kind: 'workflow', label: 'Release workflow', value: 'work/delivery/wf-7' }])
+
+    expect(editor.querySelector('[data-ref-kind="workflow"]')?.textContent).toBe('Release workflow')
+    expect(composerPlainText(editor)).toBe('@workflow:`work/delivery/wf-7` ')
+
+    const restored = document.createElement('div')
+    renderComposerContents(restored, composerPlainText(editor))
+    normalizeComposerEditorDom(restored)
+
+    expect(restored.querySelector('[data-ref-kind="workflow"]')).not.toBeNull()
+    expect(composerPlainText(restored).trim()).toBe('@workflow:`work/delivery/wf-7`')
+  })
 })
 
 describe('insertPlainTextAtCaret', () => {

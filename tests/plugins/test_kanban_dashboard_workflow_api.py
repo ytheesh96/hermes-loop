@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -117,6 +119,210 @@ def test_one_session_can_create_multiple_independent_workflows(workflow_client):
         first["workflow_id"],
         second["workflow_id"],
     }
+
+
+def test_workflow_overview_batches_sessions_and_keeps_unattached_workflows(
+    workflow_client,
+):
+    from hermes_state import SessionDB
+
+    task_body = "Inspector context " + ("b" * 240)
+    task_result = "Inspector result " + ("r" * 240)
+    run_summary = "Worker summary " + ("s" * 240)
+    first = _create_draft(
+        workflow_client,
+        "First workflow",
+        body=f"{task_body}\nprivate detail outside the card preview",
+        session_id="session-one",
+    )
+    child = _create_draft(
+        workflow_client,
+        "First child",
+        session_id="session-one",
+        workflow_id=first["workflow_id"],
+        parents=[first["task"]["id"]],
+    )
+    second = _create_draft(workflow_client, "Second workflow", session_id="session-two")
+
+    with kb.connect() as conn:
+        detached_id = kb.create_workflow(conn, title="Detached workflow")
+        archived_id = kb.create_workflow(conn, title="Archived workflow")
+        assert kb.close_workflow(conn, archived_id, archive=True)
+        with kb.write_txn(conn):
+            run_id = conn.execute(
+                "INSERT INTO task_runs "
+                "(task_id, profile, status, metadata, summary, worker_pid, started_at) "
+                "VALUES (?, ?, 'running', ?, ?, ?, ?)",
+                (
+                    first["task"]["id"],
+                    "reviewer-qa",
+                    json.dumps({
+                        "current_tool": "kanban_block",
+                        "worker_session_id": "worker-session-one",
+                    }),
+                    run_summary,
+                    4321,
+                    12345,
+                ),
+            ).lastrowid
+            conn.execute(
+                "UPDATE tasks SET current_run_id = ?, priority = ?, result = ? "
+                "WHERE id = ?",
+                (run_id, 2, task_result, first["task"]["id"]),
+            )
+        worker_event_id = conn.execute(
+            "SELECT MAX(id) FROM task_events WHERE task_id = ?",
+            (first["task"]["id"],),
+        ).fetchone()[0]
+
+    session_db = SessionDB(db_path=Path(os.environ["HERMES_HOME"]) / "state.db")
+    try:
+        for session_id, title in (
+            ("session-one", "Session one"),
+            ("session-two", "Session two"),
+        ):
+            session_db.create_session(session_id=session_id, source="desktop")
+            session_db.set_session_title(session_id, title)
+    finally:
+        session_db.close()
+
+    response = workflow_client.get("/api/plugins/kanban/workflow-overview")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["schema_version"] == 1
+    assert payload["errors"] == []
+    assert "now" not in payload
+    assert len(payload["boards"]) == 1
+
+    board = payload["boards"][0]
+    assert {workflow["id"] for workflow in board["workflows"]} == {
+        first["workflow_id"],
+        second["workflow_id"],
+        detached_id,
+    }
+    assert archived_id not in {
+        workflow["id"] for workflow in board["workflows"]
+    }
+    assert {task["id"] for task in board["tasks"]} == {
+        first["task"]["id"],
+        child["task"]["id"],
+        second["task"]["id"],
+    }
+    assert board["links"] == [
+        {"parent_id": first["task"]["id"], "child_id": child["task"]["id"]}
+    ]
+    child_payload = next(
+        task for task in board["tasks"] if task["id"] == child["task"]["id"]
+    )
+    assert child_payload["included_parent_ids"] == [first["task"]["id"]]
+    first_payload = next(
+        task for task in board["tasks"] if task["id"] == first["task"]["id"]
+    )
+    assert first_payload["body"] == task_body[:200]
+    assert first_payload["priority"] == 2
+    assert first_payload["result"] == task_result[:200]
+    assert first_payload["latest_summary"] == run_summary[:200]
+    assert "worker_activity" not in first_payload
+    assert board["workers"] == [
+        {
+            "task_id": first["task"]["id"],
+            "run_id": run_id,
+            "profile": "reviewer-qa",
+            "status": "running",
+            "outcome": None,
+            "worker_session_id": "worker-session-one",
+            "worker_pid": 4321,
+            "started_at": 12345,
+            "ended_at": None,
+            "last_heartbeat_at": None,
+            "latest_event_id": worker_event_id,
+            "current_tool": "kanban_block",
+        }
+    ]
+    assert {session["id"] for session in payload["sessions"]} == {
+        "session-one",
+        "session-two",
+    }
+
+
+def test_workflow_overview_reads_only_the_requested_profile_session_store(
+    workflow_client,
+):
+    from hermes_state import SessionDB
+
+    _create_draft(workflow_client, "Scoped workflow", session_id="shared-session")
+    home = Path(os.environ["HERMES_HOME"])
+    other_home = home / "profiles" / "other"
+    other_home.mkdir(parents=True)
+
+    for db_path, title, cwd in (
+        (home / "state.db", "Default title", "/default"),
+        (other_home / "state.db", "Other title", "/other"),
+    ):
+        session_db = SessionDB(db_path=db_path)
+        try:
+            session_db.create_session(
+                session_id="shared-session", source="desktop", cwd=cwd
+            )
+            session_db.set_session_title("shared-session", title)
+        finally:
+            session_db.close()
+
+    response = workflow_client.get(
+        "/api/plugins/kanban/workflow-overview",
+        params={"profile": "other"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["sessions"] == [
+        {
+            "id": "shared-session",
+            "current_session_id": "shared-session",
+            "lineage_session_ids": ["shared-session"],
+            "title": "Other title",
+            "cwd": "/other",
+        }
+    ]
+
+
+def test_workflow_overview_keeps_workflow_and_task_revision_domains_separate(
+    workflow_client,
+):
+    draft = _create_draft(
+        workflow_client, "Closable workflow", session_id="missing-session"
+    )
+    before = workflow_client.get("/api/plugins/kanban/workflow-overview").json()[
+        "boards"
+    ][0]
+    before_workflow = next(
+        item for item in before["workflows"] if item["id"] == draft["workflow_id"]
+    )
+
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?", (draft["task"]["id"],)
+            )
+        assert kb.close_workflow(conn, draft["workflow_id"])
+
+    after = workflow_client.get("/api/plugins/kanban/workflow-overview").json()[
+        "boards"
+    ][0]
+    workflow = next(
+        item for item in after["workflows"] if item["id"] == draft["workflow_id"]
+    )
+
+    assert after["source_revision"] == before["source_revision"]
+    assert workflow["status"] == "closed"
+    assert workflow["revision"] == before_workflow["revision"] + 1
+    assert (
+        workflow_client.get(
+            "/api/plugins/kanban/workflow-overview",
+            params={"profile": "does-not-exist"},
+        ).status_code
+        == 404
+    )
 
 
 def test_create_extends_a_workflow_without_a_root_card_or_sink_edge(

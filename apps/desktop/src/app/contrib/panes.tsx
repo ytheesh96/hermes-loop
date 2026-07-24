@@ -10,26 +10,32 @@
 
 import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
-import { atom } from 'nanostores'
-import type { CSSProperties } from 'react'
+import { atom, computed } from 'nanostores'
+import { type CSSProperties, useMemo, useRef } from 'react'
 
+import { WORK_RAIL_MAX_WIDTH, WORK_RAIL_MIN_WIDTH } from '@/app/chat/right-rail'
 import { RightSidebarPane } from '@/app/right-sidebar'
 import { ReviewPane } from '@/app/right-sidebar/review'
 import type { GroupSetter } from '@/app/shell/group-setter'
 import type { StatusbarItem } from '@/app/shell/statusbar-controls'
 import { TITLEBAR_HEIGHT } from '@/app/shell/titlebar'
 import type { TitlebarTool } from '@/app/shell/titlebar-controls'
+import { prepareTreePaneRemovalFocus } from '@/components/pane-shell/tree/store'
 import { DecodeText } from '@/components/ui/decode-text'
 import { ContribBoundary } from '@/contrib/react/boundary'
 import { useContributions } from '@/contrib/react/use-contributions'
 import { registry } from '@/contrib/registry'
 import { getLogs } from '@/hermes'
+import { translateNow } from '@/i18n'
 import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
 import { cn } from '@/lib/utils'
 import { $filePreviewTarget, $previewTarget, setCurrentSessionPreviewTarget } from '@/store/preview'
 import { $currentCwd } from '@/store/session'
 
-import { LoopPanel } from '../chat/loop-panel'
+import { requestComposerFocus } from '../chat/composer/focus'
+import { LoopPanel, loopPanelStateForWorkflow, loopWorkflowPaneTitle } from '../chat/loop-panel'
+import { type LoopWorkflowRef, loopWorkflowRefKey, normalizeLoopBoard } from '../chat/loop-state'
+import { paneMirror } from '../chat/pane-mirror'
 import { ChatPreviewRail } from '../chat/right-rail'
 import type { LoopPanelController } from '../chat/use-loop-panel-controller'
 
@@ -78,40 +84,290 @@ export const $restartPreviewServer = atom<((url: string, context?: string) => Pr
  * rendered layout-tree pane. The atom breaks the wiring↔pane import cycle. */
 export const $loopPanelController = atom<LoopPanelController | null>(null)
 
-export function LoopPane() {
+const LOOP_WORKFLOW_PANE_PREFIX = 'loop-workflow'
+
+interface LoopWorkflowPaneDescriptor {
+  key: string
+  workflowRef: LoopWorkflowRef | null
+}
+
+function canonicalLoopWorkflowRef(workflow: LoopWorkflowRef): LoopWorkflowRef {
+  return { board: normalizeLoopBoard(workflow.board), workflowId: workflow.workflowId }
+}
+
+function loopWorkflowPaneKey(canvasScopeKey: string, workflow?: LoopWorkflowRef): string {
+  if (!workflow) {
+    return `${encodeURIComponent(canvasScopeKey)}:`
+  }
+
+  const ref = canonicalLoopWorkflowRef(workflow)
+
+  const workflowIdentity =
+    ref.board === 'default'
+      ? encodeURIComponent(ref.workflowId)
+      : `${encodeURIComponent(ref.board)}:${encodeURIComponent(ref.workflowId)}`
+
+  return `${encodeURIComponent(canvasScopeKey)}:${workflowIdentity}`
+}
+
+export function loopWorkflowPaneId(canvasScopeKey: string, workflow: LoopWorkflowRef): string {
+  return `${LOOP_WORKFLOW_PANE_PREFIX}:${loopWorkflowPaneKey(canvasScopeKey, workflow)}`
+}
+
+export function loopNewWorkflowPaneId(canvasScopeKey: string): string {
+  return `${LOOP_WORKFLOW_PANE_PREFIX}:${loopWorkflowPaneKey(canvasScopeKey)}`
+}
+
+const $loopWorkflowPanes = computed($loopPanelController, loop => {
+  if (!loop?.open || loop.hidden) {
+    return []
+  }
+
+  const workflows = loop.workflowRefs.map(workflowRef => ({
+    key: loopWorkflowPaneKey(loop.workflowPaneScopeKey, workflowRef),
+    workflowRef
+  }))
+
+  return workflows.length
+    ? workflows
+    : [
+        {
+          key: loopWorkflowPaneKey(loop.workflowPaneScopeKey),
+          workflowRef: null
+        }
+      ]
+})
+
+function loopWorkflowPaneDescriptor(key: string): LoopWorkflowPaneDescriptor | undefined {
+  return $loopWorkflowPanes.get().find(pane => pane.key === key)
+}
+
+export function LoopWorkflowPane({ workflowRef }: { workflowRef: LoopWorkflowRef | null }) {
   const loop = useStore($loopPanelController)
+  const workflowId = workflowRef?.workflowId || null
+  const workflowKey = workflowRef ? loopWorkflowRefKey(workflowRef) : ''
+  const workflowCallbackRef = workflowRef || undefined
+
+  const workflowState = useMemo(
+    () => (workflowRef ? loopPanelStateForWorkflow(loop?.state, workflowRef) : null),
+    [loop?.state, workflowRef]
+  )
+
+  const focusRequestKey = workflowRef ? loop?.focusRequestKeysByWorkflow[workflowKey] || 0 : loop?.focusRequestKey || 0
+
+  const workflowIsActive = Boolean(
+    workflowRef && loop?.activeWorkflowRef && loopWorkflowRefKey(loop.activeWorkflowRef) === workflowKey
+  )
+
+  const selectedTaskId =
+    workflowId && workflowState
+      ? workflowState.rows.some(row => row.taskId === loop?.selectedTaskId)
+        ? loop?.selectedTaskId || null
+        : null
+      : workflowRef && workflowIsActive
+        ? loop?.selectedTaskId || null
+        : null
+
+  const focusedTaskId =
+    workflowId && workflowState
+      ? workflowState.rows.some(row => row.taskId === loop?.focusedTaskId)
+        ? loop?.focusedTaskId || null
+        : null
+      : workflowRef && workflowIsActive
+        ? loop?.focusedTaskId || null
+        : null
+
+  const ownsForegroundDetail = Boolean(selectedTaskId || focusedTaskId)
+
+  const selectionRef = useRef({
+    focusRequestKey,
+    selectedTaskDetail: ownsForegroundDetail ? loop?.selectedTaskDetail : null,
+    selectedTaskDetailError: ownsForegroundDetail ? loop?.selectedTaskDetailError : null,
+    selectedTaskId
+  })
+
+  // The controller has one foreground selection, while every native canvas
+  // stays mounted. Update a workflow's snapshot only for an explicit request
+  // targeting it (or while its selected detail resolves), so switching peer
+  // tabs cannot clear an inactive canvas's local task/artifact navigation.
+  if (selectionRef.current.focusRequestKey !== focusRequestKey || ownsForegroundDetail) {
+    selectionRef.current = {
+      focusRequestKey,
+      selectedTaskDetail: ownsForegroundDetail ? loop?.selectedTaskDetail : null,
+      selectedTaskDetailError: ownsForegroundDetail ? loop?.selectedTaskDetailError : null,
+      selectedTaskId
+    }
+  }
 
   if (!loop) {
     return null
   }
 
+  const selection = selectionRef.current
+
   return (
-    <div className="h-full min-h-0 overflow-hidden">
+    <div
+      className="h-full min-h-0 overflow-hidden"
+      data-loop-board={workflowRef?.board || ''}
+      data-loop-workflow-id={workflowId || ''}
+    >
       <LoopPanel
-        canvasScopeKey={loop.canvasScopeKey}
+        canvasScopeKey={
+          workflowRef ? `${loop.canvasScopeKey}:${encodeURIComponent(workflowRef.board)}` : loop.canvasScopeKey
+        }
         embedded
-        focusRequestKey={loop.focusRequestKey}
+        focusRequestKey={focusRequestKey}
         hidden={loop.hidden}
-        onAddTaskComment={loop.onAddTaskComment}
-        onCreateTask={loop.onCreateTask}
-        onFocusTaskId={loop.onFocusTaskId}
-        onHide={loop.onHide}
-        onLinkTasks={loop.onLinkTasks}
-        onSavePositions={loop.onSavePositions}
-        onSelectTaskId={loop.onSelectTaskId}
+        onAddTaskComment={
+          workflowCallbackRef
+            ? (taskId, body) => loop.onAddTaskComment(taskId, body, workflowCallbackRef)
+            : loop.onAddTaskComment
+        }
+        onCreateTask={
+          workflowCallbackRef
+            ? (idea, options) => loop.onCreateTask(idea, { ...options, workflowRef: workflowCallbackRef })
+            : loop.onCreateTask
+        }
+        onFocusTaskId={
+          workflowCallbackRef ? taskId => loop.onFocusTaskId(taskId, workflowCallbackRef) : loop.onFocusTaskId
+        }
+        onHide={() => (workflowRef ? loop.onCloseWorkflowId(workflowRef) : loop.onHide())}
+        onLinkTasks={
+          workflowCallbackRef
+            ? (parentId, childId) => loop.onLinkTasks(parentId, childId, workflowCallbackRef)
+            : loop.onLinkTasks
+        }
+        onSavePositions={positions => loop.onSavePositions(positions, workflowCallbackRef)}
+        onSelectTaskId={
+          workflowCallbackRef ? taskId => loop.onSelectTaskId(taskId, workflowCallbackRef) : loop.onSelectTaskId
+        }
         onTaskAction={loop.onTaskAction}
-        onUnlinkTasks={loop.onUnlinkTasks}
+        onUnlinkTasks={
+          workflowCallbackRef
+            ? (parentId, childId) => loop.onUnlinkTasks(parentId, childId, workflowCallbackRef)
+            : loop.onUnlinkTasks
+        }
         open={loop.open}
-        positions={loop.positions}
-        selectedTaskDetail={loop.selectedTaskDetail}
-        selectedTaskDetailError={loop.selectedTaskDetailError}
-        selectedTaskId={loop.selectedTaskId}
-        state={loop.state}
-        workflowId={loop.workflowId}
+        positions={
+          workflowRef
+            ? (loop.positionsByWorkflow[workflowKey] ?? (loop.workflowKey === workflowKey ? loop.positions : undefined))
+            : loop.positions
+        }
+        selectedTaskDetail={selection.selectedTaskDetail}
+        selectedTaskDetailError={selection.selectedTaskDetailError}
+        selectedTaskId={selection.selectedTaskId}
+        state={workflowState}
+        workflowCanvas
+        workflowId={workflowId || undefined}
       />
     </div>
   )
 }
+
+function closeLoopWorkflowPane(key: string) {
+  const descriptor = loopWorkflowPaneDescriptor(key)
+  const loop = $loopPanelController.get()
+
+  if (!descriptor || !loop) {
+    return
+  }
+
+  if (!descriptor.workflowRef) {
+    loop.onHide()
+    requestComposerFocus()
+
+    return
+  }
+
+  const workflowRef = descriptor.workflowRef
+
+  if (!loop.workflowRefs.some(ref => loopWorkflowRefKey(ref) === loopWorkflowRefKey(workflowRef))) {
+    return
+  }
+
+  const closeResult = loop.onCloseWorkflowId(workflowRef)
+
+  if (closeResult?.closedLast) {
+    requestComposerFocus()
+  } else if (closeResult?.nextWorkflowRef) {
+    prepareTreePaneRemovalFocus(
+      loopWorkflowPaneId(loop.workflowPaneScopeKey, workflowRef),
+      loopWorkflowPaneId(loop.workflowPaneScopeKey, closeResult.nextWorkflowRef)
+    )
+  }
+}
+
+/** Mirror every open workflow into the native layout-tree tab system. */
+export const watchLoopWorkflowPanes = paneMirror<LoopWorkflowPaneDescriptor>({
+  source: $loopWorkflowPanes,
+  activate: key => {
+    const descriptor = loopWorkflowPaneDescriptor(key)
+    const loop = $loopPanelController.get()
+
+    if (
+      descriptor?.workflowRef &&
+      loop &&
+      (!loop.activeWorkflowRef ||
+        loopWorkflowRefKey(loop.activeWorkflowRef) !== loopWorkflowRefKey(descriptor.workflowRef))
+    ) {
+      loop.onActivateWorkflowId(descriptor.workflowRef)
+    }
+  },
+  key: pane => pane.key,
+  prefix: LOOP_WORKFLOW_PANE_PREFIX,
+  anchor: () => 'loop',
+  before: () => 'loop',
+  close: closeLoopWorkflowPane,
+  dir: () => 'center',
+  keepAliveWhenInactive: true,
+  maxWidth: WORK_RAIL_MAX_WIDTH,
+  minWidth: WORK_RAIL_MIN_WIDTH,
+  preferredActive: key => {
+    const descriptor = loopWorkflowPaneDescriptor(key)
+    const loop = $loopPanelController.get()
+
+    return Boolean(
+      descriptor?.workflowRef &&
+      loop &&
+      loop.activeWorkflowRef &&
+      loopWorkflowRefKey(descriptor.workflowRef) === loopWorkflowRefKey(loop.activeWorkflowRef)
+    )
+  },
+  render: key => {
+    const descriptor = loopWorkflowPaneDescriptor(key)
+
+    return descriptor ? <LoopWorkflowPane workflowRef={descriptor.workflowRef} /> : null
+  },
+  replacements: (previous, next) => {
+    const pending = previous.length === 1 && !previous[0]?.workflowRef ? previous[0] : null
+    const hydrated = next.length === 1 && next[0]?.workflowRef ? next[0] : null
+
+    return pending && hydrated ? [{ from: pending.key, to: hydrated.key }] : []
+  },
+  title: key => {
+    const descriptor = loopWorkflowPaneDescriptor(key)
+
+    if (!descriptor) {
+      return key
+    }
+
+    if (!descriptor.workflowRef) {
+      return translateNow('statusStack.newWorkflow')
+    }
+
+    const duplicateWorkflowId = $loopWorkflowPanes
+      .get()
+      .some(
+        candidate =>
+          candidate.key !== descriptor.key && candidate.workflowRef?.workflowId === descriptor.workflowRef?.workflowId
+      )
+
+    const title = loopWorkflowPaneTitle($loopPanelController.get()?.state, descriptor.workflowRef)
+
+    return duplicateWorkflowId ? `${title} · ${descriptor.workflowRef.board}` : title
+  },
+  width: 'clamp(24rem, 36vw, 34rem)'
+})
 
 export function PreviewRailPane() {
   const previewTarget = useStore($previewTarget)

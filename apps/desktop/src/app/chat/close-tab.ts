@@ -1,5 +1,5 @@
 import { closeActiveTerminal } from '@/app/right-sidebar/terminal/terminals'
-import { closeWorkspaceTab } from '@/components/pane-shell/tree/store'
+import { activeTreePaneId, closeTreePane, closeWorkspaceTab } from '@/components/pane-shell/tree/store'
 import { isFocusWithin } from '@/lib/keybinds/combo'
 import { $filePreviewTabs, $previewTarget, closeActiveRightRailTab } from '@/store/preview'
 import { closeSessionTile, nextSessionTileForWorkspace } from '@/store/session-states'
@@ -7,9 +7,10 @@ import { closeSessionTile, nextSessionTileForWorkspace } from '@/store/session-s
 /**
  * ⌘W — close the tab of the context you're in, by precedence:
  *   1. a focused terminal → its active terminal tab,
- *   2. right-rail tabs (live preview and/or file peeks),
- *   3. the MAIN zone → its active tab (a session tile stacked into the workspace).
- *   4. the MAIN (workspace) tab itself, when session tabs are stacked with it:
+ *   2. the active Loop zone → its native workflow tab,
+ *   3. right-rail tabs (live preview and/or file peeks),
+ *   4. the MAIN zone → its active tab (a session tile stacked into the workspace).
+ *   5. the MAIN (workspace) tab itself, when session tabs are stacked with it:
  *      the workspace can't close, so ⌘W shifts the NEXT session tab into main
  *      (loads it as the primary + drops its now-redundant tile).
  * Returns false when nothing closes, so ⌘W is a no-op — it never closes the
@@ -23,6 +24,14 @@ import { closeSessionTile, nextSessionTileForWorkspace } from '@/store/session-s
 export function closeActiveTab(loadSessionIntoWorkspace?: (storedSessionId: string) => void): boolean {
   if (isFocusWithin('[data-terminal]')) {
     closeActiveTerminal()
+
+    return true
+  }
+
+  const activePaneId = activeTreePaneId()
+
+  if (activePaneId?.startsWith('loop-workflow:')) {
+    closeTreePane(activePaneId)
 
     return true
   }

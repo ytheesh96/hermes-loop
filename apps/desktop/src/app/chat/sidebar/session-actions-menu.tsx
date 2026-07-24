@@ -48,6 +48,7 @@ import { triggerHaptic } from '@/lib/haptics'
 import { PROFILE_SWATCHES } from '@/lib/profile-color'
 import { exportSession } from '@/lib/session-export'
 import { activeGateway } from '@/store/gateway'
+import { openLiveGraphPane } from '@/store/live-graph-panes'
 import { notify, notifyError } from '@/store/notifications'
 import {
   $activeSessionId,
@@ -113,6 +114,9 @@ interface SessionActions {
   title: string
   pinned?: boolean
   profile?: string
+  /** Spectator/watch surfaces may inspect or close the tab, but must not
+   *  mutate the worker session or fork another interactive surface. */
+  readOnly?: boolean
   onPin?: () => void
   onBranch?: () => void
   onArchive?: () => void
@@ -193,6 +197,7 @@ function useSessionActions({
   title,
   pinned = false,
   profile,
+  readOnly = false,
   onPin,
   onBranch,
   onArchive,
@@ -207,6 +212,7 @@ function useSessionActions({
   const [renameOpen, setRenameOpen] = useState(false)
   const tiles = useStore($sessionTiles)
   const selectedStoredSessionId = useStore($selectedStoredSessionId)
+  const storedSession = useStore($sessions).find(session => sessionMatchesStoredId(session, sessionId))
 
   // Already showing as a tab somewhere (a tile, or loaded in main — main IS
   // a tab): offering "Open in new tab" again is noise.
@@ -216,73 +222,93 @@ function useSessionActions({
 
   // OPEN — where else this session can go. A tab surface IS a tab already,
   // so it only offers the window hop (and its own Close, below).
-  const openItems: ItemSpec[] = [
-    ...(surface === 'row' && !alreadyTabbed
-      ? [
-          spec({
-            disabled: !sessionId,
-            icon: 'browser',
-            label: r.openInNewTab,
-            onSelect: () => {
-              triggerHaptic('selection')
-              // Stack into the MAIN zone as a tab (center dock; the strip
-              // sticky-shows on gain) — the door to the tab bar.
-              openSessionTile(sessionId, 'center')
-            }
-          })
-        ]
-      : []),
-    ...(canOpenSessionWindow()
-      ? [
-          spec({
-            disabled: !sessionId,
-            icon: 'link-external',
-            label: r.newWindow,
-            onSelect: () => {
-              triggerHaptic('selection')
-              void openSessionInNewWindow(sessionId, { profile })
-            }
-          })
-        ]
-      : [])
-  ]
+  const openItems: ItemSpec[] = readOnly
+    ? []
+    : [
+        ...(surface === 'row' && !alreadyTabbed
+          ? [
+              spec({
+                disabled: !sessionId,
+                icon: 'browser',
+                label: r.openInNewTab,
+                onSelect: () => {
+                  triggerHaptic('selection')
+                  // Stack into the MAIN zone as a tab (center dock; the strip
+                  // sticky-shows on gain) — the door to the tab bar.
+                  openSessionTile(sessionId, 'center')
+                }
+              })
+            ]
+          : []),
+        ...(canOpenSessionWindow()
+          ? [
+              spec({
+                disabled: !sessionId,
+                icon: 'link-external',
+                label: r.newWindow,
+                onSelect: () => {
+                  triggerHaptic('selection')
+                  void openSessionInNewWindow(sessionId, { profile })
+                }
+              })
+            ]
+          : [])
+      ]
 
   // IDENTITY — name/mark/reference the session.
-  const identityItems: ItemSpec[] = [
-    spec({
-      disabled: !sessionId,
-      icon: 'edit',
-      label: r.rename,
-      onSelect: () => {
-        triggerHaptic('selection')
-        setRenameOpen(true)
-      }
-    }),
-    spec({
-      disabled: !onPin,
-      icon: 'pin',
-      label: pinned ? r.unpin : r.pin,
-      onSelect: () => {
-        triggerHaptic('selection')
-        onPin?.()
-      }
-    })
-  ]
+  const identityItems: ItemSpec[] = readOnly
+    ? []
+    : [
+        spec({
+          disabled: !sessionId,
+          icon: 'edit',
+          label: r.rename,
+          onSelect: () => {
+            triggerHaptic('selection')
+            setRenameOpen(true)
+          }
+        }),
+        spec({
+          disabled: !onPin,
+          icon: 'pin',
+          label: pinned ? r.unpin : r.pin,
+          onSelect: () => {
+            triggerHaptic('selection')
+            onPin?.()
+          }
+        })
+      ]
 
   // WORK — derive/extract from the session.
   const workItems: ItemSpec[] = [
     spec({
-      disabled: !onBranch,
-      // Fork glyph to match the inline message action's GitFork icon
-      // (assistant-message.tsx). NB: this codicon font has no `git-fork`
-      // glyph (only `git-fork-private`); `repo-forked` is the fork icon.
-      icon: 'repo-forked',
-      label: r.branchFrom,
+      disabled: !storedSession,
+      icon: 'type-hierarchy-sub',
+      label: t.liveGraph.open,
       onSelect: () => {
+        if (!storedSession) {
+          return
+        }
+
         triggerHaptic('selection')
-        onBranch?.()
+        openLiveGraphPane(storedSession, { dock: 'center', sourcePaneId: 'workspace' })
       }
     }),
+    ...(!readOnly
+      ? [
+          spec({
+            disabled: !onBranch,
+            // Match the inline message action's GitFork glyph. This codicon
+            // font has no `git-fork`; `repo-forked` is the fork icon.
+            icon: 'repo-forked',
+            label: r.branchFrom,
+            onSelect: () => {
+              triggerHaptic('selection')
+              onBranch?.()
+            }
+          })
+        ]
+      : []),
     spec({
       disabled: !sessionId,
       icon: 'cloud-download',
@@ -348,28 +374,30 @@ function useSessionActions({
       : []
 
   // DANGER — put it away / destroy it (delete stays last, destructive-red).
-  const dangerItems: ItemSpec[] = [
-    spec({
-      disabled: !onArchive,
-      icon: 'archive',
-      label: r.archive,
-      onSelect: () => {
-        triggerHaptic('selection')
-        onArchive?.()
-      }
-    }),
-    {
-      className: 'text-destructive focus:text-destructive',
-      disabled: !onDelete,
-      icon: 'trash',
-      label: t.common.delete,
-      onSelect: () => {
-        triggerHaptic('warning')
-        onDelete?.()
-      },
-      variant: 'destructive'
-    }
-  ]
+  const dangerItems: ItemSpec[] = readOnly
+    ? []
+    : [
+        spec({
+          disabled: !onArchive,
+          icon: 'archive',
+          label: r.archive,
+          onSelect: () => {
+            triggerHaptic('selection')
+            onArchive?.()
+          }
+        }),
+        {
+          className: 'text-destructive focus:text-destructive',
+          disabled: !onDelete,
+          icon: 'trash',
+          label: t.common.delete,
+          onSelect: () => {
+            triggerHaptic('warning')
+            onDelete?.()
+          },
+          variant: 'destructive'
+        }
+      ]
 
   const renderMenuItem = (Item: MenuItem, { className, disabled, icon, label, onSelect, variant }: ItemSpec) => (
     <Item className={className} disabled={disabled} key={label} onSelect={onSelect} variant={variant}>
@@ -402,7 +430,7 @@ function useSessionActions({
         onCopyError={err => notifyError(err, r.copyIdFailed)}
         text={sessionId}
       />
-      <kit.Separator />
+      {(identityItems.length > 0 || sessionId) && <kit.Separator />}
       {workItems.map(item => renderMenuItem(kit.Item, item))}
       {tabCloseItems.length > 0 && (
         <>
@@ -410,8 +438,12 @@ function useSessionActions({
           {tabCloseItems.map(item => renderMenuItem(kit.Item, item))}
         </>
       )}
-      <kit.Separator />
-      {dangerItems.map(item => renderMenuItem(kit.Item, item))}
+      {dangerItems.length > 0 && (
+        <>
+          <kit.Separator />
+          {dangerItems.map(item => renderMenuItem(kit.Item, item))}
+        </>
+      )}
       {onHideTabBar && (
         <>
           <kit.Separator />

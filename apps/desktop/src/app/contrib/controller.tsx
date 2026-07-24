@@ -69,10 +69,11 @@ import {
   watchSessionTiles,
   WorkspaceTabMenu
 } from '../chat/session-tile'
+import { watchLiveGraphPanes } from '../live-graph/pane'
 import { $terminalTakeover, setTerminalTakeover } from '../right-sidebar/store'
 import { $workspaceIsPage } from '../routes'
 
-import { $loopPanelController, FilesPane, LogsPane, LoopPane, PreviewRailPane, ReviewPaneContent } from './panes'
+import { FilesPane, LogsPane, PreviewRailPane, ReviewPaneContent, watchLoopWorkflowPanes } from './panes'
 import { ContribWiring, WiredPane } from './wiring'
 
 /**
@@ -222,9 +223,13 @@ registry.registerMany([
       dock: { pane: 'workspace', pos: 'right' },
       width: 'clamp(24rem, 36vw, 34rem)',
       minWidth: WORK_RAIL_MIN_WIDTH,
-      maxWidth: WORK_RAIL_MAX_WIDTH
+      maxWidth: WORK_RAIL_MAX_WIDTH,
+      // Persisted layout anchor only. Every open workflow is a native peer
+      // tab registered beside this pane; the anchor itself stays hidden.
+      layoutAnchorOnly: true,
+      uncloseable: true
     },
-    render: () => <LoopPane />
+    render: () => null
   },
   {
     id: 'review',
@@ -423,6 +428,8 @@ watchContributedPanes()
 // main.
 watchSessionTiles()
 watchRouteTiles()
+watchLoopWorkflowPanes()
+watchLiveGraphPanes()
 
 // The main tab reads as its SESSION (the loaded title, "New session" on a
 // fresh draft) — a stack of main + tiles is then just a row of session names.
@@ -586,16 +593,9 @@ const $previewVisible = computed([$previewTarget, $filePreviewTarget], (target, 
 
 bindPaneVisibility('preview', $previewVisible, closeRightRail)
 
-const $loopVisible = computed($loopPanelController, loop => Boolean(loop?.open && !loop.hidden))
-
-const syncLoopPaneVisibility = (visible: boolean) => {
-  setTreePaneHidden('loop', !visible)
-}
-
-syncLoopPaneVisibility($loopVisible.get())
-$loopVisible.listen(syncLoopPaneVisibility)
-registerPaneCloser('loop', () => $loopPanelController.get()?.onHide())
-registerPaneOpener('loop', () => $loopPanelController.get()?.onOpen())
+// `loop` is a stable persisted layout anchor, not user-facing chrome. Native
+// `loop-workflow:*` panes share its group and provide the visible tabs.
+setTreePaneHidden('loop', true)
 
 // Logs are optional chrome: off by default, toggled from ⌘K, persisted.
 const $logsOpen = persistentAtom('hermes.desktop.logsOpen', false, Codecs.bool)

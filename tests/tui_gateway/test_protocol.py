@@ -688,7 +688,18 @@ def test_session_resume_lazy_registers_watch_session_without_agent(server, monke
 
     class _DB:
         def get_session(self, _sid):
-            return {"id": target}
+            return {
+                "id": target,
+                "model": "worker-model",
+                "model_config": json.dumps(
+                    {
+                        "model": "worker-model",
+                        "provider": "worker-provider",
+                        "reasoning_config": {"enabled": True, "effort": "xhigh"},
+                        "service_tier": "priority",
+                    }
+                ),
+            }
 
         def get_session_by_title(self, _title):
             return None
@@ -715,6 +726,7 @@ def test_session_resume_lazy_registers_watch_session_without_agent(server, monke
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
     monkeypatch.setattr(server, "_make_agent", _boom)
+    monkeypatch.setattr(server, "_resolve_model", lambda: "profile-default-model")
 
     resp = server.handle_request(
         {
@@ -730,6 +742,11 @@ def test_session_resume_lazy_registers_watch_session_without_agent(server, monke
     assert result["session_key"] == target
     assert result["info"]["lazy"] is True
     assert result["info"]["desktop_contract"] == server.DESKTOP_BACKEND_CONTRACT
+    assert result["info"]["model"] == "worker-model"
+    assert result["info"]["provider"] == "worker-provider"
+    assert result["info"]["reasoning_effort"] == "xhigh"
+    assert result["info"]["service_tier"] == "priority"
+    assert result["info"]["fast"] is True
     assert result["messages"] == [{"role": "user", "text": "delegated goal"}]
 
     sid = result["session_id"]
@@ -757,6 +774,8 @@ def test_session_resume_lazy_registers_watch_session_without_agent(server, monke
     )
     assert "error" not in resp2
     assert resp2["result"]["session_id"] == sid
+    assert resp2["result"]["info"]["model"] == "worker-model"
+    assert resp2["result"]["info"]["provider"] == "worker-provider"
     assert len(server._sessions) == 1
 
 

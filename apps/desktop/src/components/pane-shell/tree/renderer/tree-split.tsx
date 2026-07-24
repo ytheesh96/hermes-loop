@@ -106,8 +106,16 @@ export function TreeSplit({ node, root, rootRow }: { node: SplitNode; root?: boo
   // Layout-edit mode forces toggle-hidden panes (terminal off, review/preview
   // closed) visible so they're rearrangeable — only truly-absent (unregistered)
   // or narrow-collapsed panes stay gone. Restores itself on exit (render-only).
-  const paneGone = (id: string) =>
-    !paneFor(id) || (!editMode && hiddenPanes.has(id)) || (narrow && Boolean(paneChrome(paneFor(id)).collapsible))
+  const paneGone = (id: string) => {
+    const pane = paneFor(id)
+
+    return (
+      !pane ||
+      Boolean(paneChrome(pane).layoutAnchorOnly) ||
+      (!editMode && hiddenPanes.has(id)) ||
+      (narrow && Boolean(paneChrome(pane).collapsible))
+    )
+  }
 
   const trackCtx: TrackContext = { paneFor, paneGone, overrides }
 
@@ -400,10 +408,7 @@ export function TreeSplit({ node, root, rootRow }: { node: SplitNode; root?: boo
     const gone = subtreeGone(child, trackCtx)
     const minimized = isMinimized(child)
 
-    const railOnly =
-      !editMode &&
-      child.type === 'split' &&
-      subtreeOnlyCrossAxisMinimized(child, axis, trackCtx)
+    const railOnly = !editMode && child.type === 'split' && subtreeOnlyCrossAxisMinimized(child, axis, trackCtx)
 
     const collapsed = gone || railOnly || (isEmptyZone(child) && !editMode) || sideGone(i)
     const track = minimized || collapsed ? null : fixedTrackSize(child, axis, trackCtx)

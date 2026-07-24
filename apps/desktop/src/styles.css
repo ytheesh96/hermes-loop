@@ -180,6 +180,12 @@
     --ui-cyan: #4c7f8c;
     --ui-blue: #0053fd;
     --ui-purple: #9e94d5;
+    --live-graph-kind-session: #ad477f;
+    --live-graph-kind-project: #7555b8;
+    --live-graph-kind-workflow: #2864bc;
+    --live-graph-kind-task: #267d5d;
+    --live-graph-kind-agent: #287f93;
+    --live-graph-kind-artifact: #bd6532;
     --context-usage-system: color-mix(in srgb, var(--ui-base) 55%, transparent);
     --context-usage-tools: var(--ui-purple);
     --context-usage-rules: var(--ui-green);
@@ -439,6 +445,12 @@
     --ui-red: #e75e78;
     --ui-green: #55a583;
     --ui-cyan: #6f9ba6;
+    --live-graph-kind-session: #dc72aa;
+    --live-graph-kind-project: #a98ae0;
+    --live-graph-kind-workflow: #6c9bec;
+    --live-graph-kind-task: #58b48b;
+    --live-graph-kind-agent: #60b5c6;
+    --live-graph-kind-artifact: #e28a56;
 
     --sidebar-edge-border: color-mix(in srgb, var(--ui-base) 12%, transparent);
     --composer-ring-strength: 1.3;

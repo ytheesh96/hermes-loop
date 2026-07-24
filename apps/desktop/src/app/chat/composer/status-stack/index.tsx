@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef } from 'rea
 import { useNavigate } from 'react-router-dom'
 
 import { blurComposerInput } from '@/app/chat/composer/focus'
+import type { LoopWorkflowRef } from '@/app/chat/loop-state'
 import { AGENTS_ROUTE } from '@/app/routes'
 import { BillingBanner } from '@/components/billing-banner'
 import { composerDockCard } from '@/components/chat/composer-dock'
@@ -16,6 +17,7 @@ import { $billingBlock } from '@/store/billing-block'
 import {
   $statusItemsBySession,
   type ComposerStatusItem,
+  composerStatusWorkflowRef,
   dismissBackgroundProcess,
   groupStatusItems,
   refreshBackgroundProcesses,
@@ -23,6 +25,7 @@ import {
   stopBackgroundProcess
 } from '@/store/composer-status'
 import { $previewStatusBySession, dismissPreviewArtifact } from '@/store/preview-status'
+import { openSessionTab } from '@/store/session-states'
 import { $threadScrolledUp } from '@/store/thread-scroll'
 import { openSessionInNewWindow } from '@/store/windows'
 
@@ -65,7 +68,7 @@ const groupLabel = (group: StatusGroup, s: Translations['statusStack']) => {
 interface ComposerStatusStackProps {
   busy: boolean
   /** Open/focus the durable Loop/Kanban side panel for a task row. */
-  onOpenKanbanTask?: (taskId: string) => void
+  onOpenKanbanTask?: (taskId: string, workflow?: LoopWorkflowRef) => void
   /** The queue, built by the composer (it owns the queue's callbacks). Rendered
    *  as the last group so it stays fused to the composer like before. */
   queue: ReactNode
@@ -84,8 +87,8 @@ function isLoopTodo(item: ComposerStatusItem): boolean {
   return item.type === 'todo' && Boolean(item.kanbanTaskId)
 }
 
-function isWorkerSessionRow(item: ComposerStatusItem): boolean {
-  return item.type === 'subagent' || item.type === 'kanban-agent'
+function isLoopWorkerSessionRow(item: ComposerStatusItem): boolean {
+  return Boolean(item.kanbanTaskId) && (item.type === 'subagent' || item.type === 'kanban-agent')
 }
 
 export function visibleComposerStatusItems(items: readonly ComposerStatusItem[], busy: boolean): ComposerStatusItem[] {
@@ -139,22 +142,28 @@ export function ComposerStatusStack({ busy, queue, sessionId, onOpenKanbanTask }
   const openAgents = () => navigate(AGENTS_ROUTE)
 
   const openStatusItem = (item: ComposerStatusItem) => {
-    const watchOptions = item.profile ? { profile: item.profile, watch: true } : { watch: true }
-
-    if (isWorkerSessionRow(item) && item.sessionId) {
-      void openSessionInNewWindow(item.sessionId, watchOptions)
+    if (isLoopWorkerSessionRow(item) && item.sessionId) {
+      openSessionTab(
+        item.sessionId,
+        item.profile
+          ? { profile: item.profile, runningHint: item.state === 'running', watch: true }
+          : { runningHint: item.state === 'running', watch: true }
+      )
 
       return
     }
 
     if (item.kanbanTaskId && onOpenKanbanTask) {
-      onOpenKanbanTask(item.kanbanTaskId)
+      onOpenKanbanTask(item.kanbanTaskId, composerStatusWorkflowRef(item) || undefined)
 
       return
     }
 
     if (item.sessionId) {
-      void openSessionInNewWindow(item.sessionId, watchOptions)
+      void openSessionInNewWindow(
+        item.sessionId,
+        item.profile ? { profile: item.profile, watch: true } : { watch: true }
+      )
 
       return
     }

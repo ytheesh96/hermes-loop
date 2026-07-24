@@ -5,6 +5,7 @@ import type * as React from 'react'
 import { Suspense, useCallback, useEffect, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
 
+import type { LoopWorkflowRef } from '@/app/chat/loop-state'
 import type { SubmitTextOptions } from '@/app/session/hooks/use-prompt-actions/utils'
 import { Thread } from '@/components/assistant-ui/thread'
 import { Backdrop } from '@/components/Backdrop'
@@ -12,8 +13,10 @@ import { COMPOSER_HEART_CONFIG, HeartField } from '@/components/chat/vibe-hearts
 import { $sessionTileDragging, $sessionTileEdgeHover } from '@/components/pane-shell/tree/store'
 import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
+import { Codicon } from '@/components/ui/codicon'
 import { ErrorState } from '@/components/ui/error-state'
 import { TitleMenuTrigger } from '@/components/ui/title-menu-trigger'
+import { Tip } from '@/components/ui/tooltip'
 import { type HermesGateway } from '@/hermes'
 import { useI18n } from '@/i18n'
 import type { ChatMessage } from '@/lib/chat-messages'
@@ -24,6 +27,7 @@ import { cn } from '@/lib/utils'
 import { migrateSessionDraft } from '@/store/composer'
 import { migrateQueuedPrompts, parkQueuedPrompts } from '@/store/composer-queue'
 import { $pinnedSessionIds } from '@/store/layout'
+import { openLiveGraphPane } from '@/store/live-graph-panes'
 import { $petActive } from '@/store/pet'
 import { $petOverlayActive } from '@/store/pet-overlay'
 import { $activeGatewayProfile, $gatewaySwapTarget, $profiles } from '@/store/profile'
@@ -52,6 +56,7 @@ import { requestComposerInsert } from './composer/focus'
 import { droppedFileInlineRefs } from './composer/inline-refs'
 import { useComposerScope } from './composer/scope'
 import type { ChatBarState } from './composer/types'
+import { WatchComposerStatus } from './composer/watch-status'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { type DragKind, useFileDropZone } from './hooks/use-file-drop-zone'
 import { ProfileTag } from './profile-tag'
@@ -78,7 +83,8 @@ interface ChatViewProps extends Omit<React.ComponentProps<'div'>, 'onSubmit'> {
   onPickFolders: () => void
   onPickImages: () => void
   onOpenLoop?: () => void
-  onOpenKanbanTask?: (taskId: string) => void
+  onOpenLoopWorkflow?: (workflow: LoopWorkflowRef) => void
+  onOpenKanbanTask?: (taskId: string, workflow?: LoopWorkflowRef) => void
   onRemoveAttachment: (id: string) => void
   onSteer: (text: string) => Promise<boolean> | boolean
   onSubmit: (text: string, options?: SubmitTextOptions) => Promise<boolean> | boolean
@@ -108,6 +114,7 @@ function ChatHeader({
   routedSessionId,
   selectedSessionId
 }: ChatHeaderProps) {
+  const { t } = useI18n()
   const sessions = useStore($sessions)
   const pinnedSessionIds = useStore($pinnedSessionIds)
   const profiles = useStore($profiles)
@@ -142,24 +149,45 @@ function ChatHeader({
   return (
     <header className={cn(titlebarHeaderBaseClass, isRoutedSessionView && titlebarHeaderShadowClass)}>
       <div
-        className={cn(titlebarHeaderTitleClass, showProfileTag && 'flex items-center')}
+        className={cn(titlebarHeaderTitleClass, 'flex items-center gap-1')}
         style={{
           maxWidth:
             'calc(100vw - var(--titlebar-content-inset,0px) - var(--titlebar-tools-right) - var(--titlebar-tools-width) - 1.5rem)'
         }}
       >
         {showProfileTag && <ProfileTag className="pointer-events-auto mr-1.5" profile={activeStoredSession?.profile} />}
-        <SessionActionsMenu
-          align="start"
-          onDelete={selectedSessionId ? onDeleteSelectedSession : undefined}
-          onPin={selectedSessionId ? onToggleSelectedPin : undefined}
-          pinned={selectedIsPinned}
-          sessionId={selectedSessionId || activeSessionId || ''}
-          sideOffset={8}
-          title={title}
-        >
-          <TitleMenuTrigger>{title}</TitleMenuTrigger>
-        </SessionActionsMenu>
+        <div className="min-w-0">
+          <SessionActionsMenu
+            align="start"
+            onDelete={selectedSessionId ? onDeleteSelectedSession : undefined}
+            onPin={selectedSessionId ? onToggleSelectedPin : undefined}
+            pinned={selectedIsPinned}
+            sessionId={selectedSessionId || activeSessionId || ''}
+            sideOffset={8}
+            title={title}
+          >
+            <TitleMenuTrigger>{title}</TitleMenuTrigger>
+          </SessionActionsMenu>
+        </div>
+        {activeStoredSession && (
+          <Tip label={t.liveGraph.open}>
+            <Button
+              aria-label={t.liveGraph.open}
+              className="pointer-events-auto text-(--ui-text-tertiary) hover:text-(--ui-text-primary) [-webkit-app-region:no-drag]"
+              onClick={event =>
+                openLiveGraphPane(activeStoredSession, {
+                  dock: event.shiftKey ? 'right' : 'center',
+                  sourcePaneId: 'workspace'
+                })
+              }
+              size="icon-xs"
+              type="button"
+              variant="ghost"
+            >
+              <Codicon name="type-hierarchy-sub" size="0.8125rem" />
+            </Button>
+          </Tip>
+        )}
       </div>
     </header>
   )
@@ -172,6 +200,7 @@ interface ChatRuntimeBoundaryProps {
   onEdit: (message: AppendMessage) => Promise<void>
   onReload: (parentId: string | null) => Promise<void>
   onThreadMessagesChange: (messages: readonly ThreadMessage[]) => void
+  readOnly: boolean
   /** Route points at an unloaded session — render empty until resume swaps in
    *  the new transcript, so the previous session's messages don't linger. */
   suppressMessages: boolean
@@ -196,6 +225,7 @@ function ChatRuntimeBoundary({
   onEdit,
   onReload,
   onThreadMessagesChange,
+  readOnly,
   suppressMessages
 }: ChatRuntimeBoundaryProps) {
   const storeMessages = useStore(useSessionView().$messages)
@@ -203,16 +233,21 @@ function ChatRuntimeBoundary({
   const runtimeMessageRepository = useRuntimeMessageRepository(messages)
 
   const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
+    isDisabled: readOnly,
     messageRepository: runtimeMessageRepository,
     isRunning: busy,
-    setMessages: onThreadMessagesChange,
     onNew: async () => {
       // Submission is handled explicitly by ChatBar.
       // Keeping this no-op avoids duplicate prompt.submit calls.
     },
-    onEdit,
-    onCancel: async () => onCancel(),
-    onReload
+    ...(readOnly
+      ? {}
+      : {
+          setMessages: onThreadMessagesChange,
+          onEdit,
+          onCancel: async () => onCancel(),
+          onReload
+        })
   })
 
   return <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>
@@ -236,6 +271,7 @@ export function ChatView({
   onPickFolders,
   onPickImages,
   onOpenLoop,
+  onOpenLoopWorkflow,
   onOpenKanbanTask,
   onRemoveAttachment,
   onSteer,
@@ -267,8 +303,12 @@ export function ChatView({
   // Per-session (SessionView) reads — a tile IS its session, so these come
   // from the view slice, not the global atoms (which track the primary only).
   const currentCwd = useStore(view.$cwd)
+  const currentFast = useStore(view.$fast)
   const currentModel = useStore(view.$model)
   const currentProvider = useStore(view.$provider)
+  const currentReasoningEffort = useStore(view.$reasoningEffort)
+  const readOnly = useStore(view.$readOnly)
+  const spectator = readOnly || isWatchWindow()
   // A pet anywhere (in-window or popped out) owns the hearts; composer only when none.
   const petActive = useStore($petActive)
   const petOverlayActive = useStore($petOverlayActive)
@@ -358,16 +398,18 @@ export function ChatView({
     !resumeExhausted && isRoutedSessionView && (routeSessionMismatch || (messagesEmpty && !activeSessionId))
 
   const threadLoading = threadLoadingState(loadingSession, busy, awaitingResponse, lastVisibleIsUser)
-  // Hide the composer in the exhausted error state too: there's no live runtime
-  // to send to until a retry rebinds one. Watch windows are pure spectators of a
-  // subagent run driven elsewhere — no composer, transcript is read-only.
-  const showChatBar = !loadingSession && !resumeExhausted && !isWatchWindow()
+  // Hide every composer surface in the exhausted error state: there is no live
+  // runtime until retry rebinds one. Loop worker watch tabs keep the composer's
+  // status/model readout but never mount its input or mutating controls.
+  const showComposerSurface = !loadingSession && !resumeExhausted
+  const showChatBar = showComposerSurface && !spectator
+  const showWatchStatus = showComposerSurface && spectator
   const threadKey = selectedSessionId || activeSessionId || (isRoutedSessionView ? location.pathname : 'new')
 
   const modelOptionsQuery = useQuery<ModelOptionsResponse>({
     queryKey: modelOptionsQueryKey(activeGatewayProfile, activeSessionId),
     queryFn: () => requestModelOptions({ gateway: gateway || undefined, sessionId: activeSessionId }),
-    enabled: gatewayOpen
+    enabled: gatewayOpen && !spectator
   })
 
   const quickModels = useMemo(
@@ -472,6 +514,7 @@ export function ChatView({
         onEdit={onEdit}
         onReload={onReload}
         onThreadMessagesChange={onThreadMessagesChange}
+        readOnly={spectator}
         suppressMessages={routeSessionMismatch}
       >
         <div
@@ -485,10 +528,11 @@ export function ChatView({
             gateway={gateway}
             intro={showIntro ? { personality: introPersonality, seed: introSeed } : undefined}
             loading={threadLoading}
-            onBranchInNewChat={onBranchInNewChat}
-            onCancel={haltRun}
+            onBranchInNewChat={spectator ? undefined : onBranchInNewChat}
+            onCancel={spectator ? undefined : haltRun}
             onDismissError={onDismissError}
-            onRestoreToMessage={onRestoreToMessage}
+            onRestoreToMessage={spectator ? undefined : onRestoreToMessage}
+            readOnly={spectator}
             sessionId={activeSessionId}
             sessionKey={threadKey}
           />
@@ -507,7 +551,7 @@ export function ChatView({
               </ErrorState>
             </div>
           )}
-          {showChatBar && <ScrollToBottomButton />}
+          {showComposerSurface && <ScrollToBottomButton />}
           {/* Vibe hearts rise from the composer only when no pet is out (else
               they play on the pet). Fired by the core `reaction` event. */}
           {!petPresent && (
@@ -549,6 +593,7 @@ export function ChatView({
               onCancel={onCancel}
               onOpenKanbanTask={onOpenKanbanTask}
               onOpenLoop={onOpenLoop}
+              onOpenLoopWorkflow={onOpenLoopWorkflow}
               onPasteClipboardImage={onPasteClipboardImage}
               onPickFiles={onPickFiles}
               onPickFolders={onPickFolders}
@@ -562,6 +607,15 @@ export function ChatView({
               state={chatBarState}
             />
           </Suspense>
+        )}
+        {showWatchStatus && (
+          <WatchComposerStatus
+            busy={busy}
+            fast={currentFast}
+            model={currentModel}
+            provider={currentProvider}
+            reasoningEffort={currentReasoningEffort}
+          />
         )}
       </ChatRuntimeBoundary>
     </div>

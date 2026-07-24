@@ -23,11 +23,12 @@ vi.mock('@/components/pane-shell/tree/store', () => ({
   closeTreeTabsToRight: vi.fn(),
   treeTabCloseTargets: vi.fn(() => null)
 }))
-vi.mock('@/hermes', () => ({ renameSession: vi.fn() }))
+vi.mock('@/hermes', () => ({ renameSession: vi.fn(), setApiRequestProfile: vi.fn() }))
 vi.mock('@/i18n', () => ({
   useI18n: () => ({
     t: {
       common: { cancel: 'Cancel', close: 'Close', delete: 'Delete', save: 'Save' },
+      liveGraph: { open: 'Open Graph View' },
       sidebar: {
         projects: { menuAppearance: 'Appearance', noColor: 'No color' },
         row: {
@@ -75,6 +76,7 @@ vi.mock('@/store/session-states', () => ({
 }))
 vi.mock('@/store/windows', () => ({
   canOpenSessionWindow: () => false,
+  isSecondaryWindow: () => false,
   openSessionInNewWindow: vi.fn()
 }))
 

@@ -6859,15 +6859,28 @@ def _lazy_resume_info(
     *,
     model: str = "",
     provider: str = "",
+    reasoning_config: dict | None = None,
+    service_tier: str = "",
     profile: str | None = None,
 ) -> dict:
     """session.info for a not-yet-built session (the shape session.create
     returns). tools/skills land later when the deferred build emits session.info."""
+    reasoning_effort = ""
+    if isinstance(reasoning_config, dict):
+        reasoning_effort = (
+            "none"
+            if reasoning_config.get("enabled") is False
+            else str(reasoning_config.get("effort") or "")
+        )
+
     info = {
         "cwd": cwd,
         "branch": _git_branch_for_cwd(cwd),
         "project": _project_info_for_cwd(cwd),
         "model": model or _resolve_model(),
+        "reasoning_effort": reasoning_effort,
+        "service_tier": service_tier,
+        "fast": service_tier == "priority",
         "tools": {},
         "skills": {},
         "lazy": True,
@@ -7068,6 +7081,8 @@ def _(rid, params: dict) -> dict:
     if is_truthy_value(params.get("lazy", False)):
         sid = uuid.uuid4().hex[:8]
         source = _resolve_session_source(str(params.get("source") or "").strip() or None)
+        stored_runtime_overrides = _stored_session_runtime_overrides(found) or {}
+        stored_model_override = stored_runtime_overrides.get("model_override") or {}
         lease, limit_message = _claim_active_session_slot(
             target, live_session_id=sid, surface=source
         )
@@ -7097,6 +7112,8 @@ def _(rid, params: dict) -> dict:
             close_on_disconnect=is_truthy_value(params.get("close_on_disconnect", False)),
             profile_home=profile_home,
             lazy=True,
+            model_override=stored_model_override or None,
+            resume_runtime_overrides=stored_runtime_overrides or None,
         )
         if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
             return _ok(rid, _reuse_live_payload(*live))
@@ -7124,7 +7141,23 @@ def _(rid, params: dict) -> dict:
                 "resumed": target,
                 "message_count": len(messages),
                 "messages": messages,
-                "info": _lazy_resume_info(cwd, profile=profile),
+                "info": _lazy_resume_info(
+                    cwd,
+                    model=stored_model_override.get("model") or "",
+                    provider=(
+                        stored_runtime_overrides.get("provider_override")
+                        or stored_model_override.get("provider")
+                        or ""
+                    ),
+                    reasoning_config=stored_runtime_overrides.get(
+                        "reasoning_config_override"
+                    ),
+                    service_tier=stored_runtime_overrides.get(
+                        "service_tier_override"
+                    )
+                    or "",
+                    profile=profile,
+                ),
                 "inflight": None,
                 "running": child_running,
                 "session_key": target,
@@ -7489,15 +7522,29 @@ def _fallback_session_info(session: dict) -> dict:
     agent = session.get("agent")
     if agent is not None:
         return _session_info(agent)
-    cwd = _default_session_cwd()
-    return {
-        "cwd": cwd,
-        "project": _project_info_for_cwd(cwd),
-        "lazy": True,
-        "model": _resolve_model(),
-        "skills": {},
-        "tools": {},
-    }
+
+    cwd = str(session.get("cwd") or "").strip() or _default_session_cwd()
+    overrides = session.get("resume_runtime_overrides")
+    overrides = overrides if isinstance(overrides, dict) else {}
+    model_override = session.get("model_override")
+    model_override = model_override if isinstance(model_override, dict) else {}
+
+    return _lazy_resume_info(
+        cwd,
+        model=str(model_override.get("model") or ""),
+        provider=str(
+            overrides.get("provider_override")
+            or model_override.get("provider")
+            or ""
+        ),
+        reasoning_config=overrides.get("reasoning_config_override"),
+        service_tier=str(overrides.get("service_tier_override") or ""),
+        profile=(
+            Path(session["profile_home"]).name
+            if session.get("profile_home")
+            else None
+        ),
+    )
 
 
 def _reconcile_display_with_live(

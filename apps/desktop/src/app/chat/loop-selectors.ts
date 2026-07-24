@@ -88,7 +88,9 @@ export function currentToolFromLoopRecord(record: Record<string, unknown> | null
   return undefined
 }
 
-export function loopWorkerCurrentTool(row: LoopRow): string | undefined {
+export function loopWorkerCurrentTool(
+  row: Pick<LoopRow, 'latestRun' | 'workerActivity'>
+): string | undefined {
   const worker = row.workerActivity
   const direct = currentToolFromLoopRecord(worker ? (worker as unknown as Record<string, unknown>) : null)
 

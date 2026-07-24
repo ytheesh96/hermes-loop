@@ -935,6 +935,95 @@ export interface Translations {
     importedBadge: string
     resetToMine: string
   }
+  liveGraph: {
+    activeOnly: string
+    title: string
+    open: string
+    subtitle: (nodes: number, edges: number) => string
+    searchPlaceholder: string
+    fit: string
+    arrows: string
+    labels: string
+    nodeSize: string
+    textFadeThreshold: string
+    orphans: string
+    focusDepth: string
+    depthOne: string
+    depthTwo: string
+    depthAll: string
+    layout: string
+    settings: string
+    filters: string
+    display: string
+    forces: string
+    centerForce: string
+    repelForce: string
+    linkForce: string
+    linkDistance: string
+    animate: string
+    emptyTitle: string
+    emptyDesc: string
+    loading: string
+    loadFailed: string
+    globalTitle: string
+    globalEmptyTitle: string
+    globalEmptyDesc: string
+    globalLoading: string
+    globalLoadFailed: string
+    openSession: string
+    unattachedWorkflows: string
+    noMatches: string
+    inspector: string
+    taskId: string
+    assignee: string
+    priority: string
+    board: string
+    workflow: string
+    description: string
+    summary: string
+    result: string
+    openTask: string
+    showMore: string
+    showLess: string
+    taskInbox: string
+    allTasks: string
+    activeTasks: string
+    completedTasks: string
+    attentionTasks: string
+    viewTask: string
+    unassigned: string
+    allTasksCompleted: string
+    noAttentionTasks: string
+    noCompletedTasks: string
+    showMoreCompleted: (count: number) => string
+    kinds: {
+      session: string
+      project: string
+      workflow: string
+      task: string
+      agent: string
+      artifact: string
+    }
+    statuses: {
+      closed: string
+      open: string
+      paused: string
+      pending: string
+      queued: string
+      ready: string
+      review: string
+      running: string
+      scheduled: string
+      todo: string
+      triage: string
+      completed: string
+      blocked: string
+      failed: string
+      interrupted: string
+      unknown: string
+    }
+    pulseAnnouncement: (label: string, status: string) => string
+  }
   agents: {
     close: string
     title: string
@@ -1582,7 +1671,8 @@ export interface Translations {
     loop: string
     loopWorkers: (count: number) => string
     pendingTasks: (count: number) => string
-    switchWorkflow: string
+    newWorkflow: string
+    openWorkflow: string
     subagents: (count: number) => string
     todos: (done: number, total: number) => string
     workflows: string

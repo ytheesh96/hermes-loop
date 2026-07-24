@@ -96,10 +96,19 @@ function assistantMessage(): ThreadMessage {
 }
 
 // Mirrors chat/index.tsx: incremental runtime + messageRepository + onEdit.
-function IncrementalHarness({ isRunning = false, onEdit }: { isRunning?: boolean; onEdit: () => Promise<void> }) {
+function IncrementalHarness({
+  isRunning = false,
+  onEdit,
+  readOnly = false
+}: {
+  isRunning?: boolean
+  onEdit: () => Promise<void>
+  readOnly?: boolean
+}) {
   const repository = ExportedMessageRepository.fromArray([userMessage(), assistantMessage()])
 
   const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
+    isDisabled: readOnly,
     messageRepository: repository,
     isRunning,
     setMessages: () => {},
@@ -111,7 +120,7 @@ function IncrementalHarness({ isRunning = false, onEdit }: { isRunning?: boolean
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <Thread />
+      <Thread readOnly={readOnly} />
     </AssistantRuntimeProvider>
   )
 }
@@ -147,6 +156,19 @@ describe('click-to-edit user message', () => {
     await waitFor(() => {
       expect(container.querySelector('[data-slot="aui_edit-composer-root"]')).toBeTruthy()
     })
+  })
+
+  it('keeps spectator transcripts read-only', async () => {
+    const onEdit = vi.fn(async () => undefined)
+    const { container } = render(<IncrementalHarness onEdit={onEdit} readOnly />)
+
+    expect(await screen.findByText('edit me please')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Edit message' })).toBeNull()
+
+    fireEvent.click(screen.getByText('edit me please'))
+
+    expect(container.querySelector('[data-slot="aui_edit-composer-root"]')).toBeNull()
+    expect(onEdit).not.toHaveBeenCalled()
   })
 
   it('keeps a dirty inline edit open when focus leaves the composer', async () => {
