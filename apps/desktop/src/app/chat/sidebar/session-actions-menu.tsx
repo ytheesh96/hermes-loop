@@ -47,6 +47,7 @@ import { triggerHaptic } from '@/lib/haptics'
 import { PROFILE_SWATCHES } from '@/lib/profile-color'
 import { exportSession } from '@/lib/session-export'
 import { activeGateway } from '@/store/gateway'
+import { openLiveGraphPane } from '@/store/live-graph-panes'
 import { notify, notifyError } from '@/store/notifications'
 import {
   $activeSessionId,
@@ -210,6 +211,7 @@ function useSessionActions({
   const [renameOpen, setRenameOpen] = useState(false)
   const tiles = useStore($sessionTiles)
   const selectedStoredSessionId = useStore($selectedStoredSessionId)
+  const storedSession = useStore($sessions).find(session => sessionMatchesStoredId(session, sessionId))
 
   // Already showing as a tab somewhere (a tile, or loaded in main — main IS
   // a tab): offering "Open in new tab" again is noise.
@@ -278,6 +280,19 @@ function useSessionActions({
 
   // WORK — derive/extract from the session.
   const workItems: ItemSpec[] = [
+    spec({
+      disabled: !storedSession,
+      icon: 'type-hierarchy-sub',
+      label: t.liveGraph.open,
+      onSelect: () => {
+        if (!storedSession) {
+          return
+        }
+
+        triggerHaptic('selection')
+        openLiveGraphPane(storedSession, { dock: 'center', sourcePaneId: 'workspace' })
+      }
+    }),
     ...(!readOnly
       ? [
           spec({

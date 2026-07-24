@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { SetTitlebarToolGroup } from '@/app/shell/titlebar-controls'
 import { Codicon } from '@/components/ui/codicon'
 import { cn } from '@/lib/utils'
 import { closeRightRail } from '@/store/preview'
 
-import { LoopPanel, type LoopTaskCreateOptions } from '../loop-panel'
+import { LoopPanel, loopPanelStateForWorkflow, type LoopTaskCreateOptions } from '../loop-panel'
 import type { LoopPanelController } from '../use-loop-panel-controller'
 
 import { ChatPreviewRail } from './preview'
@@ -54,6 +54,15 @@ export function ChatWorkRail({
   setTitlebarToolGroup
 }: ChatWorkRailProps) {
   const loopOpen = loop.open && !loop.hidden
+
+  const closeLoop = useCallback(() => {
+    if (loop.activeWorkflowRef) {
+      loop.onCloseWorkflowId(loop.activeWorkflowRef)
+    } else {
+      loop.onHide()
+    }
+  }, [loop])
+
   const [activeTabId, setActiveTabId] = useState<WorkRailTabId>('loop')
   const lastLoopKeyRef = useRef('')
   const lastLoopFocusRequestKeyRef = useRef(loop.focusRequestKey)
@@ -62,12 +71,12 @@ export function ChatWorkRail({
 
   const tabs = useMemo<WorkRailTab[]>(
     () => [
-      ...(loopOpen ? [{ id: 'loop' as const, label: 'Loop', onClose: loop.onHide, title: loopRailLabel(loop) }] : []),
+      ...(loopOpen ? [{ id: 'loop' as const, label: 'Loop', onClose: closeLoop, title: loopRailLabel(loop) }] : []),
       ...(previewOpen
         ? [{ id: 'preview' as const, label: 'Preview', onClose: closeRightRail, title: previewLabel || 'Preview' }]
         : [])
     ],
-    [loop, loopOpen, previewLabel, previewOpen]
+    [closeLoop, loop, loopOpen, previewLabel, previewOpen]
   )
 
   useEffect(() => {
@@ -103,6 +112,13 @@ export function ChatWorkRail({
   }, [previewKey, previewOpen])
 
   const activeTab = tabs.find(tab => tab.id === activeTabId) || tabs[0]
+  const workflowState = loop.workflowRef ? loopPanelStateForWorkflow(loop.state, loop.workflowRef) : loop.state
+
+  const selectedTaskId = workflowState
+    ? workflowState.rows.some(row => row.taskId === loop.selectedTaskId)
+      ? loop.selectedTaskId
+      : null
+    : loop.selectedTaskId
 
   if (!activeTab) {
     return null
@@ -189,25 +205,35 @@ export function ChatWorkRail({
         {activeTab.id === 'loop' ? (
           <LoopPanel
             artifactSourceBaseDir={artifactSourceBaseDir}
-            canvasScopeKey={loop.canvasScopeKey}
+            canvasScopeKey={
+              loop.workflowRef
+                ? `${loop.canvasScopeKey}:${encodeURIComponent(loop.workflowRef.board)}`
+                : loop.canvasScopeKey
+            }
             embedded
             focusRequestKey={loop.focusRequestKey}
             hidden={loop.hidden}
-            onAddTaskComment={loop.onAddTaskComment}
-            onCreateTask={onCreateLoopTask}
-            onFocusTaskId={loop.onFocusTaskId}
-            onHide={loop.onHide}
-            onLinkTasks={loop.onLinkTasks}
-            onSavePositions={loop.onSavePositions}
-            onSelectTaskId={loop.onSelectTaskId}
+            onAddTaskComment={(taskId, body) => loop.onAddTaskComment(taskId, body, loop.workflowRef || undefined)}
+            onCreateTask={(idea, options) =>
+              (onCreateLoopTask || loop.onCreateTask)(idea, {
+                ...options,
+                workflowRef: loop.workflowRef || undefined
+              })
+            }
+            onFocusTaskId={taskId => loop.onFocusTaskId(taskId, loop.workflowRef || undefined)}
+            onHide={closeLoop}
+            onLinkTasks={(parentId, childId) => loop.onLinkTasks(parentId, childId, loop.workflowRef || undefined)}
+            onSavePositions={positions => loop.onSavePositions(positions, loop.workflowRef || undefined)}
+            onSelectTaskId={taskId => loop.onSelectTaskId(taskId, loop.workflowRef || undefined)}
             onTaskAction={loop.onTaskAction}
-            onUnlinkTasks={loop.onUnlinkTasks}
+            onUnlinkTasks={(parentId, childId) => loop.onUnlinkTasks(parentId, childId, loop.workflowRef || undefined)}
             open={loop.open}
-            positions={loop.positions}
-            selectedTaskDetail={loop.selectedTaskDetail}
-            selectedTaskDetailError={loop.selectedTaskDetailError}
-            selectedTaskId={loop.selectedTaskId}
-            state={loop.state}
+            positions={loop.positionsByWorkflow[loop.workflowKey] ?? loop.positions}
+            selectedTaskDetail={selectedTaskId ? loop.selectedTaskDetail : null}
+            selectedTaskDetailError={selectedTaskId ? loop.selectedTaskDetailError : null}
+            selectedTaskId={selectedTaskId}
+            state={workflowState}
+            workflowCanvas
             workflowId={loop.workflowId}
           />
         ) : (

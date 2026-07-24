@@ -207,6 +207,32 @@ export function removePane(node: LayoutNode, paneId: string): LayoutNode | null 
   return normalize(walk(node))
 }
 
+/** Replace a pane id in place without changing its group, tab index, or
+ *  active state. Used when a temporary native surface gains its durable id. */
+export function replacePaneId(node: LayoutNode, fromPaneId: string, toPaneId: string): LayoutNode {
+  if (fromPaneId === toPaneId || allPaneIds(node).includes(toPaneId)) {
+    return node
+  }
+
+  const walk = (current: LayoutNode): LayoutNode => {
+    if (current.type === 'group') {
+      if (!current.panes.includes(fromPaneId)) {
+        return current
+      }
+
+      return {
+        ...current,
+        active: current.active === fromPaneId ? toPaneId : current.active,
+        panes: current.panes.map(paneId => (paneId === fromPaneId ? toPaneId : paneId))
+      }
+    }
+
+    return { ...current, children: current.children.map(walk) }
+  }
+
+  return walk(node)
+}
+
 /**
  * Insert `paneId` at `target` group: `center` joins the stack (as a tab);
  * an edge splits the group in that direction. If the neighboring split

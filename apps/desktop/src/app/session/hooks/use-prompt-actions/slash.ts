@@ -2,7 +2,7 @@ import { type MutableRefObject, useCallback } from 'react'
 
 import { buildLoopTriageDraft } from '@/app/chat/loop-intake'
 import type { TenantLoopSource } from '@/app/chat/loop-state'
-import { createLoopDraftTask, getProfiles, loopSourceFromDraftResult, mergeLoopDraftSource } from '@/hermes'
+import { createLoopDraftTask, getProfiles, loopSourceFromDraftResult, mergeLoopDraftSources } from '@/hermes'
 import type { Translations } from '@/i18n'
 import { type ChatMessage } from '@/lib/chat-messages'
 import { parseCommandDispatch, parseSlashCommand, sessionTitle } from '@/lib/chat-runtime'
@@ -18,7 +18,7 @@ import { queryClient } from '@/lib/query-client'
 import { setSessionYolo } from '@/lib/yolo-session'
 import { openCommandPalettePage } from '@/store/command-palette'
 import { setComposerDraft } from '@/store/composer'
-import { reconcileKanbanSessionSourceForComposer } from '@/store/composer-status'
+import { reconcileKanbanSessionSourcesForComposer } from '@/store/composer-status'
 import { notify, notifyError } from '@/store/notifications'
 import { setPetScale } from '@/store/pet-gallery'
 import { $petGenInput, openPetGenerate } from '@/store/pet-generate'
@@ -442,16 +442,16 @@ export function useSlashCommand(deps: SlashCommandDeps) {
             if (source) {
               const queryKey = ['loop-session-source', profile, sourceSessionId]
 
-              const reconciledSource = mergeLoopDraftSource(
-                queryClient.getQueryData<TenantLoopSource>(queryKey),
+              const reconciledSources = mergeLoopDraftSources(
+                queryClient.getQueryData<TenantLoopSource[] | TenantLoopSource>(queryKey),
                 source
               )
 
-              queryClient.setQueryData(queryKey, reconciledSource)
+              queryClient.setQueryData(queryKey, reconciledSources)
               void queryClient.invalidateQueries({ queryKey: ['loop-session-source', profile, sourceSessionId] })
-              reconcileKanbanSessionSourceForComposer({
+              reconcileKanbanSessionSourcesForComposer({
                 activeSessionId: sessionId,
-                source: reconciledSource,
+                sources: reconciledSources,
                 sourceSessionId
               })
             }

@@ -63,6 +63,19 @@ interface PaneChrome {
    *  renders a tinted dot before the label. Live: the owning contribution
    *  re-registers it when the resolved color changes. */
   accent?: string
+  /** Semantic notification after this pane becomes active in its native tab
+   *  group. State owners can mirror selection without owning tab UI. */
+  onActivate?: () => void
+  /** Keep this pane's body mounted while a sibling tab is active. Intended
+   *  for stateful canvases whose local pan/zoom/draft state must survive tab
+   *  switches; inactive bodies are made inert and visually hidden. */
+  keepAliveWhenInactive?: boolean
+  /** Persisted structural docking target that must never render as pane
+   *  chrome, including while the user is editing the layout. */
+  layoutAnchorOnly?: boolean
+  /** Domain-owned active preference used when a layout is rebuilt around a
+   *  hidden structural anchor. */
+  preferredActive?: () => boolean
 }
 
 export const paneChrome = (c: Contribution | undefined) => (c?.data ?? {}) as PaneChrome
@@ -223,11 +236,7 @@ export function subtreeGone(node: LayoutNode, ctx: TrackContext): boolean {
  * so a composite subtree made only from those leaves must not reserve an empty
  * outer track. Same-axis minimized leaves remain real restore rails.
  */
-export function subtreeOnlyCrossAxisMinimized(
-  node: LayoutNode,
-  axis: 'row' | 'column',
-  ctx: TrackContext
-): boolean {
+export function subtreeOnlyCrossAxisMinimized(node: LayoutNode, axis: 'row' | 'column', ctx: TrackContext): boolean {
   const walk = (current: LayoutNode, parentAxis?: 'row' | 'column'): boolean => {
     if (current.type === 'group') {
       return (

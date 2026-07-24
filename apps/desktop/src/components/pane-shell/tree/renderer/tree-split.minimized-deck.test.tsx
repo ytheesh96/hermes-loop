@@ -206,6 +206,30 @@ describe('TreeSplit minimized utility deck', () => {
     expect(toolsElement?.parentElement?.style.display).not.toBe('none')
   })
 
+  it('never reserves a track for a structural layout anchor in edit mode', () => {
+    const workspace = 'test-anchor-workspace'
+    const anchor = 'test-anchor-only-pane'
+
+    registerPane(workspace, { placement: 'main' })
+    registerPane(anchor, { layoutAnchorOnly: true, placement: 'main' })
+    const anchorGroup = group([anchor], { id: 'test-anchor-only-group' })
+
+    const root = split(
+      'row',
+      [group([workspace], { id: 'test-anchor-workspace-group' }), anchorGroup],
+      [3, 1],
+      'test-anchor-root'
+    )
+
+    $layoutEditMode.set(true)
+
+    const { container } = render(<TreeSplit node={root} root rootRow />)
+    const anchorElement = container.querySelector<HTMLElement>(`[data-tree-group="${anchorGroup.id}"]`)
+
+    expect(anchorElement).not.toBeNull()
+    expect(anchorElement?.parentElement?.style.display).toBe('none')
+  })
+
   it('keeps the hidden narrow utility subtree mounted for persistent tools', () => {
     const { root, utility } = layout('narrow')
 

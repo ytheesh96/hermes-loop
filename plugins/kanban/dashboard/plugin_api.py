@@ -1406,6 +1406,11 @@ def get_session_source(
                 if task.workflow_id and str(task.workflow_id).strip()
             )
         )
+        workflows: list[dict[str, Any]] = []
+        for workflow_id in workflow_ids:
+            workflow = kanban_db.get_workflow(conn, workflow_id)
+            if workflow is not None:
+                workflows.append(asdict(workflow))
         planning_nodes: list[dict[str, Any]] = []
         planning_links: list[dict[str, str]] = []
         planning_revision = 0
@@ -1455,6 +1460,7 @@ def get_session_source(
             "lineage_session_ids": lineage_session_ids,
             "workflow_id": workflow_ids[0] if len(workflow_ids) == 1 else None,
             "workflow_ids": workflow_ids,
+            "workflows": workflows,
             "tenant": explicit_tenant
             or (inferred_tenants[0] if len(inferred_tenants) == 1 else None),
             "tenants": tenant_filters,
@@ -1481,6 +1487,244 @@ def get_session_source(
     finally:
         if conn is not None:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# GET /workflow-overview
+# ---------------------------------------------------------------------------
+
+def _workflow_overview_workers(
+    conn: sqlite3.Connection,
+    task_ids: list[str],
+) -> list[dict[str, Any]]:
+    """Return one compact latest-run row per task for the global graph.
+
+    The session-scoped source includes recent events and worker-log tails for
+    its detail UI. A global graph only needs identity and lifecycle state, so
+    keep this projection batched and deliberately free of filesystem reads.
+    """
+    if not task_ids:
+        return []
+    placeholders = ",".join("?" for _ in task_ids)
+    event_rows = conn.execute(
+        f"""
+        SELECT task_id, MAX(id) AS latest_event_id
+        FROM task_events
+        WHERE task_id IN ({placeholders})
+        GROUP BY task_id
+        """,
+        tuple(task_ids),
+    ).fetchall()
+    latest_event_by_task = {
+        str(row["task_id"]): int(row["latest_event_id"])
+        for row in event_rows
+        if row["latest_event_id"] is not None
+    }
+    workers: list[dict[str, Any]] = []
+    for task_id, run in sorted(_latest_runs_for_tasks(conn, task_ids).items()):
+        workers.append(
+            {
+                "task_id": task_id,
+                "run_id": run["id"],
+                "profile": run["profile"],
+                "status": run["status"],
+                "outcome": run["outcome"],
+                "worker_session_id": _worker_session_id_from_metadata(
+                    run["metadata"]
+                ),
+                "worker_pid": run["worker_pid"],
+                "started_at": run["started_at"],
+                "ended_at": run["ended_at"],
+                "last_heartbeat_at": run["last_heartbeat_at"],
+                "latest_event_id": latest_event_by_task.get(task_id),
+            }
+        )
+    return workers
+
+
+def _workflow_overview_session_db_path(profile: Optional[str]) -> Path:
+    """Resolve one validated profile's session database for global-remote mode."""
+    requested = str(profile or "").strip()
+    if not requested or requested.lower() == "current":
+        from hermes_constants import get_hermes_home
+
+        return Path(get_hermes_home()) / "state.db"
+
+    from hermes_cli import profiles as profiles_mod
+
+    try:
+        canonical = profiles_mod.normalize_profile_name(requested)
+        profiles_mod.validate_profile_name(canonical)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not profiles_mod.profile_exists(canonical):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Profile {canonical!r} does not exist.",
+        )
+    return profiles_mod.get_profile_dir(canonical) / "state.db"
+
+
+def _workflow_overview_sessions(
+    session_ids: set[str],
+    *,
+    db_path: Path,
+) -> list[dict[str, Any]]:
+    """Hydrate canonical compression identity and display metadata once."""
+    normalized = sorted({str(value).strip() for value in session_ids if str(value).strip()})
+    if not normalized:
+        return []
+
+    try:
+        from hermes_state import SessionDB
+
+        if not db_path.exists():
+            return []
+        session_db = SessionDB(db_path=db_path, read_only=True)
+    except Exception:
+        return []
+
+    by_root: dict[str, dict[str, Any]] = {}
+    hydrated_ids: set[str] = set()
+    try:
+        for session_id in normalized:
+            if session_id in hydrated_ids:
+                continue
+            lineage = session_db.get_compression_lineage_root_to_tip(session_id)
+            lineage = [str(value).strip() for value in lineage if str(value).strip()]
+            if not lineage:
+                continue
+            hydrated_ids.update(lineage)
+            root_id = lineage[0]
+            current_id = lineage[-1]
+            current = session_db.get_session(current_id)
+            if current is None:
+                continue
+            root = session_db.get_session(root_id) if current_id != root_id else current
+            existing = by_root.get(root_id)
+            item = {
+                "id": root_id,
+                "current_session_id": current_id,
+                "lineage_session_ids": lineage,
+                "title": (current or {}).get("title") or (root or {}).get("title"),
+                "cwd": (current or {}).get("cwd") or (root or {}).get("cwd"),
+            }
+            if existing is None or len(item["lineage_session_ids"]) > len(existing["lineage_session_ids"]):
+                by_root[root_id] = item
+    finally:
+        try:
+            session_db.close()
+        except Exception:
+            pass
+    return [by_root[key] for key in sorted(by_root)]
+
+
+@router.get("/workflow-overview")
+def get_workflow_overview(
+    profile: Optional[str] = Query(None),
+):
+    """Return one durable semantic snapshot for every workflow in the profile.
+
+    This endpoint is intentionally board-sharded: the desktop can retain the
+    previous healthy shard if one board is temporarily unreadable, and a
+    global refresh stays O(boards) instead of O(sessions x boards).
+    """
+    boards: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    session_ids: set[str] = set()
+    session_db_path = _workflow_overview_session_db_path(profile)
+
+    for board in _session_source_board_candidates(None):
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            conn = _conn(board=board)
+            workflow_rows = conn.execute(
+                """
+                SELECT id, title, status, origin_session_id, tenant,
+                       workspace_kind, workspace_path, revision,
+                       created_at, updated_at
+                FROM workflows
+                WHERE status != 'archived'
+                ORDER BY created_at, id
+                """
+            ).fetchall()
+            workflows = [dict(row) for row in workflow_rows]
+            workflow_ids = {str(row["id"]) for row in workflow_rows}
+
+            task_rows = conn.execute(
+                """
+                SELECT id, title, status, assignee, workflow_id, session_id,
+                       project_id, current_run_id, created_at, started_at,
+                       completed_at
+                FROM tasks
+                WHERE workflow_id IS NOT NULL AND status != 'archived'
+                ORDER BY created_at, id
+                """
+            ).fetchall()
+            tasks = [row for row in task_rows if str(row["workflow_id"]) in workflow_ids]
+            task_ids = [str(task["id"]) for task in tasks]
+            task_id_set = set(task_ids)
+            links = [
+                {"parent_id": row["parent_id"], "child_id": row["child_id"]}
+                for row in conn.execute(
+                    "SELECT parent_id, child_id FROM task_links ORDER BY parent_id, child_id"
+                ).fetchall()
+                if row["parent_id"] in task_id_set and row["child_id"] in task_id_set
+            ]
+            parents_by_child: dict[str, list[str]] = {}
+            children_by_parent: dict[str, list[str]] = {}
+            for link in links:
+                parents_by_child.setdefault(link["child_id"], []).append(link["parent_id"])
+                children_by_parent.setdefault(link["parent_id"], []).append(link["child_id"])
+
+            overview_tasks = [
+                {
+                    **dict(task),
+                    "included_parent_ids": parents_by_child.get(str(task["id"]), []),
+                    "included_child_ids": children_by_parent.get(str(task["id"]), []),
+                }
+                for task in tasks
+            ]
+            session_ids.update(
+                str(task["session_id"]) for task in tasks if task["session_id"]
+            )
+
+            for workflow in workflows:
+                if workflow.get("origin_session_id"):
+                    session_ids.add(str(workflow["origin_session_id"]))
+
+            latest_event_id = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) AS m FROM task_events"
+            ).fetchone()["m"]
+            boards.append(
+                {
+                    "slug": board,
+                    # Task/event and workflow revisions are separate monotonic
+                    # domains. Workflow rows carry their own revision; this
+                    # board token intentionally tracks task-event changes only.
+                    "source_revision": int(latest_event_id or 0),
+                    "workflows": workflows,
+                    "tasks": overview_tasks,
+                    "links": links,
+                    "workers": _workflow_overview_workers(conn, task_ids),
+                }
+            )
+        except Exception as exc:
+            log.warning("Skipping unreadable Kanban board %r in workflow overview: %s", board, exc)
+            errors.append({"board": board, "error": str(exc)})
+        finally:
+            if conn is not None:
+                conn.close()
+
+    return {
+        "schema_version": 1,
+        "boards": boards,
+        "sessions": _workflow_overview_sessions(
+            session_ids,
+            db_path=session_db_path,
+        ),
+        "errors": errors,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -4075,14 +4319,18 @@ def _default_workspace_kind(board: dict[str, Any]) -> str:
 
 
 @router.get("/boards")
-def list_boards(include_archived: bool = Query(False)):
+def list_boards(
+    include_archived: bool = Query(False),
+    include_counts: bool = Query(True),
+):
     """Return every board on disk with task counts and the active slug."""
     boards = kanban_db.list_boards(include_archived=include_archived)
     current = kanban_db.get_current_board()
     for b in boards:
         b["is_current"] = (b["slug"] == current)
-        b["counts"] = _board_counts(b["slug"])
-        b["total"] = sum(b["counts"].values())
+        if include_counts:
+            b["counts"] = _board_counts(b["slug"])
+            b["total"] = sum(b["counts"].values())
         b["default_workspace_kind"] = _default_workspace_kind(b)
     return {"boards": boards, "current": current}
 

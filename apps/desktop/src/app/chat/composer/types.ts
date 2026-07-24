@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 
+import type { LoopWorkflowRef } from '@/app/chat/loop-state'
 import type { SubmitTextOptions } from '@/app/session/hooks/use-prompt-actions/utils'
 import type { HermesGateway } from '@/hermes'
 
@@ -43,7 +44,8 @@ export interface ChatBarProps {
   cwd?: string | null
   onCancel: () => Promise<void> | void
   onOpenLoop?: () => void
-  onOpenKanbanTask?: (taskId: string) => void
+  onOpenLoopWorkflow?: (workflow: LoopWorkflowRef) => void
+  onOpenKanbanTask?: (taskId: string, workflow?: LoopWorkflowRef) => void
   onAddContextRef?: (refText: string, label?: string, detail?: string) => void
   onAddUrl?: (url: string) => void
   onAttachImageBlob?: (blob: Blob) => Promise<boolean | void> | boolean | void

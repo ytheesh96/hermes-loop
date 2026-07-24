@@ -34,13 +34,14 @@ import {
   loopWorkerCurrentTool,
   normalizedLoopValue
 } from './loop-selectors'
-import { loopTaskAllowsDependencyEdits, loopTaskPhaseLabel } from './loop-state'
+import { loopTaskAllowsDependencyEdits, loopTaskPhaseLabel, loopWorkflowRefKey, normalizeLoopBoard } from './loop-state'
 import type {
   LoopPanelState,
   LoopRow,
   LoopTaskComment,
   LoopTaskDetail,
   LoopWorkerActivity,
+  LoopWorkflowRef,
   TenantLoopTask
 } from './loop-state'
 import { LoopTaskGraph, type LoopTaskGraphPosition } from './loop-task-graph'
@@ -63,6 +64,7 @@ export type LoopTaskAction =
 export interface LoopTaskCreateOptions {
   childId?: string
   parentId?: string
+  workflowRef?: LoopWorkflowRef
   workflowId?: string
 }
 
@@ -109,9 +111,7 @@ function loopRowStatusIndicator(row: LoopRow): StatusIndicatorKind {
   }
 
   const failed =
-    LOOP_FAILED_STATUSES.has(status) ||
-    LOOP_FAILED_STATUSES.has(runStatus) ||
-    LOOP_FAILED_STATUSES.has(runOutcome)
+    LOOP_FAILED_STATUSES.has(status) || LOOP_FAILED_STATUSES.has(runStatus) || LOOP_FAILED_STATUSES.has(runOutcome)
 
   const attention = attentionScore(row) > 0 && !failed
 
@@ -178,11 +178,7 @@ function attentionReason(row: LoopRow): string {
     return row.childCount > 0 ? `Blocked · ${row.childCount} downstream` : 'Blocked'
   }
 
-  if (
-    LOOP_FAILED_STATUSES.has(status) ||
-    LOOP_FAILED_STATUSES.has(runStatus) ||
-    LOOP_FAILED_STATUSES.has(runOutcome)
-  ) {
+  if (LOOP_FAILED_STATUSES.has(status) || LOOP_FAILED_STATUSES.has(runStatus) || LOOP_FAILED_STATUSES.has(runOutcome)) {
     return 'Worker failed'
   }
 
@@ -213,12 +209,7 @@ function attentionScore(row: LoopRow): number {
   const runOutcome = normalizedLoopValue(row.latestRun?.outcome)
   const text = loopAttentionText(row)
 
-  if (
-    LOOP_TERMINAL_STATUSES.has(status) ||
-    status === 'running' ||
-    status === 'claimed' ||
-    status === 'in_progress'
-  ) {
+  if (LOOP_TERMINAL_STATUSES.has(status) || status === 'running' || status === 'claimed' || status === 'in_progress') {
     return 0
   }
 
@@ -263,10 +254,12 @@ function isQueuedLoopRow(row: LoopRow): boolean {
 
 interface LoopWorkflowGroup {
   anchor: LoopRow
+  board: string
   hasMultipleTasks: boolean
   ids: Set<string>
   rows: LoopRow[]
   workflowId: string
+  workflowRef: LoopWorkflowRef
 }
 
 function workflowGroupAnchor(rows: LoopRow[], preferredTaskId?: null | string): LoopRow {
@@ -274,8 +267,7 @@ function workflowGroupAnchor(rows: LoopRow[], preferredTaskId?: null | string): 
     (preferredTaskId ? rows.find(row => row.taskId === preferredTaskId) : null) ||
     [...rows].sort(
       (left, right) =>
-        (left.rawTask?.created_at ?? Number.MAX_SAFE_INTEGER) -
-        (right.rawTask?.created_at ?? Number.MAX_SAFE_INTEGER)
+        (left.rawTask?.created_at ?? Number.MAX_SAFE_INTEGER) - (right.rawTask?.created_at ?? Number.MAX_SAFE_INTEGER)
     )[0]!
   )
 }
@@ -286,19 +278,77 @@ function loopWorkflowGroups(state?: LoopPanelState | null): LoopWorkflowGroup[] 
 
   for (const row of rows) {
     const workflowId = row.workflowId?.trim() || state?.workflowId || `task:${row.taskId}`
-    rowsByWorkflow.set(workflowId, [...(rowsByWorkflow.get(workflowId) || []), row])
+    const workflowRef = { board: normalizeLoopBoard(row.board || state?.board), workflowId }
+    const workflowKey = loopWorkflowRefKey(workflowRef)
+    rowsByWorkflow.set(workflowKey, [...(rowsByWorkflow.get(workflowKey) || []), row])
   }
 
-  return [...rowsByWorkflow].map(([workflowId, workflowRows]) => ({
-    // Older workflow ids were task ids. Prefer that matching row as the
-    // display representative when present, without giving it lifecycle or
-    // mutation privileges over the other workflow members.
-    anchor: workflowGroupAnchor(workflowRows, workflowId),
-    hasMultipleTasks: workflowRows.length > 1,
-    ids: new Set(workflowRows.map(row => row.taskId)),
-    rows: workflowRows,
-    workflowId
-  }))
+  return [...rowsByWorkflow].map(([, workflowRows]) => {
+    const workflowId = workflowRows[0]?.workflowId?.trim() || state?.workflowId || `task:${workflowRows[0]!.taskId}`
+    const board = normalizeLoopBoard(workflowRows[0]?.board || state?.board)
+
+    return {
+      // Older workflow ids were task ids. Prefer that matching row as the
+      // display representative when present, without giving it lifecycle or
+      // mutation privileges over the other workflow members.
+      anchor: workflowGroupAnchor(workflowRows, workflowId),
+      board,
+      hasMultipleTasks: workflowRows.length > 1,
+      ids: new Set(workflowRows.map(row => row.taskId)),
+      rows: workflowRows,
+      workflowId,
+      workflowRef: { board, workflowId }
+    }
+  })
+}
+
+export function loopWorkflowPaneTitle(state: LoopPanelState | null | undefined, workflow: LoopWorkflowRef): string {
+  const group = loopWorkflowGroups(state).find(
+    candidate => loopWorkflowRefKey(candidate.workflowRef) === loopWorkflowRefKey(workflow)
+  )
+
+  return group?.anchor.title || workflow.workflowId
+}
+
+export function loopPanelStateForWorkflow(
+  state: LoopPanelState | null | undefined,
+  workflow: LoopWorkflowRef
+): LoopPanelState | null {
+  if (!state) {
+    return null
+  }
+
+  const workflowId = workflow.workflowId
+
+  const group = loopWorkflowGroups(state).find(
+    candidate => loopWorkflowRefKey(candidate.workflowRef) === loopWorkflowRefKey(workflow)
+  )
+
+  if (group) {
+    return {
+      ...state,
+      rows: group.rows,
+      board: group.board,
+      workflowId,
+      workflowIds: [workflowId],
+      workflowRefs: [group.workflowRef]
+    }
+  }
+
+  const canonicalRef = (state.workflowRefs || []).find(
+    candidate => loopWorkflowRefKey(candidate) === loopWorkflowRefKey(workflow)
+  )
+
+  return canonicalRef
+    ? {
+        ...state,
+        board: canonicalRef.board,
+        rows: [],
+        workflowId,
+        workflowIds: [workflowId],
+        workflowRefs: [canonicalRef]
+      }
+    : null
 }
 
 function loopWorkflowGroupForTask(
@@ -625,6 +675,8 @@ interface LoopPanelProps {
   selectedTaskDetailError?: null | string
   selectedTaskId?: null | string
   state: LoopPanelState | null
+  /** Render the selected workflow as a canvas even when it currently has one task. */
+  workflowCanvas?: boolean
   workflowId?: string
 }
 
@@ -1599,6 +1651,7 @@ function LoopWorkflowCanvas({
   const [selectedGraphTaskId, setSelectedGraphTaskId] = useState<null | string>(null)
 
   const selectedGraphRow = selectedGraphTaskId ? rows.find(row => row.taskId === selectedGraphTaskId) || null : null
+  const workflowCanvasScopeKey = canvasScopeKey ? `${canvasScopeKey}:${workflowId}` : workflowId
 
   useEffect(() => {
     setSelectedGraphTaskId(null)
@@ -1628,7 +1681,7 @@ function LoopWorkflowCanvas({
           onUnlinkTasks={onUnlinkTasks}
           positions={positions}
           rows={rows}
-          scopeKey={canvasScopeKey}
+          scopeKey={workflowCanvasScopeKey}
           selectedTaskId={selectedGraphRow?.taskId || null}
           workflowId={workflowId}
         />
@@ -1994,6 +2047,7 @@ export function LoopPanel({
   selectedTaskDetailError,
   selectedTaskId,
   state,
+  workflowCanvas = false,
   workflowId
 }: LoopPanelProps) {
   const [debugOpen, setDebugOpen] = useState(false)
@@ -2074,15 +2128,20 @@ export function LoopPanel({
 
   const selectedOverviewGroup = useMemo(
     () =>
-      focusedTaskId
-        ? loopWorkflowGroupForTask(state, focusedTaskId, workflowGroups)
-        : workflowGroups.find(group => group.workflowId === (workflowId || state?.workflowId)) ||
-          loopWorkflowGroupForTask(state, null, workflowGroups),
+      workflowId
+        ? workflowGroups.find(group => group.workflowId === workflowId) || null
+        : focusedTaskId
+          ? loopWorkflowGroupForTask(state, focusedTaskId, workflowGroups)
+          : workflowGroups.find(group => group.workflowId === state?.workflowId) ||
+            loopWorkflowGroupForTask(state, null, workflowGroups),
     [focusedTaskId, state, workflowGroups, workflowId]
   )
 
   const overviewAnchor = selectedOverviewGroup?.anchor || null
-  const loopOverviewEligible = loopWorkflowGroupShowsOverview(selectedOverviewGroup)
+
+  const loopOverviewEligible = workflowCanvas
+    ? Boolean(selectedOverviewGroup)
+    : loopWorkflowGroupShowsOverview(selectedOverviewGroup)
 
   const showingLoopOverview = Boolean(
     loopOverviewEligible && overviewAnchor && (!focusedTaskId || focusedTaskId === overviewAnchor.taskId)
@@ -2427,11 +2486,12 @@ export function LoopPanel({
         : selected?.title || loopTabTitle
 
   const missingTaskId = activeTaskTabId || focusedTaskId
+
   const showingTaskCreateCanvas = !missingTaskId && (!state || state.rows.length === 0)
 
   const showingWorkflowCanvas = Boolean(
     showingTaskCreateCanvas ||
-    (!activeArtifactTab && !activeTaskTabId && showingLoopOverview && overviewAnchor && selectedOverviewGroup)
+    (!activeArtifactTab && activeTaskTabId === null && showingLoopOverview && overviewAnchor && selectedOverviewGroup)
   )
 
   const startResize = useCallback(
@@ -2489,6 +2549,90 @@ export function LoopPanel({
     />
   )
 
+  const panelContent =
+    !state && missingTaskId ? (
+      <section
+        className="grid min-w-0 gap-2 rounded-lg border border-dashed border-(--ui-stroke-tertiary) bg-(--ui-fill-quaternary) p-3 text-xs text-(--ui-text-tertiary)"
+        data-testid="loop-panel-loading"
+      >
+        <h3 className="m-0 text-xs font-semibold uppercase tracking-wide text-(--ui-text-secondary)">
+          Loading Loop canvas…
+        </h3>
+        <p className="m-0">
+          Fetching the Loop graph for{' '}
+          <span className="font-mono text-(--ui-text-secondary)">{missingTaskId || 'this task'}</span>.
+        </p>
+      </section>
+    ) : !state ? (
+      emptyLoopCanvas
+    ) : activeArtifactTab ? (
+      <LoopArtifactSourceTab onSelectView={selectArtifactView} tab={activeArtifactTab} />
+    ) : activeTaskTabId ? (
+      activeTaskTabRow ? (
+        <div className="grid min-w-0 max-w-full gap-3">
+          <LoopTaskDetails
+            backLabel={
+              embedded && activeTaskTabId === overviewAnchor?.taskId && loopOverviewEligible ? 'Loop overview' : null
+            }
+            commentsError={selectedTaskCommentsError}
+            detail={mergedDetail}
+            onAddComment={onAddTaskComment}
+            onBack={
+              embedded && activeTaskTabId === overviewAnchor?.taskId && loopOverviewEligible ? selectBaseTab : undefined
+            }
+            onTaskAction={onTaskAction}
+            row={activeTaskTabRow}
+          />
+        </div>
+      ) : (
+        <section className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
+          <h3 className="m-0 mb-2 text-xs font-semibold uppercase tracking-wide">Selected task unavailable</h3>
+          <p className="m-0">
+            Task <span className="font-mono">{activeTaskTabId}</span> is missing from the latest Loop source. It may
+            have been archived, deleted, or refreshed out of this session lineage. Select another tab or close the
+            panel.
+          </p>
+        </section>
+      )
+    ) : showingLoopOverview && overviewAnchor && selectedOverviewGroup ? (
+      <div className="flex h-full min-h-0 min-w-0 max-w-full flex-col">
+        <LoopWorkflowOverview
+          canvasScopeKey={canvasScopeKey}
+          group={selectedOverviewGroup}
+          onCreateTask={onCreateTask}
+          onLinkTasks={onLinkTasks}
+          onOpenTaskTab={openLoopOverviewTask}
+          onSavePositions={onSavePositions}
+          onTaskAction={onTaskAction}
+          onUnlinkTasks={onUnlinkTasks}
+          positions={positions}
+        />
+      </div>
+    ) : selected ? (
+      <div className="grid min-w-0 max-w-full gap-3">
+        <LoopTaskDetails
+          backLabel={detailBackLabel}
+          commentsError={selectedTaskCommentsError}
+          detail={mergedDetail}
+          detailError={selectedTaskDetailError}
+          onAddComment={onAddTaskComment}
+          onBack={detailBack}
+          onTaskAction={onTaskAction}
+          row={selected}
+        />
+      </div>
+    ) : missingTaskId ? (
+      <section className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
+        <h3 className="m-0 mb-2 text-xs font-semibold uppercase tracking-wide">Selected task unavailable</h3>
+        <p className="m-0">
+          Task <span className="font-mono">{missingTaskId}</span> is missing from the latest Loop source. It may have
+          been archived, deleted, or refreshed out of this session lineage. Select another row or close the panel.
+        </p>
+      </section>
+    ) : (
+      emptyLoopCanvas
+    )
+
   if (hidden) {
     return null
   }
@@ -2503,6 +2647,7 @@ export function LoopPanel({
         !embedded && !open && 'hidden xl:block'
       )}
       data-layout={embedded ? 'tabbed' : 'docked'}
+      data-loop-pane
       data-modal="false"
       data-pane-id="loop-panel"
       data-pane-open={open ? 'true' : 'false'}
@@ -2559,94 +2704,8 @@ export function LoopPanel({
             </div>
           )}
 
-          <div className={cn('min-h-0 flex-1', showingWorkflowCanvas ? 'overflow-hidden' : 'overflow-auto')}>
-            {!state && missingTaskId ? (
-              <section
-                className="grid min-w-0 gap-2 rounded-lg border border-dashed border-(--ui-stroke-tertiary) bg-(--ui-fill-quaternary) p-3 text-xs text-(--ui-text-tertiary)"
-                data-testid="loop-panel-loading"
-              >
-                <h3 className="m-0 text-xs font-semibold uppercase tracking-wide text-(--ui-text-secondary)">
-                  Loading Loop canvas…
-                </h3>
-                <p className="m-0">
-                  Fetching the Loop graph for{' '}
-                  <span className="font-mono text-(--ui-text-secondary)">{missingTaskId || 'this task'}</span>.
-                </p>
-              </section>
-            ) : !state ? (
-              emptyLoopCanvas
-            ) : activeArtifactTab ? (
-              <LoopArtifactSourceTab onSelectView={selectArtifactView} tab={activeArtifactTab} />
-            ) : activeTaskTabId ? (
-              activeTaskTabRow ? (
-                <div className="grid min-w-0 max-w-full gap-3">
-                  <LoopTaskDetails
-                    backLabel={
-                      embedded && activeTaskTabId === overviewAnchor?.taskId && loopOverviewEligible
-                        ? 'Loop overview'
-                        : null
-                    }
-                    commentsError={selectedTaskCommentsError}
-                    detail={mergedDetail}
-                    onAddComment={onAddTaskComment}
-                    onBack={
-                      embedded && activeTaskTabId === overviewAnchor?.taskId && loopOverviewEligible
-                        ? selectBaseTab
-                        : undefined
-                    }
-                    onTaskAction={onTaskAction}
-                    row={activeTaskTabRow}
-                  />
-                </div>
-              ) : (
-                <section className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
-                  <h3 className="m-0 mb-2 text-xs font-semibold uppercase tracking-wide">Selected task unavailable</h3>
-                  <p className="m-0">
-                    Task <span className="font-mono">{activeTaskTabId}</span> is missing from the latest Loop source. It
-                    may have been archived, deleted, or refreshed out of this session lineage. Select another tab or
-                    close the panel.
-                  </p>
-                </section>
-              )
-            ) : showingLoopOverview && overviewAnchor && selectedOverviewGroup ? (
-              <div className="flex h-full min-h-0 min-w-0 max-w-full flex-col">
-                <LoopWorkflowOverview
-                  canvasScopeKey={canvasScopeKey}
-                  group={selectedOverviewGroup}
-                  onCreateTask={onCreateTask}
-                  onLinkTasks={onLinkTasks}
-                  onOpenTaskTab={openLoopOverviewTask}
-                  onSavePositions={onSavePositions}
-                  onTaskAction={onTaskAction}
-                  onUnlinkTasks={onUnlinkTasks}
-                  positions={positions}
-                />
-              </div>
-            ) : selected ? (
-              <div className="grid min-w-0 max-w-full gap-3">
-                <LoopTaskDetails
-                  backLabel={detailBackLabel}
-                  commentsError={selectedTaskCommentsError}
-                  detail={mergedDetail}
-                  detailError={selectedTaskDetailError}
-                  onAddComment={onAddTaskComment}
-                  onBack={detailBack}
-                  onTaskAction={onTaskAction}
-                  row={selected}
-                />
-              </div>
-            ) : missingTaskId ? (
-              <section className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
-                <h3 className="m-0 mb-2 text-xs font-semibold uppercase tracking-wide">Selected task unavailable</h3>
-                <p className="m-0">
-                  Task <span className="font-mono">{missingTaskId}</span> is missing from the latest Loop source. It may
-                  have been archived, deleted, or refreshed out of this session lineage. Select another row or close the
-                  panel.
-                </p>
-              </section>
-            ) : (
-              emptyLoopCanvas
-            )}
+          <div className={cn('relative min-h-0 flex-1', showingWorkflowCanvas ? 'overflow-hidden' : 'overflow-auto')}>
+            {panelContent}
           </div>
 
           {enableDebugJson && state && (

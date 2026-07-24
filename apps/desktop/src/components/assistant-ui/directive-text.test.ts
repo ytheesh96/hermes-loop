@@ -45,4 +45,22 @@ describe('hermesDirectiveFormatter.parse', () => {
       { kind: 'mention', type: 'task', label: 't_7437c246', id: 't_7437c246' }
     ])
   })
+
+  it('parses graph-only node refs as lightweight attachment chips', () => {
+    const segments = hermesDirectiveFormatter.parse(
+      'inspect @workflow:`work/delivery/wf-7` with @agent:`work/delivery/assignee:reviewer-qa`'
+    )
+
+    expect(segments).toEqual([
+      { kind: 'text', text: 'inspect ' },
+      { kind: 'mention', type: 'workflow', label: 'wf-7', id: 'work/delivery/wf-7' },
+      { kind: 'text', text: ' with ' },
+      {
+        kind: 'mention',
+        type: 'agent',
+        label: 'assignee:reviewer-qa',
+        id: 'work/delivery/assignee:reviewer-qa'
+      }
+    ])
+  })
 })

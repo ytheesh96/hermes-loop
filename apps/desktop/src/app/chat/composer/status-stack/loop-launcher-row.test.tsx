@@ -120,9 +120,9 @@ describe('LoopLauncherRow', () => {
     ).toBeTruthy()
   })
 
-  it('switches between workflows from the ellipsis menu next to Loop', () => {
+  it('opens workflows from the ellipsis menu next to Loop', () => {
     const onOpen = vi.fn()
-    const onSelectWorkflow = vi.fn()
+    const onOpenWorkflow = vi.fn()
 
     $kanbanStatusBySession.set({
       'runtime-session': [
@@ -161,15 +161,11 @@ describe('LoopLauncherRow', () => {
 
     render(
       <I18nProvider configClient={null}>
-        <LoopLauncherRow
-          onOpen={onOpen}
-          onSelectWorkflow={onSelectWorkflow}
-          sessionId="runtime-session"
-        />
+        <LoopLauncherRow onOpen={onOpen} onOpenWorkflow={onOpenWorkflow} sessionId="runtime-session" />
       </I18nProvider>
     )
 
-    const trigger = screen.getByRole('button', { name: 'Switch workflow' })
+    const trigger = screen.getByRole('button', { name: 'Open workflow' })
 
     expect(trigger.querySelector('.codicon-kebab-vertical')).toBeTruthy()
 
@@ -180,7 +176,7 @@ describe('LoopLauncherRow', () => {
     expect(screen.queryByRole('menuitem', { name: /One-off verification delegation/ })).toBeNull()
     fireEvent.click(screen.getByRole('menuitem', { name: /Finish private handoff/ }))
 
-    expect(onSelectWorkflow).toHaveBeenCalledWith('t_second')
+    expect(onOpenWorkflow).toHaveBeenCalledWith({ board: 'default', workflowId: 'wf_second' })
     expect(onOpen).not.toHaveBeenCalled()
     expect(
       screen.getByRole('button', {
@@ -194,8 +190,91 @@ describe('LoopLauncherRow', () => {
       })
     )
 
-    expect(onSelectWorkflow).toHaveBeenLastCalledWith('t_second')
-    expect(onSelectWorkflow).toHaveBeenCalledTimes(2)
+    expect(onOpenWorkflow).toHaveBeenLastCalledWith({ board: 'default', workflowId: 'wf_second' })
+    expect(onOpenWorkflow).toHaveBeenCalledTimes(2)
+  })
+
+  it('distinguishes duplicate workflow ids by board and opens the exact workflow', () => {
+    const onOpenWorkflow = vi.fn()
+
+    $kanbanStatusBySession.set({
+      'runtime-session': [
+        {
+          id: 'kanban-task:alpha:t_root',
+          kanbanBoard: 'alpha',
+          kanbanTaskId: 't_root',
+          kanbanWorkflowId: 'wf_shared',
+          state: 'running',
+          taskProgress: { blocked: 0, completed: 1, pending: 1, total: 2 },
+          title: 'Shared workflow on alpha',
+          todoStatus: 'in_progress',
+          type: 'todo'
+        },
+        {
+          id: 'kanban-task:beta:t_root',
+          kanbanBoard: 'beta',
+          kanbanTaskId: 't_root',
+          kanbanWorkflowId: 'wf_shared',
+          state: 'running',
+          taskProgress: { blocked: 0, completed: 0, pending: 2, total: 2 },
+          title: 'Shared workflow on beta',
+          todoStatus: 'in_progress',
+          type: 'todo'
+        }
+      ]
+    })
+
+    render(
+      <I18nProvider configClient={null}>
+        <LoopLauncherRow onOpen={() => undefined} onOpenWorkflow={onOpenWorkflow} sessionId="runtime-session" />
+      </I18nProvider>
+    )
+
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Open workflow' }), {
+      button: 0,
+      ctrlKey: false
+    })
+
+    expect(screen.getAllByText(/wf_shared/).map(node => node.textContent)).toEqual([
+      'wf_shared · alpha',
+      'wf_shared · beta'
+    ])
+
+    fireEvent.click(screen.getByRole('menuitem', { name: /Shared workflow on beta/ }))
+
+    expect(onOpenWorkflow).toHaveBeenCalledWith({ board: 'beta', workflowId: 'wf_shared' })
+  })
+
+  it('keeps a single-board workflow label unchanged', () => {
+    $kanbanStatusBySession.set({
+      'runtime-session': [
+        {
+          id: 'kanban-task:t_only',
+          kanbanBoard: 'default',
+          kanbanTaskId: 't_only',
+          kanbanWorkflowId: 'wf_only',
+          state: 'running',
+          taskProgress: { blocked: 0, completed: 0, pending: 2, total: 2 },
+          title: 'Only workflow',
+          todoStatus: 'in_progress',
+          type: 'todo'
+        }
+      ]
+    })
+
+    render(
+      <I18nProvider configClient={null}>
+        <LoopLauncherRow onOpen={() => undefined} onOpenWorkflow={() => undefined} sessionId="runtime-session" />
+      </I18nProvider>
+    )
+
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Open workflow' }), {
+      button: 0,
+      ctrlKey: false
+    })
+
+    expect(screen.getByText('wf_only')).toBeTruthy()
+    expect(screen.queryByText('wf_only · default')).toBeNull()
   })
 
   it('hides empty counters', () => {

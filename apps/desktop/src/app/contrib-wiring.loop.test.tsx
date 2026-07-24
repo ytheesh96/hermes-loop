@@ -6,18 +6,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => {
   interface MockLoopController {
+    activeWorkflowRef: null | { board: string; workflowId: string }
     canvasScopeKey: string
     focusedTaskId: null | string
     focusRequestKey: number
+    focusRequestKeysByWorkflow: Record<string, number>
     hidden: boolean
+    onActivateWorkflowId: ReturnType<typeof vi.fn>
     onAddTaskComment: ReturnType<typeof vi.fn>
+    onCloseWorkflowId: ReturnType<typeof vi.fn>
     onCreateTask: ReturnType<typeof vi.fn>
     onFocusTaskId: ReturnType<typeof vi.fn>
     onHide: ReturnType<typeof vi.fn>
+    onLinkTasks: ReturnType<typeof vi.fn>
     onOpen: ReturnType<typeof vi.fn>
+    onSavePositions: ReturnType<typeof vi.fn>
     onSelectTaskId: ReturnType<typeof vi.fn>
+    onSelectWorkflowId: ReturnType<typeof vi.fn>
     onTaskAction: ReturnType<typeof vi.fn>
+    onUnlinkTasks: ReturnType<typeof vi.fn>
     open: boolean
+    positions: undefined
+    positionsByWorkflow: Record<string, never[]>
     selectedTaskDetail: null
     selectedTaskDetailError: null
     selectedTaskId: null | string
@@ -30,36 +40,66 @@ const mocks = vi.hoisted(() => {
       status: string
     }
     tabKey: string
+    workflowId: string
+    workflowKey: string
+    workflowRef: null | { board: string; workflowId: string }
+    workflowRefs: { board: string; workflowId: string }[]
+    workflowPaneScopeKey: string
   }
 
   const selectLoopTask = vi.fn()
+  const selectLoopWorkflow = vi.fn()
   const openLoop = vi.fn()
   const createLoopTask = vi.fn(async () => 't_created')
   const submitText = vi.fn(async () => true)
+  const researchWorkflowRef = { board: 'default', workflowId: 'wf_research' }
 
   const defaultLoopController = (): MockLoopController => ({
+    activeWorkflowRef: researchWorkflowRef,
     canvasScopeKey: 'logical-origin',
     focusedTaskId: null,
     focusRequestKey: 0,
+    focusRequestKeysByWorkflow: { 'default:wf_research': 1 },
     hidden: false,
+    onActivateWorkflowId: vi.fn(),
     onAddTaskComment: vi.fn(),
+    onCloseWorkflowId: vi.fn(),
     onCreateTask: createLoopTask,
     onFocusTaskId: vi.fn(),
     onHide: vi.fn(),
+    onLinkTasks: vi.fn(),
     onOpen: openLoop,
+    onSavePositions: vi.fn(),
     onSelectTaskId: selectLoopTask,
+    onSelectWorkflowId: selectLoopWorkflow,
     onTaskAction: vi.fn(),
+    onUnlinkTasks: vi.fn(),
     open: true,
+    positions: undefined,
+    positionsByWorkflow: { 'default:wf_research': [] },
     selectedTaskDetail: null,
     selectedTaskDetailError: null,
     selectedTaskId: 't_delegated_loop',
     state: { message: '', rawJson: '{}', revision: 1, workflowId: 't_delegated_loop', rows: [], status: 'ready' },
-    tabKey: 't_delegated_loop'
+    tabKey: 't_delegated_loop',
+    workflowId: 'wf_research',
+    workflowKey: 'default:wf_research',
+    workflowRef: researchWorkflowRef,
+    workflowRefs: [researchWorkflowRef],
+    workflowPaneScopeKey: 'test:logical-origin'
   })
 
   const useLoopPanelController = vi.fn(defaultLoopController)
 
-  return { createLoopTask, defaultLoopController, openLoop, selectLoopTask, submitText, useLoopPanelController }
+  return {
+    createLoopTask,
+    defaultLoopController,
+    openLoop,
+    selectLoopTask,
+    selectLoopWorkflow,
+    submitText,
+    useLoopPanelController
+  }
 })
 
 vi.mock('@/components/pane-shell', () => ({
@@ -98,10 +138,12 @@ vi.mock('../store/windows', () => ({ isSecondaryWindow: () => false }))
 vi.mock('./chat', () => ({
   ChatView: ({
     onOpenKanbanTask,
-    onOpenLoop
+    onOpenLoop,
+    onOpenLoopWorkflow
   }: {
     onOpenKanbanTask?: (taskId: string) => void
     onOpenLoop?: () => void
+    onOpenLoopWorkflow?: (workflowId: string) => void
   }) => (
     <>
       <button onClick={() => onOpenKanbanTask?.('t_delegated_loop')} type="button">
@@ -109,6 +151,9 @@ vi.mock('./chat', () => ({
       </button>
       <button onClick={() => onOpenLoop?.()} type="button">
         Open Loop canvas
+      </button>
+      <button onClick={() => onOpenLoopWorkflow?.('wf_research')} type="button">
+        Open Loop workflow
       </button>
     </>
   )
@@ -270,8 +315,7 @@ import {
   activateTreePane,
   closeTreePane,
   moveTreePane,
-  resetLayoutTree,
-  setTreePaneHidden
+  resetLayoutTree
 } from '../components/pane-shell/tree/store'
 import { $fileBrowserOpen, setFileBrowserOpen } from '../store/layout'
 import {
@@ -282,9 +326,14 @@ import {
   $selectedStoredSessionId
 } from '../store/session'
 
+import type { LoopWorkflowRef } from './chat/loop-state'
 import { WiredPane } from './contrib/context'
-import { $loopPanelController } from './contrib/panes'
+import { $loopPanelController, loopNewWorkflowPaneId, loopWorkflowPaneId } from './contrib/panes'
 import { ContribWiring } from './contrib/wiring'
+
+function workflowRef(workflowId: string): LoopWorkflowRef {
+  return { board: 'default', workflowId }
+}
 
 function LoopWiringProbe() {
   const loop = useStore($loopPanelController)
@@ -323,6 +372,7 @@ describe('ContribWiring Loop session-source wiring', () => {
     $currentCwd.set('/tmp/hermes-loop-project')
     setFileBrowserOpen(true)
     mocks.selectLoopTask.mockClear()
+    mocks.selectLoopWorkflow.mockClear()
     mocks.openLoop.mockClear()
     mocks.createLoopTask.mockClear()
     mocks.submitText.mockClear()
@@ -353,37 +403,63 @@ describe('ContribWiring Loop session-source wiring', () => {
     )
     expect(screen.getByTestId('loop-controller-open').textContent).toBe('true')
 
+    const workflowPaneId = loopWorkflowPaneId('test:logical-origin', workflowRef('wf_research'))
     const initialTree = $layoutTree.get()
-    const workspaceGroup = initialTree ? findGroupOfPane(initialTree, 'workspace') : null
+    const anchorGroup = initialTree ? findGroupOfPane(initialTree, 'loop') : null
+    const workflowGroup = initialTree ? findGroupOfPane(initialTree, workflowPaneId) : null
 
-    expect(workspaceGroup).not.toBeNull()
-    expect(initialTree && findGroupOfPane(initialTree, 'loop')?.id).not.toBe(workspaceGroup?.id)
-
-    act(() => {
-      setTreePaneHidden('loop', true)
-      activateTreePane(workspaceGroup!.id, 'workspace')
-    })
-    expect($layoutTree.get() && findGroupOfPane($layoutTree.get()!, 'workspace')?.active).toBe('workspace')
+    expect(anchorGroup).not.toBeNull()
+    expect(workflowGroup?.id).toBe(anchorGroup?.id)
+    expect(workflowGroup?.panes).toEqual(expect.arrayContaining([workflowPaneId, 'loop']))
+    expect($hiddenTreePanes.get().has('loop')).toBe(true)
+    expect($hiddenTreePanes.get().has(workflowPaneId)).toBe(false)
 
     fireEvent.click(screen.getByRole('button', { name: /open delegated loop row/i }))
 
     expect(mocks.openLoop).toHaveBeenNthCalledWith(1, 't_delegated_loop')
-    expect($hiddenTreePanes.get().has('loop')).toBe(false)
 
     fireEvent.click(screen.getByRole('button', { name: 'Open Loop canvas' }))
 
     expect(mocks.openLoop).toHaveBeenCalledTimes(2)
-    expect(mocks.openLoop).toHaveBeenNthCalledWith(2, undefined)
-    expect($layoutTree.get() && findGroupOfPane($layoutTree.get()!, 'loop')?.active).toBe('loop')
+    expect(mocks.openLoop).toHaveBeenNthCalledWith(2)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Loop workflow' }))
+
+    expect(mocks.selectLoopWorkflow).toHaveBeenCalledWith('wf_research')
+    expect(mocks.openLoop).toHaveBeenCalledTimes(2)
+    expect($hiddenTreePanes.get().has('loop')).toBe(true)
+  })
+
+  it('routes workflow opens through the latest Loop controller after the session scope changes', () => {
+    const firstSelectWorkflow = vi.fn()
+    const nextSelectWorkflow = vi.fn()
+
+    let controller = {
+      ...mocks.defaultLoopController(),
+      onSelectWorkflowId: firstSelectWorkflow
+    }
+
+    mocks.useLoopPanelController.mockImplementation(() => controller)
+    renderController()
 
     act(() => {
-      const controller = $loopPanelController.get()
-
-      $loopPanelController.set(null)
-      $loopPanelController.set(controller)
+      controller = {
+        ...mocks.defaultLoopController(),
+        canvasScopeKey: 'logical-next',
+        onSelectWorkflowId: nextSelectWorkflow,
+        workflowPaneScopeKey: 'test:logical-next'
+      }
+      $activeSessionId.set('runtime-next')
     })
 
-    expect($hiddenTreePanes.get().has('loop')).toBe(false)
+    expect(mocks.useLoopPanelController).toHaveBeenLastCalledWith(
+      expect.objectContaining({ activeSessionId: 'runtime-next' })
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Loop workflow' }))
+
+    expect(nextSelectWorkflow).toHaveBeenCalledWith('wf_research')
+    expect(firstSelectWorkflow).not.toHaveBeenCalled()
   })
 
   it('does not render a visible Loop rail placeholder when the mounted session-source controller is empty', () => {
@@ -407,20 +483,14 @@ describe('ContribWiring Loop session-source wiring', () => {
       })
     )
     expect(screen.getByTestId('loop-controller-open').textContent).toBe('false')
+    expect(
+      $layoutTree.get() &&
+        findGroupOfPane($layoutTree.get()!, loopWorkflowPaneId('test:logical-origin', workflowRef('wf_research')))
+    ).toBeNull()
+    expect($hiddenTreePanes.get().has('loop')).toBe(true)
   })
 
   it('fronts controller-owned auto-open requests once without stealing focus on controller refresh', () => {
-    const tree = $layoutTree.get()
-    const workspaceGroup = tree ? findGroupOfPane(tree, 'workspace') : null
-
-    expect(workspaceGroup).not.toBeNull()
-
-    act(() => {
-      moveTreePane('loop', { groupId: workspaceGroup!.id, pos: 'center' })
-      setTreePaneHidden('loop', true)
-      activateTreePane(workspaceGroup!.id, 'workspace')
-    })
-
     mocks.useLoopPanelController.mockReturnValue({
       ...mocks.defaultLoopController(),
       focusRequestKey: 1
@@ -428,9 +498,16 @@ describe('ContribWiring Loop session-source wiring', () => {
 
     renderController()
 
-    expect($layoutTree.get() && findGroupOfPane($layoutTree.get()!, 'loop')?.active).toBe('loop')
+    const workflowPaneId = loopWorkflowPaneId('test:logical-origin', workflowRef('wf_research'))
+    const workflowGroup = $layoutTree.get() ? findGroupOfPane($layoutTree.get()!, workflowPaneId) : null
+
+    expect(workflowGroup?.active).toBe(workflowPaneId)
+
+    const workspaceGroup = $layoutTree.get() ? findGroupOfPane($layoutTree.get()!, 'workspace') : null
+    expect(workspaceGroup).not.toBeNull()
 
     act(() => {
+      moveTreePane(workflowPaneId, { groupId: workspaceGroup!.id, pos: 'center' })
       activateTreePane(workspaceGroup!.id, 'workspace')
       $currentCwd.set('/tmp/hermes-loop-project/refreshed')
     })
@@ -438,48 +515,90 @@ describe('ContribWiring Loop session-source wiring', () => {
     expect($layoutTree.get() && findGroupOfPane($layoutTree.get()!, 'workspace')?.active).toBe('workspace')
   })
 
-  it('closes Loop through its controller and reopens the same split from the launcher', () => {
+  it('fronts the selected workflow canvas while keeping its peer tab open', () => {
+    const researchWorkflowRef = workflowRef('wf_research')
+    const reviewWorkflowRef = workflowRef('wf_review')
+
+    let controller = {
+      ...mocks.defaultLoopController(),
+      focusRequestKey: 1,
+      focusRequestKeysByWorkflow: { 'default:wf_research': 1, 'default:wf_review': 0 },
+      workflowRefs: [researchWorkflowRef, reviewWorkflowRef]
+    }
+
+    mocks.useLoopPanelController.mockImplementation(() => controller)
+    renderController()
+
+    const researchPaneId = loopWorkflowPaneId('test:logical-origin', workflowRef('wf_research'))
+    const reviewPaneId = loopWorkflowPaneId('test:logical-origin', workflowRef('wf_review'))
+    const initialGroup = $layoutTree.get() ? findGroupOfPane($layoutTree.get()!, researchPaneId) : null
+
+    expect(initialGroup?.active).toBe(researchPaneId)
+    expect(initialGroup?.panes).toEqual(expect.arrayContaining([researchPaneId, reviewPaneId]))
+
+    act(() => {
+      controller = {
+        ...controller,
+        activeWorkflowRef: reviewWorkflowRef,
+        focusRequestKey: 2,
+        focusRequestKeysByWorkflow: { 'default:wf_research': 1, 'default:wf_review': 1 },
+        workflowId: 'wf_review',
+        workflowKey: 'default:wf_review',
+        workflowRef: reviewWorkflowRef
+      }
+      $activeSessionId.set('runtime-next')
+    })
+
+    const nextGroup = $layoutTree.get() ? findGroupOfPane($layoutTree.get()!, reviewPaneId) : null
+
+    expect(nextGroup?.active).toBe(reviewPaneId)
+    expect(nextGroup?.panes).toEqual(expect.arrayContaining([researchPaneId, reviewPaneId]))
+  })
+
+  it('fronts the native New workflow pane while a bare open is awaiting source hydration', () => {
+    mocks.useLoopPanelController.mockReturnValue({
+      ...mocks.defaultLoopController(),
+      activeWorkflowRef: null,
+      focusRequestKey: 1,
+      focusRequestKeysByWorkflow: {},
+      state: null,
+      workflowId: '',
+      workflowKey: '',
+      workflowRef: null,
+      workflowRefs: []
+    })
+
+    renderController()
+
+    const pendingPaneId = loopNewWorkflowPaneId('test:logical-origin')
+    const pendingGroup = $layoutTree.get() ? findGroupOfPane($layoutTree.get()!, pendingPaneId) : null
+
+    expect(pendingGroup?.active).toBe(pendingPaneId)
+  })
+
+  it('closes the exact native workflow while preserving the hidden layout anchor', () => {
     const controller = mocks.defaultLoopController()
-
-    const onHide = vi.fn(() => {
-      const current = $loopPanelController.get()
-
-      if (current) {
-        $loopPanelController.set({ ...current, hidden: true })
-      }
-    })
-
-    const onOpen = vi.fn(() => {
-      const current = $loopPanelController.get()
-
-      if (current) {
-        $loopPanelController.set({ ...current, hidden: false })
-      }
-    })
-
-    controller.onHide = onHide
-    controller.onOpen = onOpen
     mocks.useLoopPanelController.mockReturnValue(controller)
 
     renderController()
 
+    const workflowPaneId = loopWorkflowPaneId('test:logical-origin', workflowRef('wf_research'))
     const before = $layoutTree.get()
     const loopGroupId = before ? findGroupOfPane(before, 'loop')?.id : null
 
     expect(loopGroupId).toBeTruthy()
-    expect($hiddenTreePanes.get().has('loop')).toBe(false)
-
-    act(() => closeTreePane('loop'))
-
-    expect(onHide).toHaveBeenCalledTimes(1)
+    expect(before && findGroupOfPane(before, workflowPaneId)?.id).toBe(loopGroupId)
     expect($hiddenTreePanes.get().has('loop')).toBe(true)
-    expect($layoutTree.get() && findGroupOfPane($layoutTree.get()!, 'loop')?.id).toBe(loopGroupId)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open Loop canvas' }))
+    act(() => closeTreePane(workflowPaneId))
 
-    expect(onOpen).toHaveBeenCalledTimes(1)
-    expect($hiddenTreePanes.get().has('loop')).toBe(false)
+    expect(controller.onCloseWorkflowId).toHaveBeenCalledWith(workflowRef('wf_research'))
+
+    act(() => $loopPanelController.set(null))
+
+    expect($layoutTree.get() && findGroupOfPane($layoutTree.get()!, workflowPaneId)).toBeNull()
     expect($layoutTree.get() && findGroupOfPane($layoutTree.get()!, 'loop')?.id).toBe(loopGroupId)
+    expect($hiddenTreePanes.get().has('loop')).toBe(true)
   })
 
   it('renders an explicitly opened Loop canvas before session-source data exists', () => {
@@ -510,14 +629,18 @@ describe('ContribWiring Loop session-source wiring', () => {
   it('keeps Files and Loop visibility independent in both directions', () => {
     renderController()
 
+    const workflowPaneId = loopWorkflowPaneId('test:logical-origin', workflowRef('wf_research'))
+
     expect($hiddenTreePanes.get().has('files')).toBe(false)
-    expect($hiddenTreePanes.get().has('loop')).toBe(false)
+    expect($hiddenTreePanes.get().has('loop')).toBe(true)
+    expect($hiddenTreePanes.get().has(workflowPaneId)).toBe(false)
 
     act(() => setFileBrowserOpen(false))
 
     expect($fileBrowserOpen.get()).toBe(false)
     expect($hiddenTreePanes.get().has('files')).toBe(true)
-    expect($hiddenTreePanes.get().has('loop')).toBe(false)
+    expect($hiddenTreePanes.get().has('loop')).toBe(true)
+    expect($hiddenTreePanes.get().has(workflowPaneId)).toBe(false)
     expect($collapsedTreeSides.get().has('right')).toBe(false)
 
     act(() => {
@@ -534,6 +657,7 @@ describe('ContribWiring Loop session-source wiring', () => {
     expect($fileBrowserOpen.get()).toBe(true)
     expect($hiddenTreePanes.get().has('files')).toBe(false)
     expect($hiddenTreePanes.get().has('loop')).toBe(true)
+    expect($layoutTree.get() && findGroupOfPane($layoutTree.get()!, workflowPaneId)).toBeNull()
     expect($collapsedTreeSides.get().has('right')).toBe(false)
   })
 })

@@ -19,16 +19,19 @@ import {
   getLoopAssignees,
   getLoopCanvasPositions,
   getLoopSessionSource,
+  getLoopSessionSources,
   getLoopTaskDetail,
   getProfiles,
   getSessionMessages,
   getStatus,
+  getWorkflowOverview,
   linkLoopTasks,
   listAllProfileSessions,
   listSessions,
   listSidebarSessions,
   loopSourceFromDraftResult,
   mergeLoopDraftSource,
+  mergeLoopDraftSources,
   resetSidebarBatchCapability,
   saveLoopCanvasPositions,
   speakText,
@@ -360,6 +363,98 @@ describe('Hermes REST helpers', () => {
     })
   })
 
+  it('requests a Loop source from one explicit board', async () => {
+    api.mockResolvedValue({ tasks: [] })
+
+    await getLoopSessionSource('session-1', 'peacock', 'developer')
+
+    expect(api).toHaveBeenCalledWith({
+      path: '/api/plugins/kanban/session-source?session_id=session-1&board=developer',
+      profile: 'peacock'
+    })
+  })
+
+  it('rejects an all-board Loop snapshot when any board is unreadable', async () => {
+    api.mockImplementation(({ path }: { path: string }) => {
+      if (path === '/api/plugins/kanban/boards?include_counts=false') {
+        return Promise.resolve({
+          boards: [{ slug: 'alpha' }, { slug: 'broken' }, { slug: 'empty' }],
+          current: 'alpha'
+        })
+      }
+
+      if (path.endsWith('board=alpha')) {
+        return Promise.resolve({ tasks: [{ id: 'shared', status: 'running', title: 'Alpha task' }] })
+      }
+
+      if (path.endsWith('board=broken')) {
+        return Promise.reject(new Error('board is unreadable'))
+      }
+
+      if (path.endsWith('board=empty')) {
+        return Promise.resolve({ board: 'wrong-response-board', tasks: [] })
+      }
+
+      return Promise.reject(new Error(`Unexpected request: ${path}`))
+    })
+
+    await expect(getLoopSessionSources('session-1', 'peacock')).rejects.toThrow('board is unreadable')
+    expect(api).toHaveBeenCalledTimes(4)
+    expect(api.mock.calls.slice(1).map(call => (call[0] as { path: string }).path)).toEqual([
+      '/api/plugins/kanban/session-source?session_id=session-1&board=alpha',
+      '/api/plugins/kanban/session-source?session_id=session-1&board=broken',
+      '/api/plugins/kanban/session-source?session_id=session-1&board=empty'
+    ])
+  })
+
+  it('briefly reuses the boards that matched a session instead of rescanning every board on each active poll', async () => {
+    api.mockImplementation(({ path }: { path: string }) => {
+      if (path === '/api/plugins/kanban/boards?include_counts=false') {
+        return Promise.resolve({ boards: [{ slug: 'empty' }, { slug: 'work' }], current: 'work' })
+      }
+
+      if (path.endsWith('board=empty')) {
+        return Promise.resolve({ tasks: [] })
+      }
+
+      if (path.endsWith('board=work')) {
+        return Promise.resolve({ tasks: [{ id: 'task-1', status: 'running', title: 'Live task' }] })
+      }
+
+      return Promise.reject(new Error(`Unexpected request: ${path}`))
+    })
+
+    await getLoopSessionSources('session-with-cache', 'peacock')
+    api.mockClear()
+    await getLoopSessionSources('session-with-cache', 'peacock')
+
+    expect(api.mock.calls.map(call => (call[0] as { path: string }).path)).toEqual([
+      '/api/plugins/kanban/session-source?session_id=session-with-cache&board=work'
+    ])
+  })
+
+  it('falls back to the legacy single-board source when board discovery is unavailable', async () => {
+    api.mockImplementation(({ path }: { path: string }) => {
+      if (path === '/api/plugins/kanban/boards?include_counts=false') {
+        return Promise.reject(new Error('404: boards endpoint unavailable'))
+      }
+
+      if (path === '/api/plugins/kanban/session-source?session_id=session-1') {
+        return Promise.resolve({ tasks: [{ id: 'legacy', status: 'queued', title: 'Legacy task' }] })
+      }
+
+      return Promise.reject(new Error(`Unexpected request: ${path}`))
+    })
+
+    await expect(getLoopSessionSources('session-1', 'peacock')).resolves.toEqual([
+      {
+        board: 'default',
+        tasks: [{ id: 'legacy', status: 'queued', title: 'Legacy task' }]
+      }
+    ])
+    expect(api).toHaveBeenCalledTimes(2)
+  })
+
   it('creates a draft Loop task through the profile-scoped kanban API', async () => {
     api.mockResolvedValue({ task: { id: 't_loop', title: 'Draft Loop root' } })
 
@@ -402,6 +497,17 @@ describe('Hermes REST helpers', () => {
 
     expect(api).toHaveBeenCalledWith({
       path: '/api/plugins/kanban/capabilities',
+      profile: 'peacock'
+    })
+  })
+
+  it('loads the global workflow overview through the selected profile backend', async () => {
+    api.mockResolvedValue({ boards: [], errors: [], schema_version: 1, sessions: [] })
+
+    await getWorkflowOverview('peacock')
+
+    expect(api).toHaveBeenCalledWith({
+      path: '/api/plugins/kanban/workflow-overview',
       profile: 'peacock'
     })
   })
@@ -573,6 +679,20 @@ describe('Hermes REST helpers', () => {
     expect(merged.workflow_id).toBe('wf_loop')
     expect(merged.tasks?.map(task => task.id)).toEqual(['t_root', 't_child', 't_second'])
     expect(merged.links).toEqual([{ child_id: 't_child', parent_id: 't_root' }])
+  })
+
+  it('merges a newly created Loop row without dropping other boards', () => {
+    const merged = mergeLoopDraftSources(
+      [
+        { board: 'alpha', session_id: 'session', tasks: [{ id: 'alpha-task', status: 'ready', title: 'Alpha' }] },
+        { board: 'beta', session_id: 'session', tasks: [{ id: 'beta-task', status: 'ready', title: 'Beta' }] }
+      ],
+      { board: 'beta', session_id: 'session', tasks: [{ id: 'new-beta-task', status: 'ready', title: 'New beta' }] }
+    )
+
+    expect(merged.map(source => source.board)).toEqual(['alpha', 'beta'])
+    expect(merged[0]?.tasks?.map(task => task.id)).toEqual(['alpha-task'])
+    expect(merged[1]?.tasks?.map(task => task.id)).toEqual(['beta-task', 'new-beta-task'])
   })
 
   it('posts Loop task comments through the profile-scoped kanban API', async () => {

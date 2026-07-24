@@ -10,7 +10,12 @@ import type { ReadableAtom } from 'nanostores'
 import type { ReactElement, ReactNode, PointerEvent as ReactPointerEvent } from 'react'
 
 import type { DoubleTapContext } from '@/components/pane-shell/tree/renderer/drag-session'
-import { registerPaneCloser, removeTreePane, treePanesWithPrefix } from '@/components/pane-shell/tree/store'
+import {
+  registerPaneCloser,
+  removeTreePane,
+  replaceTreePaneId,
+  treePanesWithPrefix
+} from '@/components/pane-shell/tree/store'
 import { registry } from '@/contrib/registry'
 import type { TileDock } from '@/store/session-states'
 
@@ -30,6 +35,14 @@ export interface PaneMirror<T> {
   /** Center docks: the strip slot (stack before this pane id). */
   before?: (tile: T) => null | string | undefined
   minWidth: string
+  maxWidth?: string
+  width?: string
+  /** Preserve mounted pane-local state while another tab in its group is active. */
+  keepAliveWhenInactive?: boolean
+  /** Mirror native tab activation back into the domain state owner. */
+  activate?: (key: string) => void
+  /** Domain selection to restore when a layout is rebuilt around an anchor. */
+  preferredActive?: (key: string) => boolean
   title: (key: string) => string
   /** Lead-dot color for the tile's tab (e.g. a session's project color). Re-read
    *  on every `also` change, so pass the color source in `also` to keep it live. */
@@ -47,6 +60,8 @@ export interface PaneMirror<T> {
   ) => boolean
   /** Wired as the pane's closer (tab Close). */
   close: (key: string) => void
+  /** In-place id promotions to apply before registration/removal bookkeeping. */
+  replacements?: (previous: T[], next: T[]) => Array<{ from: string; to: string }>
 }
 
 /** Build a `watch*` fn: syncs once, then re-syncs on every source/also change.
@@ -54,10 +69,17 @@ export interface PaneMirror<T> {
 export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
   const registered = new Map<string, { dispose: () => void; title: string; accent?: string }>()
   const paneId = (key: string) => `${cfg.prefix}:${key}`
+  let previousTiles: T[] = []
 
   const sync = () => {
     const tiles = cfg.source.get()
     const wanted = new Set(tiles.map(cfg.key))
+
+    for (const replacement of cfg.replacements?.(previousTiles, tiles) ?? []) {
+      replaceTreePaneId(paneId(replacement.from), paneId(replacement.to))
+    }
+
+    previousTiles = tiles
 
     for (const tile of tiles) {
       const key = cfg.key(tile)
@@ -81,8 +103,13 @@ export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
             pane: cfg.anchor?.(tile) ?? 'workspace',
             pos: cfg.dir?.(tile) ?? 'right'
           },
+          maxWidth: cfg.maxWidth,
+          keepAliveWhenInactive: cfg.keepAliveWhenInactive,
           minWidth: cfg.minWidth,
+          onActivate: cfg.activate ? () => cfg.activate!(key) : undefined,
+          preferredActive: cfg.preferredActive ? () => cfg.preferredActive!(key) : undefined,
           placement: 'main',
+          width: cfg.width,
           tabDrag: cfg.tabDrag
             ? (event: ReactPointerEvent<HTMLElement>, onTap: () => void, double?: DoubleTapContext) =>
                 cfg.tabDrag!(key, event, onTap, double)
@@ -101,9 +128,9 @@ export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
 
     for (const [key, entry] of registered) {
       if (!wanted.has(key)) {
+        removeTreePane(paneId(key))
         entry.dispose()
         registered.delete(key)
-        removeTreePane(paneId(key))
       }
     }
 

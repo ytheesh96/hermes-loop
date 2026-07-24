@@ -1,7 +1,16 @@
 import { atom, computed } from 'nanostores'
 
 import {
+  currentToolFromLoopRecord,
+  loopRecordFrom,
+  loopToolLabel,
+  loopWorkerCurrentTool
+} from '@/app/chat/loop-selectors'
+import {
   type LoopWorkerActivity,
+  type LoopWorkflowRef,
+  loopWorkflowRefKey,
+  normalizeLoopBoard,
   type TenantLoopSource,
   type TenantLoopTask
 } from '@/app/chat/loop-state'
@@ -34,6 +43,8 @@ export interface ComposerStatusItem {
   output?: string
   /** Kanban/Loop task id. Row click focuses the durable task in the Loop side panel. */
   kanbanTaskId?: string
+  /** Owning board for board-aware workflow/task routing. */
+  kanbanBoard?: string
   /** Canonical Loop workflow identity used to merge snapshot and live-event summaries. */
   kanbanWorkflowId?: string
   /** Kanban worker run id for the durable agent row. */
@@ -68,14 +79,22 @@ export interface ComposerStatusItem {
 export const $backgroundStatusBySession = atom<Record<string, ComposerStatusItem[]>>({})
 export const $selectedLoopWorkflowBySession = atom<Record<string, string>>({})
 
-export function selectLoopWorkflowForSession(sessionId: string, workflowId: string) {
-  if (!sessionId || !workflowId) {
+export function composerStatusWorkflowRef(item: ComposerStatusItem): LoopWorkflowRef | null {
+  const workflowId = item.kanbanWorkflowId || item.kanbanTaskId
+
+  return workflowId ? { board: normalizeLoopBoard(item.kanbanBoard), workflowId } : null
+}
+
+export function selectLoopWorkflowForSession(sessionId: string, workflow: LoopWorkflowRef | string) {
+  const ref = typeof workflow === 'string' ? { board: 'default', workflowId: workflow } : workflow
+
+  if (!sessionId || !ref.workflowId) {
     return
   }
 
   $selectedLoopWorkflowBySession.set({
     ...$selectedLoopWorkflowBySession.get(),
-    [sessionId]: workflowId
+    [sessionId]: loopWorkflowRefKey(ref)
   })
 }
 
@@ -218,15 +237,22 @@ const needsAttentionText = (text: string): boolean =>
   text.includes('human approval') ||
   text.includes('needs approval')
 
-const humanToolLabel = (name: string): string =>
-  name
-    .split('_')
-    .filter(Boolean)
-    .map(part => part[0]!.toUpperCase() + part.slice(1))
-    .join(' ') || name
+const kanbanIdBoardScope = (board?: null | string): string => {
+  const normalizedBoard = normalizeLoopBoard(board)
+
+  return normalizedBoard === 'default' ? '' : `${encodeURIComponent(normalizedBoard)}:`
+}
 
 const taskAttentionText = (task: TenantLoopTask): string =>
-  [task.status, task.title, task.body, task.result, task.latest_summary, task.latest_run?.summary, task.latest_run?.outcome]
+  [
+    task.status,
+    task.title,
+    task.body,
+    task.result,
+    task.latest_summary,
+    task.latest_run?.summary,
+    task.latest_run?.outcome
+  ]
     .filter((value): value is string => Boolean(value))
     .join(' ')
     .toLowerCase()
@@ -250,16 +276,18 @@ const taskIsActive = (task: TenantLoopTask): boolean => {
   const status = normalized(task.status)
   const runStatus = normalized(task.latest_run?.status)
 
-  return ACTIVE_KANBAN_TASK_STATUSES.has(status) || ACTIVE_KANBAN_TASK_STATUSES.has(runStatus) || Boolean(task.current_run_id)
+  return (
+    ACTIVE_KANBAN_TASK_STATUSES.has(status) ||
+    ACTIVE_KANBAN_TASK_STATUSES.has(runStatus) ||
+    Boolean(task.current_run_id)
+  )
 }
 
 const taskIsDone = (task: TenantLoopTask): boolean => DONE_KANBAN_TASK_STATUSES.has(normalized(task.status))
 
 const taskIsTriage = (task: TenantLoopTask): boolean => normalized(task.status) === 'triage'
 
-const kanbanTaskProgress = (
-  tasks: readonly TenantLoopTask[]
-): NonNullable<ComposerStatusItem['taskProgress']> =>
+const kanbanTaskProgress = (tasks: readonly TenantLoopTask[]): NonNullable<ComposerStatusItem['taskProgress']> =>
   tasks.reduce<NonNullable<ComposerStatusItem['taskProgress']>>(
     (progress, task) => {
       if (taskNeedsAttention(task)) {
@@ -353,43 +381,6 @@ const kanbanWorkerState = (worker: LoopWorkerActivity): StatusItemState => {
   return 'done'
 }
 
-const recordFrom = (value: unknown): Record<string, unknown> | null =>
-  value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
-
-const currentToolFromRecord = (record: Record<string, unknown> | null): string | undefined => {
-  if (!record) {
-    return undefined
-  }
-
-  for (const key of ['current_tool', 'currentTool', 'current_tool_name', 'tool_name', 'active_tool', 'last_tool']) {
-    const value = textValue(record[key])
-
-    if (value) {
-      return humanToolLabel(value)
-    }
-  }
-
-  return undefined
-}
-
-const kanbanWorkerCurrentTool = (worker: LoopWorkerActivity): string | undefined => {
-  const direct = currentToolFromRecord(worker as unknown as Record<string, unknown>)
-
-  if (direct) {
-    return direct
-  }
-
-  for (const event of (worker.recent_task_events || []).slice().reverse()) {
-    const fromPayload = currentToolFromRecord(recordFrom(event.payload))
-
-    if (fromPayload) {
-      return fromPayload
-    }
-  }
-
-  return undefined
-}
-
 const epochMs = (value: unknown): number | undefined => {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return undefined
@@ -402,7 +393,7 @@ const kanbanWorkerActivity = (worker: LoopWorkerActivity): SubagentProgress['str
   const entries: SubagentProgress['stream'] = []
 
   for (const event of worker.recent_task_events ?? []) {
-    const tool = currentToolFromRecord(recordFrom(event.payload))
+    const tool = currentToolFromLoopRecord(loopRecordFrom(event.payload))
 
     if (!tool || entries.at(-1)?.text === tool) {
       continue
@@ -433,7 +424,7 @@ const kanbanWorkerUpdatedAt = (worker: LoopWorkerActivity): number | undefined =
 
 const kanbanWorkerActivityLabel = (worker: LoopWorkerActivity): string | undefined => {
   const profile = textValue(worker.profile)
-  const currentTool = kanbanWorkerCurrentTool(worker)
+  const currentTool = loopWorkerCurrentTool({ workerActivity: worker })
 
   return (
     [profile, currentTool].filter(Boolean).join(' · ') ||
@@ -444,14 +435,14 @@ const kanbanWorkerActivityLabel = (worker: LoopWorkerActivity): string | undefin
   )
 }
 
-const kanbanWorkerToItem = (worker: LoopWorkerActivity): ComposerStatusItem => ({
+const kanbanWorkerToItem = (worker: LoopWorkerActivity, board?: null | string): ComposerStatusItem => ({
   activity: kanbanWorkerActivity(worker),
-  currentTool: kanbanWorkerCurrentTool(worker),
+  currentTool: loopWorkerCurrentTool({ workerActivity: worker }),
   profile: textValue(worker.profile),
-  id: `kanban-agent:${worker.task_id}:${worker.run_id}`,
+  id: `kanban-agent:${kanbanIdBoardScope(board)}${worker.task_id}:${worker.run_id}`,
+  kanbanBoard: normalizeLoopBoard(board),
   kanbanTaskId: worker.task_id,
-  output:
-    worker.error_preview || worker.error || worker.summary_preview || worker.summary || undefined,
+  output: worker.error_preview || worker.error || worker.summary_preview || worker.summary || undefined,
   runId: worker.run_id,
   sessionId: worker.worker_session_id || undefined,
   startedAt: epochMs(worker.started_at),
@@ -489,6 +480,7 @@ const kanbanTaskAggregate = (
 }
 
 const kanbanTaskToItem = (
+  board: string,
   workflowId: string,
   tasks: readonly TenantLoopTask[],
   workers: readonly LoopWorkerActivity[]
@@ -498,13 +490,13 @@ const kanbanTaskToItem = (
   const task =
     tasks.find(candidate => candidate.id === workflowId) ||
     [...tasks].sort(
-      (left, right) =>
-        (left.created_at ?? Number.MAX_SAFE_INTEGER) - (right.created_at ?? Number.MAX_SAFE_INTEGER)
+      (left, right) => (left.created_at ?? Number.MAX_SAFE_INTEGER) - (right.created_at ?? Number.MAX_SAFE_INTEGER)
     )[0]!
 
   return {
     currentTool: 'Loop',
-    id: `kanban-task:${task.id}`,
+    id: `kanban-task:${kanbanIdBoardScope(board)}${task.id}`,
+    kanbanBoard: board,
     kanbanTaskId: task.id,
     kanbanWorkflowId: workflowId,
     state: aggregate.state,
@@ -606,7 +598,7 @@ const loopagentState = (agent: LoopagentActivity): StatusItemState => {
 
 const loopagentActivityLabel = (agent: LoopagentActivity): string | undefined => {
   const profile = textValue(agent.profile)
-  const currentTool = agent.currentTool ? humanToolLabel(agent.currentTool) : undefined
+  const currentTool = agent.currentTool ? loopToolLabel(agent.currentTool) : undefined
 
   return (
     [profile, currentTool].filter(Boolean).join(' · ') ||
@@ -632,12 +624,15 @@ const loopagentTaskTodoStatus = (agent: LoopagentActivity): TodoStatus => {
 }
 
 const loopagentToItem = (agent: LoopagentActivity): ComposerStatusItem => {
+  const board = normalizeLoopBoard(agent.board)
+
   if (agent.kind === 'task') {
     const todoStatus = loopagentTaskTodoStatus(agent)
 
     return {
       currentTool: 'Loop',
-      id: `kanban-task:${agent.taskId}`,
+      id: `kanban-task:${kanbanIdBoardScope(board)}${agent.taskId}`,
+      kanbanBoard: board,
       kanbanTaskId: agent.taskId,
       kanbanWorkflowId: agent.workflowId,
       state: todoStatus === 'completed' ? 'done' : 'running',
@@ -650,9 +645,10 @@ const loopagentToItem = (agent: LoopagentActivity): ComposerStatusItem => {
 
   return {
     activity: agent.stream,
-    currentTool: agent.currentTool ? humanToolLabel(agent.currentTool) : undefined,
+    currentTool: agent.currentTool ? loopToolLabel(agent.currentTool) : undefined,
     profile: textValue(agent.profile),
-    id: `kanban-agent:${agent.taskId}:${agent.runId ?? agent.workerSessionId ?? 'activity'}`,
+    id: `kanban-agent:${kanbanIdBoardScope(board)}${agent.taskId}:${agent.runId ?? agent.workerSessionId ?? 'activity'}`,
+    kanbanBoard: board,
     kanbanTaskId: agent.taskId,
     output: agent.errorPreview || agent.summaryPreview,
     runId: agent.runId,
@@ -678,9 +674,11 @@ const LOOP_STATUS_INDICATOR_RANK: Readonly<Record<StatusIndicatorKind, number>> 
 }
 
 const loopagentWorkflowTaskToItem = (
-  workflowId: string,
+  workflowRef: LoopWorkflowRef,
   agents: readonly LoopagentActivity[]
 ): ComposerStatusItem => {
+  const { board, workflowId } = workflowRef
+
   const representative =
     agents.find(agent => agent.taskId === workflowId) ||
     [...agents].sort((left, right) => left.updatedAt - right.updatedAt || left.taskId.localeCompare(right.taskId))[0]!
@@ -725,15 +723,11 @@ const loopagentWorkflowTaskToItem = (
 
   return {
     currentTool: 'Loop',
-    id: `kanban-workflow:${workflowId}`,
+    id: `kanban-workflow:${kanbanIdBoardScope(board)}${workflowId}`,
+    kanbanBoard: board,
     kanbanTaskId: representative.taskId,
     kanbanWorkflowId: workflowId,
-    state:
-      statusIndicator === 'done'
-        ? 'done'
-        : statusIndicator === 'attention'
-          ? 'failed'
-          : 'running',
+    state: statusIndicator === 'done' ? 'done' : statusIndicator === 'attention' ? 'failed' : 'running',
     statusIndicator,
     taskProgress,
     title: representative.title || representative.taskId,
@@ -742,10 +736,7 @@ const loopagentWorkflowTaskToItem = (
   }
 }
 
-const mergeLoopWorkflowTaskItem = (
-  snapshot: ComposerStatusItem,
-  live: ComposerStatusItem
-): ComposerStatusItem => {
+const mergeLoopWorkflowTaskItem = (snapshot: ComposerStatusItem, live: ComposerStatusItem): ComposerStatusItem => {
   const snapshotIndicator = snapshot.statusIndicator || 'unknown'
   const liveIndicator = live.statusIndicator || 'unknown'
 
@@ -762,8 +753,7 @@ const mergeLoopWorkflowTaskItem = (
         : 'in_progress'
 
   const taskProgress =
-    live.taskProgress &&
-    (!snapshot.taskProgress || live.taskProgress.total >= snapshot.taskProgress.total)
+    live.taskProgress && (!snapshot.taskProgress || live.taskProgress.total >= snapshot.taskProgress.total)
       ? live.taskProgress
       : snapshot.taskProgress
 
@@ -800,16 +790,8 @@ function writeKanbanStatus(sid: string, items: ComposerStatusItem[]) {
   $kanbanStatusBySession.set(next)
 }
 
-export function reconcileKanbanSessionSource(sid: string, source: TenantLoopSource | null | undefined) {
-  if (!sid) {
-    return
-  }
-
-  if (!source) {
-    writeKanbanStatus(sid, [])
-
-    return
-  }
+function kanbanItemsFromSource(source: TenantLoopSource): ComposerStatusItem[] {
+  const board = normalizeLoopBoard(source.board)
 
   const visibleTasks = (source.tasks || []).filter(task => task.id && normalized(task.status) !== 'archived')
 
@@ -831,12 +813,24 @@ export function reconcileKanbanSessionSource(sid: string, source: TenantLoopSour
   }
 
   const tasks = [...tasksByWorkflow].map(([workflowId, workflowTasks]) =>
-    kanbanTaskToItem(workflowId, workflowTasks, activeWorkers)
+    kanbanTaskToItem(board, workflowId, workflowTasks, activeWorkers)
   )
 
-  const agents = activeWorkers.map(kanbanWorkerToItem)
+  const agents = activeWorkers.map(worker => kanbanWorkerToItem(worker, board))
 
-  writeKanbanStatus(sid, [...tasks, ...agents])
+  return [...tasks, ...agents]
+}
+
+export function reconcileKanbanSessionSources(sid: string, sources: readonly TenantLoopSource[]) {
+  if (!sid) {
+    return
+  }
+
+  writeKanbanStatus(sid, sources.flatMap(kanbanItemsFromSource))
+}
+
+export function reconcileKanbanSessionSource(sid: string, source: TenantLoopSource | null | undefined) {
+  reconcileKanbanSessionSources(sid, source ? [source] : [])
 }
 
 export function reconcileKanbanSessionSourceForComposer({
@@ -846,6 +840,22 @@ export function reconcileKanbanSessionSourceForComposer({
 }: {
   activeSessionId?: null | string
   source: TenantLoopSource | null | undefined
+  sourceSessionId?: null | string
+}) {
+  reconcileKanbanSessionSourcesForComposer({
+    activeSessionId,
+    sources: source ? [source] : [],
+    sourceSessionId
+  })
+}
+
+export function reconcileKanbanSessionSourcesForComposer({
+  activeSessionId,
+  sources,
+  sourceSessionId
+}: {
+  activeSessionId?: null | string
+  sources: readonly TenantLoopSource[]
   sourceSessionId?: null | string
 }) {
   const displaySessionId = activeSessionId || sourceSessionId || ''
@@ -858,7 +868,7 @@ export function reconcileKanbanSessionSourceForComposer({
     writeKanbanStatus(sourceSessionId, [])
   }
 
-  reconcileKanbanSessionSource(displaySessionId, source)
+  reconcileKanbanSessionSources(displaySessionId, sources)
 }
 
 // The single thing the stack reads: a typed, merged item list per session.
@@ -886,19 +896,30 @@ export const $statusItemsBySession = computed(
           continue
         }
 
-        workflowTaskGroups.set(agent.workflowId, [...(workflowTaskGroups.get(agent.workflowId) || []), agent])
+        const workflowKey = loopWorkflowRefKey({
+          board: normalizeLoopBoard(agent.board),
+          workflowId: agent.workflowId
+        })
+
+        workflowTaskGroups.set(workflowKey, [...(workflowTaskGroups.get(workflowKey) || []), agent])
       }
 
       const workflowItems = new Map(
-        [...workflowTaskGroups].map(([workflowId, agents]) => [
-          workflowId,
-          loopagentWorkflowTaskToItem(workflowId, agents)
-        ])
+        [...workflowTaskGroups].map(([workflowKey, agents]) => {
+          const representative = agents[0]!
+
+          const workflowRef = {
+            board: normalizeLoopBoard(representative.board),
+            workflowId: representative.workflowId!
+          }
+
+          return [workflowKey, loopagentWorkflowTaskToItem(workflowRef, agents)] as const
+        })
       )
 
       const legacyAndWorkerItems = sessionActivities.filter(legacyLoopagentVisibleInComposer).map(loopagentToItem)
       const liveIds = new Set(legacyAndWorkerItems.map(item => item.id))
-      const snapshotWorkflowIds = new Set<string>()
+      const snapshotWorkflowKeys = new Set<string>()
 
       const snapshotItems = (kanban[sid] ?? [])
         .filter(item => !liveIds.has(item.id))
@@ -909,14 +930,19 @@ export const $statusItemsBySession = computed(
             return item
           }
 
-          snapshotWorkflowIds.add(workflowId)
-          const live = workflowItems.get(workflowId)
+          const workflowKey = loopWorkflowRefKey({
+            board: normalizeLoopBoard(item.kanbanBoard),
+            workflowId
+          })
+
+          snapshotWorkflowKeys.add(workflowKey)
+          const live = workflowItems.get(workflowKey)
 
           return live ? mergeLoopWorkflowTaskItem(item, live) : item
         })
 
       const newWorkflowItems = [...workflowItems]
-        .filter(([workflowId]) => !snapshotWorkflowIds.has(workflowId))
+        .filter(([workflowKey]) => !snapshotWorkflowKeys.has(workflowKey))
         .map(([, item]) => item)
 
       push(sid, [...snapshotItems, ...newWorkflowItems, ...legacyAndWorkerItems])

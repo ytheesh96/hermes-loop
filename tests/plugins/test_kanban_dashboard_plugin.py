@@ -227,6 +227,15 @@ def test_create_loop_draft_anchors_session_source_and_workflow(client):
     assert session_source.status_code == 200, session_source.text
     session_payload = session_source.json()
     assert session_payload["workflow_id"] == task["workflow_id"]
+    assert session_payload["workflow_ids"] == [task["workflow_id"]]
+    [workflow] = session_payload["workflows"]
+    assert workflow["id"] == task["workflow_id"]
+    assert workflow["title"] == "Draft overview"
+    assert workflow["status"] == "open"
+    assert workflow["origin_session_id"] == "session-draft-1"
+    assert isinstance(workflow["revision"], int)
+    assert isinstance(workflow["created_at"], int)
+    assert isinstance(workflow["updated_at"], int)
     assert "root_task_id" not in session_payload
     assert [item["id"] for item in session_payload["tasks"]] == [task["id"]]
 
@@ -1659,6 +1668,23 @@ def test_board_list_recommends_persistent_workspace_for_configured_workdir(
     assert boards["default"]["default_workspace_kind"] == "worktree"
     assert boards["notes"]["default_workspace_kind"] == "dir"
     assert boards["disposable"]["default_workspace_kind"] == "scratch"
+
+
+def test_board_list_can_skip_expensive_task_counts(client, monkeypatch):
+    """Discovery-only consumers should not open every board database for counts."""
+    monkeypatch.setattr(
+        "plugins.kanban.dashboard.plugin_api._board_counts",
+        lambda _slug: (_ for _ in ()).throw(AssertionError("counts should be skipped")),
+    )
+
+    response = client.get(
+        "/api/plugins/kanban/boards",
+        params={"include_counts": "false"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["boards"]
+    assert all("counts" not in board and "total" not in board for board in response.json()["boards"])
 
 
 def test_create_board_persists_project_directory(client, tmp_path):

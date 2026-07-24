@@ -6,14 +6,17 @@ import { Suspense, useCallback, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
 
 import type { SubmitTextOptions } from '@/app/session/hooks/use-prompt-actions/utils'
+import type { LoopWorkflowRef } from '@/app/chat/loop-state'
 import { Thread } from '@/components/assistant-ui/thread'
 import { Backdrop } from '@/components/Backdrop'
 import { COMPOSER_HEART_CONFIG, HeartField } from '@/components/chat/vibe-hearts'
 import { $sessionTileDragging, $sessionTileEdgeHover } from '@/components/pane-shell/tree/store'
 import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
+import { Codicon } from '@/components/ui/codicon'
 import { ErrorState } from '@/components/ui/error-state'
 import { TitleMenuTrigger } from '@/components/ui/title-menu-trigger'
+import { Tip } from '@/components/ui/tooltip'
 import { getGlobalModelOptions, type HermesGateway } from '@/hermes'
 import { useI18n } from '@/i18n'
 import type { ChatMessage } from '@/lib/chat-messages'
@@ -21,6 +24,7 @@ import { quickModelOptions, sessionTitle } from '@/lib/chat-runtime'
 import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import { cn } from '@/lib/utils'
 import { $pinnedSessionIds } from '@/store/layout'
+import { openLiveGraphPane } from '@/store/live-graph-panes'
 import { $petActive } from '@/store/pet'
 import { $petOverlayActive } from '@/store/pet-overlay'
 import { $gatewaySwapTarget, $profiles } from '@/store/profile'
@@ -75,7 +79,8 @@ interface ChatViewProps extends Omit<React.ComponentProps<'div'>, 'onSubmit'> {
   onPickFolders: () => void
   onPickImages: () => void
   onOpenLoop?: () => void
-  onOpenKanbanTask?: (taskId: string) => void
+  onOpenLoopWorkflow?: (workflow: LoopWorkflowRef) => void
+  onOpenKanbanTask?: (taskId: string, workflow?: LoopWorkflowRef) => void
   onRemoveAttachment: (id: string) => void
   onSteer: (text: string) => Promise<boolean> | boolean
   onSubmit: (text: string, options?: SubmitTextOptions) => Promise<boolean> | boolean
@@ -105,6 +110,7 @@ function ChatHeader({
   routedSessionId,
   selectedSessionId
 }: ChatHeaderProps) {
+  const { t } = useI18n()
   const sessions = useStore($sessions)
   const pinnedSessionIds = useStore($pinnedSessionIds)
   const profiles = useStore($profiles)
@@ -139,24 +145,45 @@ function ChatHeader({
   return (
     <header className={cn(titlebarHeaderBaseClass, isRoutedSessionView && titlebarHeaderShadowClass)}>
       <div
-        className={cn(titlebarHeaderTitleClass, showProfileTag && 'flex items-center')}
+        className={cn(titlebarHeaderTitleClass, 'flex items-center gap-1')}
         style={{
           maxWidth:
             'calc(100vw - var(--titlebar-content-inset,0px) - var(--titlebar-tools-right) - var(--titlebar-tools-width) - 1.5rem)'
         }}
       >
         {showProfileTag && <ProfileTag className="pointer-events-auto mr-1.5" profile={activeStoredSession?.profile} />}
-        <SessionActionsMenu
-          align="start"
-          onDelete={selectedSessionId ? onDeleteSelectedSession : undefined}
-          onPin={selectedSessionId ? onToggleSelectedPin : undefined}
-          pinned={selectedIsPinned}
-          sessionId={selectedSessionId || activeSessionId || ''}
-          sideOffset={8}
-          title={title}
-        >
-          <TitleMenuTrigger>{title}</TitleMenuTrigger>
-        </SessionActionsMenu>
+        <div className="min-w-0">
+          <SessionActionsMenu
+            align="start"
+            onDelete={selectedSessionId ? onDeleteSelectedSession : undefined}
+            onPin={selectedSessionId ? onToggleSelectedPin : undefined}
+            pinned={selectedIsPinned}
+            sessionId={selectedSessionId || activeSessionId || ''}
+            sideOffset={8}
+            title={title}
+          >
+            <TitleMenuTrigger>{title}</TitleMenuTrigger>
+          </SessionActionsMenu>
+        </div>
+        {activeStoredSession && (
+          <Tip label={t.liveGraph.open}>
+            <Button
+              aria-label={t.liveGraph.open}
+              className="pointer-events-auto text-(--ui-text-tertiary) hover:text-(--ui-text-primary) [-webkit-app-region:no-drag]"
+              onClick={event =>
+                openLiveGraphPane(activeStoredSession, {
+                  dock: event.shiftKey ? 'right' : 'center',
+                  sourcePaneId: 'workspace'
+                })
+              }
+              size="icon-xs"
+              type="button"
+              variant="ghost"
+            >
+              <Codicon name="type-hierarchy-sub" size="0.8125rem" />
+            </Button>
+          </Tip>
+        )}
       </div>
     </header>
   )
@@ -240,6 +267,7 @@ export function ChatView({
   onPickFolders,
   onPickImages,
   onOpenLoop,
+  onOpenLoopWorkflow,
   onOpenKanbanTask,
   onRemoveAttachment,
   onSteer,
@@ -542,6 +570,7 @@ export function ChatView({
               onCancel={onCancel}
               onOpenKanbanTask={onOpenKanbanTask}
               onOpenLoop={onOpenLoop}
+              onOpenLoopWorkflow={onOpenLoopWorkflow}
               onPasteClipboardImage={onPasteClipboardImage}
               onPickFiles={onPickFiles}
               onPickFolders={onPickFolders}

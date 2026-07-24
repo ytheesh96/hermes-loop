@@ -10,7 +10,16 @@
  */
 
 import { useStore } from '@nanostores/react'
-import { type CSSProperties, Fragment, type ReactNode, type RefObject, useRef, useState } from 'react'
+import {
+  type CSSProperties,
+  Fragment,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useRef,
+  useState
+} from 'react'
 
 import { Codicon } from '@/components/ui/codicon'
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu'
@@ -38,7 +47,9 @@ import {
   $layoutTree,
   $narrowViewport,
   $treeDragging,
+  $treeTabFocusRequest,
   activateTreePane,
+  clearTreeTabFocusRequest,
   closeTreePane,
   collapseTreePane,
   dismissTreePane,
@@ -162,6 +173,7 @@ export function TreeGroup({
 
   const hiddenPanes = useStore($hiddenTreePanes)
   const narrow = useStore($narrowViewport)
+  const tabFocusRequest = useStore($treeTabFocusRequest)
 
   const paneFor = (id: string) => panes.find(p => p.id === id)
 
@@ -170,13 +182,111 @@ export function TreeGroup({
   // shown one (render-side — the tree keeps `active`).
   // Edit mode forces toggle-hidden panes visible so they can be rearranged
   // (mirrors tree-split's paneGone) — restores itself on exit.
-  const paneShown = (id: string) =>
-    Boolean(paneFor(id)) && (editMode || !hiddenPanes.has(id)) && !(narrow && paneChrome(paneFor(id)).collapsible)
+  const paneShown = (id: string) => {
+    const pane = paneFor(id)
+
+    return (
+      Boolean(pane) &&
+      !paneChrome(pane).layoutAnchorOnly &&
+      (editMode || !hiddenPanes.has(id)) &&
+      !(narrow && paneChrome(pane).collapsible)
+    )
+  }
 
   const shown = node.panes.filter(paneShown)
   const activeId = shown.includes(node.active) ? node.active : (shown[0] ?? node.active)
   const active = paneFor(activeId)
+
+  const keptAlive = shown.flatMap(id => {
+    const pane = paneFor(id)
+
+    return pane?.render && paneChrome(pane).keepAliveWhenInactive ? [pane] : []
+  })
+
   const isEmpty = node.panes.length === 0
+
+  const tabFor = (paneId: string) =>
+    [...(ref.current?.querySelectorAll<HTMLElement>('[data-tree-tab]') || [])].find(
+      candidate => candidate.dataset.treeTab === paneId
+    )
+
+  const activateTabFromKeyboard = (paneId: string) => {
+    if (node.minimized) {
+      restoreTreePane(paneId)
+    } else {
+      activateTreePane(node.id, paneId)
+    }
+
+    tabFor(paneId)?.focus()
+  }
+
+  const handleTabListKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>, vertical: boolean) => {
+    const target = event.target instanceof HTMLElement ? event.target.closest<HTMLElement>('[data-tree-tab]') : null
+    const paneId = target?.dataset.treeTab
+    const index = paneId ? shown.indexOf(paneId) : -1
+
+    if (index < 0) {
+      return
+    }
+
+    let nextIndex: number | null = null
+
+    if (event.key === 'Enter' || event.key === ' ') {
+      nextIndex = index
+    } else if (event.key === 'Home') {
+      nextIndex = 0
+    } else if (event.key === 'End') {
+      nextIndex = shown.length - 1
+    } else if ((!vertical && event.key === 'ArrowRight') || (vertical && event.key === 'ArrowDown')) {
+      nextIndex = (index + 1) % shown.length
+    } else if ((!vertical && event.key === 'ArrowLeft') || (vertical && event.key === 'ArrowUp')) {
+      nextIndex = (index - 1 + shown.length) % shown.length
+    }
+
+    if (nextIndex === null) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    activateTabFromKeyboard(shown[nextIndex]!)
+  }
+
+  // A native tab switch can make the currently focused canvas inert. Move
+  // focus to the newly active tab only when focus was inside this group's old
+  // kept-alive body; unrelated composer/terminal focus is never stolen.
+  useEffect(() => {
+    const focused = document.activeElement
+
+    if (!(focused instanceof HTMLElement) || !ref.current?.contains(focused)) {
+      return
+    }
+
+    const body = focused.closest<HTMLElement>('[data-tree-pane-body]')
+    const tab = focused.closest<HTMLElement>('[data-tree-tab]')
+    const focusedPaneId = body?.dataset.treePaneBody || tab?.dataset.treeTab
+
+    if (!focusedPaneId || focusedPaneId === activeId) {
+      return
+    }
+
+    tabFor(activeId)?.focus()
+  }, [activeId])
+
+  useEffect(() => {
+    if (!tabFocusRequest || tabFocusRequest.paneId !== activeId) {
+      return
+    }
+
+    const activeTab = tabFor(activeId)
+
+    if (activeTab) {
+      activeTab.focus()
+      const frame = window.requestAnimationFrame(() => clearTreeTabFocusRequest(tabFocusRequest.key))
+
+      return () => window.cancelAnimationFrame(frame)
+    }
+  }, [activeId, tabFocusRequest])
 
   // ONE header style: the app's compact pane-header. DEFAULT is contextual —
   // a single pane isn't a "tab", so its header auto-hides; a stack shows its
@@ -326,7 +436,9 @@ export function TreeGroup({
             title={t.zones.restore}
           >
             <div
+              aria-orientation="vertical"
               className="flex min-h-0 flex-col overflow-y-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+              onKeyDown={event => handleTabListKeyDown(event, true)}
               role="tablist"
             >
               {shown.map(paneId => {
@@ -347,6 +459,7 @@ export function TreeGroup({
                     onClose={closeable ? () => closeTab(paneId) : undefined}
                     role="tab"
                     side={railSide}
+                    tabIndex={paneId === activeId ? 0 : -1}
                     vertical
                   >
                     <PaneTabLabel>{title}</PaneTabLabel>
@@ -394,6 +507,7 @@ export function TreeGroup({
           >
             <div
               className="flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+              onKeyDown={event => handleTabListKeyDown(event, false)}
               role="tablist"
             >
               {shown.map(paneId => {
@@ -448,6 +562,7 @@ export function TreeGroup({
                     }}
                     role="tab"
                     style={{ cursor: 'grab' }}
+                    tabIndex={isActive ? 0 : -1}
                   >
                     {chrome.accent ? (
                       <span
@@ -492,7 +607,9 @@ export function TreeGroup({
         </ZoneMenu>
       )}
 
-      {/* Body: the active pane's contributed content, or the empty zone. */}
+      {/* Body: normally only the active contribution mounts. Stateful
+          canvases may opt into staying mounted across native tab switches;
+          inactive bodies remain laid out but hidden, inert, and inaccessible. */}
       {!node.minimized && (
         <div className="relative min-h-0 min-w-0 flex-1 overflow-auto">
           {isEmpty ? (
@@ -501,7 +618,26 @@ export function TreeGroup({
               <DecodeText className="text-(--ui-text-quaternary)" cursor prefix={1} text="HERMES" />
             </div>
           ) : active?.render ? (
-            <ContribBoundary id={active.id}>{active.render()}</ContribBoundary>
+            <>
+              {keptAlive.map(pane => {
+                const isActive = pane.id === activeId
+
+                return (
+                  <div
+                    aria-hidden={isActive ? undefined : true}
+                    className={cn('absolute inset-0 overflow-auto', !isActive && 'invisible pointer-events-none')}
+                    data-tree-pane-body={pane.id}
+                    inert={!isActive}
+                    key={pane.id}
+                  >
+                    <ContribBoundary id={pane.id}>{pane.render!()}</ContribBoundary>
+                  </div>
+                )
+              })}
+              {!paneChrome(active).keepAliveWhenInactive && (
+                <ContribBoundary id={active.id}>{active.render()}</ContribBoundary>
+              )}
+            </>
           ) : (
             <div className="p-3 font-mono text-[11px] text-(--ui-text-quaternary)">{t.zones.missingPane(activeId)}</div>
           )}

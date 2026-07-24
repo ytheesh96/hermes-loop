@@ -1,6 +1,14 @@
 import { JsonRpcGatewayClient } from '@hermes/shared'
 
-import type { LoopTaskComment, LoopTaskDetail, TenantLoopSource } from '@/app/chat/loop-state'
+import type {
+  KanbanBoardsResponse,
+  LoopTaskComment,
+  LoopTaskDetail,
+  LoopWorkerActivity,
+  TenantLoopSource,
+  TenantLoopTask,
+  TenantLoopWorkflow
+} from '@/app/chat/loop-state'
 import type {
   ActionResponse,
   ActionStatusResponse,
@@ -585,13 +593,124 @@ export function deleteSession(id: string, profile?: string | null): Promise<{ ok
   })
 }
 
-export function getLoopSessionSource(sessionId: string, profile?: string | null): Promise<TenantLoopSource> {
+function getKanbanBoardsWithoutCounts(profile?: string | null): Promise<KanbanBoardsResponse> {
+  return window.hermesDesktop.api<KanbanBoardsResponse>({
+    ...(profile ? { profile } : profileScoped()),
+    path: '/api/plugins/kanban/boards?include_counts=false'
+  })
+}
+
+export interface WorkflowOverviewBoard {
+  links: { child_id: string; parent_id: string }[]
+  slug: string
+  source_revision: number
+  tasks: TenantLoopTask[]
+  workers: LoopWorkerActivity[]
+  workflows: TenantLoopWorkflow[]
+}
+
+export interface WorkflowOverviewSession {
+  current_session_id: string
+  cwd: null | string
+  id: string
+  lineage_session_ids: string[]
+  title: null | string
+}
+
+export interface WorkflowOverviewResponse {
+  boards: WorkflowOverviewBoard[]
+  errors: { board: string; error: string }[]
+  schema_version: number
+  sessions: WorkflowOverviewSession[]
+}
+
+export function getWorkflowOverview(profile?: string | null): Promise<WorkflowOverviewResponse> {
+  return window.hermesDesktop.api<WorkflowOverviewResponse>({
+    ...(profile ? { profile } : profileScoped()),
+    path: '/api/plugins/kanban/workflow-overview'
+  })
+}
+
+export function getLoopSessionSource(
+  sessionId: string,
+  profile?: string | null,
+  board?: string | null
+): Promise<TenantLoopSource> {
   const query = new URLSearchParams({ session_id: sessionId })
+  const normalizedBoard = board?.trim()
+
+  if (normalizedBoard) {
+    query.set('board', normalizedBoard)
+  }
 
   return window.hermesDesktop.api<TenantLoopSource>({
     ...(profile ? { profile } : profileScoped()),
     path: `/api/plugins/kanban/session-source?${query.toString()}`
   })
+}
+
+const LOOP_SOURCE_BOARD_DISCOVERY_TTL_MS = 30_000
+const loopSourceBoardCache = new Map<string, { boards: string[]; expiresAt: number }>()
+
+export async function getLoopSessionSources(sessionId: string, profile?: string | null): Promise<TenantLoopSource[]> {
+  const cacheKey = `${profile?.trim() || 'default'}\u0000${sessionId}`
+  const cached = loopSourceBoardCache.get(cacheKey)
+  let boards = cached && cached.expiresAt > Date.now() ? cached.boards : null
+
+  if (!boards) {
+    let response: KanbanBoardsResponse
+
+    try {
+      response = await getKanbanBoardsWithoutCounts(profile)
+    } catch {
+      const source = await getLoopSessionSource(sessionId, profile)
+
+      return source.tasks?.length ? [{ ...source, board: source.board || 'default' }] : []
+    }
+
+    boards = Array.from(new Set((response.boards || []).map(board => board.slug.trim()).filter(Boolean)))
+  }
+
+  if (!boards.length) {
+    const source = await getLoopSessionSource(sessionId, profile)
+
+    return source.tasks?.length ? [{ ...source, board: source.board || 'default' }] : []
+  }
+
+  // Keep the aggregate snapshot atomic. React Query retains its previous data
+  // when a refetch rejects, whereas returning a partial board set would remove
+  // nodes and make the next healthy poll look like brand-new work.
+  // Session-source hydration is intentionally serialized. A profile can have
+  // dozens of boards and each endpoint call reads both the session lineage and
+  // a board database. Fanning every board out at once can monopolize the local
+  // backend long enough for unrelated session requests to time out.
+  const results: TenantLoopSource[] = []
+  let firstError: unknown = null
+
+  for (const board of boards) {
+    try {
+      results.push({ ...(await getLoopSessionSource(sessionId, profile, board)), board })
+    } catch (error) {
+      firstError ??= error
+    }
+  }
+
+  if (firstError) {
+    throw firstError
+  }
+
+  const matched = results.filter(source => source.tasks?.length)
+
+  if (matched.length) {
+    loopSourceBoardCache.set(cacheKey, {
+      boards: matched.map(source => source.board || 'default'),
+      expiresAt: Date.now() + LOOP_SOURCE_BOARD_DISCOVERY_TTL_MS
+    })
+  } else {
+    loopSourceBoardCache.delete(cacheKey)
+  }
+
+  return matched
 }
 
 function kanbanBoardQuery(board?: null | string): string {
@@ -700,6 +819,20 @@ export function mergeLoopDraftSource(
       ])
     )
   }
+}
+
+export function mergeLoopDraftSources(
+  current: TenantLoopSource[] | TenantLoopSource | undefined,
+  incoming: TenantLoopSource
+): TenantLoopSource[] {
+  const sources = Array.isArray(current) ? current : current ? [current] : []
+  const incomingBoard = incoming.board?.trim() || 'default'
+  const existing = sources.find(source => (source.board?.trim() || 'default') === incomingBoard)
+  const merged = mergeLoopDraftSource(existing, { ...incoming, board: incomingBoard })
+
+  return [...sources.filter(source => (source.board?.trim() || 'default') !== incomingBoard), merged].sort((a, b) =>
+    (a.board || 'default').localeCompare(b.board || 'default')
+  )
 }
 
 export interface LoopAssignee {

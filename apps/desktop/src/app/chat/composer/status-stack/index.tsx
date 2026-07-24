@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef } from 'rea
 import { useNavigate } from 'react-router-dom'
 
 import { blurComposerInput } from '@/app/chat/composer/focus'
+import type { LoopWorkflowRef } from '@/app/chat/loop-state'
 import { AGENTS_ROUTE } from '@/app/routes'
 import { composerDockCard } from '@/components/chat/composer-dock'
 import { StatusSection } from '@/components/chat/status-section'
@@ -14,6 +15,7 @@ import { cn } from '@/lib/utils'
 import {
   $statusItemsBySession,
   type ComposerStatusItem,
+  composerStatusWorkflowRef,
   dismissBackgroundProcess,
   groupStatusItems,
   refreshBackgroundProcesses,
@@ -64,7 +66,7 @@ const groupLabel = (group: StatusGroup, s: Translations['statusStack']) => {
 interface ComposerStatusStackProps {
   busy: boolean
   /** Open/focus the durable Loop/Kanban side panel for a task row. */
-  onOpenKanbanTask?: (taskId: string) => void
+  onOpenKanbanTask?: (taskId: string, workflow?: LoopWorkflowRef) => void
   /** The queue, built by the composer (it owns the queue's callbacks). Rendered
    *  as the last group so it stays fused to the composer like before. */
   queue: ReactNode
@@ -149,7 +151,7 @@ export function ComposerStatusStack({ busy, queue, sessionId, onOpenKanbanTask }
     }
 
     if (item.kanbanTaskId && onOpenKanbanTask) {
-      onOpenKanbanTask(item.kanbanTaskId)
+      onOpenKanbanTask(item.kanbanTaskId, composerStatusWorkflowRef(item) || undefined)
 
       return
     }

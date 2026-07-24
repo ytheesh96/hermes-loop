@@ -20,7 +20,12 @@ vi.mock('@/hermes', () => ({
   loopSourceFromDraftResult: (sessionId: string, result: { source?: unknown; task?: null | { id: string } }) =>
     result.source ||
     (result.task ? { workflow_id: result.task.id, session_id: sessionId, tasks: [result.task] } : null),
-  mergeLoopDraftSource: (_current: unknown, incoming: unknown) => incoming,
+  mergeLoopDraftSources: (current: unknown, incoming: { board?: string }) => {
+    const sources = Array.isArray(current) ? current : current ? [current] : []
+    const board = incoming.board || 'default'
+
+    return [...sources.filter(source => ((source as { board?: string }).board || 'default') !== board), incoming]
+  },
   PROMPT_SUBMIT_REQUEST_TIMEOUT_MS: 1_800_000,
   setApiRequestProfile: vi.fn(),
   transcribeAudio: vi.fn()

@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { LoopPanel, LoopTaskStack } from './loop-panel'
+import { LoopPanel, loopPanelStateForWorkflow, LoopTaskStack, loopWorkflowPaneTitle } from './loop-panel'
 import { deriveLoopPanelStateFromTenantSource, type LoopPanelState } from './loop-state'
 import { LoopTaskGraph, type LoopTaskGraphPosition } from './loop-task-graph'
 
@@ -59,6 +59,29 @@ function LoopHarness({ state }: { state: LoopPanelState }) {
       />
     </>
   )
+}
+
+function workflowTabsState(): LoopPanelState {
+  return deriveLoopPanelStateFromTenantSource({
+    session_id: 'session-1',
+    workflow_ids: ['wf-a', 'wf-b'],
+    tasks: [
+      {
+        created_at: 1,
+        id: 'a-root',
+        status: 'scheduled',
+        title: 'Workflow A',
+        workflow_id: 'wf-a'
+      },
+      {
+        created_at: 2,
+        id: 'b-root',
+        status: 'scheduled',
+        title: 'Workflow B',
+        workflow_id: 'wf-b'
+      }
+    ]
+  })!
 }
 
 function DetailFetchHarness({ state }: { state: LoopPanelState }) {
@@ -656,6 +679,46 @@ describe('LoopPanel', () => {
     await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Rough idea' })).toBeNull())
   })
 
+  it('renders one explicit workflow canvas without an inner workflow tab strip', () => {
+    const state = workflowTabsState()
+    const workflowRef = { board: 'default', workflowId: 'wf-a' }
+    const workflowState = loopPanelStateForWorkflow(state, workflowRef)
+
+    render(
+      <LoopPanel
+        canvasScopeKey="session-1"
+        embedded
+        open
+        positions={[]}
+        state={workflowState}
+        workflowCanvas
+        workflowId="wf-a"
+      />
+    )
+
+    expect(loopWorkflowPaneTitle(state, workflowRef)).toBe('Workflow A')
+    expect(screen.queryByTestId('loop-workflow-tabbar')).toBeNull()
+    expect(screen.queryAllByRole('tab')).toHaveLength(0)
+    expect(screen.getByTestId('loop-workflow-canvas')).toBeTruthy()
+    expect(screen.getByTestId('loop-task-graph-node-a-root')).toBeTruthy()
+    expect(screen.queryByTestId('loop-task-graph-node-b-root')).toBeNull()
+  })
+
+  it('keeps a canonical workflow pane when its source currently has no rows', () => {
+    const state = deriveLoopPanelStateFromTenantSource({
+      latest_event_id: 1,
+      session_id: 'session-empty',
+      tasks: [],
+      workflow_ids: ['wf-empty']
+    })
+
+    const workflowState = loopPanelStateForWorkflow(state, { board: 'default', workflowId: 'wf-empty' })
+
+    expect(workflowState).toEqual(
+      expect.objectContaining({ rows: [], workflowId: 'wf-empty', workflowIds: ['wf-empty'] })
+    )
+  })
+
   it('renders dependency groups, opens the Loop overview on click, and omits raw JSON/debug affordances in normal view', () => {
     const state = deriveLoopPanelStateFromTenantSource({
       latest_event_id: 3,
@@ -845,6 +908,39 @@ describe('LoopPanel', () => {
     expect(Number(canvas.getAttribute('data-view-x'))).toBe(startX + 30)
     expect(Number(canvas.getAttribute('data-view-y'))).toBe(startY + 35)
     expect(screen.queryByTestId('loop-task-card')).toBeNull()
+  })
+
+  it('scopes SVG arrow markers to each mounted workflow canvas', () => {
+    const state = quickActionGraphState()
+
+    render(
+      <>
+        <div data-testid="marker-graph-a">
+          <LoopTaskGraph fullPanel rows={state.rows} scopeKey="marker-a" />
+        </div>
+        <div data-testid="marker-graph-b">
+          <LoopTaskGraph fullPanel rows={state.rows} scopeKey="marker-b" />
+        </div>
+      </>
+    )
+
+    const graphA = screen.getByTestId('marker-graph-a')
+    const graphB = screen.getByTestId('marker-graph-b')
+
+    const markerIds = [graphA, graphB].flatMap(graph =>
+      [...graph.querySelectorAll<SVGMarkerElement>('marker[id]')].map(marker => marker.id)
+    )
+
+    expect(markerIds).toHaveLength(4)
+    expect(new Set(markerIds).size).toBe(4)
+
+    for (const graph of [graphA, graphB]) {
+      const localMarkerIds = [...graph.querySelectorAll<SVGMarkerElement>('marker[id]')].map(marker => marker.id)
+      const edge = graph.querySelector<SVGPathElement>('[data-testid^="loop-task-graph-edge-"]')!
+      const markerId = edge.getAttribute('marker-end')?.match(/^url\(#(.+)\)$/)?.[1]
+
+      expect(localMarkerIds).toContain(markerId)
+    }
   })
 
   it('resets an empty canvas draft and view while cancelling an old-scope drag', async () => {

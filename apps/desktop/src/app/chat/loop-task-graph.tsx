@@ -6,6 +6,7 @@ import {
   type WheelEvent as ReactWheelEvent,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState
@@ -49,9 +50,7 @@ function loopRowStatusIndicator(row: LoopRow): StatusIndicatorKind {
   }
 
   const failed =
-    LOOP_FAILED_STATUSES.has(status) ||
-    LOOP_FAILED_STATUSES.has(runStatus) ||
-    LOOP_FAILED_STATUSES.has(runOutcome)
+    LOOP_FAILED_STATUSES.has(status) || LOOP_FAILED_STATUSES.has(runStatus) || LOOP_FAILED_STATUSES.has(runOutcome)
 
   if (failed) {
     return 'failed'
@@ -1236,6 +1235,9 @@ export function LoopTaskGraph({
   selectedTaskId?: null | string
   workflowId?: string
 }) {
+  const markerScope = useId().replaceAll(':', '')
+  const arrowMarkerId = `${markerScope}-loop-graph-arrow`
+  const dimArrowMarkerId = `${markerScope}-loop-graph-arrow-dim`
   const [view, setView] = useState<LoopGraphView>(INITIAL_LOOP_GRAPH_VIEW)
   const [hoveredTaskId, setHoveredTaskId] = useState<null | string>(null)
   const [hoveredEdgeKey, setHoveredEdgeKey] = useState<null | string>(null)
@@ -2621,7 +2623,7 @@ export function LoopTaskGraph({
           >
             <defs>
               <marker
-                id="loop-graph-arrow"
+                id={arrowMarkerId}
                 markerHeight={6 / view.scale}
                 markerUnits="userSpaceOnUse"
                 markerWidth={6 / view.scale}
@@ -2633,7 +2635,7 @@ export function LoopTaskGraph({
                 <path d="M 0 1.5 L 7 5 L 0 8.5 z" fill="currentColor" />
               </marker>
               <marker
-                id="loop-graph-arrow-dim"
+                id={dimArrowMarkerId}
                 markerHeight={6 / view.scale}
                 markerUnits="userSpaceOnUse"
                 markerWidth={6 / view.scale}
@@ -2695,9 +2697,7 @@ export function LoopTaskGraph({
                     data-selected-connected={selectedConnected ? 'true' : 'false'}
                     data-testid={`loop-task-graph-edge-${edge.from}-${edge.to}`}
                     fill="none"
-                    markerEnd={
-                      highlighted || !activeFocus.taskId ? 'url(#loop-graph-arrow)' : 'url(#loop-graph-arrow-dim)'
-                    }
+                    markerEnd={`url(#${highlighted || !activeFocus.taskId ? arrowMarkerId : dimArrowMarkerId})`}
                     opacity={opacity}
                     stroke="currentColor"
                     strokeLinecap="round"
@@ -2715,7 +2715,7 @@ export function LoopTaskGraph({
                 d={connectionPreviewPath}
                 data-testid="loop-task-graph-connection-preview"
                 fill="none"
-                markerEnd="url(#loop-graph-arrow)"
+                markerEnd={`url(#${arrowMarkerId})`}
                 opacity="0.85"
                 stroke="currentColor"
                 strokeDasharray={`${5 / view.scale} ${4 / view.scale}`}

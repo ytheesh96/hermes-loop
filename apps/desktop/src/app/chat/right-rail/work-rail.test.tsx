@@ -48,11 +48,15 @@ function loopController(): LoopPanelController {
   })
 
   return {
+    activeWorkflowRef: { board: 'default', workflowId: 't_root' },
     canvasScopeKey: 'session-1',
     focusedTaskId: 't_root',
     focusRequestKey: 0,
+    focusRequestKeysByWorkflow: { 'default:t_root': 0 },
     hidden: false,
+    onActivateWorkflowId: vi.fn(),
     onAddTaskComment: vi.fn(),
+    onCloseWorkflowId: vi.fn(),
     onCreateTask: vi.fn(async () => null),
     onFocusTaskId: vi.fn(),
     onHide: vi.fn(),
@@ -61,10 +65,16 @@ function loopController(): LoopPanelController {
     onOpen: vi.fn(),
     onSavePositions: vi.fn(async () => true),
     onSelectTaskId: vi.fn(),
+    onSelectWorkflowId: vi.fn(),
     onTaskAction: vi.fn(),
     open: true,
     positions: [],
+    positionsByWorkflow: { 'default:t_root': [] },
+    workflowKey: 'default:t_root',
     workflowId: 't_root',
+    workflowRef: { board: 'default', workflowId: 't_root' },
+    workflowRefs: [{ board: 'default', workflowId: 't_root' }],
+    workflowPaneScopeKey: 'default:session-1',
     selectedTaskDetail: undefined,
     selectedTaskDetailError: null,
     selectedTaskId: 't_root',
@@ -137,7 +147,10 @@ describe('ChatWorkRail', () => {
     const idea = screen.getByRole('textbox', { name: 'Rough idea' })
     fireEvent.change(idea, { target: { value: 'Fix flaky auth test' } })
     fireEvent.keyDown(idea, { key: 'Enter' })
-    expect(onCreateLoopTask).toHaveBeenCalledWith('Fix flaky auth test', { workflowId: 't_root' })
+    expect(onCreateLoopTask).toHaveBeenCalledWith('Fix flaky auth test', {
+      workflowId: 't_root',
+      workflowRef: { board: 'default', workflowId: 't_root' }
+    })
   })
 
   it('reactivates the Loop tab when the same root row is explicitly opened again', async () => {

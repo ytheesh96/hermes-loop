@@ -42,6 +42,7 @@ export type ChatActions = Pick<
   | 'onPickFolders'
   | 'onPickImages'
   | 'onOpenLoop'
+  | 'onOpenLoopWorkflow'
   | 'onOpenKanbanTask'
   | 'onReload'
   | 'onRemoveAttachment'

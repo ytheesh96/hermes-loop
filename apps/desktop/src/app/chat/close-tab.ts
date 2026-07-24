@@ -1,13 +1,14 @@
 import { closeActiveTerminal } from '@/app/right-sidebar/terminal/terminals'
-import { closeWorkspaceTab } from '@/components/pane-shell/tree/store'
+import { activeTreePaneId, closeTreePane, closeWorkspaceTab } from '@/components/pane-shell/tree/store'
 import { isFocusWithin } from '@/lib/keybinds/combo'
 import { $filePreviewTarget, $previewTarget, closeActiveRightRailTab } from '@/store/preview'
 
 /**
  * ⌘W — close the tab of the context you're in, by precedence:
  *   1. a focused terminal → its active terminal tab,
- *   2. an open preview → its active preview tab (unchanged from pre-tiling),
- *   3. the MAIN zone → its active tab (a session tile stacked into the workspace).
+ *   2. the active Loop zone → its native workflow tab,
+ *   3. an open preview → its active preview tab (unchanged from pre-tiling),
+ *   4. the MAIN zone → its active tab (a session tile stacked into the workspace).
  * Returns false when nothing closes, so ⌘W is a no-op — it never closes the
  * window (a bare workspace stays put). Shared by the keyboard path (Win/Linux)
  * and the macOS menu-accelerator IPC.
@@ -15,6 +16,14 @@ import { $filePreviewTarget, $previewTarget, closeActiveRightRailTab } from '@/s
 export function closeActiveTab(): boolean {
   if (isFocusWithin('[data-terminal]')) {
     closeActiveTerminal()
+
+    return true
+  }
+
+  const activePaneId = activeTreePaneId()
+
+  if (activePaneId?.startsWith('loop-workflow:')) {
+    closeTreePane(activePaneId)
 
     return true
   }
