@@ -508,6 +508,27 @@ def test_delegate_child_kanban_mutator_guard_rejects_explicit_task_id(monkeypatc
     assert "delegate_task child" in payload["error"]
 
 
+def test_delegate_child_cannot_create_kanban_task(monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_parent")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "123")
+    monkeypatch.setenv("HERMES_KANBAN_CLAIM_LOCK", "claim")
+    from agent.delegation_context import delegated_child_context
+    from tools import kanban_tools
+
+    with delegated_child_context():
+        raw = kanban_tools._handle_create(
+            {
+                "title": "unauthorized child",
+                "body": "must not persist",
+                "assignee": "peer",
+            }
+        )
+
+    payload = json.loads(raw)
+    assert payload["error"]
+    assert "delegate_task child" in payload["error"]
+
+
 def test_delegate_child_attach_guard_leaves_no_row_or_file(monkeypatch, tmp_path):
     kb, tid, _workspace, attachments_root = _make_running_kanban_task(monkeypatch, tmp_path)
 
