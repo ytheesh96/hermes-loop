@@ -1,6 +1,7 @@
 import { useStore } from '@nanostores/react'
 import { memo } from 'react'
 
+import { type LoopWorkflowRef, loopWorkflowRefKey } from '@/app/chat/loop-state'
 import { StatusRow } from '@/components/chat/status-row'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -12,7 +13,6 @@ import {
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
 import { useI18n } from '@/i18n'
-import { loopWorkflowRefKey, type LoopWorkflowRef } from '@/app/chat/loop-state'
 import {
   $selectedLoopWorkflowBySession,
   $statusItemsBySession,

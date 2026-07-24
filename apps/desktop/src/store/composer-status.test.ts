@@ -461,11 +461,10 @@ describe('reconcileKanbanSessionSource', () => {
       ]
     })
 
-    expect(
-      $kanbanStatusBySession
-        .get()
-        [SID]?.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus, item.currentTool])
-    ).toEqual([['kanban-task:t_root', 't_root', 'Original Loop workflow', 'pending', 'Loop']])
+    const items = $kanbanStatusBySession.get()[SID]
+    expect(items?.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus, item.currentTool])).toEqual([
+      ['kanban-task:t_root', 't_root', 'Original Loop workflow', 'pending', 'Loop']
+    ])
   })
 
   it('shows multiple Loop workflows from the same foreground session', () => {
@@ -580,10 +579,9 @@ describe('reconcileKanbanSessionSource', () => {
       }
     ])
 
+    const items = $kanbanStatusBySession.get()[SID]
     expect(
-      $kanbanStatusBySession
-        .get()
-        [SID]?.map(item => [item.id, item.kanbanBoard, item.kanbanWorkflowId, item.kanbanTaskId, item.title])
+      items?.map(item => [item.id, item.kanbanBoard, item.kanbanWorkflowId, item.kanbanTaskId, item.title])
     ).toEqual([
       ['kanban-task:alpha:t_root', 'alpha', 'wf_shared', 't_root', 'Alpha workflow'],
       ['kanban-task:beta:t_root', 'beta', 'wf_shared', 't_root', 'Beta workflow']
@@ -679,11 +677,10 @@ describe('reconcileKanbanSessionSource', () => {
       ]
     })
 
-    expect(
-      $kanbanStatusBySession
-        .get()
-        [SID]?.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus, item.currentTool])
-    ).toEqual([['kanban-task:t_outer_loop', 't_outer_loop', 'Outer Loop workflow', 'completed', 'Loop']])
+    const items = $kanbanStatusBySession.get()[SID]
+    expect(items?.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus, item.currentTool])).toEqual([
+      ['kanban-task:t_outer_loop', 't_outer_loop', 'Outer Loop workflow', 'completed', 'Loop']
+    ])
   })
 
   it('uses the task matching workflow_id as the workflow summary when present', () => {
@@ -714,11 +711,10 @@ describe('reconcileKanbanSessionSource', () => {
       ]
     })
 
-    expect(
-      $kanbanStatusBySession
-        .get()
-        [SID]?.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus, item.currentTool])
-    ).toEqual([['kanban-task:t_root', 't_root', 'Original Loop workflow', 'pending', 'Loop']])
+    const items = $kanbanStatusBySession.get()[SID]
+    expect(items?.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus, item.currentTool])).toEqual([
+      ['kanban-task:t_root', 't_root', 'Original Loop workflow', 'pending', 'Loop']
+    ])
   })
 
   it('uses the oldest workflow member as its summary when no task id matches the workflow id', () => {
@@ -748,11 +744,10 @@ describe('reconcileKanbanSessionSource', () => {
       ]
     })
 
-    expect(
-      $kanbanStatusBySession
-        .get()
-        [SID]?.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus, item.currentTool])
-    ).toEqual([['kanban-task:t_root', 't_root', 'Original Loop workflow', 'pending', 'Loop']])
+    const items = $kanbanStatusBySession.get()[SID]
+    expect(items?.map(item => [item.id, item.kanbanTaskId, item.title, item.todoStatus, item.currentTool])).toEqual([
+      ['kanban-task:t_root', 't_root', 'Original Loop workflow', 'pending', 'Loop']
+    ])
   })
 
   it('writes compressed lineage source under the active composer session key', () => {
@@ -790,10 +785,9 @@ describe('reconcileKanbanSessionSource', () => {
       'loopagent.worker.upsert'
     )
 
+    const items = $statusItemsBySession.get()['runtime-tip']
     expect(
-      $statusItemsBySession
-        .get()
-        ['runtime-tip']?.map(item => [item.id, item.type, item.state, item.sessionId, item.profile, item.currentTool])
+      items?.map(item => [item.id, item.type, item.state, item.sessionId, item.profile, item.currentTool])
     ).toEqual([['kanban-agent:t_running:7', 'subagent', 'running', 'worker-session-7', 'peacock', 'Terminal']])
 
     reconcileKanbanSessionSource('runtime-tip', {
@@ -884,10 +878,9 @@ describe('reconcileKanbanSessionSource', () => {
       'loopagent.worker.upsert'
     )
 
+    const items = $statusItemsBySession.get()['runtime-tip']
     expect(
-      $statusItemsBySession
-        .get()
-        ['runtime-tip']?.map(item => [item.id, item.type, item.title, item.sessionId, item.profile, item.currentTool])
+      items?.map(item => [item.id, item.type, item.title, item.sessionId, item.profile, item.currentTool])
     ).toEqual([
       ['kanban-task:t_root', 'todo', 'Live workflow', undefined, undefined, 'Loop'],
       ['kanban-agent:t_root:42', 'subagent', 'Live workflow', 'worker-session-root', 'default', 'Read File']
@@ -935,12 +928,16 @@ describe('reconcileKanbanSessionSource', () => {
       'loopagent.worker.upsert'
     )
 
+    const items = $statusItemsBySession.get()['runtime-tip']
     expect(
-      $statusItemsBySession
-        .get()
-        [
-          'runtime-tip'
-        ]?.map(item => [item.id, item.type, item.kanbanWorkflowId, item.kanbanTaskId, item.state, item.statusIndicator])
+      items?.map(item => [
+        item.id,
+        item.type,
+        item.kanbanWorkflowId,
+        item.kanbanTaskId,
+        item.state,
+        item.statusIndicator
+      ])
     ).toEqual([
       ['kanban-workflow:wf_dynamic', 'todo', 'wf_dynamic', 't_build', 'failed', 'attention'],
       ['kanban-agent:t_review:9', 'subagent', undefined, 't_review', 'running', 'active']
