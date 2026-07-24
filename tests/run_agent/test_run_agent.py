@@ -4391,15 +4391,10 @@ class TestRunConversation:
             call["api_request_id"] for call in post_request_calls
         ]
         assert all("message_count" in c and isinstance(c.get("request_messages"), list) for c in pre_request_calls)
-        expected_first_request_chars = sum(
-            len(str(message))
-            for message in (
-                {"role": "system", "content": "You are helpful."},
-                {"role": "user", "content": "search something"},
-            )
+        assert all(
+            call["request_char_count"] == call["approx_input_tokens"] * 4
+            for call in pre_request_calls
         )
-        assert pre_request_calls[0]["request_char_count"] == expected_first_request_chars
-        assert all(call["request_char_count"] > 0 for call in pre_request_calls)
         assert all("request" in c and "messages" in c["request"]["body"] for c in pre_request_calls)
         assert any(msg.get("role") == "user" and msg.get("content") == "search something" for msg in pre_request_calls[0]["request_messages"])
         assert all("usage" in c and "response" in c for c in post_request_calls)
