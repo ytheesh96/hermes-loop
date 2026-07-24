@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -67,6 +68,27 @@ def test_idempotency_key_returns_existing_task(kanban_home):
         assert task.title == "first"
     finally:
         conn.close()
+
+
+def test_concurrent_idempotency_key_persists_one_task(kanban_home):
+    def create(index):
+        with kb.connect() as conn:
+            return kb.create_task(
+                conn,
+                title=f"attempt {index}",
+                idempotency_key="concurrent-create",
+            )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        task_ids = list(pool.map(create, range(8)))
+
+    assert len(set(task_ids)) == 1
+    with kb.connect() as conn:
+        rows = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ?",
+            ("concurrent-create",),
+        ).fetchall()
+    assert [row["id"] for row in rows] == [task_ids[0]]
 
 
 def test_idempotency_key_ignored_for_archived(kanban_home):
