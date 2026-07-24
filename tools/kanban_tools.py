@@ -65,6 +65,28 @@ def _profile_has_kanban_toolset() -> bool:
         return False
 
 
+def _is_delegated_child_context() -> bool:
+    try:
+        from agent.delegation_context import is_delegated_child_context
+
+        return is_delegated_child_context()
+    except Exception:
+        return False
+
+
+def _reject_delegated_child_mutation(tool_name: str) -> Optional[str]:
+    """Deny durable board mutations from delegate_task child contexts."""
+
+    if not _is_delegated_child_context():
+        return None
+    return tool_error(
+        f"{tool_name} refused: delegate_task child agents are not Kanban "
+        "run owners. Return findings to the parent agent; the dispatcher "
+        "worker or an explicitly configured Kanban orchestrator must perform "
+        "board mutations."
+    )
+
+
 def _loop_foreground_enabled() -> bool:
     """Whether a non-worker session can originate and resume Loop work."""
 
@@ -82,7 +104,7 @@ def _loop_foreground_enabled() -> bool:
 def _check_kanban_foreground_mode() -> bool:
     """Foreground controls needed to act on an internal Loop wake."""
 
-    if os.environ.get("HERMES_KANBAN_TASK"):
+    if os.environ.get("HERMES_KANBAN_TASK") or _is_delegated_child_context():
         return False
     return _profile_has_kanban_toolset() or _loop_foreground_enabled()
 
@@ -90,6 +112,8 @@ def _check_kanban_foreground_mode() -> bool:
 def _check_kanban_reentry_mode() -> bool:
     """Task lifecycle for workers plus the bounded foreground re-entry set."""
 
+    if _is_delegated_child_context():
+        return False
     return bool(os.environ.get("HERMES_KANBAN_TASK")) or _check_kanban_foreground_mode()
 
 
@@ -105,6 +129,8 @@ def _check_kanban_mode() -> bool:
     re-entry set through ``_check_kanban_reentry_mode`` and
     ``_check_kanban_foreground_mode``.
     """
+    if _is_delegated_child_context():
+        return False
     if os.environ.get("HERMES_KANBAN_TASK"):
         return True
     return _profile_has_kanban_toolset()
@@ -119,6 +145,8 @@ def _check_kanban_orchestrator_mode() -> bool:
     surface; profiles that explicitly opt into the Kanban toolset and are not
     scoped to one task retain list/create controls.
     """
+    if _is_delegated_child_context():
+        return False
     if os.environ.get("HERMES_KANBAN_TASK"):
         return False
     return _profile_has_kanban_toolset()
@@ -126,7 +154,7 @@ def _check_kanban_orchestrator_mode() -> bool:
 
 def _check_kanban_graph_control_mode() -> bool:
     """High-level graph control is orchestrator-only, never leaf-worker."""
-    if os.environ.get("HERMES_KANBAN_TASK"):
+    if os.environ.get("HERMES_KANBAN_TASK") or _is_delegated_child_context():
         return False
     return _profile_has_kanban_toolset()
 
@@ -139,6 +167,8 @@ def _default_task_id(arg: Optional[str]) -> Optional[str]:
     """Resolve ``task_id`` arg or fall back to the env var the dispatcher set."""
     if arg:
         return arg
+    if _is_delegated_child_context():
+        return None
     env_tid = os.environ.get("HERMES_KANBAN_TASK")
     return env_tid or None
 
@@ -383,6 +413,9 @@ def _require_orchestrator_tool(tool_name: str) -> Optional[str]:
     structured tool_error so the model gets a clear refusal instead of
     silently mutating board state from a worker context.
     """
+    delegated_err = _reject_delegated_child_mutation(tool_name)
+    if delegated_err:
+        return delegated_err
     if os.environ.get("HERMES_KANBAN_TASK"):
         return tool_error(
             f"{tool_name} is orchestrator-only; dispatcher-spawned workers "
@@ -413,6 +446,7 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
         "completed_at": task.completed_at,
         "current_run_id": task.current_run_id,
         "model_override": task.model_override,
+        "provider_override": task.provider_override,
         "parents": parents,
         "children": children,
         "parent_count": len(parents),
@@ -459,6 +493,7 @@ def _handle_show(args: dict, **kw) -> str:
                     "result": t.result,
                     "current_run_id": t.current_run_id,
                     "model_override": t.model_override,
+                    "provider_override": t.provider_override,
                 }
 
             def _run_dict(r):
@@ -564,6 +599,9 @@ def _handle_list(args: dict, **kw) -> str:
 
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff."""
+    delegated_err = _reject_delegated_child_mutation("kanban_complete")
+    if delegated_err:
+        return delegated_err
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         return tool_error(
@@ -776,6 +814,9 @@ def _handle_complete(args: dict, **kw) -> str:
 
 def _handle_block(args: dict, **kw) -> str:
     """Record a terminal blocker on the current task."""
+    delegated_err = _reject_delegated_child_mutation("kanban_block")
+    if delegated_err:
+        return delegated_err
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         return tool_error(
@@ -916,6 +957,9 @@ def _handle_heartbeat(args: dict, **kw) -> str:
     by ``release_stale_claims`` — which is exactly the trap that
     ``heartbeat_claim``'s docstring warns against.
     """
+    delegated_err = _reject_delegated_child_mutation("kanban_heartbeat")
+    if delegated_err:
+        return delegated_err
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         return tool_error(
@@ -960,6 +1004,9 @@ def _handle_heartbeat(args: dict, **kw) -> str:
 
 def _handle_comment(args: dict, **kw) -> str:
     """Append a non-waking message to a task's thread."""
+    delegated_err = _reject_delegated_child_mutation("kanban_comment")
+    if delegated_err:
+        return delegated_err
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         return tool_error(
@@ -1004,6 +1051,9 @@ def _handle_attach(args: dict, **kw) -> str:
     """
     from hermes_cli import kanban_db as kb
 
+    delegated_err = _reject_delegated_child_mutation("kanban_attach")
+    if delegated_err:
+        return delegated_err
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         return tool_error(
@@ -1123,6 +1173,9 @@ def _handle_attach_url(args: dict, **kw) -> str:
     """
     from hermes_cli import kanban_db as kb
 
+    delegated_err = _reject_delegated_child_mutation("kanban_attach_url")
+    if delegated_err:
+        return delegated_err
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         return tool_error(
@@ -1232,7 +1285,13 @@ def _handle_create(args: dict, **kw) -> str:
     # Stamp the originating session id from the gateway context before
     # falling back to process env. Desktop/TUI can multiplex sessions in one
     # process, so env may be stale from a prior conversation.
-    session_id = args.get("session_id") or get_logical_session_id(None)
+    from tools.async_delegation import _current_origin_session_id
+
+    session_id = (
+        args.get("session_id")
+        or _current_origin_session_id()
+        or get_logical_session_id(None)
+    )
     priority = args.get("priority")
     # Resolve workspace. If the caller passed one explicitly, honor it.
     # Otherwise committed follow-up/review work inherits the first parent
@@ -1273,6 +1332,10 @@ def _handle_create(args: dict, **kw) -> str:
     if goal_bool_error:
         return tool_error(goal_bool_error)
     goal_max_turns = args.get("goal_max_turns")
+    model_override = args.get("model")
+    provider_override = args.get("provider")
+    if provider_override and not model_override:
+        return tool_error("'provider' requires 'model' to be set as well")
     if isinstance(parents, str):
         parents = [parents]
     if not isinstance(parents, (list, tuple)):
@@ -1416,6 +1479,8 @@ def _handle_create(args: dict, **kw) -> str:
                         if max_runtime_seconds is not None else None
                     ),
                     skills=skills,
+                    model_override=model_override,
+                    provider_override=provider_override,
                     goal_mode=goal_mode,
                     goal_max_turns=(
                         int(goal_max_turns)
@@ -1458,6 +1523,9 @@ def _handle_create(args: dict, **kw) -> str:
             return _ok(
                 task_id=new_tid,
                 status=new_task.status if new_task else None,
+                workspace_kind=new_task.workspace_kind if new_task else None,
+                workspace_path=new_task.workspace_path if new_task else None,
+                project_id=new_task.project_id if new_task else None,
                 subscribed=subscribed,
                 workflow_id=workflow_id,
                 decomposition=progress["decomposition"],
@@ -1518,6 +1586,9 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
 
 def _handle_unblock(args: dict, **kw) -> str:
     """Transition a blocked task to ready, or todo while parents remain open."""
+    delegated_err = _reject_delegated_child_mutation("kanban_unblock")
+    if delegated_err:
+        return delegated_err
     guard = _require_orchestrator_tool("kanban_unblock")
     if guard:
         return guard
@@ -2135,6 +2206,26 @@ KANBAN_CREATE_SCHEMA = {
                     "continuation turns the worker may take before the task "
                     "is blocked for review. Ignored unless goal_mode is "
                     "true. Defaults to the goal-engine default (20)."
+                ),
+            },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Pin the dispatched worker to this model instead of "
+                    "the assignee profile's configured model. Use the "
+                    "exact model name the target provider expects. Omit "
+                    "to use the profile default."
+                ),
+            },
+            "provider": {
+                "type": "string",
+                "description": (
+                    "Provider the 'model' belongs to (e.g. 'openrouter', "
+                    "'anthropic', 'nous'). Set this whenever the model "
+                    "is not from the assignee profile's configured "
+                    "provider — a model name alone is resolved against "
+                    "the profile's provider and will fail if it belongs "
+                    "to a different one. Requires 'model'."
                 ),
             },
             "board": _board_schema_prop(),

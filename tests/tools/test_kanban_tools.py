@@ -1828,6 +1828,23 @@ def test_create_no_parent_stays_scratch(monkeypatch, foreground_env):
         conn.close()
 
 
+def test_create_no_worker_task_stays_scratch(monkeypatch, worker_env):
+    """Orchestrator/CLI callers keep the same isolated scratch default."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    d = json.loads(kt._handle_create({"title": "orch child", "assignee": "peer"}))
+    assert d["ok"] is True
+    conn = kb.connect()
+    try:
+        child = kb.get_task(conn, d["task_id"])
+        assert child.workspace_kind == "scratch"
+        assert child.workspace_path is None
+    finally:
+        conn.close()
+
+
 def test_create_stamps_session_id_from_env(monkeypatch, foreground_env):
     """When the agent loop runs under ACP, the server propagates the
     originating chat session id via HERMES_SESSION_ID. ``kanban_create``
