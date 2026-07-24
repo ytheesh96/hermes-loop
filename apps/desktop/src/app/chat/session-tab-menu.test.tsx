@@ -25,13 +25,13 @@ afterEach(() => {
   $sessionTiles.set([])
 })
 
-async function openTabMenu() {
+async function openTabMenu(title = 'Session') {
   fireEvent.contextMenu(screen.getByRole('button', { name: 'Worker tab' }), {
     clientX: 10,
     clientY: 10
   })
 
-  return screen.findByRole('menu', { name: 'Actions for Session' })
+  return screen.findByRole('menu', { name: `Actions for ${title}` })
 }
 
 describe('SessionTabMenu', () => {
@@ -80,7 +80,7 @@ describe('SessionTabMenu', () => {
       </SessionTabMenu>
     )
 
-    await openTabMenu()
+    await openTabMenu('New session')
 
     expect(screen.getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
     expect(screen.getByRole('menuitem', { name: 'Pin' })).toBeTruthy()

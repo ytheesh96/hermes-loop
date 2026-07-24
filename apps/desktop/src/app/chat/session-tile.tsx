@@ -368,9 +368,15 @@ export function tileStoredRow(storedSessionId: string): SessionInfo | undefined 
 function tileTitle(storedSessionId: string): string {
   const stored = tileStoredRow(storedSessionId)
 
+  if (stored) {
+    return sessionTitle(stored)
+  }
+
   // A tab-strip "+" tab is unlisted until its first turn persists, so it isn't
   // in $sessions yet — label it "New session" rather than a bare "Session".
-  return stored ? sessionTitle(stored) : 'New session'
+  return $sessionTiles.get().some(tile => tile.storedSessionId === storedSessionId && tile.watch)
+    ? 'Session'
+    : 'New session'
 }
 
 /** The `@session` link payload for a tile tab drag — id + owning profile + title. */
