@@ -106,64 +106,64 @@ export function ChatPreviewRail({ embedded = false, onRestartServer, setTitlebar
     >
       {!embedded && (
         <div
-        className={cn(
-          'group/rail-tabs flex h-(--titlebar-height) shrink-0 bg-(--ui-sidebar-surface-background)',
-          PANE_TAB_STRIP_LINE
-        )}
-      >
-        <div
-          className="flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden overscroll-x-contain [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-          role="tablist"
+          className={cn(
+            'group/rail-tabs flex h-(--titlebar-height) shrink-0 bg-(--ui-sidebar-surface-background)',
+            PANE_TAB_STRIP_LINE
+          )}
         >
-          {tabs.map((tab, index) => {
-            const active = tab.id === activeTab.id
-            const hasOthers = tabs.length > 1
-            const hasTabsToRight = index < tabs.length - 1
-            const dirty = Boolean(dirtyPreviewUrls[tab.target.url])
+          <div
+            className="flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden overscroll-x-contain [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            role="tablist"
+          >
+            {tabs.map((tab, index) => {
+              const active = tab.id === activeTab.id
+              const hasOthers = tabs.length > 1
+              const hasTabsToRight = index < tabs.length - 1
+              const dirty = Boolean(dirtyPreviewUrls[tab.target.url])
 
-            return (
-              <ContextMenu key={tab.id}>
-                <ContextMenuTrigger asChild>
-                  <PaneTab active={active} dirty={dirty} onClose={() => closeRightRailTab(tab.id)}>
-                    <Tip label={tab.target.path || tab.target.url || tab.label}>
-                      <PaneTabLabel
-                        aria-selected={active}
-                        as="button"
-                        className="normal-case tracking-normal"
-                        onClick={() => selectRightRailTab(tab.id)}
-                        role="tab"
-                        type="button"
-                      >
-                        {tab.label}
-                      </PaneTabLabel>
-                    </Tip>
-                  </PaneTab>
-                </ContextMenuTrigger>
-                <ContextMenuContent>
-                  <ContextMenuItem onSelect={() => closeRightRailTab(tab.id)}>
-                    {t.common.close}
-                    <span className="ml-auto pl-4 text-(--ui-text-tertiary)">{formatCombo('mod+w')}</span>
-                  </ContextMenuItem>
-                  <ContextMenuItem disabled={!hasOthers} onSelect={() => closeOtherRightRailTabs(tab.id)}>
-                    {t.preview.closeOthers}
-                  </ContextMenuItem>
-                  <ContextMenuItem disabled={!hasTabsToRight} onSelect={() => closeRightRailTabsToRight(tab.id)}>
-                    {t.preview.closeToRight}
-                  </ContextMenuItem>
-                  <ContextMenuSeparator />
-                  <ContextMenuItem onSelect={closeRightRail}>{t.preview.closeAll}</ContextMenuItem>
-                </ContextMenuContent>
-              </ContextMenu>
-            )
-          })}
-        </div>
-        <button
-          aria-label={t.preview.closePane}
-          className="mr-1.5 grid size-6 shrink-0 self-center place-items-center rounded-md text-(--ui-text-tertiary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring group-hover/rail-tabs:opacity-100 [-webkit-app-region:no-drag]"
-          onClick={closeRightRail}
-          type="button"
-        >
-          <Codicon name="close" size="0.75rem" />
+              return (
+                <ContextMenu key={tab.id}>
+                  <ContextMenuTrigger asChild>
+                    <PaneTab active={active} dirty={dirty} onClose={() => closeRightRailTab(tab.id)}>
+                      <Tip label={tab.target.path || tab.target.url || tab.label}>
+                        <PaneTabLabel
+                          aria-selected={active}
+                          as="button"
+                          className="normal-case tracking-normal"
+                          onClick={() => selectRightRailTab(tab.id)}
+                          role="tab"
+                          type="button"
+                        >
+                          {tab.label}
+                        </PaneTabLabel>
+                      </Tip>
+                    </PaneTab>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent>
+                    <ContextMenuItem onSelect={() => closeRightRailTab(tab.id)}>
+                      {t.common.close}
+                      <span className="ml-auto pl-4 text-(--ui-text-tertiary)">{formatCombo('mod+w')}</span>
+                    </ContextMenuItem>
+                    <ContextMenuItem disabled={!hasOthers} onSelect={() => closeOtherRightRailTabs(tab.id)}>
+                      {t.preview.closeOthers}
+                    </ContextMenuItem>
+                    <ContextMenuItem disabled={!hasTabsToRight} onSelect={() => closeRightRailTabsToRight(tab.id)}>
+                      {t.preview.closeToRight}
+                    </ContextMenuItem>
+                    <ContextMenuSeparator />
+                    <ContextMenuItem onSelect={closeRightRail}>{t.preview.closeAll}</ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
+              )
+            })}
+          </div>
+          <button
+            aria-label={t.preview.closePane}
+            className="mr-1.5 grid size-6 shrink-0 self-center place-items-center rounded-md text-(--ui-text-tertiary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring group-hover/rail-tabs:opacity-100 [-webkit-app-region:no-drag]"
+            onClick={closeRightRail}
+            type="button"
+          >
+            <Codicon name="close" size="0.75rem" />
           </button>
         </div>
       )}

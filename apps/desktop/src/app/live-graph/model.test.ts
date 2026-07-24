@@ -136,7 +136,9 @@ describe('buildSessionLiveGraph', () => {
     )
 
     expect(
-      Object.fromEntries(graph.nodes.filter(node => node.kind === 'task').map(node => [node.entityId, node.currentTool]))
+      Object.fromEntries(
+        graph.nodes.filter(node => node.kind === 'task').map(node => [node.entityId, node.currentTool])
+      )
     ).toEqual({
       direct: 'Kanban Block',
       event: 'Write File',

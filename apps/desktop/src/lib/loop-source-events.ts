@@ -11,12 +11,19 @@ export interface LoopSourceChangedEvent {
   worker_session_id?: unknown
 }
 
-export function isLoopSourceInvalidationEvent(eventType: string | undefined, payload: unknown): payload is LoopSourceChangedEvent {
+export function isLoopSourceInvalidationEvent(
+  eventType: string | undefined,
+  payload: unknown
+): payload is LoopSourceChangedEvent {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return false
   }
 
-  return eventType === 'loop.source_changed' || eventType === 'kanban.task_event' || Boolean(eventType?.startsWith('kanban.worker.'))
+  return (
+    eventType === 'loop.source_changed' ||
+    eventType === 'kanban.task_event' ||
+    Boolean(eventType?.startsWith('kanban.worker.'))
+  )
 }
 
 interface InvalidateLoopSourceOptions {
@@ -103,7 +110,10 @@ export async function invalidateLoopSourceFromEvent(
   ].filter(isStr)
 
   const lineageIds = new Set(eventLineageIds.length ? eventLineageIds : activeSessionIds.filter(isStr))
-  const affectedTaskIds = new Set([...strings(event.affected_task_ids), ...(isStr(event.task_id) ? [event.task_id] : [])])
+  const affectedTaskIds = new Set([
+    ...strings(event.affected_task_ids),
+    ...(isStr(event.task_id) ? [event.task_id] : [])
+  ])
   const incomingRevision = eventRevision(event)
 
   await queryClient.invalidateQueries({

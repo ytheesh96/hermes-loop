@@ -51,5 +51,4 @@ describe('loopSessionSourceRefetchInterval', () => {
 
     expect(loopSessionSourceRefetchInterval(source)).toBe(LOOP_SOURCE_IDLE_REFETCH_INTERVAL_MS)
   })
-
 })

@@ -1372,6 +1372,7 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
 
   const title = titleParts.title
   const titleEnriched = title !== baseTitle
+
   const loopGraphSubtitle =
     part.toolName === 'loop_graph' && Array.isArray(resultRecord.nodes)
       ? [
@@ -1381,6 +1382,7 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
           .filter(Boolean)
           .join(' · ')
       : ''
+
   const baseSubtitle = error || loopGraphSubtitle || toolSubtitle(part, argsRecord, resultRecord)
 
   const keepSubtitleWithTitle =

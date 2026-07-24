@@ -70,7 +70,7 @@ describe('AgentsView Loopagent workers', () => {
   })
 
   it('renders active Kanban worker snapshot rows when no Loopagent event reached the store', () => {
-    const rawLog = "Warning: Unknown toolsets: moa Query: task Initializing agent... $ git status --short\n$ git diff"
+    const rawLog = 'Warning: Unknown toolsets: moa Query: task Initializing agent... $ git status --short\n$ git diff'
 
     $kanbanStatusBySession.set({
       'loop-session': [

@@ -13,6 +13,7 @@ export interface TimelineEntry {
 
 // Injected as user messages for alternation; not human prompts (thread.tsx).
 const PROCESS_NOTIFICATION_RE = /^\[IMPORTANT: Background process [\s\S]*\]$/
+
 const KANBAN_REENTRY_RE =
   /^\[IMPORTANT:(?: A workflow produced a task-boundary batch\b|[^\r\n]*\bKanban\s+\S+\s+(?:done|blocked|gave up|worker crashed|timed out)\b)/
 

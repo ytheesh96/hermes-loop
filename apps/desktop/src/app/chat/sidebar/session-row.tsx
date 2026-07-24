@@ -221,6 +221,7 @@ export function SidebarSessionRow({
 
               return
             }
+
             onResume()
           }}
           onMouseDown={event => event.button === 1 && event.preventDefault()}

@@ -198,10 +198,8 @@ export function sessionMatchesAnyId(session: SessionIdentity, ids: Iterable<null
 /** True when a stored/lineage id resolves to this session — it matches either
  *  the live id, stable lineage root, or any known compression segment. The one place the
  *  "same conversation across compression" test lives. */
-export const sessionMatchesStoredId = (
-  session: SessionIdentity,
-  storedSessionId: string
-): boolean => sessionMatchesId(session, storedSessionId)
+export const sessionMatchesStoredId = (session: SessionIdentity, storedSessionId: string): boolean =>
+  sessionMatchesId(session, storedSessionId)
 
 /**
  * Stable composer + `/queue` scope for a selected stored session.

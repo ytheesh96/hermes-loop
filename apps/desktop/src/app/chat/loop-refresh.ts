@@ -20,11 +20,7 @@ function needsActiveRefresh(task: NonNullable<TenantLoopSource['tasks']>[number]
   const taskStatus = normalizedStatus(task.status)
   const runStatus = normalizedStatus(task.latest_run?.status)
 
-  return (
-    !TERMINAL_TASK_STATUSES.has(taskStatus) ||
-    ACTIVE_RUN_STATUSES.has(runStatus) ||
-    Boolean(task.current_run_id)
-  )
+  return !TERMINAL_TASK_STATUSES.has(taskStatus) || ACTIVE_RUN_STATUSES.has(runStatus) || Boolean(task.current_run_id)
 }
 
 export function loopSessionSourceRefetchInterval(source?: null | TenantLoopSource): false | number {

@@ -30,11 +30,14 @@ export function AttachmentList({
 function AttachmentPill({ attachment, onRemove }: { attachment: ComposerAttachment; onRemove?: (id: string) => void }) {
   const { t } = useI18n()
   const c = t.composer
-  const Icon = { folder: FolderOpen, url: Link, image: ImageIcon, file: FileText, task: Clipboard, terminal: Terminal }[attachment.kind]
+  const Icon = { folder: FolderOpen, url: Link, image: ImageIcon, file: FileText, task: Clipboard, terminal: Terminal }[
+    attachment.kind
+  ]
   const cwd = useStore($currentCwd)
   const isUploading = attachment.uploadState === 'uploading'
   const hasUploadError = attachment.uploadState === 'error'
-  const canPreview = attachment.kind !== 'folder' && attachment.kind !== 'task' && attachment.kind !== 'terminal' && !isUploading
+  const canPreview =
+    attachment.kind !== 'folder' && attachment.kind !== 'task' && attachment.kind !== 'terminal' && !isUploading
   const detail = attachment.detail && attachment.detail !== attachment.label ? attachment.detail : undefined
 
   async function openPreview() {

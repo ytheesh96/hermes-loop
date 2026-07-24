@@ -942,11 +942,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           // The gateway's notification poller announces background process
           // completions / watch matches here — re-sync the status stack.
           void refreshBackgroundProcesses(sessionId)
-        } else if (
-          sessionId &&
-          payload?.kind === 'workflow' &&
-          payload.status === 'foreground_resumed'
-        ) {
+        } else if (sessionId && payload?.kind === 'workflow' && payload.status === 'foreground_resumed') {
           const text = coerceGatewayText(payload.text).trim()
           const workflowId = typeof payload.workflow_id === 'string' ? payload.workflow_id.trim() : ''
           const eventId = payload.event_id

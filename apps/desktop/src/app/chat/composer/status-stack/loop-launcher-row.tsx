@@ -50,6 +50,7 @@ export const LoopLauncherRow = memo(function LoopLauncherRow({
 
   const graphWorkflows = workflowSummaries.filter(item => (item.taskProgress?.total || 0) > 1)
   const workflows = graphWorkflows.length > 0 ? graphWorkflows : workflowSummaries
+
   const duplicateWorkflowIds = new Set(
     workflows
       .filter((item, index) =>
