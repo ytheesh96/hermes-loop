@@ -67,12 +67,31 @@ npm run dev          # Vite renderer + Electron, which boots the Python backend
 Point the app at a specific source checkout, or sandbox it away from your real config:
 
 ```bash
-# throwaway HERMES_HOME, separate Electron userData, distinct app name to avoid the single-instance lock
-../scripts/dev-sandbox.sh npm run dev
+# First-class read-only inspector: snapshots ~/.hermes into a disposable writable home.
+# The source home is never used as HERMES_HOME and is never mutated by the backend.
+npm run dev:inspect
+
+# Inspect a different Hermes home (macOS example).
+HERMES_DESKTOP_INSPECT_HOME=/Users/yt/.hermes npm run dev:inspect
+
+# Keep the generated snapshot/userData for later inspection (overwritten on launch).
+HERMES_DESKTOP_INSPECT_DIR=/tmp/hermes-desktop-inspect npm run dev:inspect
+
+# Generic throwaway HERMES_HOME, separate Electron userData, distinct app name to avoid the single-instance lock
+../../scripts/dev-sandbox.sh -- npm run dev
 HERMES_DESKTOP_HERMES_ROOT=/path/to/clone npm run dev
 HERMES_HOME=/tmp/throwaway npm run dev
 npm run dev:fake-boot   # exercise the startup overlay with deterministic delays
 ```
+
+`npm run dev:inspect` sets `HERMES_DESKTOP_DEV_INSTANCE=1`, uses a distinct
+`Hermes Inspector` app name and Electron `userData` directory, and excludes
+credentials (`.env`, `auth.json`, OAuth token files), runtime directories, and
+symlinks from the snapshot. This is a snapshot inspection path, not a live
+view: changes made by the development backend stay in the generated snapshot.
+The inspector never registers or claims the production `hermes://` protocol;
+that protocol remains owned by the packaged Hermes app. Use the ordinary
+`npm run dev` path when you intentionally want a writable, live Hermes home.
 
 ### Building installers
 

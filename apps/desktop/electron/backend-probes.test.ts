@@ -15,6 +15,7 @@ import { test } from 'vitest'
 import {
   canImportHermesCli,
   hermesRuntimeImportProbe,
+  selectImportablePython,
   shouldTrustHermesOverride,
   verifyHermesCli
 } from './backend-probes'
@@ -48,6 +49,7 @@ test('canImportHermesCli returns false when binary does not exist', () => {
 
 test('hermes runtime import probe checks config dependencies', () => {
   const probe = hermesRuntimeImportProbe()
+  assert.match(probe, /\bimport rich\b/)
   assert.match(probe, /\bimport yaml\b/)
   // dotenv is the first third-party import on the CLI boot path
   // (hermes_cli/env_loader.py); a mid-update venv missing python-dotenv
@@ -63,6 +65,21 @@ test('explicit Hermes override is authoritative', () => {
 test('empty Hermes override is not authoritative', () => {
   assert.equal(shouldTrustHermesOverride(''), false)
   assert.equal(shouldTrustHermesOverride(undefined), false)
+})
+
+test('selectImportablePython skips an incomplete runtime and keeps the first working candidate', () => {
+  const calls: string[] = []
+
+  const selected = selectImportablePython(['/usr/bin/python3', '/home/test/.venv/bin/python'], {
+    probe: candidate => {
+      calls.push(candidate)
+
+      return candidate === '/home/test/.venv/bin/python'
+    }
+  })
+
+  assert.equal(selected, '/home/test/.venv/bin/python')
+  assert.deepEqual(calls, ['/usr/bin/python3', '/home/test/.venv/bin/python'])
 })
 
 test('verifyHermesCli returns false when command is falsy', () => {

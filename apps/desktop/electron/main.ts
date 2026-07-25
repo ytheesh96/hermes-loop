@@ -34,7 +34,7 @@ import { stopBackendChild as stopBackendChildImpl } from './backend-child'
 import { dashboardFallbackArgs, sourceDeclaresServe } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
 import { buildDesktopBackendEnv, normalizeHermesHomeRoot } from './backend-env'
-import { canImportHermesCli, shouldTrustHermesOverride, verifyHermesCli } from './backend-probes'
+import { canImportHermesCli, selectImportablePython, shouldTrustHermesOverride, verifyHermesCli } from './backend-probes'
 import { waitForDashboardPortAnnouncement } from './backend-ready'
 import { shouldLatchBackendStartFailure } from './backend-start-failure'
 import { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } from './bootstrap-platform'
@@ -76,6 +76,7 @@ import {
   shouldRemoveAppBundle,
   uninstallArgsForMode
 } from './desktop-uninstall'
+import { resolveDesktopDevInstance, shouldRegisterHermesProtocol } from './dev-instance'
 import { installEmbedReferer } from './embed-referer'
 import { createEventDeduper } from './event-dedupe'
 import { findGitBash as _findGitBash } from './find-git-bash'
@@ -205,7 +206,15 @@ import { isPackagedInstallPath as isPackagedInstallPathUnderRoots } from './work
 import { readWslWindowsClipboardImage } from './wsl-clipboard-image'
 import { resolvePickerDefaultPath } from './wsl-path-bridge'
 
-const USER_DATA_OVERRIDE = process.env.HERMES_DESKTOP_USER_DATA_DIR
+const IS_PACKAGED = app.isPackaged || Boolean(process.env.HERMES_DESKTOP_IS_PACKAGED)
+
+const DEV_INSTANCE = resolveDesktopDevInstance({
+  env: process.env,
+  home: app.getPath('home'),
+  isPackaged: IS_PACKAGED
+})
+
+const USER_DATA_OVERRIDE = process.env.HERMES_DESKTOP_USER_DATA_DIR || DEV_INSTANCE.userDataDir
 
 if (USER_DATA_OVERRIDE) {
   const resolvedUserData = path.resolve(USER_DATA_OVERRIDE)
@@ -214,7 +223,6 @@ if (USER_DATA_OVERRIDE) {
 }
 
 const DEV_SERVER = process.env.HERMES_DESKTOP_DEV_SERVER
-const IS_PACKAGED = app.isPackaged || Boolean(process.env.HERMES_DESKTOP_IS_PACKAGED)
 const IS_MAC = process.platform === 'darwin'
 const IS_WINDOWS = process.platform === 'win32'
 const IS_WSL = isWslEnvironment()
@@ -596,7 +604,7 @@ const BOOT_FAKE_STEP_MS = (() => {
   return Math.max(120, raw)
 })()
 
-const APP_NAME = process.env.HERMES_DESKTOP_APP_NAME || 'Hermes'
+const APP_NAME = process.env.HERMES_DESKTOP_APP_NAME || DEV_INSTANCE.appName || 'Hermes'
 const TITLEBAR_HEIGHT = 34
 const MACOS_TRAFFIC_LIGHTS_HEIGHT = 14
 
@@ -894,7 +902,7 @@ app.setName(APP_NAME)
 // need this, so gate it on Windows. (Fixes: desktop approval/turn notifications
 // never firing on Windows.)
 if (IS_WINDOWS) {
-  app.setAppUserModelId('com.nousresearch.hermes')
+  app.setAppUserModelId(DEV_INSTANCE.appUserModelId)
 }
 
 // Seed the native About panel with the live Hermes version. This is refreshed
@@ -1762,15 +1770,20 @@ function findPythonForRoot(root) {
     ? [path.join('.venv', 'Scripts', 'python.exe'), path.join('venv', 'Scripts', 'python.exe')]
     : [path.join('.venv', 'bin', 'python'), path.join('venv', 'bin', 'python')]
 
-  for (const relativePath of relativePaths) {
-    const candidate = path.join(root, relativePath)
+  const venvRoot = path.join(root, 'venv')
 
-    if (fileExists(candidate)) {
-      return candidate
-    }
-  }
+  const runtimeEnv = buildDesktopBackendEnv({
+    hermesHome: HERMES_HOME,
+    pythonPathEntries: [root, ...getVenvSitePackagesEntries(venvRoot)],
+    venvRoot
+  })
 
-  return findSystemPython()
+  const localCandidates = relativePaths.map(relativePath => path.join(root, relativePath)).filter(fileExists)
+
+  return selectImportablePython(
+    [...localCandidates, findSystemPython(), findOnPath('python'), findOnPath('python3')],
+    { env: runtimeEnv }
+  )
 }
 
 function findSystemPython() {
@@ -10623,6 +10636,12 @@ ipcMain.handle('hermes:deep-link-ready', () => {
 })
 
 function registerDeepLinkProtocol() {
+  if (!shouldRegisterHermesProtocol({ isPackaged: IS_PACKAGED, devInstance: DEV_INSTANCE.enabled })) {
+    rememberLog('[deeplink] skipping hermes:// registration for isolated development instance')
+
+    return
+  }
+
   try {
     if (process.defaultApp && process.argv.length >= 2) {
       // Dev: register with the electron exec path + entry script so the OS can

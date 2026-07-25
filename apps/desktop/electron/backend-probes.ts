@@ -44,7 +44,7 @@ const PROBE_TIMEOUT_MS = 5000
  * @returns {string}
  */
 function hermesRuntimeImportProbe() {
-  return 'import yaml; import dotenv; import hermes_cli.config'
+  return 'import rich; import yaml; import dotenv; import hermes_cli.config'
 }
 
 /**
@@ -57,9 +57,10 @@ function hermesRuntimeImportProbe() {
  * site-packages -- and the resolver returns a backend that immediately
  * dies on spawn.
  *
- * The probe intentionally imports hermes_cli.config, not just the top-level
- * package: a broken/empty Windows launcher venv can still see the source tree
- * through PYTHONPATH but lack PyYAML, then die on the first real CLI import.
+ * The probe intentionally imports rich alongside hermes_cli.config, not just
+ * the top-level package: a broken/empty Windows launcher venv can still see
+ * the source tree through PYTHONPATH but lack a CLI startup dependency, then
+ * die on the first real CLI import.
  *
  * @param {string} pythonPath - Absolute path to a python.exe / python.
  * @param {object} [opts.env] - Additional environment for the probe.
@@ -82,6 +83,34 @@ function canImportHermesCli(pythonPath: string, opts: { env?: Record<string, str
   } catch {
     return false
   }
+}
+
+/**
+ * Return the first candidate interpreter that can import the CLI's startup
+ * dependencies. A source checkout may be launched from a shell whose PATH
+ * contains both an incomplete system Python and a working Hermes venv; file
+ * existence alone cannot distinguish those runtimes.
+ */
+function selectImportablePython(
+  candidates: Array<string | null | undefined>,
+  opts: { env?: Record<string, string>; probe?: typeof canImportHermesCli } = {}
+) {
+  const probe = opts.probe || canImportHermesCli
+  const seen = new Set<string>()
+
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate)) {
+      continue
+    }
+
+    seen.add(candidate)
+
+    if (probe(candidate, { env: opts.env })) {
+      return candidate
+    }
+  }
+
+  return null
 }
 
 /**
@@ -133,4 +162,11 @@ function verifyHermesCli(hermesCommand: string, opts?: { shell?: boolean }) {
   }
 }
 
-export { canImportHermesCli, hermesRuntimeImportProbe, PROBE_TIMEOUT_MS, shouldTrustHermesOverride, verifyHermesCli }
+export {
+  canImportHermesCli,
+  hermesRuntimeImportProbe,
+  PROBE_TIMEOUT_MS,
+  selectImportablePython,
+  shouldTrustHermesOverride,
+  verifyHermesCli
+}
