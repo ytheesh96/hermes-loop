@@ -12,12 +12,23 @@ const BLOCKED_DIRECTORY_NAMES = new Set([
   '.git',
   '__pycache__',
   '.venv',
+  'backups',
   'cache',
+  'checkpoints',
+  'cron',
   'hermes-agent',
+  'home',
+  'kanban',
   'logs',
   'node',
+  'profiles',
+  'projects',
+  'runs',
   'runtime',
-  'venv'
+  'sessions',
+  'storage-guard',
+  'venv',
+  'worktrees'
 ])
 const INSPECT_CREDENTIAL_FILE_NAMES = new Set(['.env', 'auth.json'])
 const BLOCKED_FILE_NAMES = new Set([
@@ -28,8 +39,11 @@ const BLOCKED_FILE_NAMES = new Set([
   'client_secret.json',
   'credentials.json',
   'google_token.json',
+  'kanban.db',
+  'state.db',
   'token.json'
 ])
+const MAX_INSPECT_SNAPSHOT_BYTES = 512 * 1024 * 1024
 const SECRET_ENV_NAME_RE =
   /(?:^|_)(?:api[_-]?key|access[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|auth(?:orization)?|client[_-]?secret|credential|password|passwd|private[_-]?key|cookie|bearer|signature|webhook[_-]?token)(?:$|_)/i
 const SENSITIVE_ENV_NAMES = new Set([
@@ -51,6 +65,10 @@ const UNSAFE_INHERITED_ENV_NAMES = new Set([
 
 function isInspectLiveDataEnabled(env = process.env) {
   return /^(?:1|true|yes|on)$/i.test(String(env.HERMES_DESKTOP_INSPECT_LIVE || '').trim())
+}
+
+function isInspectSnapshotPreserved(env = process.env) {
+  return /^(?:1|true|yes|on)$/i.test(String(env.HERMES_DESKTOP_INSPECT_PRESERVE || '').trim())
 }
 
 function isSensitiveEnvironmentName(name) {
@@ -245,10 +263,78 @@ function isBlockedSnapshotPath(sourceHome, candidate) {
   }
 
   return (
-    /\.(?:sqlite|db)-(?:shm|wal)$/i.test(basename) ||
+    /\.(?:sqlite|db)(?:-(?:shm|wal))?$/i.test(basename) ||
     /\.(?:key|pem|p12|pfx)$/i.test(basename) ||
     /^id_(?:rsa|ed25519|ecdsa|dsa)$/i.test(basename)
   )
+}
+
+function inspectionSnapshotBytes(root, fileSystem = fs) {
+  let total = 0
+
+  for (const entry of fileSystem.readdirSync(root, { withFileTypes: true })) {
+    const candidate = path.join(root, entry.name)
+
+    if (entry.isSymbolicLink()) {
+      continue
+    }
+
+    const metadata = fileSystem.lstatSync(candidate)
+    total += Number(metadata.blocks || 0) * 512 || Number(metadata.size || 0)
+
+    if (entry.isDirectory()) {
+      total += inspectionSnapshotBytes(candidate, fileSystem)
+    }
+  }
+
+  return total
+}
+
+function inspectionSourceBytes(root, filter, fileSystem = fs) {
+  let total = 0
+
+  for (const entry of fileSystem.readdirSync(root, { withFileTypes: true })) {
+    const candidate = path.join(root, entry.name)
+
+    if (!filter(candidate) || entry.isSymbolicLink()) {
+      continue
+    }
+
+    let metadata
+    try {
+      metadata = fileSystem.lstatSync(candidate)
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        continue
+      }
+
+      throw error
+    }
+    total += Number(metadata.blocks || 0) * 512 || Number(metadata.size || 0)
+
+    if (entry.isDirectory()) {
+      total += inspectionSourceBytes(candidate, filter, fileSystem)
+    }
+  }
+
+  return total
+}
+
+function assertInspectSnapshotSize(
+  root,
+  fileSystem = fs,
+  maxBytes = MAX_INSPECT_SNAPSHOT_BYTES
+) {
+  const bytes = inspectionSnapshotBytes(root, fileSystem)
+
+  if (bytes > maxBytes) {
+    throw new Error(
+      `Inspector snapshot rejected: ${bytes} bytes exceeds the ${maxBytes}-byte safety cap. ` +
+        'Select a smaller Hermes profile; databases, nested profiles, caches, and artifacts must not be cloned.'
+    )
+  }
+
+  return bytes
 }
 
 function hardenPrivateTree(root, fileSystem = fs, sourceHome = null) {
@@ -273,45 +359,58 @@ function hardenPrivateTree(root, fileSystem = fs, sourceHome = null) {
   }
 }
 
-function copyInspectionHome(sourceHome, targetHome, fileSystem = fs, { includeCredentials = false } = {}) {
+function copyInspectionHome(
+  sourceHome,
+  targetHome,
+  fileSystem = fs,
+  { includeCredentials = false, maxBytes = MAX_INSPECT_SNAPSHOT_BYTES } = {}
+) {
   const source = canonicalInspectPath(sourceHome, fileSystem)
   const target = assertSafeInspectPath(targetHome, source, fileSystem)
+  const filter = candidate => {
+    if (candidate !== source) {
+      try {
+        if (fileSystem.lstatSync(candidate).isSymbolicLink()) {
+          return false
+        }
+      } catch (error) {
+        // A live Hermes home can remove SQLite sidecars between directory
+        // traversal and metadata lookup. That source-only race means there
+        // is nothing to copy; unrelated metadata and copy errors must stay
+        // visible to the caller.
+        if (error?.code === 'ENOENT') {
+          return false
+        }
+
+        throw error
+      }
+    }
+
+    if (includeCredentials && candidate !== source) {
+      const relative = path.relative(source, candidate)
+      const basename = path.basename(candidate).toLowerCase()
+
+      if (!relative.includes(path.sep) && INSPECT_CREDENTIAL_FILE_NAMES.has(basename)) {
+        return true
+      }
+    }
+
+    return !isBlockedSnapshotPath(source, candidate)
+  }
+  const projectedBytes = inspectionSourceBytes(source, filter, fileSystem)
+
+  if (projectedBytes > maxBytes) {
+    throw new Error(
+      `Inspector snapshot rejected before copy: ${projectedBytes} bytes exceeds the ${maxBytes}-byte safety cap.`
+    )
+  }
 
   fileSystem.rmSync(target, { force: true, recursive: true })
   createPrivateInspectDirectory(target, source, fileSystem)
   assertSafeInspectPath(target, source, fileSystem)
   fileSystem.cpSync(source, target, {
     dereference: false,
-    filter: candidate => {
-      if (candidate !== source) {
-        try {
-          if (fileSystem.lstatSync(candidate).isSymbolicLink()) {
-            return false
-          }
-        } catch (error) {
-          // A live Hermes home can remove SQLite sidecars between directory
-          // traversal and metadata lookup. That source-only race means there
-          // is nothing to copy; unrelated metadata and copy errors must stay
-          // visible to the caller.
-          if (error?.code === 'ENOENT') {
-            return false
-          }
-
-          throw error
-        }
-      }
-
-      if (includeCredentials && candidate !== source) {
-        const relative = path.relative(source, candidate)
-        const basename = path.basename(candidate).toLowerCase()
-
-        if (!relative.includes(path.sep) && INSPECT_CREDENTIAL_FILE_NAMES.has(basename)) {
-          return true
-        }
-      }
-
-      return !isBlockedSnapshotPath(source, candidate)
-    },
+    filter,
     recursive: true
   })
 
@@ -418,7 +517,8 @@ Snapshots a Hermes home into an isolated writable home and launches the Desktop 
 
 Environment:
   HERMES_DESKTOP_INSPECT_HOME  Source Hermes home (default: ~/.hermes)
-  HERMES_DESKTOP_INSPECT_DIR   Keep the generated snapshot under this directory
+  HERMES_DESKTOP_INSPECT_DIR   Place the generated snapshot under this directory
+  HERMES_DESKTOP_INSPECT_PRESERVE  Explicitly retain the snapshot after exit (off by default)
   HERMES_DESKTOP_INSPECT_LIVE  Explicitly copy .env/auth.json and an explicitly pinned Kanban DB
   HERMES_DESKTOP_APP_NAME      Override the inspector display name
   HERMES_DESKTOP_HERMES_ROOT  Override the Hermes source checkout
@@ -439,9 +539,27 @@ function runDevInspect(argv = process.argv.slice(2), env = process.env) {
   }
 
   const configuredRoot = String(env.HERMES_DESKTOP_INSPECT_DIR || '').trim()
+  const preserveSnapshot = isInspectSnapshotPreserved(env)
   const inspectRoot = configuredRoot
     ? path.resolve(configuredRoot)
     : fs.mkdtempSync(path.join(canonicalInspectPath(resolveInspectTempDirectory(env)), 'hermes-desktop-inspect-'))
+  let configuredRootIsDisposable = false
+
+  if (configuredRoot) {
+    try {
+      const entry = fs.lstatSync(inspectRoot)
+      configuredRootIsDisposable =
+        entry.isDirectory() && !entry.isSymbolicLink() && fs.readdirSync(inspectRoot).length === 0
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        configuredRootIsDisposable = true
+      } else {
+        throw error
+      }
+    }
+  }
+
+  let cleanupAllowed = !configuredRoot
   let cleaned = false
   const cleanup = () => {
     if (cleaned) {
@@ -450,7 +568,7 @@ function runDevInspect(argv = process.argv.slice(2), env = process.env) {
 
     cleaned = true
 
-    if (!configuredRoot) {
+    if (cleanupAllowed && !preserveSnapshot) {
       try {
         fs.rmSync(inspectRoot, { force: true, recursive: true })
       } catch {
@@ -461,12 +579,14 @@ function runDevInspect(argv = process.argv.slice(2), env = process.env) {
 
   try {
     createPrivateInspectDirectory(inspectRoot, sourceHome)
+    cleanupAllowed = cleanupAllowed || configuredRootIsDisposable
 
     const liveData = isInspectLiveDataEnabled(env)
     const hermesHome = copyInspectionHome(sourceHome, path.join(inspectRoot, 'hermes-home'), fs, {
       includeCredentials: liveData
     })
     const boardDatabase = liveData ? copyInspectBoardDatabase(sourceHome, hermesHome, env) : null
+    assertInspectSnapshotSize(hermesHome)
     const userDataDir = path.join(inspectRoot, 'user-data')
     const tempDir = path.join(inspectRoot, 'tmp')
     const childEnv = buildInspectChildEnv(env, {
@@ -528,12 +648,14 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
 }
 
 export {
+  assertInspectSnapshotSize,
   buildInspectChildEnv,
   copyInspectBoardDatabase,
   copyInspectionHome,
   hardenPrivateTree,
   isBlockedSnapshotPath,
   isInspectLiveDataEnabled,
+  isInspectSnapshotPreserved,
   isSensitiveEnvironmentName,
   printHelp,
   redactInspectDiagnostic,

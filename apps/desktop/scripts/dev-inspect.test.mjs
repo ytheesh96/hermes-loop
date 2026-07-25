@@ -6,10 +6,12 @@ import path from 'node:path'
 import { test } from 'vitest'
 
 import {
+  assertInspectSnapshotSize,
   buildInspectChildEnv,
   copyInspectBoardDatabase,
   copyInspectionHome,
   isInspectLiveDataEnabled,
+  isInspectSnapshotPreserved,
   redactInspectDiagnostic,
   resolveInspectSourceHome,
   runDevInspect
@@ -34,11 +36,16 @@ test('inspector snapshot excludes credentials, runtime directories, and symlinks
 
   try {
     fs.mkdirSync(path.join(source, 'profiles', 'coder'), { recursive: true })
+    fs.mkdirSync(path.join(source, 'home', '.cache'), { recursive: true })
+    fs.mkdirSync(path.join(source, 'kanban', 'artifacts'), { recursive: true })
     fs.mkdirSync(path.join(source, 'hermes-agent'), { recursive: true })
     fs.mkdirSync(path.join(source, 'venv'), { recursive: true })
     fs.mkdirSync(path.join(source, 'logs'), { recursive: true })
     fs.writeFileSync(path.join(source, 'config.yaml'), 'model: {}\n')
     fs.writeFileSync(path.join(source, 'profiles', 'coder', 'sessions.db'), 'session data')
+    fs.writeFileSync(path.join(source, 'home', '.cache', 'model.gguf'), 'model data')
+    fs.writeFileSync(path.join(source, 'kanban', 'artifacts', 'recording.mp4'), 'artifact data')
+    fs.writeFileSync(path.join(source, 'state.db'), 'state data')
     fs.writeFileSync(path.join(source, 'auth.json'), 'secret')
     fs.writeFileSync(path.join(source, 'private.pem'), 'private key')
     fs.writeFileSync(path.join(source, '.env'), 'API_KEY=secret')
@@ -48,7 +55,10 @@ test('inspector snapshot excludes credentials, runtime directories, and symlinks
     copyInspectionHome(source, target)
 
     assert.equal(fs.existsSync(path.join(target, 'config.yaml')), true)
-    assert.equal(fs.existsSync(path.join(target, 'profiles', 'coder', 'sessions.db')), true)
+    assert.equal(fs.existsSync(path.join(target, 'profiles')), false)
+    assert.equal(fs.existsSync(path.join(target, 'home')), false)
+    assert.equal(fs.existsSync(path.join(target, 'kanban')), false)
+    assert.equal(fs.existsSync(path.join(target, 'state.db')), false)
     assert.equal(fs.existsSync(path.join(target, 'auth.json')), false)
     assert.equal(fs.existsSync(path.join(target, '.env')), false)
     assert.equal(fs.existsSync(path.join(target, 'logs')), false)
@@ -59,6 +69,41 @@ test('inspector snapshot excludes credentials, runtime directories, and symlinks
   } finally {
     fs.rmSync(root, { force: true, recursive: true })
   }
+})
+
+test('inspector snapshot cap rejects unexpectedly large retained state', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-dev-inspect-size-cap-test-'))
+
+  try {
+    fs.writeFileSync(path.join(root, 'unexpected.bin'), Buffer.alloc(4096))
+    assert.throws(() => assertInspectSnapshotSize(root, fs, 1024), /snapshot rejected/)
+    assert.equal(assertInspectSnapshotSize(root, fs, 8192) > 0, true)
+  } finally {
+    fs.rmSync(root, { force: true, recursive: true })
+  }
+})
+
+test('inspector rejects an oversized source before creating its target', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-dev-inspect-preflight-cap-test-'))
+  const source = path.join(root, 'source')
+  const target = path.join(root, 'target')
+
+  try {
+    fs.mkdirSync(source, { recursive: true })
+    fs.writeFileSync(path.join(source, 'unexpected.bin'), Buffer.alloc(4096))
+    assert.throws(
+      () => copyInspectionHome(source, target, fs, { maxBytes: 1024 }),
+      /rejected before copy/
+    )
+    assert.equal(fs.existsSync(target), false)
+  } finally {
+    fs.rmSync(root, { force: true, recursive: true })
+  }
+})
+
+test('configured output does not imply preservation', () => {
+  assert.equal(isInspectSnapshotPreserved({ HERMES_DESKTOP_INSPECT_DIR: '/tmp/evidence' }), false)
+  assert.equal(isInspectSnapshotPreserved({ HERMES_DESKTOP_INSPECT_PRESERVE: '1' }), true)
 })
 
 test('inspector live-data mode is explicit and copies only the active Hermes credentials', () => {
@@ -195,6 +240,33 @@ test('inspector removes its automatic private workspace after the child exits', 
 
     await new Promise(resolve => child.once('close', resolve))
     assert.deepEqual(fs.readdirSync(tempDir), [])
+  } finally {
+    fs.rmSync(root, { force: true, recursive: true })
+  }
+})
+
+test('inspector removes a configured workspace unless preservation is explicit', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-dev-inspect-configured-cleanup-test-'))
+  const source = path.join(root, 'source')
+  const configuredOutput = path.join(root, 'configured-output')
+  const binDir = path.join(root, 'bin')
+  const npm = path.join(binDir, process.platform === 'win32' ? 'npm.cmd' : 'npm')
+
+  try {
+    fs.mkdirSync(source, { recursive: true })
+    fs.mkdirSync(binDir, { recursive: true })
+    fs.writeFileSync(path.join(source, 'config.yaml'), 'model: {}\n')
+    fs.writeFileSync(npm, '#!/bin/sh\nexit 0\n')
+    fs.chmodSync(npm, 0o700)
+
+    const child = runDevInspect([], {
+      HERMES_DESKTOP_INSPECT_HOME: source,
+      HERMES_DESKTOP_INSPECT_DIR: configuredOutput,
+      PATH: binDir
+    })
+
+    await new Promise(resolve => child.once('close', resolve))
+    assert.equal(fs.existsSync(configuredOutput), false)
   } finally {
     fs.rmSync(root, { force: true, recursive: true })
   }
@@ -374,6 +446,7 @@ test('inspector creates missing descendants below a safe configured ancestor', a
     const child = runDevInspect([], {
       HERMES_DESKTOP_INSPECT_HOME: source,
       HERMES_DESKTOP_INSPECT_DIR: configuredOutput,
+      HERMES_DESKTOP_INSPECT_PRESERVE: '1',
       PATH: binDir
     })
     await new Promise(resolve => child.once('close', resolve))
