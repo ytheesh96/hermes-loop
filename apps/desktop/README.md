@@ -77,6 +77,10 @@ HERMES_DESKTOP_INSPECT_HOME=/Users/yt/.hermes npm run dev:inspect
 # Keep the generated snapshot/userData for later inspection (overwritten on launch).
 HERMES_DESKTOP_INSPECT_DIR=/tmp/hermes-desktop-inspect npm run dev:inspect
 
+# Explicit opt-in for authenticated inspection. Only the active home's .env,
+# auth.json, and an explicitly pinned HERMES_KANBAN_DB are copied into isolation.
+HERMES_DESKTOP_INSPECT_LIVE=1 HERMES_KANBAN_DB=/path/to/kanban.db npm run dev:inspect
+
 # Generic throwaway HERMES_HOME, separate Electron userData, distinct app name to avoid the single-instance lock
 ../../scripts/dev-sandbox.sh -- npm run dev
 HERMES_DESKTOP_HERMES_ROOT=/path/to/clone npm run dev
@@ -86,9 +90,16 @@ npm run dev:fake-boot   # exercise the startup overlay with deterministic delays
 
 `npm run dev:inspect` sets `HERMES_DESKTOP_DEV_INSTANCE=1`, uses a distinct
 `Hermes Inspector` app name and Electron `userData` directory, and excludes
-credentials (`.env`, `auth.json`, OAuth token files), runtime directories, and
-symlinks from the snapshot. This is a snapshot inspection path, not a live
+credentials (`.env`, `auth.json`, OAuth token files), runtime directories,
+external Kanban paths, and symlinks from the snapshot. The default child
+environment is also credential-free and points all writable Hermes/terminal
+state at the isolated snapshot. This is a snapshot inspection path, not a live
 view: changes made by the development backend stay in the generated snapshot.
+Set `HERMES_DESKTOP_INSPECT_LIVE=1` only when authenticated/live-data access is
+deliberately required; that mode copies only the active home's `.env` and
+`auth.json`, plus an explicitly pinned `HERMES_KANBAN_DB`, into a private
+temporary area with restrictive permissions. It never copies runtime
+directories or OAuth sidecars, and it never mutates the source home.
 The inspector never registers or claims the production `hermes://` protocol;
 that protocol remains owned by the packaged Hermes app. Use the ordinary
 `npm run dev` path when you intentionally want a writable, live Hermes home.
