@@ -1,8 +1,9 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { HoistedWorkMapPanel, workMapFromMessageContent } from './work-map-tool'
 import type { WorkMapItem } from '@/lib/work-map'
+
+import { HoistedWorkMapPanel, workMapFromMessageContent } from './work-map-tool'
 
 describe('workMapFromMessageContent', () => {
   it('returns the latest work_map tool-call and parses JSON or object payloads', () => {
