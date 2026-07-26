@@ -944,6 +944,80 @@ describe('Graph View model', () => {
     expect(filtered.edges.map(edge => edge.id).sort()).toEqual(['edge:session-a-workflow', 'edge:workflow-a-task'])
   })
 
+  it('hides settled workflow branches that share a session with active work', () => {
+    const sharedSessionGraph: LiveGraphSnapshot = {
+      edges: [
+        {
+          id: 'edge:session-active-workflow',
+          kind: 'contains',
+          sourceId: 'session:shared',
+          targetId: 'workflow:active'
+        },
+        {
+          id: 'edge:active-workflow-task',
+          kind: 'contains',
+          sourceId: 'workflow:active',
+          targetId: 'task:active'
+        },
+        {
+          id: 'edge:session-settled-workflow',
+          kind: 'contains',
+          sourceId: 'session:shared',
+          targetId: 'workflow:settled'
+        },
+        {
+          id: 'edge:settled-workflow-task',
+          kind: 'contains',
+          sourceId: 'workflow:settled',
+          targetId: 'task:settled'
+        }
+      ],
+      nodes: [
+        { entityId: 'shared', id: 'session:shared', kind: 'session', label: 'Shared session' },
+        {
+          entityId: 'active',
+          id: 'workflow:active',
+          kind: 'workflow',
+          label: 'Active workflow',
+          status: 'open'
+        },
+        { entityId: 'active', id: 'task:active', kind: 'task', label: 'Active task', status: 'running' },
+        {
+          entityId: 'settled',
+          id: 'workflow:settled',
+          kind: 'workflow',
+          label: 'Settled workflow',
+          status: 'closed'
+        },
+        {
+          entityId: 'settled',
+          id: 'task:settled',
+          kind: 'task',
+          label: 'Settled task',
+          status: 'completed'
+        }
+      ]
+    }
+
+    const filtered = visibleLiveGraph(sharedSessionGraph, {
+      activeOnly: true,
+      enabledKinds: new Set(DEFAULT_LIVE_GRAPH_VIEW_STATE.enabledKinds),
+      focusDepth: 'all',
+      orphans: true,
+      search: ''
+    })
+
+    expect(filtered.nodes.map(node => node.label).sort()).toEqual([
+      'Active task',
+      'Active workflow',
+      'Shared session'
+    ])
+    expect(filtered.edges.map(edge => edge.id).sort()).toEqual([
+      'edge:active-workflow-task',
+      'edge:session-active-workflow'
+    ])
+  })
+
   it('filters node kinds before classifying filtered nodes as orphans', () => {
     const connected = visibleLiveGraph(graph, {
       enabledKinds: new Set(['workflow', 'task']),

@@ -630,14 +630,128 @@ function liveGraphNodeWorkState(node: LiveGraphNode): LiveGraphWorkState {
   return 'active'
 }
 
+function liveGraphActiveWorkflowNodeIds(
+  nodes: readonly LiveGraphNode[],
+  edges: readonly LiveGraphEdge[]
+): ReadonlySet<string> {
+  const nodesById = new Map(nodes.map(node => [liveGraphNodeId(node), node]))
+  const parentIdsById = new Map<string, Set<string>>()
+
+  const addParent = (childId: string, parentId: string) => {
+    const parentIds = parentIdsById.get(childId)
+
+    if (parentIds) {
+      parentIds.add(parentId)
+    } else {
+      parentIdsById.set(childId, new Set([parentId]))
+    }
+  }
+
+  for (const edge of edges) {
+    const sourceId = liveGraphEdgeSource(edge)
+    const targetId = liveGraphEdgeTarget(edge)
+    const source = nodesById.get(sourceId)
+    const target = nodesById.get(targetId)
+
+    if (!source || !target) {
+      continue
+    }
+
+    if (edge.kind === 'contains' || edge.kind === 'delegated_to') {
+      addParent(targetId, sourceId)
+    } else if (edge.kind === 'depends_on') {
+      const sourceWorkflow = liveGraphWorkflowEnvelopeId(source)
+      const targetWorkflow = liveGraphWorkflowEnvelopeId(target)
+
+      if (!sourceWorkflow || !targetWorkflow || sourceWorkflow === targetWorkflow) {
+        addParent(sourceId, targetId)
+      }
+    }
+  }
+
+  const activeWorkflowIds = new Set<string>()
+
+  for (const node of nodes) {
+    const workState = liveGraphNodeWorkState(node)
+
+    if (workState === 'none' || workState === 'settled') {
+      continue
+    }
+
+    const pending = [liveGraphNodeId(node)]
+    const visited = new Set<string>()
+
+    while (pending.length > 0) {
+      const id = pending.pop()!
+
+      if (visited.has(id)) {
+        continue
+      }
+
+      visited.add(id)
+
+      const ancestor = nodesById.get(id)
+
+      if (!ancestor) {
+        continue
+      }
+
+      const kind = liveGraphNodeKind(ancestor)
+
+      if (kind === 'workflow') {
+        activeWorkflowIds.add(id)
+
+        continue
+      }
+
+      if (kind === 'project' || kind === 'session') {
+        continue
+      }
+
+      for (const parentId of parentIdsById.get(id) ?? []) {
+        pending.push(parentId)
+      }
+    }
+  }
+
+  return activeWorkflowIds
+}
+
 export function liveGraphActiveComponentNodeIds(
   nodes: readonly LiveGraphNode[],
   edges: readonly LiveGraphEdge[]
 ): ReadonlySet<string> {
   const nodesById = new Map(nodes.map(node => [liveGraphNodeId(node), node]))
+  const activeWorkflowIds = liveGraphActiveWorkflowNodeIds(nodes, edges)
+
+  const activeContextEdges = edges.filter(edge => {
+    const source = nodesById.get(liveGraphEdgeSource(edge))
+    const targetId = liveGraphEdgeTarget(edge)
+    const target = nodesById.get(targetId)
+
+    if (!source || !target) {
+      return false
+    }
+
+    if (edge.kind === 'contains' && liveGraphNodeKind(target) === 'workflow') {
+      return activeWorkflowIds.has(targetId)
+    }
+
+    if (edge.kind === 'depends_on') {
+      const sourceWorkflow = liveGraphWorkflowEnvelopeId(source)
+      const targetWorkflow = liveGraphWorkflowEnvelopeId(target)
+
+      if (sourceWorkflow && targetWorkflow && sourceWorkflow !== targetWorkflow) {
+        return false
+      }
+    }
+
+    return true
+  })
+
   const activeIds = new Set<string>()
 
-  for (const component of analyzeLiveGraphTopology(nodes, edges).components) {
+  for (const component of analyzeLiveGraphTopology(nodes, activeContextEdges).components) {
     const active = component.some(id => {
       const node = nodesById.get(id)
 
