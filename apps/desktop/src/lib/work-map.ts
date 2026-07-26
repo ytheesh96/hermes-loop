@@ -22,9 +22,16 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const isStatus = (value: unknown): value is WorkMapStatus => (STATUSES as readonly string[]).includes(value as string)
 const isKind = (value: unknown): value is WorkMapKind => (KINDS as readonly string[]).includes(value as string)
+
 const isTruthy = (value: unknown): boolean => {
-  if (typeof value === 'boolean') return value
-  if (value === undefined || value === null) return false
+  if (typeof value === 'boolean') {
+    return value
+  }
+
+  if (value === undefined || value === null) {
+    return false
+  }
+
   return ['1', 'true', 'yes', 'y', 'on'].includes(String(value).trim().toLowerCase())
 }
 
@@ -46,14 +53,19 @@ function parseArray(value: unknown[]): WorkMapItem[] {
 
     for (const key of ['attention', 'evidence', 'kanban_task_id', 'parent_id', 'verification_state', 'dispatchable'] as const) {
       const raw = item[key]
+
       if (raw === undefined || raw === null) {
         continue
       }
+
       if (key === 'dispatchable') {
         out.dispatchable = isTruthy(raw)
+
         continue
       }
+
       const text = String(raw).trim()
+
       if (text) {
         out[key] = text as never
       }
@@ -84,6 +96,7 @@ function parse(value: unknown, depth: number): null | WorkMapItem[] {
     if (Object.hasOwn(value, 'work_map')) {
       return parse(value.work_map, depth + 1)
     }
+
     if (Object.hasOwn(value, 'workMap')) {
       return parse(value.workMap, depth + 1)
     }
