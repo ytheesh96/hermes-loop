@@ -986,6 +986,7 @@ export interface Translations {
     showMore: string
     showLess: string
     taskInbox: string
+    workflowInbox: string
     allTasks: string
     activeTasks: string
     completedTasks: string
@@ -995,6 +996,10 @@ export interface Translations {
     allTasksCompleted: string
     noAttentionTasks: string
     noCompletedTasks: string
+    allWorkflowsCompleted: string
+    noAttentionWorkflows: string
+    noCompletedWorkflows: string
+    viewWorkflow: string
     showMoreCompleted: (count: number) => string
     kinds: {
       session: string

@@ -1098,6 +1098,7 @@ export const ja = defineLocale({
     showMore: 'もっと見る',
     showLess: '折りたたむ',
     taskInbox: 'ワークフローのタスク受信箱',
+    workflowInbox: 'セッションのワークフロー受信箱',
     allTasks: 'すべて',
     activeTasks: '対応中',
     completedTasks: '完了',
@@ -1107,6 +1108,10 @@ export const ja = defineLocale({
     allTasksCompleted: '対応中のタスクはありません。',
     noAttentionTasks: '確認が必要なタスクはありません。',
     noCompletedTasks: '完了したタスクはありません。',
+    allWorkflowsCompleted: '対応中のワークフローはありません。',
+    noAttentionWorkflows: '確認が必要なワークフローはありません。',
+    noCompletedWorkflows: '完了したワークフローはありません。',
+    viewWorkflow: 'ワークフローを表示',
     showMoreCompleted: count => `さらに ${count} 件を表示`,
     kinds: {
       session: 'セッション',

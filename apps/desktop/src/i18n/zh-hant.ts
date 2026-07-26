@@ -1066,6 +1066,7 @@ export const zhHant = defineLocale({
     showMore: '顯示更多',
     showLess: '收起',
     taskInbox: '工作流程任務收件匣',
+    workflowInbox: '工作階段工作流程收件匣',
     allTasks: '全部',
     activeTasks: '進行中',
     completedTasks: '已完成',
@@ -1075,6 +1076,10 @@ export const zhHant = defineLocale({
     allTasksCompleted: '沒有進行中的任務。',
     noAttentionTasks: '沒有需要注意的任務。',
     noCompletedTasks: '沒有已完成的任務。',
+    allWorkflowsCompleted: '沒有進行中的工作流程。',
+    noAttentionWorkflows: '沒有需要注意的工作流程。',
+    noCompletedWorkflows: '沒有已完成的工作流程。',
+    viewWorkflow: '檢視工作流程',
     showMoreCompleted: count => `再顯示 ${count} 項`,
     kinds: {
       session: '工作階段',

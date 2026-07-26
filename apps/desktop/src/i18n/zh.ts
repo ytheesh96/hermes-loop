@@ -1314,6 +1314,7 @@ export const zh: Translations = {
     showMore: '显示更多',
     showLess: '收起',
     taskInbox: '工作流任务收件箱',
+    workflowInbox: '会话工作流收件箱',
     allTasks: '全部',
     activeTasks: '活跃',
     completedTasks: '已完成',
@@ -1323,6 +1324,10 @@ export const zh: Translations = {
     allTasksCompleted: '没有活跃任务。',
     noAttentionTasks: '没有需要关注的任务。',
     noCompletedTasks: '没有已完成的任务。',
+    allWorkflowsCompleted: '没有活跃工作流。',
+    noAttentionWorkflows: '没有需要关注的工作流。',
+    noCompletedWorkflows: '没有已完成的工作流。',
+    viewWorkflow: '查看工作流',
     showMoreCompleted: count => `再显示 ${count} 项`,
     kinds: {
       session: '会话',

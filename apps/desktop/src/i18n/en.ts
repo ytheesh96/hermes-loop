@@ -1119,6 +1119,7 @@ export const en: Translations = {
     showMore: 'Show more',
     showLess: 'Show less',
     taskInbox: 'Workflow task inbox',
+    workflowInbox: 'Session workflow inbox',
     allTasks: 'All',
     activeTasks: 'Active',
     completedTasks: 'Completed',
@@ -1128,6 +1129,10 @@ export const en: Translations = {
     allTasksCompleted: 'No active tasks.',
     noAttentionTasks: 'No tasks need attention.',
     noCompletedTasks: 'No completed tasks.',
+    allWorkflowsCompleted: 'No active workflows.',
+    noAttentionWorkflows: 'No workflows need attention.',
+    noCompletedWorkflows: 'No completed workflows.',
+    viewWorkflow: 'View workflow',
     showMoreCompleted: count => `Show ${count} more`,
     kinds: {
       session: 'Session',
