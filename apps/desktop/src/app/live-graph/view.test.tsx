@@ -1007,11 +1007,7 @@ describe('Graph View model', () => {
       search: ''
     })
 
-    expect(filtered.nodes.map(node => node.label).sort()).toEqual([
-      'Active task',
-      'Active workflow',
-      'Shared session'
-    ])
+    expect(filtered.nodes.map(node => node.label).sort()).toEqual(['Active task', 'Active workflow', 'Shared session'])
     expect(filtered.edges.map(edge => edge.id).sort()).toEqual([
       'edge:active-workflow-task',
       'edge:session-active-workflow'
