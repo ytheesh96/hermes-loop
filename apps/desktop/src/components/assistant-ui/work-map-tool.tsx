@@ -53,7 +53,7 @@ const Checkmark: FC<{ item: WorkMapItem }> = ({ item }) => {
 }
 
 const ItemMeta: FC<{ item: WorkMapItem }> = ({ item }) => {
-  const bits = [item.kind, item.status]
+  const bits: string[] = [item.kind, item.status]
   if (item.attention) bits.push(item.attention)
   if (item.verification_state) bits.push(`verify:${item.verification_state}`)
   return <span className="text-[0.65rem] text-muted-foreground">{bits.join(' · ')}</span>
