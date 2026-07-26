@@ -232,6 +232,7 @@ function ChatRuntimeBoundary({
   const storeMessages = useStore(useSessionView().$messages)
   const messages = suppressMessages ? NO_MESSAGES : storeMessages
   const runtimeMessageRepository = useRuntimeMessageRepository(messages)
+
   const currentWorkMap = useMemo(
     () => workMapFromMessageContent(messages.flatMap(message => message.parts)),
     [messages]
