@@ -6321,7 +6321,7 @@ def recompute_ready(
         while True:
             changed_this_pass = 0
             todo_sql = (
-                "SELECT id, status, consecutive_failures, max_retries, "
+                "SELECT id, status, block_kind, consecutive_failures, max_retries, "
                 "needs_specification FROM tasks "
                 "WHERE status IN ('todo', 'blocked') "
             )
@@ -6347,6 +6347,16 @@ def recompute_ready(
                     # legitimate exit (it emits ``"unblocked"`` which flips
                     # this predicate back).
                     continue
+                if cur_status == "todo" and row["block_kind"] == "dependency":
+                    # A dependency wait without an explicit graph parent is
+                    # prose, not topology. Do not let the parentless scheduler
+                    # turn that wait back into runnable work.
+                    has_parent = conn.execute(
+                        "SELECT 1 FROM task_links WHERE child_id = ? LIMIT 1",
+                        (task_id,),
+                    ).fetchone()
+                    if has_parent is None:
+                        continue
                 parents = conn.execute(
                     "SELECT t.status FROM tasks t "
                     "JOIN task_links l ON l.parent_id = t.id "
@@ -7905,9 +7915,10 @@ def block_task(
 
     * ``dependency`` — the task is only waiting on another task. It does NOT
       sit in ``blocked`` (where a cron would keep "unblocking" it); it goes to
-      ``todo`` so the existing parent-gating / ``recompute_ready`` machinery
-      promotes it automatically once its parents finish. No human, no cron, no
-      retry storm. This is Dale's "Type 2 — dependency blocked".
+      ``todo`` so the existing parent-gating machinery can promote it once an
+      explicit graph parent finishes. Parentless dependency waits stay in
+      ``todo`` until topology or an operator changes them, and repeated waits
+      use the same recurrence breaker as other block kinds.
 
     * ``needs_input`` / ``capability`` / ``None`` — "truly blocked" (Dale's
       "Type 1"). Lands in ``blocked`` for a human. BUT: each time such a task
@@ -7945,24 +7956,31 @@ def block_task(
             else 0
         )
 
-        # Dependency blocks never enter the human ``blocked`` bucket — they
-        # wait in ``todo`` and let ``recompute_ready`` gate on parents. Routing
-        # here (rather than ``blocked``) is what keeps a cron from ever seeing
-        # a dependency-wait as something to "unblock".
+        # Increment the unblock-loop counter when this is a re-block for the
+        # SAME cause after a prior return to the work pool. Dependency waits
+        # use the same memory so a parentless or stale dependency cannot evade
+        # the loop breaker by routing through ``todo``.
+        same_cause = prev_kind == kind
+        recurrences = prev_recurrences + 1 if same_cause else 1
+
         if kind == "dependency":
+            dependency_loop = recurrences >= BLOCK_RECURRENCE_LIMIT
+            routed_to = "triage" if dependency_loop else "todo"
             cur = conn.execute(
                 """
                 UPDATE tasks
-                   SET status        = 'todo',
+                   SET status        = ?,
                        claim_lock    = NULL,
                        claim_expires = NULL,
                        worker_pid    = NULL,
-                       block_kind    = ?
+                       block_kind    = ?,
+                       block_recurrences = ?
                  WHERE id = ?
                    AND status IN ('running', 'ready')
                 """ + ("" if expected_run_id is None else " AND current_run_id = ?"),
-                (kind, task_id) if expected_run_id is None
-                else (kind, task_id, int(expected_run_id)),
+                (routed_to, kind, recurrences, task_id)
+                if expected_run_id is None
+                else (routed_to, kind, recurrences, task_id, int(expected_run_id)),
             )
             if cur.rowcount != 1:
                 return False
@@ -7974,19 +7992,41 @@ def block_task(
             )
             if run_id is None and reason:
                 run_id = _synthesize_ended_run(
-                    conn, task_id, outcome="blocked", summary=summary if summary is not None else reason,
-                metadata=metadata,
+                    conn,
+                    task_id,
+                    outcome="blocked",
+                    summary=summary if summary is not None else reason,
+                    metadata=metadata,
                 )
-            _append_event(
-                conn, task_id, "dependency_wait",
-                {
-                    "reason": reason,
-                    "summary": summary,
-                    "metadata": metadata,
-                    "kind": kind,
-                }, run_id=run_id,
+            dependency_payload = {
+                "reason": reason,
+                "summary": summary,
+                "metadata": metadata,
+                "kind": kind,
+            }
+            event_kind = "dependency_wait"
+            if dependency_loop:
+                event_kind = "block_loop_detected"
+                dependency_payload.update(
+                    {
+                        "recurrences": recurrences,
+                        "limit": BLOCK_RECURRENCE_LIMIT,
+                        "comments": _notification_comments(conn, task_id),
+                    }
+                )
+            source_event_id = _append_event(
+                conn, task_id, event_kind, dependency_payload, run_id=run_id,
             )
-            routed_to = "todo"
+            if dependency_loop:
+                _append_loop_root_notification_event(
+                    conn,
+                    task_id,
+                    source_event_id=source_event_id,
+                    source_kind=event_kind,
+                    synthetic_kind="loop_descendant_blocked",
+                    payload=dependency_payload,
+                    source_run_id=run_id,
+                )
             _blocked_task = get_task(conn, task_id)
             _fire_kanban_lifecycle_hook(
                 "kanban_task_blocked",
@@ -7997,15 +8037,6 @@ def block_task(
                 reason=reason,
             )
             return True
-
-        # Truly-blocked kinds. Increment the unblock-loop counter when this is a
-        # re-block for the SAME reason after a prior unblock. block_task only
-        # fires from running/ready (i.e. AFTER an unblock returned the task to
-        # the work pool), so a stored block_kind that matches the incoming kind
-        # means: blocked → unblocked → about-to-re-block for the same cause.
-        # An un-typed (None) block compares as "same" to a prior un-typed block.
-        same_cause = prev_kind == kind
-        recurrences = prev_recurrences + 1 if same_cause else 1
 
         if recurrences >= BLOCK_RECURRENCE_LIMIT:
             # Loop detected — stop letting the unblocker spin this task. Route

@@ -217,6 +217,13 @@ def _truncate(text: str, limit: int) -> str:
     return text[: limit - 1] + "…"
 
 
+def _truncate_tail(text: str, limit: int) -> str:
+    """Bound append-only context while preserving its latest correction."""
+    if len(text) <= limit:
+        return text
+    return "…" + text[-(limit - 1) :]
+
+
 def _positive_int_env(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
@@ -439,7 +446,7 @@ def _live_graph_context(conn: Any, task: Any, workflow_id: str | None) -> str:
                     "Workflow context:",
                     *([f"- {workflow.title}"] if workflow.title else []),
                     *(
-                        [_truncate(workflow.shared_context.strip(), 2000)]
+                        [_truncate_tail(workflow.shared_context.strip(), 2000)]
                         if workflow.shared_context
                         and workflow.shared_context.strip()
                         else []
