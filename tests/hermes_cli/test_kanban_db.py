@@ -6868,3 +6868,29 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
     # Still usable after with-block exit (the leak).
     conn.execute("SELECT 1").fetchone()
     conn.close()  # explicit close to avoid leaking THIS test
+
+
+def test_dependency_wait_without_parent_is_not_repromoted(kanban_home):
+    """An external dependency wait must not become a ready-loop for parentless work."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="explicit prerequisite")
+        child = kb.create_task(conn, title="graph-gated child", parents=[parent])
+        assert kb.get_task(conn, child).status == "todo"
+
+        parentless = kb.create_task(conn, title="external dependency")
+        assert kb.claim_task(conn, parentless, claimer="worker:external") is not None
+        assert kb.block_task(
+            conn,
+            parentless,
+            kind="dependency",
+            reason="waiting on an external system",
+        )
+        assert kb.get_task(conn, parentless).status == "todo"
+
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, parentless).status == "todo"
+        assert kb.get_task(conn, child).status == "todo"
+
+        assert kb.complete_task(conn, parent)
+        assert kb.get_task(conn, child).status == "ready"
+    conn.close()  # explicit close to avoid leaking THIS test

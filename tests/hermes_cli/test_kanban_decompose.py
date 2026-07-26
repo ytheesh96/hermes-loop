@@ -1090,3 +1090,30 @@ def test_decompose_no_aux_client_configured(kanban_home):
     assert outcome.ok is False
     # call_llm's no-provider RuntimeError surfaces via the LLM-error branch.
     assert "LLM error" in outcome.reason
+
+
+def test_live_graph_context_uses_later_append_only_correction(kanban_home):
+    """A later workflow-context correction must reach the decomposer prompt."""
+    obsolete = "OBSOLETE INSTRUCTION: use the old implementation path."
+    correction = "CORRECTION: use the revised implementation path instead."
+    shared_context = obsolete + (" historical detail" * 140) + "\n" + correction
+
+    with kb.connect() as conn:
+        workflow_id = kb.create_workflow(
+            conn,
+            title="Append-only context workflow",
+            shared_context=shared_context,
+        )
+        task_id = kb.create_task(
+            conn,
+            title="Compile context",
+            workflow_id=workflow_id,
+            triage=True,
+            needs_specification=True,
+        )
+        task = kb.get_task(conn, task_id)
+        rendered = decomp._live_graph_context(conn, task, workflow_id)
+
+    assert len(shared_context) > 2000
+    assert correction in rendered
+    assert obsolete not in rendered
