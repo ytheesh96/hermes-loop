@@ -4070,7 +4070,7 @@ def create_task(
                         skills, max_retries, model_override, provider_override,
                         goal_mode, goal_max_turns, session_id, workflow_id,
                         needs_specification
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
