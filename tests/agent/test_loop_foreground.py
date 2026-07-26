@@ -27,6 +27,39 @@ def test_ultra_substantive_foreground_request_routes_without_prompt_mutation(mon
     assert decision.reason == "canonical_ultra_substantive_foreground_request"
 
 
+def test_informational_status_and_diagnostic_questions_bypass_loop(monkeypatch):
+    from agent.loop_foreground import decide_foreground_loop_route
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    for message in (
+        "Are the workflows closed?",
+        "Why did the workflow close?",
+        "Why is the deployment failing?",
+        "Why did the test fail?",
+    ):
+        decision = decide_foreground_loop_route(
+            Agent(),
+            message,
+            config={"loop": {"enabled": True, "foreground_routing": "ultra"}},
+        )
+        assert decision.route is False
+        assert decision.reason == "informational_question"
+
+
+def test_substantive_question_still_routes_through_loop(monkeypatch):
+    from agent.loop_foreground import decide_foreground_loop_route
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    decision = decide_foreground_loop_route(
+        Agent(),
+        "How should we implement the migration and verify the rollout?",
+        config={"loop": {"enabled": True, "foreground_routing": "ultra"}},
+    )
+
+    assert decision.route is True
+    assert decision.reason == "canonical_ultra_substantive_foreground_request"
+
+
 def test_foreground_loop_policy_has_explicit_bypasses(monkeypatch):
     from agent.loop_foreground import decide_foreground_loop_route
 
@@ -120,6 +153,13 @@ def test_named_tool_choice_is_provider_native():
     anthropic.api_mode = "anthropic_messages"
     assert foreground_loop_tool_choice(anthropic) == {
         "type": "tool",
+        "name": "delegate_task",
+    }
+
+    codex = Agent()
+    codex.api_mode = "codex_responses"
+    assert foreground_loop_tool_choice(codex) == {
+        "type": "function",
         "name": "delegate_task",
     }
 

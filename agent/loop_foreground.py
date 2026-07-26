@@ -18,6 +18,12 @@ _REQUIRED_LOOP_TOOLS = frozenset(
     {"delegate_task", "kanban_show", "kanban_complete", "kanban_comment"}
 )
 
+_SUBSTANTIVE_ACTION_RE = re.compile(
+    r"\b(?:add|build|change|configure|create|delete|deploy|develop|execute|"
+    r"fix|implement|investigate|migrate|plan|refactor|remove|review|run|"
+    r"test|update|verify|write)\b"
+)
+
 
 @dataclass(frozen=True)
 class ForegroundLoopDecision:
@@ -30,6 +36,28 @@ class ForegroundLoopDecision:
 def _config_value(config: Mapping[str, Any] | None, key: str, default: Any) -> Any:
     loop = config.get("loop") if isinstance(config, Mapping) else None
     return loop.get(key, default) if isinstance(loop, Mapping) else default
+
+
+def _has_substantive_action(text: str) -> bool:
+    return bool(_SUBSTANTIVE_ACTION_RE.search(text.lower()))
+
+
+def _is_informational_question(text: str) -> bool:
+    normalized = text.lower().strip()
+    if re.match(r"^(?:why|is|are|was|were)\b", normalized) and re.search(
+        r"\b(?:closed?|fail(?:ed|ing|ure)?|broken|error|status|stuck)\b",
+        normalized,
+    ):
+        return True
+    if _has_substantive_action(normalized):
+        return False
+    return bool(
+        re.match(
+            r"^(?:who|what|when|where|why|how|is|are|was|were|do|does|did|"
+            r"has|have|can|could|would|will)\b",
+            normalized,
+        )
+    )
 
 
 def _is_opt_out(text: str) -> bool:
@@ -48,7 +76,11 @@ def _is_clarification_dependency(text: str) -> bool:
     return bool(
         re.search(r"\b(?:clarify|clarification|need your input|needs? input|waiting on|blocked by)\b", normalized)
         or re.search(r"\bwhich\s+(?:option|one|approach)\b", normalized)
-        or (normalized.endswith("?") and re.search(r"\b(?:should|can you confirm|what do you mean)\b", normalized))
+        or (
+            normalized.endswith("?")
+            and re.search(r"\b(?:should|can you confirm|what do you mean)\b", normalized)
+            and not _has_substantive_action(normalized)
+        )
     )
 
 
@@ -154,6 +186,8 @@ def decide_foreground_loop_route(
         return ForegroundLoopDecision(False, "loop_tools_unavailable")
     if _is_opt_out(text):
         return ForegroundLoopDecision(False, "request_opt_out")
+    if _is_informational_question(text):
+        return ForegroundLoopDecision(False, "informational_question")
     if _is_clarification_dependency(text):
         return ForegroundLoopDecision(False, "clarification_dependency")
     if _is_trivial_or_single_step(text):
@@ -169,6 +203,10 @@ def foreground_loop_tool_choice(agent: Any) -> dict[str, Any] | str | None:
         # into this shape.  The foreground guard is applied after that builder
         # returns, so it must use the already-native Anthropic form here.
         return {"type": "tool", "name": "delegate_task"}
+    if getattr(agent, "api_mode", "chat_completions") == "codex_responses":
+        # Responses API names a function directly under the choice object;
+        # the Chat Completions ``function`` wrapper is not valid here.
+        return {"type": "function", "name": "delegate_task"}
     if getattr(agent, "api_mode", "chat_completions") == "chat_completions":
         return {"type": "function", "function": {"name": "delegate_task"}}
     return None
