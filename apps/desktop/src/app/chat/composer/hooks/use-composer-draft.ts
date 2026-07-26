@@ -21,6 +21,7 @@ import {
 } from '../focus'
 import { type InlineRefInput, insertInlineRefsIntoEditor } from '../inline-refs'
 import { composerPlainText, placeCaretEnd, renderComposerContents } from '../rich-editor'
+import { safeComposerAction } from '../runtime'
 import { useComposerScope } from '../scope'
 import type { ChatBarProps } from '../types'
 
@@ -65,17 +66,8 @@ export function useComposerDraft({
     return trimmed.length > 0 && !SLASH_COMMAND_RE.test(trimmed)
   })
 
-  // assistant-ui's composer mutators throw when the core isn't bound yet (a
-  // startup/thread-swap window); the DOM + draftRef hold the text and the
-  // subscription reconciles once it binds, so swallow the premature write.
   const setComposerText = useCallback(
-    (value: string) => {
-      try {
-        aui.composer().setText(value)
-      } catch {
-        // Composer core not bound yet — DOM/draftRef carry the text.
-      }
-    },
+    (value: string) => safeComposerAction(() => aui.composer().setText(value)),
     [aui]
   )
 

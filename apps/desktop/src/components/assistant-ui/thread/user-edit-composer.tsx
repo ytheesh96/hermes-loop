@@ -36,6 +36,7 @@ import {
   renderComposerContents,
   RICH_INPUT_SLOT
 } from '@/app/chat/composer/rich-editor'
+import { safeComposerAction } from '@/app/chat/composer/runtime'
 import { detectTrigger, textBeforeCaret, type TriggerState } from '@/app/chat/composer/text-utils'
 import { ComposerTriggerPopover } from '@/app/chat/composer/trigger-popover'
 import {
@@ -130,6 +131,13 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
     }
   }, [])
 
+  const setComposerText = useCallback(
+    (value: string) => safeComposerAction(() => aui.composer().setText(value)),
+    [aui]
+  )
+
+  const cancelComposer = useCallback(() => safeComposerAction(() => aui.composer().cancel()), [aui])
+
   const appendExternalText = useCallback(
     (text: string, mode: ComposerInsertMode) => {
       const value = text.trim()
@@ -144,7 +152,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
       const next = `${base}${sep}${value}`
 
       draftRef.current = next
-      aui.composer().setText(next)
+      setComposerText(next)
 
       const editor = editorRef.current
 
@@ -155,7 +163,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
 
       setFocusRequestId(id => id + 1)
     },
-    [aui, rememberInitialDraft]
+    [rememberInitialDraft, setComposerText]
   )
 
   useEffect(() => {
@@ -204,12 +212,12 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
 
       if (nextDraft !== draftRef.current) {
         draftRef.current = nextDraft
-        aui.composer().setText(nextDraft)
+        setComposerText(nextDraft)
       }
 
       return nextDraft
     },
-    [aui]
+    [setComposerText]
   )
 
   const refreshTrigger = useCallback(() => {
@@ -282,7 +290,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
 
       const finish = () => {
         draftRef.current = composerPlainText(editor)
-        aui.composer().setText(draftRef.current)
+        setComposerText(draftRef.current)
         requestEditFocus()
         starter ? window.setTimeout(refreshTrigger, 0) : closeTrigger()
       }
@@ -324,7 +332,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
       document.execCommand('insertText', false, text)
       finish()
     },
-    [aui, closeTrigger, refreshTrigger, rememberInitialDraft, requestEditFocus, trigger]
+    [closeTrigger, refreshTrigger, rememberInitialDraft, requestEditFocus, setComposerText, trigger]
   )
 
   const insertRefStrings = useCallback(
@@ -343,12 +351,12 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
 
       rememberInitialDraft()
       draftRef.current = nextDraft
-      aui.composer().setText(nextDraft)
+      setComposerText(nextDraft)
       requestEditFocus()
 
       return true
     },
-    [aui, rememberInitialDraft, requestEditFocus]
+    [rememberInitialDraft, requestEditFocus, setComposerText]
   )
 
   const insertDroppedRefs = useCallback(
@@ -514,7 +522,10 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
     }
 
     setSubmitting(true)
-    aui.composer().send()
+
+    if (!safeComposerAction(() => aui.composer().send())) {
+      setSubmitting(false)
+    }
   }
 
   const handleEditBlur = useCallback(
@@ -549,10 +560,10 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
         }
 
         closeTrigger()
-        aui.composer().cancel()
+        cancelComposer()
       }, 80)
     },
-    [aui, closeTrigger, submitting, syncDraftFromEditor]
+    [cancelComposer, closeTrigger, submitting, syncDraftFromEditor]
   )
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -596,7 +607,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
 
     if (event.key === 'Escape') {
       event.preventDefault()
-      aui.composer().cancel()
+      cancelComposer()
 
       return
     }
