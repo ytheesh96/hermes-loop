@@ -5123,9 +5123,11 @@ export function LiveGraphCanvas({
                 <div className="text-[0.625rem] font-medium tracking-wide text-(--ui-text-tertiary) uppercase">
                   {t.liveGraph.inspector} · {kindLabels[liveGraphNodeKind(selectedNode)]}
                 </div>
-                <div className="mt-1 break-words text-sm leading-5 font-semibold text-(--ui-text-primary)">
-                  {liveGraphNodeLabel(selectedNode)}
-                </div>
+                {!selectedWorkflowNode && (
+                  <div className="mt-1 break-words text-sm leading-5 font-semibold text-(--ui-text-primary)">
+                    {liveGraphNodeLabel(selectedNode)}
+                  </div>
+                )}
                 <div className="mt-2 flex items-center gap-1.5 text-[0.625rem] text-(--ui-text-tertiary)">
                   <span
                     className="size-1.5 rounded-full"

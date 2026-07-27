@@ -2511,6 +2511,9 @@ describe('LiveGraphCanvas', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /Workflow: Correct artifact/ }))
 
+    const workflowInspector = await screen.findByTestId('live-graph-selection-inspector')
+    expect(within(workflowInspector).queryByText('Correct artifact')).toBeNull()
+
     const inbox = await screen.findByTestId('live-graph-workflow-inbox')
     expect(within(inbox).getByRole('button', { name: 'View task: Verify live app' })).toBeTruthy()
     expect(within(inbox).getByRole('button', { name: 'View task: Package the release' })).toBeTruthy()
@@ -2526,6 +2529,7 @@ describe('LiveGraphCanvas', () => {
     fireEvent.click(within(inbox).getByRole('button', { name: 'View task: Verify live app' }))
 
     const inspector = await screen.findByTestId('live-graph-selection-inspector')
+    expect(within(inspector).getByText('Verify live app')).toBeTruthy()
     expect(within(inspector).getByText('Desktop interaction is ready for review.')).toBeTruthy()
     expect(await screen.findByRole('button', { name: /Task: Verify live app/ })).toBeTruthy()
   })
