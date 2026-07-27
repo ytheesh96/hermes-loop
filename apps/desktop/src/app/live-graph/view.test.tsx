@@ -649,10 +649,12 @@ beforeAll(() => {
   Element.prototype.hasPointerCapture ??= () => false
   Element.prototype.setPointerCapture ??= () => undefined
   Element.prototype.releasePointerCapture ??= () => undefined
+  Element.prototype.scrollIntoView ??= () => undefined
 })
 
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
   hermesMocks.addLoopTaskComment.mockReset()
   hermesMocks.getLoopTaskDetail.mockReset()
   hermesMocks.getSessionMessages.mockReset()
@@ -2670,10 +2672,11 @@ describe('LiveGraphCanvas', () => {
 
     const inspector = await screen.findByTestId('live-graph-selection-inspector')
     expect(within(inspector).getByRole('button', { name: 'Activity' }).getAttribute('aria-pressed')).toBe('true')
-    expect(within(inspector).getByText('Desktop interaction is ready for review.')).toBeTruthy()
+    expect(within(inspector).queryByText('Desktop interaction is ready for review.')).toBeNull()
 
     fireEvent.click(within(inspector).getByRole('button', { name: 'Details' }))
     expect(within(inspector).getByText('Verify live app')).toBeTruthy()
+    expect(within(inspector).getByText('Desktop interaction is ready for review.')).toBeTruthy()
     expect(await screen.findByRole('button', { name: /Task: Verify live app/ })).toBeTruthy()
   })
 
@@ -3009,8 +3012,8 @@ describe('LiveGraphCanvas', () => {
     expect(details.getByRole('button', { name: 'Activity' }).getAttribute('aria-pressed')).toBe('true')
     expect(details.getByRole('button', { name: 'Details' })).toBeTruthy()
 
-    expect(details.getByText('Desktop interaction is ready for review.')).toBeTruthy()
-    expect(details.getByText('The live verification passed.')).toBeTruthy()
+    expect(details.queryByText('Desktop interaction is ready for review.')).toBeNull()
+    expect(details.queryByText('The live verification passed.')).toBeNull()
     expect(details.queryByText('Exercise the installed app and capture the selected task state.')).toBeNull()
     expect(container.querySelectorAll('[data-live-graph-label]')).toHaveLength(0)
 
@@ -3021,7 +3024,8 @@ describe('LiveGraphCanvas', () => {
     expect(details.getByText('board')).toBeTruthy()
     expect(details.getByText('wf')).toBeTruthy()
     expect(details.getByText('task')).toBeTruthy()
-    expect(details.queryByText('Desktop interaction is ready for review.')).toBeNull()
+    expect(details.getByText('Desktop interaction is ready for review.')).toBeTruthy()
+    expect(details.getByText('The live verification passed.')).toBeTruthy()
 
     fireEvent.pointerMove(task, { pointerId: 11 })
     expect(hoverLabel.textContent).toContain('Verify live app')
@@ -3032,13 +3036,14 @@ describe('LiveGraphCanvas', () => {
     expect(details.queryByText('Exercise the installed app and capture the selected task state.')).toBeNull()
 
     fireEvent.click(details.getByRole('button', { name: 'Activity' }))
-    expect(details.getByText('Desktop interaction is ready for review.')).toBeTruthy()
-    expect(details.getByText('The live verification passed.')).toBeTruthy()
+    expect(details.queryByText('Desktop interaction is ready for review.')).toBeNull()
+    expect(details.queryByText('The live verification passed.')).toBeNull()
     expect(details.queryByText('Exercise the installed app and capture the selected task state.')).toBeNull()
 
     fireEvent.click(details.getByRole('button', { name: 'Details' }))
     expect(details.getByText('Exercise the installed app and capture the selected task state.')).toBeTruthy()
-    expect(details.queryByText('Desktop interaction is ready for review.')).toBeNull()
+    expect(details.getByText('Desktop interaction is ready for review.')).toBeTruthy()
+    expect(details.getByText('The live verification passed.')).toBeTruthy()
 
     fireEvent.click(details.getByRole('button', { name: 'Open task' }))
     expect(onOpenTask).toHaveBeenCalledWith({ board: 'board', taskId: 'task', workflowId: 'wf' })
@@ -3049,6 +3054,8 @@ describe('LiveGraphCanvas', () => {
   })
 
   it('loads the worker transcript and posts comments from the selected task feed', async () => {
+    const scrollIntoView = vi.spyOn(Element.prototype, 'scrollIntoView')
+
     const newComment = {
       author: 'desktop',
       body: 'Ready for the final review.',
@@ -3179,7 +3186,22 @@ describe('LiveGraphCanvas', () => {
     expect(sessionFeed.querySelector('[data-live-graph-session-tool]')).toBeTruthy()
     expect(details.getByText('Worker session initialized.')).toBeTruthy()
     expect(details.queryByText('Hidden transport message.')).toBeNull()
-    expect(await details.findByText('Captured the production evidence.')).toBeTruthy()
+    expect(details.queryByText('Captured the production evidence.')).toBeNull()
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: 'end' }))
+
+    scrollIntoView.mockClear()
+    queryClient.setQueryData(['live-graph-task-worker-transcript', 'worker-profile', 'worker-session'], {
+      messages: [
+        {
+          content: 'Live worker update.',
+          role: 'system',
+          timestamp: Date.now() / 1000
+        }
+      ],
+      session_id: 'worker-session'
+    })
+    expect(await details.findByText('Live worker update.')).toBeTruthy()
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: 'end' }))
 
     fireEvent.click(details.getByRole('button', { name: 'Comments' }))
     expect(await details.findByText('Verified in the live app.')).toBeTruthy()
@@ -3214,6 +3236,8 @@ describe('LiveGraphCanvas', () => {
     expect(await details.findByText('Authoritative task description.')).toBeTruthy()
     expect(details.getByText('Authoritative task title')).toBeTruthy()
     expect(details.getByText('Completed')).toBeTruthy()
+    expect(details.getByText('Run history')).toBeTruthy()
+    expect(details.getByText('Captured the production evidence.')).toBeTruthy()
 
     queryClient.clear()
   })
@@ -3286,23 +3310,26 @@ describe('LiveGraphCanvas', () => {
     const inspector = await screen.findByTestId('live-graph-selection-inspector')
     const details = within(inspector)
 
-    const activitySection = screen.getByTestId('live-graph-task-activity')
-    const activityTexts = activitySection.querySelectorAll('[data-live-graph-inspector-section-text]')
-    const summary = activityTexts[0]!
-    const result = activityTexts[1]!
-
-    expect(summary.className).toContain('line-clamp-5')
-    expect(result.className).not.toContain('line-clamp-5')
-    expect(details.queryByRole('button', { name: 'Show more Result' })).toBeNull()
+    expect(screen.getByTestId('live-graph-task-activity')).toBeTruthy()
+    expect(
+      screen.getByTestId('live-graph-task-activity').querySelector('[data-live-graph-inspector-section-text]')
+    ).toBeNull()
 
     fireEvent.click(details.getByRole('button', { name: 'Details' }))
 
-    const description = screen
+    const detailTexts = screen
       .getByTestId('live-graph-task-details')
-      .querySelector('[data-live-graph-inspector-section-text]')!
+      .querySelectorAll('[data-live-graph-inspector-section-text]')
+
+    const description = detailTexts[0]!
+    const summary = detailTexts[1]!
+    const result = detailTexts[2]!
 
     expect(description.className).toContain('line-clamp-5')
     expect(description.getAttribute('data-live-graph-inspector-truncated')).toBe('true')
+    expect(summary.className).toContain('line-clamp-5')
+    expect(result.className).not.toContain('line-clamp-5')
+    expect(details.queryByRole('button', { name: 'Show more Result' })).toBeNull()
 
     const expandDescription = details.getByRole('button', { name: 'Show more Description' })
     expect(expandDescription.getAttribute('aria-expanded')).toBe('false')
@@ -3317,8 +3344,7 @@ describe('LiveGraphCanvas', () => {
     expect(details.queryByTestId('live-graph-task-details')).toBeNull()
     expect(
       screen.getByTestId('live-graph-task-activity').querySelector('[data-live-graph-inspector-section-text]')
-        ?.className
-    ).toContain('line-clamp-5')
+    ).toBeNull()
   })
 
   it('shows task details when pointer capture retargets the release to the canvas', async () => {

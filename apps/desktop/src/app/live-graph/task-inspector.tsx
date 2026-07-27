@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useRef, useState } from 'react'
 
 import { PRIMARY_ICON_BTN } from '@/app/chat/composer/controls'
 import type { LoopLatestRun, LoopTaskDetail, LoopTaskRun } from '@/app/chat/loop-state'
@@ -243,7 +243,7 @@ function LiveGraphTaskInspectorContent({
   const priority = task?.priority ?? node.priority
   const workflowId = task?.workflow_id || target.workflowId || ''
 
-  const activityTextSections = [
+  const runHistoryTextSections = [
     { id: 'summary', label: t.liveGraph.summary, value: summary },
     { id: 'result', label: t.liveGraph.result, value: result }
   ].filter(section => section.value)
@@ -251,6 +251,19 @@ function LiveGraphTaskInspectorContent({
   const showComments = filter === 'comments'
   const showActivity = filter === 'activity'
   const showDetails = filter === 'details'
+  const transcriptEndRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!showActivity) {
+      return
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      transcriptEndRef.current?.scrollIntoView?.({ block: 'end' })
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [showActivity, transcriptLoading, transcriptMessages])
 
   return (
     <div className="flex h-full min-h-0 min-w-0 max-w-full flex-col" data-live-graph-inspector-details>
@@ -340,7 +353,7 @@ function LiveGraphTaskInspectorContent({
         )}
 
         {showActivity && (
-          <div className="h-full overflow-y-auto">
+          <div className="h-full overflow-x-hidden overflow-y-auto">
             <TaskInspectorSection label={t.liveGraph.taskViewActivity} testId="live-graph-task-activity">
               {transcriptLoading ? (
                 <Loader
@@ -360,59 +373,7 @@ function LiveGraphTaskInspectorContent({
                   sessionId={workerSessionId}
                 />
               )}
-
-              {(activityTextSections.length > 0 || runs.length > 0) && (
-                <div className="grid min-w-0 gap-2 rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-secondary) p-2.5">
-                  <h4 className="m-0 text-[0.625rem] font-semibold tracking-wide text-(--ui-text-tertiary) uppercase">
-                    {t.liveGraph.taskRunHistory}
-                  </h4>
-                  {activityTextSections.map(section => (
-                    <TaskInspectorTextSection
-                      collapseLabel={t.liveGraph.showLess}
-                      expandLabel={t.liveGraph.showMore}
-                      key={target.taskId + ':activity:' + section.id}
-                      label={section.label}
-                      value={section.value}
-                    />
-                  ))}
-                  {runs.map((run, index) => {
-                    const timestamp = taskTimestamp(run.ended_at || run.started_at)
-                    const runStatus = run.outcome || run.status || ''
-                    const runText = run.summary || run.error || ''
-
-                    return (
-                      <article
-                        className="grid min-w-0 gap-1 rounded-md bg-(--ui-bg-tertiary) px-2.5 py-2"
-                        key={String(run.id ?? `${run.task_id || target.taskId}:${run.started_at ?? index}`)}
-                      >
-                        <div className="flex min-w-0 items-center gap-2 text-[0.625rem] text-(--ui-text-tertiary)">
-                          <span className="font-mono">{runLabel(run, index)}</span>
-                          {runStatus && <span className="truncate">{runStatus}</span>}
-                          {timestamp && <time className="ml-auto shrink-0">{timestamp}</time>}
-                        </div>
-                        {runText && (
-                          <p className="m-0 whitespace-pre-wrap break-words text-[0.6875rem] leading-4 text-(--ui-text-secondary)">
-                            {runText}
-                          </p>
-                        )}
-                      </article>
-                    )
-                  })}
-                </div>
-              )}
-              {filter === 'activity' && loading && !transcriptLoading && (
-                <Loader
-                  aria-label={t.liveGraph.taskDetailLoading}
-                  className="size-6 text-(--ui-text-tertiary)"
-                  label={t.liveGraph.taskDetailLoading}
-                  type="lemniscate-bloom"
-                />
-              )}
-              {filter === 'activity' && detailError && activityTextSections.length === 0 && !transcriptError && (
-                <p className="m-0 text-[0.6875rem] leading-4 text-(--ui-text-tertiary)">
-                  {t.liveGraph.taskDetailLoadFailed}
-                </p>
-              )}
+              <div aria-hidden data-live-graph-transcript-end ref={transcriptEndRef} />
             </TaskInspectorSection>
           </div>
         )}
@@ -458,6 +419,45 @@ function LiveGraphTaskInspectorContent({
                     </div>
                   ))}
               </dl>
+              {(runHistoryTextSections.length > 0 || runs.length > 0) && (
+                <div className="grid min-w-0 gap-2 rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-secondary) p-2.5">
+                  <h4 className="m-0 text-[0.625rem] font-semibold tracking-wide text-(--ui-text-tertiary) uppercase">
+                    {t.liveGraph.taskRunHistory}
+                  </h4>
+                  {runHistoryTextSections.map(section => (
+                    <TaskInspectorTextSection
+                      collapseLabel={t.liveGraph.showLess}
+                      expandLabel={t.liveGraph.showMore}
+                      key={target.taskId + ':details:' + section.id}
+                      label={section.label}
+                      value={section.value}
+                    />
+                  ))}
+                  {runs.map((run, index) => {
+                    const timestamp = taskTimestamp(run.ended_at || run.started_at)
+                    const runStatus = run.outcome || run.status || ''
+                    const runText = run.summary || run.error || ''
+
+                    return (
+                      <article
+                        className="grid min-w-0 gap-1 rounded-md bg-(--ui-bg-tertiary) px-2.5 py-2"
+                        key={String(run.id ?? `${run.task_id || target.taskId}:${run.started_at ?? index}`)}
+                      >
+                        <div className="flex min-w-0 items-center gap-2 text-[0.625rem] text-(--ui-text-tertiary)">
+                          <span className="font-mono">{runLabel(run, index)}</span>
+                          {runStatus && <span className="truncate">{runStatus}</span>}
+                          {timestamp && <time className="ml-auto shrink-0">{timestamp}</time>}
+                        </div>
+                        {runText && (
+                          <p className="m-0 whitespace-pre-wrap break-words text-[0.6875rem] leading-4 text-(--ui-text-secondary)">
+                            {runText}
+                          </p>
+                        )}
+                      </article>
+                    )
+                  })}
+                </div>
+              )}
               {onOpenTask && (
                 <Button onClick={() => onOpenTask(target)} size="sm" variant="secondary">
                   <Codicon name="go-to-file" />
