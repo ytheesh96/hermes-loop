@@ -57,16 +57,33 @@ export default defineConfig({
     }
   },
   resolve: {
-    alias: {
-      '@': path.resolve(__dirname, './src'),
-      '@hermes/plugin-sdk': path.resolve(__dirname, './src/sdk/index.ts'),
-      '@hermes/shared/billing': path.resolve(__dirname, '../shared/src/billing-types.ts'),
-      '@hermes/shared': path.resolve(__dirname, '../shared/src'),
-      react: path.resolve(__dirname, '../../node_modules/react'),
-      'react-dom': path.resolve(__dirname, '../../node_modules/react-dom'),
-      'react/jsx-dev-runtime': path.resolve(__dirname, '../../node_modules/react/jsx-dev-runtime.js'),
-      'react/jsx-runtime': path.resolve(__dirname, '../../node_modules/react/jsx-runtime.js')
-    },
+    alias: [
+      // Rolldown can mis-link Shiki's root re-export wrapper when every
+      // language is collapsed into our intentional single renderer chunk.
+      // The full bundle is the same public surface react-shiki consumes,
+      // without the extra wrapper or its duplicated runtime helpers.
+      {
+        find: /^shiki$/,
+        replacement: path.resolve(__dirname, '../../node_modules/shiki/dist/bundle-full.mjs')
+      },
+      { find: '@', replacement: path.resolve(__dirname, './src') },
+      { find: '@hermes/plugin-sdk', replacement: path.resolve(__dirname, './src/sdk/index.ts') },
+      {
+        find: '@hermes/shared/billing',
+        replacement: path.resolve(__dirname, '../shared/src/billing-types.ts')
+      },
+      { find: '@hermes/shared', replacement: path.resolve(__dirname, '../shared/src') },
+      { find: 'react', replacement: path.resolve(__dirname, '../../node_modules/react') },
+      { find: 'react-dom', replacement: path.resolve(__dirname, '../../node_modules/react-dom') },
+      {
+        find: 'react/jsx-dev-runtime',
+        replacement: path.resolve(__dirname, '../../node_modules/react/jsx-dev-runtime.js')
+      },
+      {
+        find: 'react/jsx-runtime',
+        replacement: path.resolve(__dirname, '../../node_modules/react/jsx-runtime.js')
+      }
+    ],
     dedupe: ['react', 'react-dom']
   },
   server: {
