@@ -43,6 +43,8 @@ import { readJson, writeJson } from '@/lib/storage'
 
 import { attachLiveGraphNodeToComposer } from './context'
 import {
+  LIVE_GRAPH_ATTENTION_STATUSES,
+  LIVE_GRAPH_COMPLETED_STATUSES,
   LIVE_GRAPH_SETTLED_STATUSES,
   LIVE_GRAPH_WAITING_STATUSES,
   type LiveGraphEdge,
@@ -51,6 +53,7 @@ import {
   type LiveGraphSnapshot,
   normalizeLiveGraphStatus
 } from './model'
+import { LiveGraphSessionWorkflowInbox, type LiveGraphWorkflowFeedItem } from './session-workflow-inbox'
 import { LiveGraphWorkflowInbox } from './workflow-inbox'
 
 export const LIVE_GRAPH_KINDS = ['session', 'project', 'workflow', 'task', 'agent', 'artifact'] as const
@@ -2448,6 +2451,7 @@ export function LiveGraphCanvas({
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [workflowFeedOpen, setWorkflowFeedOpen] = useState(false)
   const [clock, setClock] = useState(0)
   const [activePulses, setActivePulses] = useState<ActivePulse[]>([])
   const [announcement, setAnnouncement] = useState('')
@@ -2462,8 +2466,25 @@ export function LiveGraphCanvas({
   useEffect(() => {
     if (!surfaceActive) {
       setSettingsOpen(false)
+      setWorkflowFeedOpen(false)
     }
   }, [surfaceActive])
+
+  useEffect(() => {
+    if (!surfaceActive || !workflowFeedOpen) {
+      return
+    }
+
+    const closeWorkflowFeed = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setWorkflowFeedOpen(false)
+      }
+    }
+
+    document.addEventListener('keydown', closeWorkflowFeed)
+
+    return () => document.removeEventListener('keydown', closeWorkflowFeed)
+  }, [surfaceActive, workflowFeedOpen])
 
   const commitState = useCallback(
     (updater: LiveGraphViewState | ((current: LiveGraphViewState) => LiveGraphViewState), persist = true) => {
@@ -2479,6 +2500,11 @@ export function LiveGraphCanvas({
     },
     [onStateChange]
   )
+
+  const openNodeSelection = useCallback((nodeId: string) => {
+    setWorkflowFeedOpen(false)
+    setSelectedId(nodeId)
+  }, [])
 
   const applyDenseCamera = useCallback(
     (camera: Camera, persist: boolean) => {
@@ -3437,6 +3463,55 @@ export function LiveGraphCanvas({
     [graph, selectedWorkflowEnvelope]
   )
 
+  const workflowFeedItems = useMemo<LiveGraphWorkflowFeedItem[]>(() => {
+    const nodes = snapshotNodes(graph)
+
+    const taskCountsByWorkflow = new Map<
+      string,
+      Pick<LiveGraphWorkflowFeedItem, 'activeTaskCount' | 'attentionTaskCount' | 'completedTaskCount'>
+    >()
+
+    for (const node of nodes) {
+      if (liveGraphNodeKind(node) !== 'task') {
+        continue
+      }
+
+      const workflowEnvelope = liveGraphWorkflowEnvelopeId(node)
+
+      if (!workflowEnvelope) {
+        continue
+      }
+
+      const counts = taskCountsByWorkflow.get(workflowEnvelope) || {
+        activeTaskCount: 0,
+        attentionTaskCount: 0,
+        completedTaskCount: 0
+      }
+
+      const status = normalizeLiveGraphStatus(node.status)
+
+      if (LIVE_GRAPH_COMPLETED_STATUSES.has(status)) {
+        counts.completedTaskCount += 1
+      } else if (LIVE_GRAPH_ATTENTION_STATUSES.has(status)) {
+        counts.attentionTaskCount += 1
+      } else {
+        counts.activeTaskCount += 1
+      }
+
+      taskCountsByWorkflow.set(workflowEnvelope, counts)
+    }
+
+    return nodes
+      .filter(node => liveGraphNodeKind(node) === 'workflow')
+      .map(node => ({
+        activeTaskCount: 0,
+        attentionTaskCount: 0,
+        completedTaskCount: 0,
+        ...(taskCountsByWorkflow.get(liveGraphWorkflowEnvelopeId(node)) || {}),
+        node
+      }))
+  }, [graph])
+
   const selectWorkflowTask = useCallback(
     (nodeId: string) => {
       commitState(current => ({
@@ -3445,9 +3520,24 @@ export function LiveGraphCanvas({
         enabledKinds: current.enabledKinds.includes('task') ? current.enabledKinds : [...current.enabledKinds, 'task'],
         search: ''
       }))
-      setSelectedId(nodeId)
+      openNodeSelection(nodeId)
     },
-    [commitState]
+    [commitState, openNodeSelection]
+  )
+
+  const selectFeedWorkflow = useCallback(
+    (nodeId: string) => {
+      commitState(current => ({
+        ...current,
+        activeOnly: false,
+        enabledKinds: current.enabledKinds.includes('workflow')
+          ? current.enabledKinds
+          : [...current.enabledKinds, 'workflow'],
+        search: ''
+      }))
+      openNodeSelection(nodeId)
+    },
+    [commitState, openNodeSelection]
   )
 
   const labelsOnHoverOnly = selectedTaskNode !== null
@@ -3567,7 +3657,8 @@ export function LiveGraphCanvas({
   )
 
   const fitGraphRef = useRef(fitGraph)
-  const previousSelectedIdRef = useRef<string | null | undefined>(undefined)
+  const inspectorPanelKey = workflowFeedOpen ? 'workflow-feed' : selectedId
+  const previousInspectorPanelKeyRef = useRef<string | null | undefined>(undefined)
   fitGraphRef.current = fitGraph
 
   const hasAutoFitRef = useRef(false)
@@ -3585,10 +3676,10 @@ export function LiveGraphCanvas({
   }, [autoFit, fitGraph, viewport])
 
   useEffect(() => {
-    const previousSelectedId = previousSelectedIdRef.current
-    previousSelectedIdRef.current = selectedId
+    const previousInspectorPanelKey = previousInspectorPanelKeyRef.current
+    previousInspectorPanelKeyRef.current = inspectorPanelKey
 
-    if (previousSelectedId === undefined || previousSelectedId === selectedId) {
+    if (previousInspectorPanelKey === undefined || previousInspectorPanelKey === inspectorPanelKey) {
       return
     }
 
@@ -3605,7 +3696,7 @@ export function LiveGraphCanvas({
         bounds && bounds.width > 0 && bounds.height > 0 ? { height: bounds.height, width: bounds.width } : viewport
       )
     })
-  }, [selectedId, viewport])
+  }, [inspectorPanelKey, viewport])
 
   const revealProgress = useMemo(() => {
     if (!reveal || reveal.key !== physicsKey) {
@@ -4191,7 +4282,7 @@ export function LiveGraphCanvas({
           suppressedNodeActivationRef.current = { id: drag.id, until: performance.now() + 500 }
           onAttachNode?.(node.node)
         } else {
-          setSelectedId(drag.id)
+          openNodeSelection(drag.id)
         }
       }
     }
@@ -4301,7 +4392,7 @@ export function LiveGraphCanvas({
     })
   }
 
-  const selectNode = (node: LiveGraphNode) => setSelectedId(liveGraphNodeId(node))
+  const selectNode = (node: LiveGraphNode) => openNodeSelection(liveGraphNodeId(node))
 
   const selectNearbyDenseNode = (event: ReactMouseEvent<SVGSVGElement>): boolean => {
     if (!denseGraph) {
@@ -4329,7 +4420,7 @@ export function LiveGraphCanvas({
       return false
     }
 
-    setSelectedId(nearestId)
+    openNodeSelection(nearestId)
 
     return true
   }
@@ -4351,8 +4442,17 @@ export function LiveGraphCanvas({
             } as CSSProperties
           }
         >
-          <div className="absolute top-3 right-3 z-30">
-            <Popover onOpenChange={setSettingsOpen} open={settingsOpen}>
+          <div className="absolute top-3 right-3 z-30 flex flex-col items-end gap-2" data-live-graph-controls>
+            <Popover
+              onOpenChange={open => {
+                setSettingsOpen(open)
+
+                if (open) {
+                  setWorkflowFeedOpen(false)
+                }
+              }}
+              open={settingsOpen}
+            >
               <Tip label={t.liveGraph.settings}>
                 <PopoverTrigger asChild>
                   <Button
@@ -4618,6 +4718,25 @@ export function LiveGraphCanvas({
                 </details>
               </PopoverContent>
             </Popover>
+            <Tip label={t.liveGraph.workflowFeed}>
+              <Button
+                aria-label={t.liveGraph.workflowFeed}
+                aria-pressed={workflowFeedOpen}
+                className="border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated)/90 backdrop-blur-sm"
+                onClick={() => {
+                  if (!workflowFeedOpen) {
+                    setSettingsOpen(false)
+                    setSelectedId(null)
+                  }
+
+                  setWorkflowFeedOpen(!workflowFeedOpen)
+                }}
+                size="icon-sm"
+                variant={workflowFeedOpen ? 'secondary' : 'ghost'}
+              >
+                <Codicon name="inbox" />
+              </Button>
+            </Tip>
           </div>
 
           {visible.nodes.length === 0 ? (
@@ -4647,6 +4766,7 @@ export function LiveGraphCanvas({
                   return
                 }
 
+                setWorkflowFeedOpen(false)
                 setSelectedId(null)
               }}
               onLostPointerCapture={finishPointer}
@@ -5145,7 +5265,36 @@ export function LiveGraphCanvas({
           )}
         </div>
 
-        {selectedNode && (
+        {workflowFeedOpen ? (
+          <aside
+            aria-label={t.liveGraph.workflowFeed}
+            className="relative z-20 h-full min-w-[16rem] w-[clamp(16rem,46%,22rem)] shrink-0 overflow-x-hidden overflow-y-auto border-l border-(--stroke-nous) bg-(--ui-bg-elevated) [overflow-wrap:anywhere]"
+            data-testid="live-graph-workflow-feed"
+          >
+            <div className="flex min-w-0 items-center gap-2 p-3">
+              <Codicon className="shrink-0 text-(--ui-text-tertiary)" name="inbox" />
+              <div className="min-w-0 flex-1 text-[0.625rem] font-medium tracking-wide text-(--ui-text-tertiary) uppercase">
+                {t.liveGraph.workflowFeed}
+              </div>
+              <Tip label={t.common.close}>
+                <Button
+                  aria-label={t.common.close}
+                  onClick={() => setWorkflowFeedOpen(false)}
+                  size="icon-xs"
+                  variant="ghost"
+                >
+                  <Codicon name="close" />
+                </Button>
+              </Tip>
+            </div>
+            <LiveGraphSessionWorkflowInbox
+              label={t.liveGraph.workflowFeed}
+              onSelectWorkflow={selectFeedWorkflow}
+              sessionScope={snapshotRootId(graph) || 'global'}
+              workflows={workflowFeedItems}
+            />
+          </aside>
+        ) : selectedNode ? (
           <aside
             aria-label={t.liveGraph.inspector}
             className="relative z-20 h-full min-w-[16rem] w-[clamp(16rem,46%,22rem)] shrink-0 overflow-x-hidden overflow-y-auto border-l border-(--stroke-nous) bg-(--ui-bg-elevated) [overflow-wrap:anywhere]"
@@ -5258,7 +5407,7 @@ export function LiveGraphCanvas({
               </div>
             )}
           </aside>
-        )}
+        ) : null}
       </div>
       <span aria-atomic="true" aria-live="polite" className="sr-only">
         {announcement}

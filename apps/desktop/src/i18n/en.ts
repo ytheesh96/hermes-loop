@@ -1120,6 +1120,7 @@ export const en: Translations = {
     showLess: 'Show less',
     taskInbox: 'Workflow task inbox',
     workflowInbox: 'Session workflow inbox',
+    workflowFeed: 'Workflow feed',
     allTasks: 'All',
     activeTasks: 'Active',
     completedTasks: 'Completed',

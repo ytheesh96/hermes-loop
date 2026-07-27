@@ -987,6 +987,7 @@ export interface Translations {
     showLess: string
     taskInbox: string
     workflowInbox: string
+    workflowFeed: string
     allTasks: string
     activeTasks: string
     completedTasks: string

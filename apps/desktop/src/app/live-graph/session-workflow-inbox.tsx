@@ -56,6 +56,7 @@ export interface LiveGraphWorkflowFeedItem {
 }
 
 export interface LiveGraphSessionWorkflowInboxProps {
+  label?: string
   onSelectWorkflow: (nodeId: string) => void
   sessionScope: string
   workflows: readonly LiveGraphWorkflowFeedItem[]
@@ -234,11 +235,13 @@ function CompletedWorkflowRow({ item, nowMs, onSelect, reducedMotion }: Complete
 }
 
 export const LiveGraphSessionWorkflowInbox = memo(function LiveGraphSessionWorkflowInbox({
+  label,
   onSelectWorkflow,
   sessionScope,
   workflows
 }: LiveGraphSessionWorkflowInboxProps) {
   const { t } = useI18n()
+  const inboxLabel = label || t.liveGraph.workflowInbox
   const reducedMotion = Boolean(useReducedMotion())
   const [filter, setFilter] = useState<SessionWorkflowInboxFilter>('all')
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -281,16 +284,12 @@ export const LiveGraphSessionWorkflowInbox = memo(function LiveGraphSessionWorkf
   return (
     <LayoutGroup id={`live-graph-session-workflow-inbox:${sessionScope}`}>
       <div
-        aria-label={t.liveGraph.workflowInbox}
+        aria-label={inboxLabel}
         className="grid min-w-0 gap-4 border-t border-(--ui-stroke-tertiary) px-3 py-3"
         data-testid="live-graph-session-workflow-inbox"
         role="region"
       >
-        <div
-          aria-label={t.liveGraph.workflowInbox}
-          className="flex min-w-0 flex-nowrap items-center gap-1"
-          role="group"
-        >
+        <div aria-label={inboxLabel} className="flex min-w-0 flex-nowrap items-center gap-1" role="group">
           <Button
             aria-pressed={filter === 'all'}
             className="h-6 px-1.5 text-[0.625rem]"

@@ -2534,6 +2534,45 @@ describe('LiveGraphCanvas', () => {
     expect(await screen.findByRole('button', { name: /Task: Verify live app/ })).toBeTruthy()
   })
 
+  it('opens the workflow feed below graph settings and selects a workflow from it', async () => {
+    const { container } = render(
+      <LiveGraphCanvas graph={graph} initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }} />
+    )
+
+    const controls = container.querySelector('[data-live-graph-controls]')!
+    const settings = screen.getByRole('button', { name: 'Graph settings' })
+    const feedButton = screen.getByRole('button', { name: 'Workflow feed' })
+
+    expect([...controls.querySelectorAll('button')].slice(0, 2)).toEqual([settings, feedButton])
+    expect(feedButton.getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.click(feedButton)
+
+    const feed = await screen.findByTestId('live-graph-workflow-feed')
+    const workflow = within(feed).getByRole('button', { name: 'View workflow: Correct artifact' })
+
+    expect(feedButton.getAttribute('aria-pressed')).toBe('true')
+    expect(within(feed).getByRole('region', { name: 'Workflow feed' })).toBeTruthy()
+    expect(workflow.querySelector('[data-live-graph-workflow-task-counts]')?.textContent).toContain('1 Active')
+    expect(workflow.querySelector('[data-live-graph-workflow-task-counts]')?.textContent).toContain('0 Completed')
+
+    fireEvent.keyDown(feedButton, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByTestId('live-graph-workflow-feed')).toBeNull())
+
+    fireEvent.click(feedButton)
+    fireEvent.click(
+      within(await screen.findByTestId('live-graph-workflow-feed')).getByRole('button', {
+        name: 'View workflow: Correct artifact'
+      })
+    )
+
+    await waitFor(() => expect(screen.queryByTestId('live-graph-workflow-feed')).toBeNull())
+    expect(await screen.findByTestId('live-graph-selection-inspector')).toBeTruthy()
+    expect(
+      (await screen.findByRole('button', { name: /Workflow: Correct artifact/ })).getAttribute('aria-pressed')
+    ).toBe('true')
+  })
+
   it('shows full task details on a single click', async () => {
     const onOpenTask = vi.fn()
 
