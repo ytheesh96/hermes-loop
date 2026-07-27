@@ -1,12 +1,13 @@
-import { useQuery } from '@tanstack/react-query'
-import { type ReactNode, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { type ReactNode, useEffect, useState } from 'react'
 
+import { PRIMARY_ICON_BTN } from '@/app/chat/composer/controls'
 import type { LoopLatestRun, LoopTaskDetail, LoopTaskRun } from '@/app/chat/loop-state'
+import { composerFill, composerSurfaceGlass } from '@/components/chat/composer-dock'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Loader } from '@/components/ui/loader'
-import { SegmentedControl } from '@/components/ui/segmented-control'
-import { getLoopTaskDetail, getSessionMessages } from '@/hermes'
+import { addLoopTaskComment, getLoopTaskDetail, getSessionMessages } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { relativeTime } from '@/lib/time'
 import type { SessionMessage } from '@/types/hermes'
@@ -30,6 +31,7 @@ interface LiveGraphTaskInspectorContentProps {
   detailError?: string
   loading?: boolean
   node: LiveGraphNode
+  onAddComment?: (body: string) => Promise<void>
   onOpenTask?: (target: LiveGraphTaskTarget) => void
   target: LiveGraphTaskTarget
   transcriptError?: string
@@ -114,13 +116,102 @@ function runLabel(run: LoopTaskRun, index: number): string {
 
 function TaskInspectorSection({ children, label, testId }: { children: ReactNode; label: string; testId: string }) {
   return (
-    <section
-      className="grid min-w-0 max-w-full gap-2 border-t border-(--ui-stroke-tertiary) px-3 py-3 first:border-t-0"
-      data-testid={testId}
-    >
-      <h3 className="m-0 text-[0.625rem] font-semibold tracking-wide text-(--ui-text-tertiary) uppercase">{label}</h3>
+    <section aria-label={label} className="grid min-w-0 max-w-full gap-3 px-3 py-3" data-testid={testId}>
       {children}
     </section>
+  )
+}
+
+function TaskCommentComposer({
+  onAddComment,
+  taskId
+}: {
+  onAddComment: (body: string) => Promise<void>
+  taskId: string
+}) {
+  const { t } = useI18n()
+  const [draft, setDraft] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [submitFailed, setSubmitFailed] = useState(false)
+  const canSubmit = draft.trim().length > 0 && !submitting
+
+  useEffect(() => {
+    setDraft('')
+    setSubmitFailed(false)
+  }, [taskId])
+
+  const submitComment = async () => {
+    const body = draft.trim()
+
+    if (!body || submitting) {
+      return
+    }
+
+    setSubmitting(true)
+    setSubmitFailed(false)
+
+    try {
+      await onAddComment(body)
+      setDraft('')
+    } catch {
+      setSubmitFailed(true)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <form
+      className="group/composer shrink-0 bg-(--ui-bg-elevated) px-3 pt-2 pb-3"
+      data-slot="composer-root"
+      data-testid="live-graph-task-comment-composer"
+      onSubmit={event => {
+        event.preventDefault()
+        void submitComment()
+      }}
+    >
+      <div className="relative isolate overflow-hidden rounded-2xl border border-[color-mix(in_srgb,var(--dt-composer-ring)_calc(18%*var(--composer-ring-strength)),var(--dt-input))]">
+        <div
+          aria-hidden
+          className={`pointer-events-none absolute inset-0 -z-10 ${composerFill} ${composerSurfaceGlass}`}
+        />
+        <textarea
+          aria-label={t.liveGraph.taskCommentComposerLabel}
+          autoCapitalize="sentences"
+          autoComplete="off"
+          autoCorrect="on"
+          className="block min-h-8 max-h-24 w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-xs leading-4 text-(--ui-text-primary) outline-none placeholder:text-(--ui-text-tertiary) disabled:cursor-default disabled:opacity-60"
+          disabled={submitting}
+          onChange={event => setDraft(event.target.value)}
+          onKeyDown={event => {
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault()
+              void submitComment()
+            }
+          }}
+          placeholder={t.liveGraph.taskCommentPlaceholder}
+          rows={1}
+          spellCheck
+          value={draft}
+        />
+        <div className="flex min-w-0 items-center gap-2 px-3 pb-2">
+          {submitFailed && (
+            <span className="min-w-0 flex-1 text-[0.625rem] leading-4 text-destructive" role="alert">
+              {t.liveGraph.taskCommentSubmitFailed}
+            </span>
+          )}
+          <Button
+            aria-label={submitting ? t.liveGraph.taskCommentSubmitting : t.liveGraph.taskCommentSubmit}
+            className={`${PRIMARY_ICON_BTN} ml-auto`}
+            disabled={!canSubmit}
+            size="icon"
+            type="submit"
+          >
+            <Codicon className={submitting ? 'animate-spin' : undefined} name={submitting ? 'loading' : 'arrow-up'} />
+          </Button>
+        </div>
+      </div>
+    </form>
   )
 }
 
@@ -129,6 +220,7 @@ function LiveGraphTaskInspectorContent({
   detailError,
   loading = false,
   node,
+  onAddComment,
   onOpenTask,
   target,
   transcriptError,
@@ -161,188 +253,219 @@ function LiveGraphTaskInspectorContent({
   const showDetails = filter === 'details'
 
   return (
-    <div className="min-w-0 max-w-full" data-live-graph-inspector-details>
-      <div className="sticky top-0 z-10 border-b border-(--ui-stroke-tertiary) bg-(--ui-bg-elevated) p-2">
-        <SegmentedControl
-          className="w-full"
-          onChange={setFilter}
-          options={[
-            { id: 'comments', label: t.liveGraph.taskViewComments },
-            { id: 'activity', label: t.liveGraph.taskViewActivity },
-            { id: 'details', label: t.liveGraph.taskViewDetails }
-          ]}
-          value={filter}
-        />
+    <div className="flex h-full min-h-0 min-w-0 max-w-full flex-col" data-live-graph-inspector-details>
+      <div
+        aria-label={t.liveGraph.inspector}
+        className="flex min-w-0 shrink-0 flex-nowrap items-center gap-1 px-3 pt-3"
+        role="group"
+      >
+        {[
+          { id: 'comments' as const, label: t.liveGraph.taskViewComments },
+          { id: 'activity' as const, label: t.liveGraph.taskViewActivity },
+          { id: 'details' as const, label: t.liveGraph.taskViewDetails }
+        ].map(option => (
+          <Button
+            aria-pressed={filter === option.id}
+            className="h-6 px-1.5 text-[0.625rem]"
+            key={option.id}
+            onClick={() => setFilter(option.id)}
+            size="xs"
+            type="button"
+            variant={filter === option.id ? 'secondary' : 'ghost'}
+          >
+            {option.label}
+          </Button>
+        ))}
       </div>
 
-      <div className="[&>section:first-child]:border-t-0">
+      <div className="min-h-0 flex-1">
         {showComments && (
-          <TaskInspectorSection label={t.liveGraph.taskViewComments} testId="live-graph-task-comments">
-            {loading ? (
-              <Loader
-                aria-label={t.liveGraph.taskDetailLoading}
-                className="size-6 text-(--ui-text-tertiary)"
-                label={t.liveGraph.taskDetailLoading}
-                type="lemniscate-bloom"
-              />
-            ) : detailError ? (
-              <p className="m-0 text-[0.6875rem] leading-4 text-(--ui-text-tertiary)">
-                {t.liveGraph.taskDetailLoadFailed}
-              </p>
-            ) : comments.length === 0 ? (
-              <p className="m-0 text-[0.6875rem] leading-4 text-(--ui-text-tertiary)">
-                {t.liveGraph.taskCommentsEmpty}
-              </p>
-            ) : (
-              <div className="grid min-w-0 gap-2">
-                {comments.map((comment, index) => {
-                  const timestamp = taskTimestamp(comment.created_at)
+          <section
+            aria-label={t.liveGraph.taskViewComments}
+            className="flex h-full min-h-0 flex-col"
+            data-testid="live-graph-task-comments"
+          >
+            <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-3">
+              {loading ? (
+                <Loader
+                  aria-label={t.liveGraph.taskDetailLoading}
+                  className="size-6 text-(--ui-text-tertiary)"
+                  label={t.liveGraph.taskDetailLoading}
+                  type="lemniscate-bloom"
+                />
+              ) : detailError ? (
+                <p className="m-0 text-[0.6875rem] leading-4 text-(--ui-text-tertiary)">
+                  {t.liveGraph.taskDetailLoadFailed}
+                </p>
+              ) : comments.length === 0 ? (
+                <p className="m-0 py-2 text-center text-[0.6875rem] leading-4 text-(--ui-text-tertiary)">
+                  {t.liveGraph.taskCommentsEmpty}
+                </p>
+              ) : (
+                <div className="grid min-w-0 gap-3" data-testid="live-graph-task-comments-list">
+                  {comments.map((comment, index) => {
+                    const timestamp = taskTimestamp(comment.created_at)
 
-                  return (
-                    <article
-                      className="grid min-w-0 gap-1 border-b border-(--ui-stroke-tertiary) pb-2 last:border-b-0 last:pb-0"
-                      key={String(comment.id ?? `${comment.task_id || target.taskId}:${comment.created_at ?? index}`)}
-                    >
-                      <div className="flex min-w-0 items-center gap-2 text-[0.625rem] text-(--ui-text-tertiary)">
-                        <span className="truncate font-medium text-(--ui-text-secondary)">
-                          {comment.author || t.liveGraph.unknownCommentAuthor}
+                    return (
+                      <article
+                        className="flex w-full min-w-0 max-w-full items-start gap-2.5 overflow-hidden rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-secondary) p-2.5 shadow-[0_1px_0_color-mix(in_srgb,var(--ui-text-primary)_4%,transparent)]"
+                        data-testid="live-graph-task-comment"
+                        key={String(comment.id ?? `${comment.task_id || target.taskId}:${comment.created_at ?? index}`)}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="flex size-6 shrink-0 items-center justify-center rounded-full bg-(--ui-bg-tertiary) text-(--ui-text-tertiary)"
+                        >
+                          <Codicon name="account" />
                         </span>
-                        {timestamp && <time className="shrink-0">{timestamp}</time>}
-                      </div>
-                      <p className="m-0 whitespace-pre-wrap break-words text-[0.6875rem] leading-4 text-(--ui-text-secondary)">
-                        {comment.body || ''}
-                      </p>
-                    </article>
-                  )
-                })}
-              </div>
-            )}
-          </TaskInspectorSection>
+                        <div className="grid min-w-0 flex-1 gap-1 overflow-hidden">
+                          <div className="flex min-w-0 items-center gap-2 text-[0.625rem] text-(--ui-text-tertiary)">
+                            <span className="truncate font-semibold text-(--ui-text-secondary)">
+                              {comment.author || t.liveGraph.unknownCommentAuthor}
+                            </span>
+                            {timestamp && <time className="ml-auto shrink-0">{timestamp}</time>}
+                          </div>
+                          <p className="m-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-[0.6875rem] leading-4 text-(--ui-text-secondary)">
+                            {comment.body || ''}
+                          </p>
+                        </div>
+                      </article>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+            {onAddComment && <TaskCommentComposer onAddComment={onAddComment} taskId={target.taskId} />}
+          </section>
         )}
 
         {showActivity && (
-          <TaskInspectorSection label={t.liveGraph.taskViewActivity} testId="live-graph-task-activity">
-            {transcriptLoading ? (
-              <Loader
-                aria-label={t.liveGraph.taskWorkerTranscriptLoading}
-                className="size-6 text-(--ui-text-tertiary)"
-                label={t.liveGraph.taskWorkerTranscriptLoading}
-                type="lemniscate-bloom"
-              />
-            ) : transcriptError || detailError ? (
-              <p className="m-0 text-[0.6875rem] leading-4 text-(--ui-text-tertiary)">
-                {t.liveGraph.taskWorkerTranscriptLoadFailed}
-              </p>
-            ) : (
-              <WorkerSessionFeed
-                emptyLabel={t.liveGraph.taskWorkerTranscriptEmpty}
-                messages={transcriptMessages}
-                sessionId={workerSessionId}
-              />
-            )}
+          <div className="h-full overflow-y-auto">
+            <TaskInspectorSection label={t.liveGraph.taskViewActivity} testId="live-graph-task-activity">
+              {transcriptLoading ? (
+                <Loader
+                  aria-label={t.liveGraph.taskWorkerTranscriptLoading}
+                  className="size-6 text-(--ui-text-tertiary)"
+                  label={t.liveGraph.taskWorkerTranscriptLoading}
+                  type="lemniscate-bloom"
+                />
+              ) : transcriptError || detailError ? (
+                <p className="m-0 text-[0.6875rem] leading-4 text-(--ui-text-tertiary)">
+                  {t.liveGraph.taskWorkerTranscriptLoadFailed}
+                </p>
+              ) : (
+                <WorkerSessionFeed
+                  emptyLabel={t.liveGraph.taskWorkerTranscriptEmpty}
+                  messages={transcriptMessages}
+                  sessionId={workerSessionId}
+                />
+              )}
 
-            {(activityTextSections.length > 0 || runs.length > 0) && (
-              <div className="grid min-w-0 gap-2 border-t border-(--ui-stroke-tertiary) pt-2">
-                <h4 className="m-0 text-[0.625rem] font-semibold tracking-wide text-(--ui-text-tertiary) uppercase">
-                  {t.liveGraph.taskRunHistory}
-                </h4>
-                {activityTextSections.map(section => (
-                  <TaskInspectorTextSection
-                    collapseLabel={t.liveGraph.showLess}
-                    expandLabel={t.liveGraph.showMore}
-                    key={target.taskId + ':activity:' + section.id}
-                    label={section.label}
-                    value={section.value}
-                  />
-                ))}
-                {runs.map((run, index) => {
-                  const timestamp = taskTimestamp(run.ended_at || run.started_at)
-                  const runStatus = run.outcome || run.status || ''
-                  const runText = run.summary || run.error || ''
+              {(activityTextSections.length > 0 || runs.length > 0) && (
+                <div className="grid min-w-0 gap-2 rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-secondary) p-2.5">
+                  <h4 className="m-0 text-[0.625rem] font-semibold tracking-wide text-(--ui-text-tertiary) uppercase">
+                    {t.liveGraph.taskRunHistory}
+                  </h4>
+                  {activityTextSections.map(section => (
+                    <TaskInspectorTextSection
+                      collapseLabel={t.liveGraph.showLess}
+                      expandLabel={t.liveGraph.showMore}
+                      key={target.taskId + ':activity:' + section.id}
+                      label={section.label}
+                      value={section.value}
+                    />
+                  ))}
+                  {runs.map((run, index) => {
+                    const timestamp = taskTimestamp(run.ended_at || run.started_at)
+                    const runStatus = run.outcome || run.status || ''
+                    const runText = run.summary || run.error || ''
 
-                  return (
-                    <article
-                      className="grid min-w-0 gap-1 border-t border-(--ui-stroke-tertiary) pt-2 first:border-t-0 first:pt-0"
-                      key={String(run.id ?? `${run.task_id || target.taskId}:${run.started_at ?? index}`)}
-                    >
-                      <div className="flex min-w-0 items-center gap-2 text-[0.625rem] text-(--ui-text-tertiary)">
-                        <span className="font-mono">{runLabel(run, index)}</span>
-                        {runStatus && <span className="truncate">{runStatus}</span>}
-                        {timestamp && <time className="ml-auto shrink-0">{timestamp}</time>}
-                      </div>
-                      {runText && (
-                        <p className="m-0 whitespace-pre-wrap break-words text-[0.6875rem] leading-4 text-(--ui-text-secondary)">
-                          {runText}
-                        </p>
-                      )}
-                    </article>
-                  )
-                })}
-              </div>
-            )}
-            {filter === 'activity' && loading && !transcriptLoading && (
-              <Loader
-                aria-label={t.liveGraph.taskDetailLoading}
-                className="size-6 text-(--ui-text-tertiary)"
-                label={t.liveGraph.taskDetailLoading}
-                type="lemniscate-bloom"
-              />
-            )}
-            {filter === 'activity' && detailError && activityTextSections.length === 0 && !transcriptError && (
-              <p className="m-0 text-[0.6875rem] leading-4 text-(--ui-text-tertiary)">
-                {t.liveGraph.taskDetailLoadFailed}
-              </p>
-            )}
-          </TaskInspectorSection>
+                    return (
+                      <article
+                        className="grid min-w-0 gap-1 rounded-md bg-(--ui-bg-tertiary) px-2.5 py-2"
+                        key={String(run.id ?? `${run.task_id || target.taskId}:${run.started_at ?? index}`)}
+                      >
+                        <div className="flex min-w-0 items-center gap-2 text-[0.625rem] text-(--ui-text-tertiary)">
+                          <span className="font-mono">{runLabel(run, index)}</span>
+                          {runStatus && <span className="truncate">{runStatus}</span>}
+                          {timestamp && <time className="ml-auto shrink-0">{timestamp}</time>}
+                        </div>
+                        {runText && (
+                          <p className="m-0 whitespace-pre-wrap break-words text-[0.6875rem] leading-4 text-(--ui-text-secondary)">
+                            {runText}
+                          </p>
+                        )}
+                      </article>
+                    )
+                  })}
+                </div>
+              )}
+              {filter === 'activity' && loading && !transcriptLoading && (
+                <Loader
+                  aria-label={t.liveGraph.taskDetailLoading}
+                  className="size-6 text-(--ui-text-tertiary)"
+                  label={t.liveGraph.taskDetailLoading}
+                  type="lemniscate-bloom"
+                />
+              )}
+              {filter === 'activity' && detailError && activityTextSections.length === 0 && !transcriptError && (
+                <p className="m-0 text-[0.6875rem] leading-4 text-(--ui-text-tertiary)">
+                  {t.liveGraph.taskDetailLoadFailed}
+                </p>
+              )}
+            </TaskInspectorSection>
+          </div>
         )}
 
         {showDetails && (
-          <TaskInspectorSection label={t.liveGraph.taskViewDetails} testId="live-graph-task-details">
-            {description && (
-              <TaskInspectorTextSection
-                collapseLabel={t.liveGraph.showLess}
-                expandLabel={t.liveGraph.showMore}
-                key={target.taskId + ':details:description'}
-                label={t.liveGraph.description}
-                value={description}
-              />
-            )}
-            <dl className="m-0 grid min-w-0 max-w-full grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[0.625rem] leading-4">
-              {[
-                { id: 'title', label: t.liveGraph.taskTitle, value: title },
-                { id: 'status', label: t.liveGraph.status, value: statusLabel },
-                { id: 'task', label: t.liveGraph.taskId, value: target.taskId },
-                { id: 'assignee', label: t.liveGraph.assignee, value: assignee },
-                {
-                  id: 'priority',
-                  label: t.liveGraph.priority,
-                  value: priority === undefined ? '' : `P${priority}`
-                },
-                { id: 'board', label: t.liveGraph.board, value: target.board || '' },
-                { id: 'workflow', label: t.liveGraph.workflow, value: workflowId }
-              ]
-                .filter(item => item.value)
-                .map(item => (
-                  <div className="contents" key={item.id}>
-                    <dt className="text-(--ui-text-tertiary)">{item.label}</dt>
-                    <dd
-                      className={
-                        'm-0 min-w-0 text-(--ui-text-secondary)' +
-                        (item.id === 'title' || item.id === 'status' ? ' break-words' : ' break-all font-mono')
-                      }
-                    >
-                      {item.value}
-                    </dd>
-                  </div>
-                ))}
-            </dl>
-            {onOpenTask && (
-              <Button onClick={() => onOpenTask(target)} size="sm" variant="secondary">
-                <Codicon name="go-to-file" />
-                {t.liveGraph.openTask}
-              </Button>
-            )}
-          </TaskInspectorSection>
+          <div className="h-full overflow-y-auto">
+            <TaskInspectorSection label={t.liveGraph.taskViewDetails} testId="live-graph-task-details">
+              {description && (
+                <TaskInspectorTextSection
+                  collapseLabel={t.liveGraph.showLess}
+                  expandLabel={t.liveGraph.showMore}
+                  key={target.taskId + ':details:description'}
+                  label={t.liveGraph.description}
+                  value={description}
+                />
+              )}
+              <dl className="m-0 grid min-w-0 max-w-full grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[0.625rem] leading-4">
+                {[
+                  { id: 'title', label: t.liveGraph.taskTitle, value: title },
+                  { id: 'status', label: t.liveGraph.status, value: statusLabel },
+                  { id: 'task', label: t.liveGraph.taskId, value: target.taskId },
+                  { id: 'assignee', label: t.liveGraph.assignee, value: assignee },
+                  {
+                    id: 'priority',
+                    label: t.liveGraph.priority,
+                    value: priority === undefined ? '' : `P${priority}`
+                  },
+                  { id: 'board', label: t.liveGraph.board, value: target.board || '' },
+                  { id: 'workflow', label: t.liveGraph.workflow, value: workflowId }
+                ]
+                  .filter(item => item.value)
+                  .map(item => (
+                    <div className="contents" key={item.id}>
+                      <dt className="text-(--ui-text-tertiary)">{item.label}</dt>
+                      <dd
+                        className={
+                          'm-0 min-w-0 text-(--ui-text-secondary)' +
+                          (item.id === 'title' || item.id === 'status' ? ' break-words' : ' break-all font-mono')
+                        }
+                      >
+                        {item.value}
+                      </dd>
+                    </div>
+                  ))}
+              </dl>
+              {onOpenTask && (
+                <Button onClick={() => onOpenTask(target)} size="sm" variant="secondary">
+                  <Codicon name="go-to-file" />
+                  {t.liveGraph.openTask}
+                </Button>
+              )}
+            </TaskInspectorSection>
+          </div>
         )}
       </div>
     </div>
@@ -354,12 +477,47 @@ function LiveGraphTaskInspectorWithDetail(
     profile?: string
   }
 ) {
+  const queryClient = useQueryClient()
+
+  const detailQueryKey = [
+    'live-graph-task-detail',
+    props.profile || 'default',
+    props.target.board,
+    props.target.taskId
+  ] as const
+
   const query = useQuery({
-    queryKey: ['live-graph-task-detail', props.profile || 'default', props.target.board, props.target.taskId],
+    queryKey: detailQueryKey,
     queryFn: () => getLoopTaskDetail(props.target.taskId, props.profile, props.target.board),
     refetchInterval: 5_000,
     refetchOnWindowFocus: true,
     staleTime: 2_000
+  })
+
+  const commentMutation = useMutation({
+    mutationFn: async (body: string) => {
+      const result = await addLoopTaskComment(props.target.taskId, body, props.profile, 'desktop', props.target.board)
+
+      if (!result.ok) {
+        throw new Error('Task comment was not accepted')
+      }
+
+      return result
+    },
+    onSuccess: result => {
+      if (result.comment) {
+        queryClient.setQueryData<LoopTaskDetail>(detailQueryKey, current =>
+          current
+            ? {
+                ...current,
+                comments: [...(current.comments ?? []), result.comment!]
+              }
+            : current
+        )
+      }
+
+      void queryClient.invalidateQueries({ queryKey: detailQueryKey })
+    }
   })
 
   const latestRun = query.data?.task?.latest_run
@@ -392,6 +550,7 @@ function LiveGraphTaskInspectorWithDetail(
       detail={query.data}
       detailError={query.error ? (query.error instanceof Error ? query.error.message : String(query.error)) : undefined}
       loading={query.isLoading}
+      onAddComment={body => commentMutation.mutateAsync(body).then(() => undefined)}
       transcriptError={
         transcriptQuery.error
           ? transcriptQuery.error instanceof Error

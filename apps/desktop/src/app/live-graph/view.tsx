@@ -5310,7 +5310,10 @@ export function LiveGraphCanvas({
         ) : selectedNode ? (
           <aside
             aria-label={t.liveGraph.inspector}
-            className="relative z-20 h-full min-w-[16rem] w-[clamp(16rem,46%,22rem)] shrink-0 overflow-x-hidden overflow-y-auto border-l border-(--stroke-nous) bg-(--ui-bg-elevated) [overflow-wrap:anywhere]"
+            className={
+              'relative z-20 h-full min-w-[16rem] w-[clamp(16rem,46%,22rem)] shrink-0 overflow-x-hidden border-l border-(--stroke-nous) bg-(--ui-bg-elevated) [overflow-wrap:anywhere] ' +
+              (selectedTaskNode ? 'overflow-y-hidden' : 'overflow-y-auto')
+            }
             data-testid="live-graph-selection-inspector"
           >
             {!selectedWorkflowNode && !selectedTaskNode && (

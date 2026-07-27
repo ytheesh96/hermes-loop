@@ -51,12 +51,14 @@ import {
 } from './view'
 
 const hermesMocks = vi.hoisted(() => ({
+  addLoopTaskComment: vi.fn(),
   getLoopTaskDetail: vi.fn(),
   getSessionMessages: vi.fn()
 }))
 
 vi.mock('@/hermes', async importOriginal => ({
   ...(await importOriginal<typeof HermesApi>()),
+  addLoopTaskComment: hermesMocks.addLoopTaskComment,
   getLoopTaskDetail: hermesMocks.getLoopTaskDetail,
   getSessionMessages: hermesMocks.getSessionMessages
 }))
@@ -651,6 +653,7 @@ beforeAll(() => {
 
 afterEach(() => {
   cleanup()
+  hermesMocks.addLoopTaskComment.mockReset()
   hermesMocks.getLoopTaskDetail.mockReset()
   hermesMocks.getSessionMessages.mockReset()
   window.localStorage.clear()
@@ -3045,7 +3048,54 @@ describe('LiveGraphCanvas', () => {
     expect(container.querySelectorAll('[data-live-graph-label]').length).toBeGreaterThan(0)
   })
 
-  it('loads comments and the latest worker transcript for the selected task feed', async () => {
+  it('loads the worker transcript and posts comments from the selected task feed', async () => {
+    const newComment = {
+      author: 'desktop',
+      body: 'Ready for the final review.',
+      created_at: Date.now() / 1000,
+      id: 8,
+      task_id: 'task'
+    }
+
+    const taskDetail = {
+      comments: [
+        {
+          author: 'reviewer-qa',
+          body: 'Verified in the live app.',
+          created_at: Date.now() / 1000,
+          id: 7,
+          task_id: 'task'
+        }
+      ],
+      runs: [
+        {
+          ended_at: Date.now() / 1000,
+          id: 12,
+          metadata: {
+            worker_session_id: 'worker-session'
+          },
+          outcome: 'completed',
+          profile: 'worker-profile',
+          status: 'done',
+          summary: 'Captured the production evidence.',
+          task_id: 'task'
+        }
+      ],
+      task: {
+        body: 'Authoritative task description.',
+        id: 'task',
+        status: 'completed',
+        title: 'Authoritative task title',
+        worker_activity: {
+          profile: 'worker-profile',
+          run_id: 12,
+          task_id: 'task',
+          worker_session_id: 'worker-session'
+        },
+        workflow_id: 'wf'
+      }
+    }
+
     hermesMocks.getSessionMessages.mockResolvedValue({
       messages: [
         {
@@ -3088,44 +3138,10 @@ describe('LiveGraphCanvas', () => {
       ],
       session_id: 'worker-session'
     })
-    hermesMocks.getLoopTaskDetail.mockResolvedValue({
-      comments: [
-        {
-          author: 'reviewer-qa',
-          body: 'Verified in the live app.',
-          created_at: Date.now() / 1000,
-          id: 7,
-          task_id: 'task'
-        }
-      ],
-      runs: [
-        {
-          ended_at: Date.now() / 1000,
-          id: 12,
-          metadata: {
-            worker_session_id: 'worker-session'
-          },
-          outcome: 'completed',
-          profile: 'worker-profile',
-          status: 'done',
-          summary: 'Captured the production evidence.',
-          task_id: 'task'
-        }
-      ],
-      task: {
-        body: 'Authoritative task description.',
-        id: 'task',
-        status: 'completed',
-        title: 'Authoritative task title',
-        worker_activity: {
-          profile: 'worker-profile',
-          run_id: 12,
-          task_id: 'task',
-          worker_session_id: 'worker-session'
-        },
-        workflow_id: 'wf'
-      }
-    })
+    hermesMocks.getLoopTaskDetail
+      .mockResolvedValueOnce(taskDetail)
+      .mockResolvedValue({ ...taskDetail, comments: [...taskDetail.comments, newComment] })
+    hermesMocks.addLoopTaskComment.mockResolvedValue({ comment: newComment, ok: true })
 
     const queryClient = new QueryClient({
       defaultOptions: {
@@ -3167,11 +3183,82 @@ describe('LiveGraphCanvas', () => {
 
     fireEvent.click(details.getByRole('button', { name: 'Comments' }))
     expect(await details.findByText('Verified in the live app.')).toBeTruthy()
+    const commentComposer = details.getByTestId('live-graph-task-comment-composer')
+    const commentList = details.getByTestId('live-graph-task-comments-list')
+
+    expect(commentComposer).toBeTruthy()
+    expect(commentList.compareDocumentPosition(commentComposer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    const commentBox = details.getByRole('textbox', { name: 'Add a comment to this task' }) as HTMLTextAreaElement
+    const commentButton = details.getByRole('button', { name: 'Comment' }) as HTMLButtonElement
+
+    expect(commentButton.disabled).toBe(true)
+    fireEvent.change(commentBox, { target: { value: '  Ready for the final review.  ' } })
+    expect(commentButton.disabled).toBe(false)
+    fireEvent.keyDown(commentBox, { key: 'Enter', metaKey: true })
+
+    await waitFor(() =>
+      expect(hermesMocks.addLoopTaskComment).toHaveBeenCalledWith(
+        'task',
+        'Ready for the final review.',
+        'reviewer-qa',
+        'desktop',
+        'board'
+      )
+    )
+    await waitFor(() => expect(commentBox.value).toBe(''))
+    expect(await details.findByText('Ready for the final review.')).toBeTruthy()
+    expect(details.getAllByTestId('live-graph-task-comment')).toHaveLength(2)
 
     fireEvent.click(details.getByRole('button', { name: 'Details' }))
     expect(await details.findByText('Authoritative task description.')).toBeTruthy()
     expect(details.getByText('Authoritative task title')).toBeTruthy()
     expect(details.getByText('Completed')).toBeTruthy()
+
+    queryClient.clear()
+  })
+
+  it('keeps a failed task comment draft available for retry', async () => {
+    hermesMocks.getLoopTaskDetail.mockResolvedValue({
+      comments: [],
+      runs: [],
+      task: {
+        body: 'Task description.',
+        id: 'task',
+        status: 'todo',
+        title: 'Task title',
+        workflow_id: 'wf'
+      }
+    })
+    hermesMocks.addLoopTaskComment.mockRejectedValue(new Error('backend unavailable'))
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false
+        }
+      }
+    })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LiveGraphCanvas graph={graph} taskInspectorProfile="reviewer-qa" taskInspectorQueries />
+      </QueryClientProvider>
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: /Verify live app/ }))
+    const inspector = await screen.findByTestId('live-graph-selection-inspector')
+    const details = within(inspector)
+
+    fireEvent.click(details.getByRole('button', { name: 'Comments' }))
+    const commentBox = await details.findByRole('textbox', { name: 'Add a comment to this task' })
+
+    fireEvent.change(commentBox, { target: { value: 'Please retry this comment.' } })
+    fireEvent.click(details.getByRole('button', { name: 'Comment' }))
+
+    expect((await details.findByRole('alert')).textContent).toBe('Could not post the comment. Try again.')
+    expect((commentBox as HTMLTextAreaElement).value).toBe('Please retry this comment.')
+    expect((details.getByRole('button', { name: 'Comment' }) as HTMLButtonElement).disabled).toBe(false)
 
     queryClient.clear()
   })

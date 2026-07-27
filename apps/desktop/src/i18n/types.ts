@@ -990,6 +990,11 @@ export interface Translations {
     taskDetailLoading: string
     taskDetailLoadFailed: string
     taskCommentsEmpty: string
+    taskCommentComposerLabel: string
+    taskCommentPlaceholder: string
+    taskCommentSubmit: string
+    taskCommentSubmitting: string
+    taskCommentSubmitFailed: string
     taskActivityEmpty: string
     taskWorkerTranscriptLoading: string
     taskWorkerTranscriptLoadFailed: string
