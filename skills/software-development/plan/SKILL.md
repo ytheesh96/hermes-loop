@@ -1,8 +1,8 @@
 ---
 name: plan
-description: Write a markdown plan to .hermes/plans/; no execution.
-version: 2.0.0
-author: Hermes Agent (writing-craft adapted from obra/superpowers)
+description: "Use when writing a plan without executing it."
+version: 2.1.0
+author: Hermes Agent (adapted from obra/superpowers + Matt Pocock)
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
@@ -65,7 +65,7 @@ The rest of this skill is the craft of authoring a *good* implementation plan �
 
 ## Overview
 
-Write comprehensive implementation plans assuming the implementer has zero context for the codebase and questionable taste. Document everything they need: which files to touch, complete code, testing commands, docs to check, how to verify. Give them bite-sized tasks. DRY. YAGNI. TDD. Frequent commits.
+Write comprehensive implementation plans assuming the implementer has zero context for the codebase and questionable taste. Document everything they need: which files to touch, complete code, testing commands, docs to check, how to verify. Give them bite-sized tasks. DRY. YAGNI. TDD. Authorized local commits only.
 
 Assume the implementer is a skilled developer but knows almost nothing about the toolset or problem domain. Assume they don't know good test design very well.
 
@@ -87,12 +87,33 @@ Assume the implementer is a skilled developer but knows almost nothing about the
 
 **Each task = 2-5 minutes of focused work.**
 
+## Model Vertical Slices and Dependencies
+
+Prefer a **tracer bullet**: one narrow, complete path through every layer needed
+to deliver observable behavior. Each task should be independently demoable or
+verifiable, fit a fresh execution context, and carry explicit **acceptance
+criteria**.
+
+Represent prerequisites as a **blocking edge**, not prose buried in a task.
+Tasks with no unresolved blockers form the **execution frontier** and may run in
+parallel. For a durable Hermes Loop graph, map prerequisites to `depends_on`;
+use `blocks` only when inserting new prerequisite work ahead of an existing
+downstream task.
+
+Wide mechanical refactors are the exception. Use
+**expand–migrate–contract**: add the new form beside the old, migrate callers in
+green batches, then remove the old form after every migration completes. Model
+the expand, each migration, and the contract step as separate dependency nodes.
+
+**Completion criterion:** every task delivers a vertical behavior or a justified
+refactor phase, names its blocking edges, and has checkable acceptance criteria.
+
 Every step is one action:
 - "Write the failing test" — step
 - "Run it to make sure it fails" — step
 - "Implement the minimal code to make the test pass" — step
 - "Run the tests and make sure they pass" — step
-- "Commit" — step
+- "Commit when authorized" — step
 
 **Too big:**
 ```markdown
@@ -171,7 +192,7 @@ def function(input):
 Run: `pytest tests/path/test.py::test_specific_behavior -v`
 Expected: PASS
 
-**Step 5: Commit**
+**Step 5: Commit (only when authorized)**
 
 ```bash
 git add tests/path/test.py src/path/file.py
@@ -281,13 +302,17 @@ Every task that produces code should include the full TDD cycle:
 
 See `test-driven-development` skill for details.
 
-### Frequent Commits
+### Commit Policy
 
-Commit after every task:
+When the user authorized local commits, commit after each independently verified
+task and stage only that task's paths:
 ```bash
 git add [files]
 git commit -m "type: description"
 ```
+
+Otherwise omit commit steps from the plan. Never add push, publication, branch,
+issue-write, or label-change steps unless the user explicitly authorized them.
 
 ## Common Mistakes
 
@@ -332,7 +357,13 @@ Complete code (copy-pasteable)
 Exact commands with expected output
 Verification steps
 DRY, YAGNI, TDD
-Frequent commits
+Authorized local commits only
 ```
 
 **A good plan makes implementation obvious.**
+
+## Attribution
+
+The tracer-bullet, blocking-edge, execution-frontier, and
+expand–migrate–contract guidance is adapted from Matt Pocock's `to-tickets`
+skill. See `references/UPSTREAM_LICENSE.md`.

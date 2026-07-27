@@ -1,8 +1,8 @@
 ---
 name: systematic-debugging
 description: "4-phase root cause debugging: understand bugs before fixing."
-version: 1.1.0
-author: Hermes Agent (adapted from obra/superpowers)
+version: 1.2.0
+author: Hermes Agent (adapted from obra/superpowers + Matt Pocock)
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
@@ -274,6 +274,9 @@ If the user is present, show the ranked list before testing. They may have domai
 - Automated test if possible
 - MUST have before fixing
 - Use the `test-driven-development` skill
+- Put the regression at the correct **public seam** that reproduces the real bug
+  pattern. If no stable public seam can express it, document that as an
+  **architecture gap** instead of coupling the test to private internals.
 
 ### 2. Implement Single Fix
 
@@ -400,12 +403,10 @@ When fixing bugs:
 3. Fix the root cause (GREEN)
 4. The test proves the fix and prevents regression
 
-## Real-World Impact
+## Attribution
 
-From debugging sessions:
-- Systematic approach: 15-30 minutes to fix
-- Random fixes approach: 2-3 hours of thrashing
-- First-time fix rate: 95% vs 40%
-- New bugs introduced: Near zero vs common
+The feedback-loop, reproduction-minimization, and ranked-hypothesis guidance is
+adapted from Matt Pocock's `diagnosing-bugs` skill. See
+`references/UPSTREAM_LICENSE.md`.
 
 **No shortcuts. No guessing. Systematic always wins.**

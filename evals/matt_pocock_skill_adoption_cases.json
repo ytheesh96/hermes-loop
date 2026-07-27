@@ -1,0 +1,384 @@
+[
+  {
+    "id": "module_interface_design",
+    "category": "codebase_design_positive",
+    "prompt": "Design the public interface for a payment-retry module before implementation. Show at least two radically different options and compare what callers must know. Do not edit the repository yet.",
+    "expected": {
+      "primary_skill": "codebase-design",
+      "first_move": "design_interfaces",
+      "phase": "design",
+      "artifact": "alternatives",
+      "workspace_action": "read_only",
+      "user_decision_owner": true
+    }
+  },
+  {
+    "id": "deepen_existing_cluster",
+    "category": "codebase_design_positive",
+    "prompt": "Authentication checks are scattered across eight callers. Decide whether to add another helper or deepen an existing module, but make no code changes yet.",
+    "expected": {
+      "primary_skill": "codebase-design",
+      "first_move": [
+        "inspect",
+        "design_interfaces"
+      ],
+      "phase": "design",
+      "artifact": "alternatives",
+      "workspace_action": "read_only",
+      "user_decision_owner": true
+    }
+  },
+  {
+    "id": "greenfield_module_shape",
+    "category": "codebase_design_positive",
+    "prompt": "We need the module boundaries and interface for a new greenfield billing subsystem. Work out the design, not the implementation. Return the options in chat and do not write or edit files.",
+    "expected": {
+      "primary_skill": "codebase-design",
+      "first_move": "design_interfaces",
+      "phase": "design",
+      "artifact": "alternatives",
+      "workspace_action": "read_only",
+      "user_decision_owner": true
+    }
+  },
+  {
+    "id": "domain_cancellation_language",
+    "category": "domain_modeling_positive",
+    "prompt": "Our order model uses cancel, void, and refund inconsistently. Establish canonical domain language, invariants, and legal state transitions. Draft findings but wait before editing files.",
+    "expected": {
+      "primary_skill": "domain-modeling",
+      "first_move": "clarify_domain",
+      "phase": "design",
+      "artifact": "domain_notes",
+      "workspace_action": "blocked_pending_authorization",
+      "user_decision_owner": true
+    }
+  },
+  {
+    "id": "domain_adr_record",
+    "category": "domain_modeling_positive",
+    "prompt": "We chose event sourcing after evaluating real trade-offs. Update the domain glossary if needed and record the approved decision in docs/adr now.",
+    "expected": {
+      "primary_skill": "domain-modeling",
+      "first_move": "record_domain_decision",
+      "phase": [
+        "design",
+        "implementation"
+      ],
+      "artifact": "domain_notes",
+      "workspace_action": "authorized_write",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "domain_consumer_not_modeling",
+    "category": "domain_modeling_negative",
+    "prompt": "Read the existing CONTEXT.md vocabulary, then implement the already-specified serializer exactly as documented.",
+    "expected": {
+      "primary_skill": [
+        "none",
+        "test-driven-development"
+      ],
+      "first_move": [
+        "inspect",
+        "choose_test_seam"
+      ],
+      "phase": "implementation",
+      "artifact": [
+        "none",
+        "test"
+      ],
+      "workspace_action": "authorized_write",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "architecture_hotspot_audit",
+    "category": "architecture_audit_positive",
+    "prompt": "Audit this existing codebase for the three architecture friction hot spots that most hurt locality and testability. Show me a report, but do not refactor anything. Return the report in chat; do not write files.",
+    "expected": {
+      "primary_skill": "improve-codebase-architecture",
+      "first_move": "audit_architecture",
+      "phase": [
+        "research",
+        "review"
+      ],
+      "artifact": "architecture_report",
+      "workspace_action": "read_only",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "architecture_navigation_pain",
+    "category": "architecture_audit_positive",
+    "prompt": "Which existing modules cause the most navigation pain and why? Rank evidence-backed candidates, but do not design replacement interfaces yet. Return the report in chat; do not write files.",
+    "expected": {
+      "primary_skill": "improve-codebase-architecture",
+      "first_move": "audit_architecture",
+      "phase": [
+        "research",
+        "review"
+      ],
+      "artifact": "architecture_report",
+      "workspace_action": "read_only",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "logic_state_prototype",
+    "category": "prototype_logic_positive",
+    "prompt": "Build a throwaway CLI so I can test whether this approval state-transition model feels right. Keep production code untouched.",
+    "expected": {
+      "primary_skill": "prototype",
+      "first_move": "build_logic_prototype",
+      "phase": "prototyping",
+      "artifact": "prototype",
+      "workspace_action": "authorized_write",
+      "user_decision_owner": true
+    }
+  },
+  {
+    "id": "ui_direction_prototype",
+    "category": "prototype_ui_positive",
+    "prompt": "Create several disposable dashboard UI variants I can switch among to choose a direction. Do not integrate any variant into production.",
+    "expected": {
+      "primary_skill": "prototype",
+      "first_move": "build_ui_prototype",
+      "phase": "prototyping",
+      "artifact": "prototype",
+      "workspace_action": "authorized_write",
+      "user_decision_owner": true
+    }
+  },
+  {
+    "id": "production_ui_implementation",
+    "category": "prototype_negative",
+    "prompt": "The dashboard design is approved. Implement that final design in the production application and test it.",
+    "expected": {
+      "primary_skill": [
+        "none",
+        "test-driven-development"
+      ],
+      "first_move": [
+        "inspect",
+        "choose_test_seam"
+      ],
+      "phase": "implementation",
+      "artifact": [
+        "none",
+        "test"
+      ],
+      "workspace_action": "authorized_write",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "library_feasibility_spike",
+    "category": "prototype_negative_spike",
+    "prompt": "Before choosing a PDF parser, research the maintained options and build a tiny feasibility experiment to see whether one handles rotated tables.",
+    "expected": {
+      "primary_skill": "spike",
+      "first_move": "research",
+      "phase": [
+        "research",
+        "prototyping"
+      ],
+      "artifact": "prototype",
+      "workspace_action": "authorized_write",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "stateful_bayesian_course",
+    "category": "learning_positive",
+    "prompt": "Teach me Bayesian statistics over the next month. Maintain sources, lessons, retrieval practice, and a record of what I have mastered in this workspace.",
+    "expected": {
+      "primary_skill": "learning-workspace",
+      "first_move": "establish_mission",
+      "phase": [
+        "teaching",
+        "planning"
+      ],
+      "artifact": [
+        "learning_record",
+        "plan"
+      ],
+      "workspace_action": "authorized_write",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "stateful_programming_course",
+    "category": "learning_positive",
+    "prompt": "I want a multi-session learning workspace that takes me from Python basics to writing a small research automation tool, with cited lessons and spaced recall.",
+    "expected": {
+      "primary_skill": "learning-workspace",
+      "first_move": "establish_mission",
+      "phase": [
+        "teaching",
+        "planning"
+      ],
+      "artifact": [
+        "learning_record",
+        "plan"
+      ],
+      "workspace_action": "authorized_write",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "one_off_bayes_explanation",
+    "category": "learning_negative",
+    "prompt": "Explain Bayes' theorem in two paragraphs. Do not create files or a course.",
+    "expected": {
+      "primary_skill": "none",
+      "first_move": "answer",
+      "phase": "answer",
+      "artifact": "none",
+      "workspace_action": "read_only",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "bug_exact_repro",
+    "category": "debugging_integration",
+    "prompt": "The cart API returns 500 only for an empty cart. Diagnose and fix it, and prove the original failure is gone.",
+    "expected": {
+      "primary_skill": "systematic-debugging",
+      "first_move": "build_feedback_loop",
+      "phase": "debugging",
+      "artifact": "debug_repro",
+      "workspace_action": "authorized_write",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "rare_flake_diagnosis",
+    "category": "debugging_integration",
+    "prompt": "A test fails roughly one run in a hundred. Diagnose the cause without guessing or stacking speculative fixes. Do not edit files yet.",
+    "expected": {
+      "primary_skill": "systematic-debugging",
+      "first_move": "build_feedback_loop",
+      "phase": "debugging",
+      "artifact": "debug_repro",
+      "workspace_action": "read_only",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "tdd_new_rate_limiter",
+    "category": "tdd_integration",
+    "prompt": "Implement the new rate limiter using TDD. Make sure the tests remain useful after internal refactors.",
+    "expected": {
+      "primary_skill": "test-driven-development",
+      "first_move": "choose_test_seam",
+      "phase": "implementation",
+      "artifact": "test",
+      "workspace_action": "authorized_write",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "tautological_test_repair",
+    "category": "tdd_integration",
+    "prompt": "This test computes its expected total with the same reduce algorithm as production. Improve the test before changing the implementation.",
+    "expected": {
+      "primary_skill": "test-driven-development",
+      "first_move": "choose_test_seam",
+      "phase": [
+        "review",
+        "implementation"
+      ],
+      "artifact": "test",
+      "workspace_action": "authorized_write",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "two_axis_branch_review",
+    "category": "review_integration",
+    "prompt": "Review this branch against issue #42 and also assess implementation quality. Report findings but do not edit anything.",
+    "expected": {
+      "primary_skill": "requesting-code-review",
+      "first_move": "review_two_axes",
+      "phase": "review",
+      "artifact": "review_report",
+      "workspace_action": "read_only",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "quality_review_without_spec",
+    "category": "review_integration",
+    "prompt": "Review the current worktree for code quality. There is no product spec, and you must not modify the files.",
+    "expected": {
+      "primary_skill": "requesting-code-review",
+      "first_move": "review_two_axes",
+      "phase": "review",
+      "artifact": "review_report",
+      "workspace_action": "read_only",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "feature_task_graph_plan",
+    "category": "planning_integration",
+    "prompt": "Write an implementation plan for threaded comments. Decompose it into independently verifiable slices with dependencies and acceptance criteria. Do not execute it.",
+    "expected": {
+      "primary_skill": "plan",
+      "first_move": "plan_task_graph",
+      "phase": "planning",
+      "artifact": "plan",
+      "workspace_action": "authorized_write",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "wide_refactor_plan",
+    "category": "planning_integration",
+    "prompt": "Plan how to rename a shared status field across several packages while keeping CI green throughout. No implementation yet.",
+    "expected": {
+      "primary_skill": "plan",
+      "first_move": "plan_task_graph",
+      "phase": "planning",
+      "artifact": "plan",
+      "workspace_action": "authorized_write",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "deep_module_definition",
+    "category": "routing_negative_answer",
+    "prompt": "In one sentence, what does the term deep module mean?",
+    "expected": {
+      "primary_skill": "none",
+      "first_move": "answer",
+      "phase": "answer",
+      "artifact": "none",
+      "workspace_action": "read_only",
+      "user_decision_owner": false
+    }
+  },
+  {
+    "id": "straightforward_cli_flag",
+    "category": "routing_negative_implementation",
+    "prompt": "Add the documented --json CLI flag exactly like the adjacent --yaml flag and run its tests.",
+    "expected": {
+      "primary_skill": [
+        "none",
+        "test-driven-development"
+      ],
+      "first_move": [
+        "inspect",
+        "choose_test_seam"
+      ],
+      "phase": "implementation",
+      "artifact": [
+        "none",
+        "test"
+      ],
+      "workspace_action": "authorized_write",
+      "user_decision_owner": false
+    }
+  }
+]

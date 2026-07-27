@@ -1,8 +1,8 @@
 ---
 name: test-driven-development
 description: "TDD: enforce RED-GREEN-REFACTOR, tests before code."
-version: 1.1.0
-author: Hermes Agent (adapted from obra/superpowers)
+version: 1.2.0
+author: Hermes Agent (adapted from obra/superpowers + Matt Pocock)
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
@@ -51,6 +51,31 @@ Write code before the test? Delete it. Start over.
 - Delete means delete
 
 Implement fresh from tests. Period.
+
+## Choose the Test Seam
+
+Before RED, identify the **test seam**: the public interface where a caller can
+observe the required behavior without reaching into internals. Inspect the
+codebase and requirement first; do not default to a private helper merely
+because it is easy to call.
+
+- Test through the public interface and name the user- or caller-visible behavior.
+- Derive the expected result from an **independently known** source: an accepted
+  requirement, worked example, protocol rule, or known literal.
+- A **tautological** test recomputes the expectation the same way as production
+  code. It can agree with the implementation even when both are wrong; replace
+  it with an independent oracle.
+- Mock only at a **system boundary** such as a remote API, clock, random source,
+  or filesystem. Prefer real collaborators and a test database for code the
+  project controls.
+- If the desired seam is painful to test, treat that as interface-design
+  evidence rather than testing a private path.
+
+Read `references/test-design-and-mocking.md` when choosing between unit,
+integration, and end-to-end seams or deciding whether a mock is justified.
+
+**Completion criterion:** the test seam, observable behavior, and independent
+expected value are explicit before production code changes.
 
 ## Red-Green-Refactor Cycle
 
@@ -330,7 +355,7 @@ delegate_task(
     3. Write minimal code to pass
     4. Run test to verify it passes
     5. Refactor if needed
-    6. Commit
+    6. Commit only when explicitly authorized; otherwise leave a verified dirty diff
 
     Project test command: pytest tests/ -q
     Project structure: [describe relevant files]
@@ -349,8 +374,15 @@ Never fix bugs without a test.
 
 - **Testing mock behavior instead of real behavior** — mocks should verify interactions, not replace the system under test
 - **Testing implementation details** — test behavior/results, not internal method calls
+- **Tautological expectations** — expected values must not reproduce the production algorithm
 - **Happy path only** — always test edge cases, errors, and boundaries
 - **Brittle tests** — tests should verify behavior, not structure; refactoring shouldn't break them
+
+## Attribution
+
+The seam-first, public-interface, independent-oracle, boundary-mocking, and
+tracer-bullet guidance is adapted from Matt Pocock's `tdd` skill. See
+`references/UPSTREAM_LICENSE.md`.
 
 ## Final Rule
 
