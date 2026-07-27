@@ -59,7 +59,10 @@ import {
   type LiveGraphWorkflowFeedItem,
   type LiveGraphWorkflowFilter
 } from './session-workflow-inbox'
+import { LiveGraphTaskInspector, type LiveGraphTaskTarget } from './task-inspector'
 import { liveGraphTaskCategory, type LiveGraphTaskFilter, LiveGraphWorkflowInbox } from './workflow-inbox'
+
+export type { LiveGraphTaskTarget } from './task-inspector'
 
 export const LIVE_GRAPH_KINDS = ['session', 'project', 'workflow', 'task', 'agent', 'artifact'] as const
 export type LiveGraphKind = (typeof LIVE_GRAPH_KINDS)[number]
@@ -378,8 +381,6 @@ const OVERVIEW_LABEL_KIND_RANK: Record<LiveGraphKind, number> = {
 }
 
 const LIVE_GRAPH_ACTIVE_WORK_KINDS = new Set<LiveGraphKind>(['task', 'agent'])
-const LIVE_GRAPH_INSPECTOR_PREVIEW_CHARACTERS = 240
-const LIVE_GRAPH_INSPECTOR_PREVIEW_LINES = 5
 const LIVE_GRAPH_TEXT_FADE_THRESHOLD_DEFAULT = 200
 const LIVE_GRAPH_TEXT_FADE_THRESHOLD_MAX = 200
 
@@ -462,12 +463,6 @@ function liveGraphTaskId(node: LiveGraphNode): string {
   return node.kind === 'task' ? node.entityId || node.id : ''
 }
 
-export interface LiveGraphTaskTarget {
-  board?: string
-  taskId: string
-  workflowId?: string
-}
-
 function liveGraphTaskTarget(node: LiveGraphNode): LiveGraphTaskTarget | null {
   if (liveGraphNodeKind(node) !== 'task') {
     return null
@@ -484,56 +479,6 @@ function liveGraphTaskTarget(node: LiveGraphNode): LiveGraphTaskTarget | null {
     taskId,
     ...(node.workflowId ? { workflowId: node.workflowId } : {})
   }
-}
-
-interface LiveGraphInspectorTextSectionProps {
-  collapseLabel: string
-  expandLabel: string
-  label: string
-  value: string
-}
-
-function LiveGraphInspectorTextSection({
-  collapseLabel,
-  expandLabel,
-  label,
-  value
-}: LiveGraphInspectorTextSectionProps) {
-  const [expanded, setExpanded] = useState(false)
-  const lineCount = value.split(/\r?\n/).length
-
-  const collapsible =
-    value.length > LIVE_GRAPH_INSPECTOR_PREVIEW_CHARACTERS || lineCount > LIVE_GRAPH_INSPECTOR_PREVIEW_LINES
-
-  return (
-    <section className="grid min-w-0 max-w-full gap-1">
-      <h3 className="m-0 text-[0.625rem] font-semibold tracking-wide text-(--ui-text-tertiary) uppercase">{label}</h3>
-      <p
-        className={
-          'm-0 whitespace-pre-wrap break-words text-[0.6875rem] leading-4 text-(--ui-text-secondary)' +
-          (collapsible && !expanded ? ' line-clamp-5' : '')
-        }
-        data-live-graph-inspector-section-text
-        data-live-graph-inspector-truncated={collapsible && !expanded ? 'true' : undefined}
-      >
-        {value}
-      </p>
-      {collapsible && (
-        <Button
-          aria-expanded={expanded}
-          aria-label={(expanded ? collapseLabel : expandLabel) + ' ' + label}
-          className="-ml-2 h-5 w-fit justify-start px-2 text-[0.625rem]"
-          onClick={() => setExpanded(current => !current)}
-          size="xs"
-          type="button"
-          variant="text"
-        >
-          <Codicon name={expanded ? 'chevron-up' : 'chevron-down'} />
-          {expanded ? collapseLabel : expandLabel}
-        </Button>
-      )}
-    </section>
-  )
 }
 
 export function liveGraphEdgeSource(edge: LiveGraphEdge): string {
@@ -2426,6 +2371,8 @@ export interface LiveGraphCanvasProps {
   onOpenTask?: (target: LiveGraphTaskTarget) => void
   onStateChange?: (state: LiveGraphViewState) => void
   pulses?: readonly LiveGraphPulse[]
+  taskInspectorProfile?: string
+  taskInspectorQueries?: boolean
 }
 
 export function LiveGraphCanvas({
@@ -2438,7 +2385,9 @@ export function LiveGraphCanvas({
   onOpenSession,
   onOpenTask,
   onStateChange,
-  pulses = EMPTY_PULSES
+  pulses = EMPTY_PULSES,
+  taskInspectorProfile,
+  taskInspectorQueries = false
 }: LiveGraphCanvasProps) {
   const { t } = useI18n()
   const rootRef = useRef<HTMLDivElement>(null)
@@ -5364,7 +5313,7 @@ export function LiveGraphCanvas({
             className="relative z-20 h-full min-w-[16rem] w-[clamp(16rem,46%,22rem)] shrink-0 overflow-x-hidden overflow-y-auto border-l border-(--stroke-nous) bg-(--ui-bg-elevated) [overflow-wrap:anywhere]"
             data-testid="live-graph-selection-inspector"
           >
-            {!selectedWorkflowNode && (
+            {!selectedWorkflowNode && !selectedTaskNode && (
               <div className="flex min-w-0 items-start gap-2 p-3">
                 <Codicon
                   className="mt-0.5 shrink-0"
@@ -5414,56 +5363,14 @@ export function LiveGraphCanvas({
               />
             )}
             {selectedTaskNode && selectedTaskTarget && (
-              <div
-                className="grid min-w-0 max-w-full gap-3 border-t border-(--ui-stroke-tertiary) px-3 py-3"
-                data-live-graph-inspector-details
-              >
-                {[
-                  {
-                    id: 'description',
-                    label: t.liveGraph.description,
-                    value: liveGraphNodeDetail(selectedTaskNode)
-                  },
-                  { id: 'summary', label: t.liveGraph.summary, value: selectedTaskNode.summary || '' },
-                  { id: 'result', label: t.liveGraph.result, value: selectedTaskNode.result || '' }
-                ]
-                  .filter(section => section.value)
-                  .map(section => (
-                    <LiveGraphInspectorTextSection
-                      collapseLabel={t.liveGraph.showLess}
-                      expandLabel={t.liveGraph.showMore}
-                      key={selectedId + ':' + section.id}
-                      label={section.label}
-                      value={section.value}
-                    />
-                  ))}
-                <dl className="m-0 grid min-w-0 max-w-full grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[0.625rem] leading-4">
-                  {[
-                    { id: 'task', label: t.liveGraph.taskId, value: selectedTaskTarget.taskId },
-                    { id: 'assignee', label: t.liveGraph.assignee, value: selectedTaskNode.assignee || '' },
-                    {
-                      id: 'priority',
-                      label: t.liveGraph.priority,
-                      value: selectedTaskNode.priority === undefined ? '' : `P${selectedTaskNode.priority}`
-                    },
-                    { id: 'board', label: t.liveGraph.board, value: selectedTaskTarget.board || '' },
-                    { id: 'workflow', label: t.liveGraph.workflow, value: selectedTaskTarget.workflowId || '' }
-                  ]
-                    .filter(item => item.value)
-                    .map(item => (
-                      <div className="contents" key={item.id}>
-                        <dt className="text-(--ui-text-tertiary)">{item.label}</dt>
-                        <dd className="m-0 min-w-0 break-all font-mono text-(--ui-text-secondary)">{item.value}</dd>
-                      </div>
-                    ))}
-                </dl>
-                {onOpenTask && (
-                  <Button onClick={() => onOpenTask(selectedTaskTarget)} size="sm" variant="secondary">
-                    <Codicon name="go-to-file" />
-                    {t.liveGraph.openTask}
-                  </Button>
-                )}
-              </div>
+              <LiveGraphTaskInspector
+                key={selectedId}
+                node={selectedTaskNode}
+                onOpenTask={onOpenTask}
+                profile={taskInspectorProfile}
+                queryDetail={taskInspectorQueries}
+                target={selectedTaskTarget}
+              />
             )}
             {onOpenSession && liveGraphNodeKind(selectedNode) === 'session' && selectedNode.openable !== false && (
               <div className="border-t border-(--ui-stroke-tertiary) px-3 py-3">
@@ -5595,6 +5502,8 @@ export function LiveGraphPaneView({
         onOpenTask={onOpenTask}
         onStateChange={state => writeJson(storageKey, state)}
         pulses={pulses}
+        taskInspectorProfile={descriptor?.profile}
+        taskInspectorQueries
       />
     </div>
   )

@@ -982,6 +982,17 @@ export interface Translations {
     description: string
     summary: string
     result: string
+    status: string
+    taskTitle: string
+    taskViewAll: string
+    taskViewComments: string
+    taskViewActivity: string
+    taskViewDetails: string
+    taskDetailLoading: string
+    taskDetailLoadFailed: string
+    taskCommentsEmpty: string
+    taskActivityEmpty: string
+    unknownCommentAuthor: string
     openTask: string
     showMore: string
     showLess: string
