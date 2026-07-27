@@ -41,6 +41,9 @@ import {
   liveGraphSettleTickBudget,
   liveGraphSimulationHeat,
   liveGraphStartupHeat,
+  liveGraphTaskFilterGraph,
+  liveGraphTaskNavigationGraph,
+  liveGraphTasksForNode,
   liveGraphTextFadeOpacity,
   liveGraphTopologyKey,
   normalizeLiveGraphViewState,
@@ -375,7 +378,13 @@ function denseReadabilityGraph(): LiveGraphSnapshot {
       label: 'Selected task',
       workflowId: 'workflow-a'
     },
-    { entityId: 'neighbor', id: 'agent:neighbor', kind: 'agent', label: 'Neighbor agent' },
+    {
+      entityId: 'neighbor',
+      id: 'task:neighbor',
+      kind: 'task',
+      label: 'Neighbor task',
+      workflowId: 'workflow-a'
+    },
     {
       entityId: 'unrelated',
       id: 'task:unrelated',
@@ -388,9 +397,10 @@ function denseReadabilityGraph(): LiveGraphSnapshot {
   for (let index = 0; index < 793; index += 1) {
     nodes.push({
       entityId: String(index),
-      id: `artifact:orphan:${index}`,
-      kind: 'artifact',
-      label: `Orphan ${index}`
+      id: `task:orphan:${index}`,
+      kind: 'task',
+      label: `Orphan ${index}`,
+      workflowId: 'workflow-b'
     })
   }
 
@@ -400,7 +410,7 @@ function denseReadabilityGraph(): LiveGraphSnapshot {
       { id: 'edge:project-workflow-a', kind: 'contains', sourceId: 'project:root', targetId: 'workflow:a' },
       { id: 'edge:project-workflow-b', kind: 'contains', sourceId: 'project:root', targetId: 'workflow:b' },
       { id: 'edge:workflow-task', kind: 'contains', sourceId: 'workflow:a', targetId: 'task:selected' },
-      { id: 'edge:task-agent', kind: 'delegated_to', sourceId: 'task:selected', targetId: 'agent:neighbor' },
+      { id: 'edge:task-neighbor', kind: 'depends_on', sourceId: 'task:selected', targetId: 'task:neighbor' },
       { id: 'edge:workflow-unrelated', kind: 'contains', sourceId: 'workflow:b', targetId: 'task:unrelated' }
     ],
     nodes,
@@ -410,16 +420,16 @@ function denseReadabilityGraph(): LiveGraphSnapshot {
 
 function denseManyEdgeGraph(): LiveGraphSnapshot {
   const snapshot = denseReadabilityGraph()
-  const artifactCount = 793
+  const taskCount = 793
   const edges = [...snapshot.edges]
 
   for (let step = 1; step <= 5; step += 1) {
-    for (let index = 0; index < artifactCount; index += 1) {
+    for (let index = 0; index < taskCount; index += 1) {
       edges.push({
-        id: `edge:artifact:${step}:${index}`,
+        id: `edge:task:${step}:${index}`,
         kind: 'depends_on',
-        sourceId: `artifact:orphan:${index}`,
-        targetId: `artifact:orphan:${(index + step) % artifactCount}`
+        sourceId: `task:orphan:${index}`,
+        targetId: `task:orphan:${(index + step) % taskCount}`
       })
     }
   }
@@ -967,7 +977,7 @@ describe('Graph View model', () => {
       search: ''
     })
 
-    const connectedKinds = ['agent', 'artifact', 'session', 'task', 'workflow']
+    const connectedKinds = ['session', 'task', 'workflow']
 
     expect(depthOne.nodes.map(node => node.kind).sort()).toEqual(connectedKinds)
     expect(depthTwo.nodes.map(node => node.kind).sort()).toEqual(connectedKinds)
@@ -993,38 +1003,116 @@ describe('Graph View model', () => {
     ])
   })
 
-  it('ignores open workflow containers while preserving the full context of attention tasks', () => {
-    const activeAndSettled = twoSessionGraph()
+  it('scopes the task feed to the selected workflow or session hub', () => {
+    const snapshot = twoSessionGraph()
 
-    const statuses = new Map([
-      ['workflow:default:board:a', 'open'],
-      ['task:default:board:a', 'blocked'],
-      ['workflow:default:board:b', 'open'],
-      ['task:default:board:b', 'completed']
+    expect(
+      liveGraphTasksForNode(snapshot.nodes, snapshot.edges, 'workflow:default:board:a').map(node => node.label)
+    ).toEqual(['Task A'])
+    expect(liveGraphTasksForNode(snapshot.nodes, snapshot.edges, 'session:default:a').map(node => node.label)).toEqual([
+      'Task A'
     ])
-
-    const filtered = visibleLiveGraph(
-      {
-        ...activeAndSettled,
-        nodes: activeAndSettled.nodes.map(node => ({
-          ...node,
-          status: statuses.get(node.id) ?? node.status
-        }))
-      },
-      {
-        enabledKinds: new Set(DEFAULT_LIVE_GRAPH_VIEW_STATE.enabledKinds),
-        focusDepth: 'all',
-        orphans: true,
-        search: '',
-        workflowFilter: 'attention'
-      }
-    )
-
-    expect(filtered.nodes.map(node => node.label).sort()).toEqual(['Session A', 'Task A', 'Workflow A'])
-    expect(filtered.edges.map(edge => edge.id).sort()).toEqual(['edge:session-a-workflow', 'edge:workflow-a-task'])
+    expect(
+      liveGraphTasksForNode(snapshot.nodes, snapshot.edges, null)
+        .map(node => node.label)
+        .sort()
+    ).toEqual(['Task A', 'Task B'])
   })
 
-  it('hides settled workflow branches that share a session with active work', () => {
+  it('hides workflow branches without a matching task while retaining context inside matching workflows', () => {
+    const snapshot: LiveGraphSnapshot = {
+      edges: [
+        {
+          id: 'edge:session-active-workflow',
+          kind: 'contains',
+          sourceId: 'session:root',
+          targetId: 'workflow:active'
+        },
+        {
+          id: 'edge:active-workflow-active-task',
+          kind: 'contains',
+          sourceId: 'workflow:active',
+          targetId: 'task:active'
+        },
+        {
+          id: 'edge:active-workflow-completed-context',
+          kind: 'contains',
+          sourceId: 'workflow:active',
+          targetId: 'task:completed-context'
+        },
+        {
+          id: 'edge:session-completed-workflow',
+          kind: 'contains',
+          sourceId: 'session:root',
+          targetId: 'workflow:completed'
+        },
+        {
+          id: 'edge:completed-workflow-task',
+          kind: 'contains',
+          sourceId: 'workflow:completed',
+          targetId: 'task:completed'
+        }
+      ],
+      nodes: [
+        { entityId: 'root', id: 'session:root', kind: 'session', label: 'Session' },
+        {
+          entityId: 'active',
+          id: 'workflow:active',
+          kind: 'workflow',
+          label: 'Active workflow',
+          workflowId: 'active'
+        },
+        {
+          entityId: 'active',
+          id: 'task:active',
+          kind: 'task',
+          label: 'Active task',
+          status: 'running',
+          workflowId: 'active'
+        },
+        {
+          entityId: 'completed-context',
+          id: 'task:completed-context',
+          kind: 'task',
+          label: 'Completed context',
+          status: 'completed',
+          workflowId: 'active'
+        },
+        {
+          entityId: 'completed',
+          id: 'workflow:completed',
+          kind: 'workflow',
+          label: 'Completed workflow',
+          workflowId: 'completed'
+        },
+        {
+          entityId: 'completed',
+          id: 'task:completed',
+          kind: 'task',
+          label: 'Completed task',
+          status: 'completed',
+          workflowId: 'completed'
+        }
+      ],
+      rootId: 'session:root'
+    }
+
+    const filtered = liveGraphTaskFilterGraph(snapshot, liveGraphTasksForNode(snapshot.nodes, snapshot.edges), 'active')
+
+    expect(filtered.nodes.map(node => node.id)).toEqual([
+      'session:root',
+      'workflow:active',
+      'task:active',
+      'task:completed-context'
+    ])
+    expect(filtered.edges.map(edge => edge.id)).toEqual([
+      'edge:session-active-workflow',
+      'edge:active-workflow-active-task',
+      'edge:active-workflow-completed-context'
+    ])
+  })
+
+  it('keeps the selected task workflow subgraph connected to its containing hub chain', () => {
     const sharedSessionGraph: LiveGraphSnapshot = {
       edges: [
         {
@@ -1049,6 +1137,12 @@ describe('Graph View model', () => {
           id: 'edge:settled-workflow-task',
           kind: 'contains',
           sourceId: 'workflow:settled',
+          targetId: 'task:settled'
+        },
+        {
+          id: 'edge:settled-task-review',
+          kind: 'depends_on',
+          sourceId: 'task:settled-review',
           targetId: 'task:settled'
         }
       ],
@@ -1085,22 +1179,37 @@ describe('Graph View model', () => {
           label: 'Settled task',
           status: 'completed',
           workflowId: 'settled'
+        },
+        {
+          entityId: 'settled-review',
+          id: 'task:settled-review',
+          kind: 'task',
+          label: 'Settled review',
+          status: 'completed',
+          workflowId: 'settled'
         }
       ]
     }
 
-    const filtered = visibleLiveGraph(sharedSessionGraph, {
+    const navigation = liveGraphTaskNavigationGraph(sharedSessionGraph, 'task:settled')
+
+    const filtered = visibleLiveGraph(navigation, {
       enabledKinds: new Set(DEFAULT_LIVE_GRAPH_VIEW_STATE.enabledKinds),
       focusDepth: 'all',
       orphans: true,
-      search: '',
-      workflowFilter: 'active'
+      search: ''
     })
 
-    expect(filtered.nodes.map(node => node.label).sort()).toEqual(['Active task', 'Active workflow', 'Shared session'])
+    expect(filtered.nodes.map(node => node.label).sort()).toEqual([
+      'Settled review',
+      'Settled task',
+      'Settled workflow',
+      'Shared session'
+    ])
     expect(filtered.edges.map(edge => edge.id).sort()).toEqual([
-      'edge:active-workflow-task',
-      'edge:session-active-workflow'
+      'edge:session-settled-workflow',
+      'edge:settled-task-review',
+      'edge:settled-workflow-task'
     ])
   })
 
@@ -1129,7 +1238,7 @@ describe('Graph View model', () => {
     expect(connected.nodes.map(node => node.kind)).toEqual(['task', 'workflow'])
     expect(connected.edges.map(edge => edge.id)).toEqual(['edge:workflow-task'])
     expect(hiddenOrphans).toEqual({ edges: [], nodes: [] })
-    expect(shownOrphans.nodes.map(node => node.label).sort()).toEqual(['Detached note', 'Verification report'])
+    expect(shownOrphans.nodes).toEqual([])
     expect(shownOrphans.edges).toEqual([])
   })
 
@@ -1150,11 +1259,11 @@ describe('Graph View model', () => {
       search: ''
     })
 
-    expect(selectedWorkflow.nodes.map(node => node.kind).sort()).toEqual(['task', 'workflow'])
-    expect(selectedTask.nodes.map(node => node.kind).sort()).toEqual(['agent', 'artifact', 'task', 'workflow'])
+    expect(selectedWorkflow.nodes.map(node => node.kind).sort()).toEqual(['session', 'task', 'workflow'])
+    expect(selectedTask.nodes.map(node => node.kind).sort()).toEqual(['task', 'workflow'])
   })
 
-  it('shows the complete reduced task DAG at one hop when focusing a workflow', () => {
+  it('applies ordinary hop depth to the reduced navigation graph', () => {
     const { graph, ids } = hierarchicalTaskGraph()
     const otherWorkflowId = 'workflow:default:board:other'
     const otherTaskId = 'task:default:board:other'
@@ -1199,26 +1308,49 @@ describe('Graph View model', () => {
     const depthTwo = visibleLiveGraph(hierarchy, { ...options, focusDepth: 2 })
     const all = visibleLiveGraph(hierarchy, { ...options, focusDepth: 'all' })
 
-    expect(new Set(depthOne.nodes.map(node => node.id))).toEqual(new Set([ids.workflow, ids.rootTask, ids.childTask]))
+    expect(new Set(depthOne.nodes.map(node => node.id))).toEqual(new Set([ids.session, ids.workflow, ids.rootTask]))
     expect(new Set(depthOne.edges.map(edge => edge.id))).toEqual(
-      new Set(['edge:tree-workflow-root', 'edge:tree-child-depends-root'])
+      new Set(['edge:tree-session-workflow', 'edge:tree-workflow-root'])
     )
     expect(new Set(depthTwo.nodes.map(node => node.id))).toEqual(
-      new Set([ids.workflow, ids.rootTask, ids.childTask, ids.agent])
+      new Set([ids.session, ids.workflow, ids.rootTask, ids.childTask, otherWorkflowId])
     )
-    expect(depthTwo.nodes.some(node => node.id === ids.artifact)).toBe(false)
-    expect(new Set(all.nodes.map(node => node.id))).toEqual(new Set(hierarchy.nodes.map(node => node.id)))
+    expect(new Set(depthTwo.edges.map(edge => edge.id))).toEqual(
+      new Set([
+        'edge:tree-session-workflow',
+        'edge:tree-session-other',
+        'edge:tree-workflow-root',
+        'edge:tree-child-depends-root'
+      ])
+    )
+    expect(new Set(all.nodes.map(node => node.id))).toEqual(
+      new Set([ids.session, ids.workflow, ids.rootTask, ids.childTask, otherWorkflowId, otherTaskId])
+    )
   })
 
   it('shows orphans only when requested and applies search after graph depth', () => {
-    const withoutOrphans = visibleLiveGraph(graph, {
+    const graphWithDetachedTask: LiveGraphSnapshot = {
+      ...graph,
+      nodes: [
+        ...graph.nodes,
+        {
+          entityId: 'detached',
+          id: 'task:default:board:detached',
+          kind: 'task',
+          label: 'Detached task',
+          workflowId: 'wf'
+        }
+      ]
+    }
+
+    const withoutOrphans = visibleLiveGraph(graphWithDetachedTask, {
       enabledKinds: new Set(DEFAULT_LIVE_GRAPH_VIEW_STATE.enabledKinds),
       focusDepth: 'all',
       orphans: false,
       search: ''
     })
 
-    const matchingOrphan = visibleLiveGraph(graph, {
+    const matchingOrphan = visibleLiveGraph(graphWithDetachedTask, {
       enabledKinds: new Set(DEFAULT_LIVE_GRAPH_VIEW_STATE.enabledKinds),
       focusDepth: 'all',
       orphans: true,
@@ -1226,7 +1358,7 @@ describe('Graph View model', () => {
     })
 
     expect(withoutOrphans.nodes.some(node => node.id.includes('orphan'))).toBe(false)
-    expect(matchingOrphan.nodes.map(node => node.label)).toEqual(['Detached note'])
+    expect(matchingOrphan.nodes.map(node => node.label)).toEqual(['Detached task'])
   })
 
   it('settles deterministically regardless of node and edge input order', () => {
@@ -1818,7 +1950,9 @@ describe('LiveGraphCanvas', () => {
     const settings = await screen.findByRole('dialog', { name: 'Graph settings' })
 
     expect(within(settings).getByRole('textbox', { name: 'Search graph…' })).toBeTruthy()
-    expect(within(settings).getAllByRole('switch')).toHaveLength(9)
+    expect(within(settings).getAllByRole('switch')).toHaveLength(7)
+    expect(within(settings).queryByRole('switch', { name: 'Agent' })).toBeNull()
+    expect(within(settings).queryByRole('switch', { name: 'Artifact' })).toBeNull()
     expect(within(settings).queryByRole('switch', { name: 'Active only' })).toBeNull()
     expect(within(settings).getByRole('slider', { name: 'Center force' })).toBeTruthy()
     expect(within(settings).getByRole('slider', { name: 'Repel force' })).toBeTruthy()
@@ -1916,19 +2050,55 @@ describe('LiveGraphCanvas', () => {
     }
   })
 
-  it('fades local links at rest and fully reveals the hovered node neighborhood', async () => {
+  it('preserves local links at rest and fully reveals the hovered node neighborhood', async () => {
+    const unrelatedWorkflowId = 'workflow:unrelated'
+    const unrelatedTaskId = 'task:unrelated'
+
+    const graphWithUnrelatedBranch: LiveGraphSnapshot = {
+      ...sixKindGraph,
+      edges: [
+        ...sixKindGraph.edges,
+        {
+          id: 'edge:unrelated',
+          kind: 'contains',
+          sourceId: unrelatedWorkflowId,
+          targetId: unrelatedTaskId
+        }
+      ],
+      nodes: [
+        ...sixKindGraph.nodes,
+        {
+          entityId: 'unrelated',
+          id: unrelatedWorkflowId,
+          kind: 'workflow',
+          label: 'Unrelated workflow',
+          workflowId: 'unrelated'
+        },
+        {
+          entityId: 'unrelated',
+          id: unrelatedTaskId,
+          kind: 'task',
+          label: 'Unrelated task',
+          workflowId: 'unrelated'
+        }
+      ]
+    }
+
     const { container } = render(
-      <LiveGraphCanvas graph={graph} initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }} />
+      <LiveGraphCanvas
+        graph={graphWithUnrelatedBranch}
+        initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all', orphans: true }}
+      />
     )
 
-    const workflow = await screen.findByRole('button', { name: /Workflow: Correct artifact/ })
+    const workflow = await screen.findByRole('button', { name: /Workflow: Workflow/ })
 
     const incident = container.querySelector(
-      '[data-live-graph-edge-source="session:default:root"][data-live-graph-edge-target="workflow:default:board:wf"]'
+      '[data-live-graph-edge-source="project:types"][data-live-graph-edge-target="workflow:types"]'
     )!
 
     const unrelated = container.querySelector(
-      '[data-live-graph-edge-source="task:default:board:task"][data-live-graph-edge-target="agent:default:board:task:worker"]'
+      `[data-live-graph-edge-source="${unrelatedWorkflowId}"][data-live-graph-edge-target="${unrelatedTaskId}"]`
     )!
 
     expect(incident.getAttribute('opacity')).toBe('0.48')
@@ -1938,7 +2108,7 @@ describe('LiveGraphCanvas', () => {
 
     expect(incident.getAttribute('opacity')).toBe('1')
     expect(incident.getAttribute('stroke')).toBe('var(--ui-text-secondary)')
-    expect(unrelated.getAttribute('opacity')).toBe('0.07')
+    expect(unrelated.getAttribute('opacity')).toBe('0.48')
 
     fireEvent.pointerLeave(workflow)
 
@@ -1946,16 +2116,14 @@ describe('LiveGraphCanvas', () => {
     expect(unrelated.getAttribute('opacity')).toBe('0.48')
   })
 
-  it('renders all node kinds as circular spheres with unique type palettes', async () => {
+  it('renders only task navigation kinds as circular spheres with unique type palettes', async () => {
     const { container } = render(
       <LiveGraphCanvas graph={sixKindGraph} initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }} />
     )
 
-    await screen.findByRole('button', { name: /Artifact: Artifact/ })
+    await screen.findByRole('button', { name: /Project: Project/ })
 
     const expectedIcons: Record<(typeof LIVE_GRAPH_KINDS)[number], string> = {
-      agent: 'hubot',
-      artifact: 'file',
       project: 'folder',
       session: 'comment-discussion',
       task: 'checklist',
@@ -1986,6 +2154,8 @@ describe('LiveGraphCanvas', () => {
 
     expect(new Set(fills).size).toBe(LIVE_GRAPH_KINDS.length)
     expect(iconGlyphs.size).toBe(LIVE_GRAPH_KINDS.length)
+    expect(container.querySelector('[data-live-graph-node-kind="agent"]')).toBeNull()
+    expect(container.querySelector('[data-live-graph-node-kind="artifact"]')).toBeNull()
   })
 
   it('keeps node type primary while active tasks get visible status markers', async () => {
@@ -1996,7 +2166,7 @@ describe('LiveGraphCanvas', () => {
     const runningTask = await screen.findByRole('button', { name: /Task: Running task/ })
     const blockedTask = await screen.findByRole('button', { name: /Task: Blocked task/ })
     const workflow = await screen.findByRole('button', { name: /Workflow: Workflow/ })
-    const agent = await screen.findByRole('button', { name: /Agent: Agent/ })
+    expect(screen.queryByRole('button', { name: /Agent: Agent/ })).toBeNull()
 
     const bodyFill = (node: Element) => node.querySelector('[data-live-graph-node-body]')?.getAttribute('fill')
     const status = (node: Element) => node.querySelector('[data-live-graph-node-status-ring]')
@@ -2010,14 +2180,13 @@ describe('LiveGraphCanvas', () => {
     expect(runningTask.querySelector('[data-live-graph-node-running-marker]')).not.toBeNull()
     expect(blockedTask.querySelector('[data-live-graph-active-halo]')).not.toBeNull()
     expect(blockedTask.querySelector('[data-live-graph-node-blocked-marker]')).not.toBeNull()
-    expect(agent.querySelector('[data-live-graph-node-work-marker]')).toBeNull()
     expect(Number(status(runningTask)?.getAttribute('r'))).toBeGreaterThan(
       Number(runningTask.querySelector('[data-live-graph-node-body]')?.getAttribute('r'))
     )
 
-    fireEvent.click(agent)
+    fireEvent.click(workflow)
 
-    expect(agent.querySelector('[data-live-graph-node-selection]')?.tagName.toLowerCase()).toBe('circle')
+    expect(workflow.querySelector('[data-live-graph-node-selection]')?.tagName.toLowerCase()).toBe('circle')
     expect(container.querySelectorAll('[data-live-graph-node-selection]')).toHaveLength(1)
   })
 
@@ -2094,8 +2263,8 @@ describe('LiveGraphCanvas', () => {
 
     fireEvent.click(within(settings).getByRole('switch', { name: 'Orphans' }))
 
-    expect(await screen.findByRole('button', { name: /Agent: elephant/ })).toBeTruthy()
-    expect(await screen.findByRole('button', { name: /Artifact: Verification report/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Agent: elephant/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Artifact: Verification report/ })).toBeNull()
     expect(screen.queryByRole('button', { name: /Task: Verify live app/ })).toBeNull()
   })
 
@@ -2126,7 +2295,7 @@ describe('LiveGraphCanvas', () => {
     expect(taskFilter.getAttribute('data-state')).toBe('unchecked')
     expect(onStateChange).toHaveBeenCalledTimes(2)
     expect(onStateChange.mock.calls[1]?.[0]).toMatchObject({
-      enabledKinds: ['session', 'project', 'workflow', 'agent', 'artifact'],
+      enabledKinds: ['session', 'project', 'workflow'],
       orphans: true
     })
   })
@@ -2146,20 +2315,22 @@ describe('LiveGraphCanvas', () => {
   })
 
   it('uses the selected node and focus-depth control as the only persistent focus boundary', async () => {
-    render(<LiveGraphCanvas graph={graph} initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }} />)
+    render(
+      <LiveGraphCanvas graph={sixKindGraph} initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }} />
+    )
 
-    fireEvent.click(await screen.findByRole('button', { name: /Workflow: Correct artifact/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Project: Project/ }))
 
-    expect((await screen.findByRole('button', { name: /Agent: elephant/ })).getAttribute('opacity')).toBe('1')
+    expect((await screen.findByRole('button', { name: /Task: Running task/ })).getAttribute('opacity')).toBe('1')
 
     fireEvent.click(screen.getByRole('button', { name: 'Graph settings' }))
     const settings = await screen.findByRole('dialog', { name: 'Graph settings' })
 
     fireEvent.click(within(settings).getByRole('button', { name: '1 hop' }))
-    await waitFor(() => expect(screen.queryByRole('button', { name: /Agent: elephant/ })).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Task: Running task/ })).toBeNull())
 
     fireEvent.click(within(settings).getByRole('button', { name: '2 hops' }))
-    expect((await screen.findByRole('button', { name: /Agent: elephant/ })).getAttribute('opacity')).toBe('1')
+    expect((await screen.findByRole('button', { name: /Task: Running task/ })).getAttribute('opacity')).toBe('1')
   })
 
   it('clears focus when the selected node disappears', async () => {
@@ -2374,20 +2545,25 @@ describe('LiveGraphCanvas', () => {
     const selected = container.querySelector('[data-live-graph-node-id="task:selected"]')!
     fireEvent.click(selected)
 
-    await waitFor(() => expect(container.querySelectorAll('[data-live-graph-label]')).toHaveLength(0))
-    fireEvent.pointerMove(selected, { pointerId: 8 })
+    await waitFor(() => {
+      expect(container.querySelector('[data-live-graph-edge-batch]')).toBeNull()
+      expect(container.querySelector('[data-live-graph-node-id="task:unrelated"]')).toBeNull()
+      expect(container.querySelector('[data-live-graph-node-id="task:neighbor"]')).toBeTruthy()
+      expect(container.querySelector('[data-live-graph-node-id="task:selected"]')).toBeTruthy()
+      expect(container.querySelector('[data-live-graph-node-id="workflow:a"]')).toBeTruthy()
+      expect(container.querySelector('[data-live-graph-node-id="project:root"]')).toBeTruthy()
+      expect(container.querySelector('[data-live-graph-node-id="session:root"]')).toBeTruthy()
+    })
+
+    const selectedNavigationTask = container.querySelector('[data-live-graph-node-id="task:selected"]')!
+    const selectedNavigationWorkflow = container.querySelector('[data-live-graph-node-id="workflow:a"]')!
+
+    expect(selectedNavigationTask.getAttribute('opacity')).toBe('1')
+    expect(selectedNavigationWorkflow.getAttribute('opacity')).toBe('0.2')
+
+    fireEvent.pointerMove(selectedNavigationTask, { pointerId: 8 })
     expect(hoverLabel.textContent).toContain('Selected task')
     expect(hoverLabel.getAttribute('opacity')).toBe('1')
-    await waitFor(() => expect(segmentCount(highlightedEdges)).toBe(2))
-    expect(baseEdges.getAttribute('opacity')).toBe('0.025')
-    expect(segmentCount(highlightedArrows)).toBeGreaterThan(0)
-    expect(segmentCount(highlightedArrows)).toBeLessThanOrEqual(2)
-    expect(unrelated.getAttribute('opacity')).toBe('0.2')
-
-    fireEvent.pointerEnter(unrelated, { pointerId: 8 })
-    expect(segmentCount(highlightedEdges)).toBe(3)
-    fireEvent.pointerLeave(unrelated, { pointerId: 8 })
-    expect(segmentCount(highlightedEdges)).toBe(2)
   }, 10_000)
 
   it('keeps thousands of dense connections in a constant-size edge DOM', async () => {
@@ -2487,19 +2663,12 @@ describe('LiveGraphCanvas', () => {
     expect(Number(body.getAttribute('r'))).toBeCloseTo(radiusBefore * 1.5, 8)
   })
 
-  it('renders descendant hubs larger than leaves regardless of visible degree', async () => {
+  it('does not render agent or artifact nodes in the navigation graph', async () => {
     render(<LiveGraphCanvas graph={graph} initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }} />)
 
-    const task = await screen.findByRole('button', { name: /Task: Verify live app/ })
-    const artifact = await screen.findByRole('button', { name: /Artifact: Verification report/ })
-    const taskBody = task.querySelector('[data-live-graph-node-body]')
-    const artifactBody = artifact.querySelector('[data-live-graph-node-body]')
-
-    expect(task.getAttribute('data-live-graph-node-degree')).toBe('3')
-    expect(task.getAttribute('data-live-graph-node-reach')).toBe('2')
-    expect(artifact.getAttribute('data-live-graph-node-degree')).toBe('1')
-    expect(artifact.getAttribute('data-live-graph-node-reach')).toBe('0')
-    expect(Number(taskBody?.getAttribute('r'))).toBeGreaterThan(Number(artifactBody?.getAttribute('r')))
+    expect(await screen.findByRole('button', { name: /Task: Verify live app/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Agent: elephant/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Artifact: Verification report/ })).toBeNull()
   })
 
   it('renders a workflow hub substantially larger than its task leaves', async () => {
@@ -2647,25 +2816,31 @@ describe('LiveGraphCanvas', () => {
     fireEvent.click(inbox.querySelector<HTMLButtonElement>('[data-live-graph-completed-count]')!)
 
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: /^Task: Verify live app/ })).toBeNull()
-      expect(screen.getByRole('button', { name: /^Task: Package the release/ })).toBeTruthy()
-      expect(screen.queryByRole('button', { name: /^Task: Resolve blocked verification/ })).toBeNull()
+      expect(screen.getByRole('button', { name: /^Task: Verify live app/ }).getAttribute('opacity')).toBe('0.2')
+      expect(screen.getByRole('button', { name: /^Task: Package the release/ }).getAttribute('opacity')).toBe('1')
+      expect(screen.getByRole('button', { name: /^Task: Resolve blocked verification/ }).getAttribute('opacity')).toBe(
+        '0.2'
+      )
     })
 
     fireEvent.click(inbox.querySelector<HTMLButtonElement>('[data-live-graph-attention-count]')!)
 
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: /^Task: Verify live app/ })).toBeNull()
-      expect(screen.queryByRole('button', { name: /^Task: Package the release/ })).toBeNull()
-      expect(screen.getByRole('button', { name: /^Task: Resolve blocked verification/ })).toBeTruthy()
+      expect(screen.getByRole('button', { name: /^Task: Verify live app/ }).getAttribute('opacity')).toBe('0.2')
+      expect(screen.getByRole('button', { name: /^Task: Package the release/ }).getAttribute('opacity')).toBe('0.2')
+      expect(screen.getByRole('button', { name: /^Task: Resolve blocked verification/ }).getAttribute('opacity')).toBe(
+        '1'
+      )
     })
 
     fireEvent.click(inbox.querySelector<HTMLButtonElement>('[data-live-graph-active-count]')!)
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /^Task: Verify live app/ })).toBeTruthy()
-      expect(screen.queryByRole('button', { name: /^Task: Package the release/ })).toBeNull()
-      expect(screen.queryByRole('button', { name: /^Task: Resolve blocked verification/ })).toBeNull()
+      expect(screen.getByRole('button', { name: /^Task: Verify live app/ }).getAttribute('opacity')).toBe('1')
+      expect(screen.getByRole('button', { name: /^Task: Package the release/ }).getAttribute('opacity')).toBe('0.14')
+      expect(screen.getByRole('button', { name: /^Task: Resolve blocked verification/ }).getAttribute('opacity')).toBe(
+        '0.2'
+      )
     })
 
     fireEvent.click(within(inbox).getByRole('button', { name: 'View task: Verify live app' }))
@@ -2680,53 +2855,49 @@ describe('LiveGraphCanvas', () => {
     expect(await screen.findByRole('button', { name: /Task: Verify live app/ })).toBeTruthy()
   })
 
-  it('opens the workflow feed below graph settings and selects a workflow from it', async () => {
+  it('opens one global task feed and keeps the selected workflow subgraph navigable', async () => {
     const { container } = render(
-      <LiveGraphCanvas graph={graph} initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }} />
+      <LiveGraphCanvas graph={sixKindGraph} initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }} />
     )
 
     const controls = container.querySelector('[data-live-graph-controls]')!
     const settings = screen.getByRole('button', { name: 'Graph settings' })
-    const feedButton = screen.getByRole('button', { name: 'Workflow feed' })
+    const feedButton = screen.getByRole('button', { name: 'Task feed' })
 
     expect([...controls.querySelectorAll('button')].slice(0, 2)).toEqual([settings, feedButton])
     expect(feedButton.getAttribute('aria-pressed')).toBe('false')
 
     fireEvent.click(feedButton)
 
-    const feed = await screen.findByTestId('live-graph-workflow-feed')
-    const workflow = within(feed).getByRole('button', { name: 'View workflow: Correct artifact' })
+    const feed = await screen.findByTestId('live-graph-task-feed')
 
     expect(feedButton.getAttribute('aria-pressed')).toBe('true')
-    expect(within(feed).getByRole('region', { name: 'Workflow feed' })).toBeTruthy()
-    expect(within(feed).queryByText('Workflow feed')).toBeNull()
+    expect(within(feed).getByRole('region', { name: 'Task feed' })).toBeTruthy()
     expect(within(feed).queryByRole('button', { name: 'Close' })).toBeNull()
-    expect(workflow.querySelector('[data-live-graph-workflow-task-counts]')?.textContent).toContain('1 Active')
-    expect(workflow.querySelector('[data-live-graph-workflow-task-counts]')?.textContent).toContain('0 Completed')
+    expect(within(feed).getByRole('button', { name: 'View task: Running task' })).toBeTruthy()
+    expect(within(feed).getByRole('button', { name: 'View task: Blocked task' })).toBeTruthy()
+    expect(within(feed).queryByRole('button', { name: /View workflow:/ })).toBeNull()
 
     fireEvent.keyDown(feedButton, { key: 'Escape' })
-    await waitFor(() => expect(screen.queryByTestId('live-graph-workflow-feed')).toBeNull())
+    await waitFor(() => expect(screen.queryByTestId('live-graph-task-feed')).toBeNull())
 
-    fireEvent.click(feedButton)
-    fireEvent.click(
-      within(await screen.findByTestId('live-graph-workflow-feed')).getByRole('button', {
-        name: 'View workflow: Correct artifact'
-      })
-    )
+    fireEvent.click(screen.getByRole('button', { name: /Workflow: Workflow/ }))
 
-    await waitFor(() => expect(screen.queryByTestId('live-graph-workflow-feed')).toBeNull())
-    expect(await screen.findByTestId('live-graph-selection-inspector')).toBeTruthy()
-    expect(
-      (await screen.findByRole('button', { name: /Workflow: Correct artifact/ })).getAttribute('aria-pressed')
-    ).toBe('true')
+    const scopedFeed = await screen.findByTestId('live-graph-workflow-inbox')
+    expect(within(scopedFeed).getByRole('button', { name: 'View task: Running task' })).toBeTruthy()
+    expect(within(scopedFeed).getByRole('button', { name: 'View task: Blocked task' })).toBeTruthy()
 
-    const selectedInbox = await screen.findByTestId('live-graph-workflow-inbox')
-    fireEvent.click(within(selectedInbox).getByRole('button', { name: '0 Completed' }))
+    fireEvent.click(within(scopedFeed).getByRole('button', { name: 'View task: Running task' }))
 
     await waitFor(() => {
       expect(screen.getByTestId('live-graph-selection-inspector')).toBeTruthy()
-      expect(screen.getByRole('button', { name: /Workflow: Correct artifact/ })).toBeTruthy()
-      expect(screen.queryByRole('button', { name: /^Task: Verify live app/ })).toBeNull()
+      expect(screen.getByRole('button', { name: /Task: Running task/ })).toBeTruthy()
+      expect(screen.getByRole('button', { name: /Workflow: Workflow/ })).toBeTruthy()
+      expect(screen.getByRole('button', { name: /Project: Project/ })).toBeTruthy()
+      expect(screen.getByRole('button', { name: /Session: Session/ })).toBeTruthy()
+      expect(screen.getByRole('button', { name: /Task: Blocked task/ }).getAttribute('opacity')).toBe('0.2')
+      expect(screen.queryByRole('button', { name: /Agent: Agent/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: /Artifact: Artifact/ })).toBeNull()
     })
   })
 
@@ -2858,9 +3029,11 @@ describe('LiveGraphCanvas', () => {
 
     const { container } = render(
       <LiveGraphCanvas
+        autoFit={false}
         graph={filteredGraph}
         initialState={{
           ...DEFAULT_LIVE_GRAPH_VIEW_STATE,
+          camera: { scale: 0.1, x: 0, y: 0 },
           enabledKinds: ['task'],
           focusDepth: 1
         }}
@@ -2891,19 +3064,19 @@ describe('LiveGraphCanvas', () => {
     expect(within(feed).getByRole('button', { name: 'View task: Attention task' })).toBeTruthy()
     expect(within(feed).queryByRole('button', { name: /View workflow:/ })).toBeNull()
 
+    const world = container.querySelector('[data-live-graph-world]')!
+    const cameraBeforeFilter = world.getAttribute('transform')
+
     fireEvent.click(activeFilter)
 
     await waitFor(() => {
       const activeNode = screen.getByRole('button', { name: /Task: Active task/ })
-      const completedNode = screen.getByRole('button', { name: /Task: Completed task/ })
-      const attentionNode = screen.getByRole('button', { name: /Task: Attention task/ })
 
       expect(activeNode.getAttribute('data-live-graph-filter-context')).toBeNull()
       expect(activeNode.getAttribute('opacity')).toBe('1')
-      expect(completedNode.getAttribute('data-live-graph-filter-context')).toBe('true')
-      expect(completedNode.getAttribute('opacity')).toBe('0.2')
-      expect(attentionNode.getAttribute('data-live-graph-filter-context')).toBe('true')
-      expect(attentionNode.getAttribute('opacity')).toBe('0.2')
+      expect(screen.queryByRole('button', { name: /Task: Completed task/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: /Task: Attention task/ })).toBeNull()
+      expect(world.getAttribute('transform')).not.toBe(cameraBeforeFilter)
     })
     expect(within(feed).getByRole('button', { name: 'View task: Active task' })).toBeTruthy()
     expect(within(feed).queryByRole('button', { name: 'View task: Completed task' })).toBeNull()
@@ -2913,14 +3086,10 @@ describe('LiveGraphCanvas', () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole('button', { name: /Task: Active task/ }).getAttribute('data-live-graph-filter-context')
-      ).toBe('true')
-      expect(
         screen.getByRole('button', { name: /Task: Completed task/ }).getAttribute('data-live-graph-filter-context')
       ).toBeNull()
-      expect(
-        screen.getByRole('button', { name: /Task: Attention task/ }).getAttribute('data-live-graph-filter-context')
-      ).toBe('true')
+      expect(screen.queryByRole('button', { name: /Task: Active task/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: /Task: Attention task/ })).toBeNull()
     })
     expect(within(feed).getByRole('button', { name: 'View task: Completed task' })).toBeTruthy()
     expect(within(feed).queryByRole('button', { name: 'View task: Active task' })).toBeNull()
@@ -2929,14 +3098,10 @@ describe('LiveGraphCanvas', () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole('button', { name: /Task: Active task/ }).getAttribute('data-live-graph-filter-context')
-      ).toBe('true')
-      expect(
-        screen.getByRole('button', { name: /Task: Completed task/ }).getAttribute('data-live-graph-filter-context')
-      ).toBe('true')
-      expect(
         screen.getByRole('button', { name: /Task: Attention task/ }).getAttribute('data-live-graph-filter-context')
       ).toBeNull()
+      expect(screen.queryByRole('button', { name: /Task: Active task/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: /Task: Completed task/ })).toBeNull()
     })
     expect(within(feed).getByRole('button', { name: 'View task: Attention task' })).toBeTruthy()
     expect(within(feed).queryByRole('button', { name: 'View task: Active task' })).toBeNull()
@@ -2955,29 +3120,30 @@ describe('LiveGraphCanvas', () => {
       ).toBeNull()
     })
 
+    const activeTaskCard = within(feed).getByRole('button', { name: 'View task: Active task' })
+    fireEvent.pointerEnter(activeTaskCard)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Task: Active task/ }).getAttribute('opacity')).toBe('1')
+      expect(screen.getByRole('button', { name: /Task: Completed task/ }).getAttribute('opacity')).toBe('0.2')
+      expect(screen.getByRole('button', { name: /Task: Attention task/ }).getAttribute('opacity')).toBe('0.2')
+    })
+
+    fireEvent.pointerLeave(activeTaskCard)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Task: Completed task/ }).getAttribute('opacity')).toBe('1')
+      expect(screen.getByRole('button', { name: /Task: Attention task/ }).getAttribute('opacity')).toBe('1')
+    })
+
     fireEvent.click(screen.getByRole('button', { name: /Task: Active task/ }))
 
     await waitFor(() => {
       expect(screen.getByTestId('live-graph-selection-inspector')).toBeTruthy()
       expect(screen.getByRole('button', { name: /Task: Active task/ }).getAttribute('opacity')).toBe('1')
-      expect(screen.getByRole('button', { name: /Task: Completed task/ }).getAttribute('opacity')).toBe('0.2')
-      expect(screen.getByRole('button', { name: /Task: Attention task/ }).getAttribute('opacity')).toBe('0.2')
-      expect(
-        container
-          .querySelector(
-            '[data-live-graph-edge-source="task:default:board:active"]' +
-              '[data-live-graph-edge-target="task:default:board:completed"]'
-          )
-          ?.getAttribute('opacity')
-      ).toBe('1')
-      expect(
-        container
-          .querySelector(
-            '[data-live-graph-edge-source="task:default:board:completed"]' +
-              '[data-live-graph-edge-target="task:default:board:attention"]'
-          )
-          ?.getAttribute('opacity')
-      ).toBe('0.48')
+      expect(screen.queryByRole('button', { name: /Task: Completed task/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: /Task: Attention task/ })).toBeNull()
+      expect(container.querySelectorAll('[data-live-graph-edge-source]')).toHaveLength(0)
     })
   })
 
@@ -3415,11 +3581,11 @@ describe('LiveGraphCanvas', () => {
     expect(screen.queryByTestId('live-graph-selection-inspector')).toBeNull()
     expect(task.getAttribute('aria-pressed')).toBe('false')
 
-    const agent = await screen.findByRole('button', { name: /Agent: elephant/ })
-    fireEvent.click(agent)
+    const workflow = await screen.findByRole('button', { name: /Workflow: Correct artifact/ })
+    fireEvent.click(workflow)
 
     expect(await screen.findByTestId('live-graph-selection-inspector')).toBeTruthy()
-    expect(agent.getAttribute('aria-pressed')).toBe('true')
+    expect(workflow.getAttribute('aria-pressed')).toBe('true')
   })
 
   it('does not attach a node when a Shift press becomes a drag', async () => {
@@ -3490,14 +3656,14 @@ describe('LiveGraphCanvas', () => {
     )
 
     const svg = await screen.findByRole('application', { name: 'Graph View' })
-    const agent = await screen.findByRole('button', { name: /Agent: elephant/ })
+    const task = await screen.findByRole('button', { name: /Task: Verify live app/ })
     const world = container.querySelector('[data-live-graph-world]')
 
     const link = container.querySelector(
-      '[data-live-graph-edge-source="task:default:board:task"][data-live-graph-edge-target="agent:default:board:task:worker"]'
+      '[data-live-graph-edge-source="workflow:default:board:wf"][data-live-graph-edge-target="task:default:board:task"]'
     )
 
-    const agentBefore = graphNodePosition(agent)
+    const taskBefore = graphNodePosition(task)
     const worldBefore = world?.getAttribute('transform')
 
     const linkBefore = [
@@ -3507,14 +3673,14 @@ describe('LiveGraphCanvas', () => {
       link?.getAttribute('y2')
     ]
 
-    fireEvent.pointerDown(agent, { button: 0, clientX: 100, clientY: 100, pointerId: 7 })
+    fireEvent.pointerDown(task, { button: 0, clientX: 100, clientY: 100, pointerId: 7 })
     fireEvent.pointerMove(svg, { clientX: 180, clientY: 140, pointerId: 7 })
 
     await waitFor(() => {
-      const agentAfter = graphNodePosition(agent)
+      const taskAfter = graphNodePosition(task)
 
-      expect(agentAfter.x - agentBefore.x).toBeCloseTo(80, 0)
-      expect(agentAfter.y - agentBefore.y).toBeCloseTo(40, 0)
+      expect(taskAfter.x - taskBefore.x).toBeCloseTo(80, 0)
+      expect(taskAfter.y - taskBefore.y).toBeCloseTo(40, 0)
     })
 
     expect(world?.getAttribute('transform')).toBe(worldBefore)
@@ -3526,8 +3692,8 @@ describe('LiveGraphCanvas', () => {
     ]).not.toEqual(linkBefore)
 
     fireEvent.pointerUp(svg, { clientX: 180, clientY: 140, pointerId: 7 })
-    fireEvent.click(agent)
-    expect(agent.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(task)
+    expect(task.getAttribute('aria-pressed')).toBe('false')
   })
   it('replays the graph outward from its root', async () => {
     const { container } = render(
@@ -3539,22 +3705,21 @@ describe('LiveGraphCanvas', () => {
     )
 
     const root = await screen.findByRole('button', { name: /Session: Agent-ready codebase/ })
-    const agent = await screen.findByRole('button', { name: /Agent: elephant/ })
+    const workflow = await screen.findByRole('button', { name: /Workflow: Correct artifact/ })
     const task = await screen.findByRole('button', { name: /Task: Verify live app/ })
 
-    fireEvent.click(task)
     fireEvent.click(screen.getByRole('button', { name: 'Graph settings' }))
     const settings = await screen.findByRole('dialog', { name: 'Graph settings' })
     fireEvent.click(within(settings).getByRole('button', { name: 'Animate' }))
 
     expect(Number(root.getAttribute('opacity'))).toBe(1)
+    expect(Number(workflow.getAttribute('opacity'))).toBe(0)
     expect(Number(task.getAttribute('opacity'))).toBe(0)
-    expect(Number(agent.getAttribute('opacity'))).toBe(0)
     expect(
       container.querySelector('[data-live-graph-edge-source="session:default:root"]')?.getAttribute('opacity')
     ).toBe('0')
 
-    await waitFor(() => expect(Number(agent.getAttribute('opacity'))).toBeGreaterThan(0), { timeout: 1600 })
+    await waitFor(() => expect(Number(task.getAttribute('opacity'))).toBeGreaterThan(0), { timeout: 1600 })
   })
 
   it('restores the settled graph when its pane is hidden during replay', async () => {
@@ -3567,20 +3732,20 @@ describe('LiveGraphCanvas', () => {
     )
 
     const { container, rerender } = render(<div>{graphView}</div>)
-    const agent = await screen.findByRole('button', { name: /Agent: elephant/ })
-    const settledPosition = graphNodePosition(agent)
+    const task = await screen.findByRole('button', { name: /Task: Verify live app/ })
+    const settledPosition = graphNodePosition(task)
 
     fireEvent.click(screen.getByRole('button', { name: 'Graph settings' }))
     const settings = await screen.findByRole('dialog', { name: 'Graph settings' })
     fireEvent.click(within(settings).getByRole('button', { name: 'Animate' }))
-    expect(Number(agent.getAttribute('opacity'))).toBe(0)
+    expect(Number(task.getAttribute('opacity'))).toBe(0)
 
     rerender(<div aria-hidden="true">{graphView}</div>)
 
-    const hiddenAgent = container.querySelector('[data-live-graph-node-kind="agent"]')
+    const hiddenTask = container.querySelector('[data-live-graph-node-kind="task"]')
 
-    await waitFor(() => expect(hiddenAgent?.getAttribute('opacity')).toBe('1'))
-    const restoredPosition = graphNodePosition(hiddenAgent!)
+    await waitFor(() => expect(hiddenTask?.getAttribute('opacity')).toBe('1'))
+    const restoredPosition = graphNodePosition(hiddenTask!)
 
     expect(Math.hypot(restoredPosition.x - settledPosition.x, restoredPosition.y - settledPosition.y)).toBeLessThan(
       0.001

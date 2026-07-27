@@ -53,6 +53,7 @@ export interface LiveGraphWorkflowInboxProps {
   label?: string
   onFilterChange: (filter: LiveGraphTaskFilter) => void
   onSelectTask: (nodeId: string) => void
+  onTaskHover?: (nodeId: string | null) => void
   tasks: readonly LiveGraphNode[]
   workflowScope: string
 }
@@ -152,12 +153,13 @@ function TaskStatus({ status }: { status: string }) {
 
 interface TaskCardProps {
   nowMs: number
+  onHoverChange?: (hovered: boolean) => void
   onSelect: () => void
   reducedMotion: boolean
   task: LiveGraphNode
 }
 
-function TaskCard({ nowMs, onSelect, reducedMotion, task }: TaskCardProps) {
+function TaskCard({ nowMs, onHoverChange, onSelect, reducedMotion, task }: TaskCardProps) {
   const { t } = useI18n()
   const assignee = clean(task.assignee) || t.liveGraph.unassigned
   const currentTool = clean(task.currentTool)
@@ -176,7 +178,11 @@ function TaskCard({ nowMs, onSelect, reducedMotion, task }: TaskCardProps) {
       <button
         aria-label={`${t.liveGraph.viewTask}: ${task.label}`}
         className="flex h-[8.5rem] w-full min-w-0 cursor-default flex-col border-0 bg-transparent px-3 py-2.5 text-left text-inherit outline-none"
+        onBlur={() => onHoverChange?.(false)}
         onClick={onSelect}
+        onFocus={() => onHoverChange?.(true)}
+        onPointerEnter={() => onHoverChange?.(true)}
+        onPointerLeave={() => onHoverChange?.(false)}
         type="button"
       >
         <span className="flex min-w-0 items-center justify-between gap-2">
@@ -227,12 +233,13 @@ function TaskCard({ nowMs, onSelect, reducedMotion, task }: TaskCardProps) {
 
 interface CompletedTaskRowProps {
   nowMs: number
+  onHoverChange?: (hovered: boolean) => void
   onSelect: () => void
   reducedMotion: boolean
   task: LiveGraphNode
 }
 
-function CompletedTaskRow({ nowMs, onSelect, reducedMotion, task }: CompletedTaskRowProps) {
+function CompletedTaskRow({ nowMs, onHoverChange, onSelect, reducedMotion, task }: CompletedTaskRowProps) {
   const { t } = useI18n()
   const timing = taskLifecycleTiming(task)
   const timingLabel = timing ? formatAgo(timing.timestampMs, t.agents, nowMs) : ''
@@ -249,7 +256,11 @@ function CompletedTaskRow({ nowMs, onSelect, reducedMotion, task }: CompletedTas
       <button
         aria-label={`${t.liveGraph.viewTask}: ${task.label}`}
         className="flex h-8 w-full min-w-0 cursor-default items-center gap-2 border-0 bg-transparent px-2 text-left text-inherit outline-none"
+        onBlur={() => onHoverChange?.(false)}
         onClick={onSelect}
+        onFocus={() => onHoverChange?.(true)}
+        onPointerEnter={() => onHoverChange?.(true)}
+        onPointerLeave={() => onHoverChange?.(false)}
         type="button"
       >
         <Codicon className="shrink-0 text-(--ui-text-tertiary)" name="checklist" />
@@ -273,6 +284,7 @@ export const LiveGraphWorkflowInbox = memo(function LiveGraphWorkflowInbox({
   label,
   onFilterChange,
   onSelectTask,
+  onTaskHover,
   tasks,
   workflowScope
 }: LiveGraphWorkflowInboxProps) {
@@ -409,6 +421,7 @@ export const LiveGraphWorkflowInbox = memo(function LiveGraphWorkflowInbox({
                     <TaskCard
                       key={task.id}
                       nowMs={nowMs}
+                      onHoverChange={hovered => onTaskHover?.(hovered ? task.id : null)}
                       onSelect={() => onSelectTask(task.id)}
                       reducedMotion={reducedMotion}
                       task={task}
@@ -447,6 +460,7 @@ export const LiveGraphWorkflowInbox = memo(function LiveGraphWorkflowInbox({
                     <TaskCard
                       key={task.id}
                       nowMs={nowMs}
+                      onHoverChange={hovered => onTaskHover?.(hovered ? task.id : null)}
                       onSelect={() => onSelectTask(task.id)}
                       reducedMotion={reducedMotion}
                       task={task}
@@ -482,6 +496,7 @@ export const LiveGraphWorkflowInbox = memo(function LiveGraphWorkflowInbox({
                     <CompletedTaskRow
                       key={task.id}
                       nowMs={nowMs}
+                      onHoverChange={hovered => onTaskHover?.(hovered ? task.id : null)}
                       onSelect={() => onSelectTask(task.id)}
                       reducedMotion={reducedMotion}
                       task={task}
