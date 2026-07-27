@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "manifest": {
+    "software-development/wayfinder-pre-spec/SKILL.md": [
+      1785134562466285628,
+      13059
+    ]
+  },
+  "skills": [
+    {
+      "skill_name": "wayfinder-pre-spec",
+      "category": "software-development",
+      "frontmatter_name": "wayfinder-pre-spec",
+      "description": "Use when a feature has unresolved product or architecture...",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "conditions": {
+        "fallback_for_toolsets": [],
+        "requires_toolsets": [],
+        "fallback_for_tools": [],
+        "requires_tools": []
+      }
+    }
+  ],
+  "category_descriptions": {}
+}

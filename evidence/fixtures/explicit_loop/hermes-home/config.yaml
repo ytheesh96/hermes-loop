@@ -1,0 +1,12 @@
+model:
+  default: local-wayfinder
+  provider: custom:local
+  api_mode: chat_completions
+custom_providers:
+  - name: local
+    base_url: http://127.0.0.1:59763/v1
+    api_key: local-key
+    model: local-wayfinder
+plugins:
+  enabled:
+    - eval_trace

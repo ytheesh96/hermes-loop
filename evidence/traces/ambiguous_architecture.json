@@ -1,0 +1,335 @@
+{
+  "case": "ambiguous_architecture",
+  "changed_paths": [],
+  "checks": {
+    "bounded_write": true,
+    "foreground_choice": true,
+    "fresh_process": true,
+    "inspect_before_choice": true,
+    "loop_route": true,
+    "production_unchanged": true,
+    "returncode": true,
+    "skill_discovery": true,
+    "tool_trace": true
+  },
+  "final_text": "I inspected the repository first. The choice between session cookies, JWTs, and passkeys changes security and product behavior; which option should the foreground approve? No production change was made.",
+  "hook_events": [
+    {
+      "args": {},
+      "duration_ms": 0,
+      "result": "{\"success\": true, \"skills\": [{\"name\": \"wayfinder-pre-spec\", \"description\": \"Use when a feature has unresolved product or architecture decisions, or the user asks for Wayfinder. Research first, keep user-owned choices in the foreground, and hand off a decision-complete specification without production implementation.\", \"category\": \"software-development\"}], \"categories\": [\"software-development\"], \"count\": 1, \"hint\": \"Use skill_view(name) to see full content, tags, and linked files\"}",
+      "session_id": "20260727_024523_639d8d",
+      "status": "ok",
+      "task_id": "48c3c0d4-0ef3-4fc4-bb1f-5a0ac9015968",
+      "tool_call_id": "call-skills",
+      "tool_name": "skills_list"
+    },
+    {
+      "args": {
+        "name": "wayfinder-pre-spec"
+      },
+      "duration_ms": 3,
+      "result": "{\"success\": true, \"name\": \"wayfinder-pre-spec\", \"description\": \"Use when a feature has unresolved product or architecture decisions, or the user asks for Wayfinder. Research first, keep user-owned choices in the foreground, and hand off a decision-complete specification without production implementation.\", \"tags\": [\"planning\", \"discovery\", \"decisions\", \"specifications\", \"wayfinder\"], \"related_skills\": [\"plan\", \"loop-triage\"], \"content\": \"---\\nname: wayfinder-pre-spec\\ndescription: Use when a fea",
+      "session_id": "20260727_024523_639d8d",
+      "status": "ok",
+      "task_id": "48c3c0d4-0ef3-4fc4-bb1f-5a0ac9015968",
+      "tool_call_id": "call-view",
+      "tool_name": "skill_view"
+    },
+    {
+      "args": {
+        "path": "README.md"
+      },
+      "duration_ms": 119,
+      "result": "{\"content\": \"1|# Fixture\\n2|\\n3|Existing convention.\\n4|\", \"total_lines\": 3, \"file_size\": 32, \"truncated\": false, \"is_binary\": false, \"is_image\": false}",
+      "session_id": "20260727_024523_639d8d",
+      "status": "ok",
+      "task_id": "48c3c0d4-0ef3-4fc4-bb1f-5a0ac9015968",
+      "tool_call_id": "call-read",
+      "tool_name": "read_file"
+    }
+  ],
+  "requests": [
+    {
+      "message_roles": [],
+      "model": null,
+      "response_tool_calls": [],
+      "system_contains_wayfinder_skill": false,
+      "system_excerpt": "",
+      "tool_names": []
+    },
+    {
+      "message_roles": [],
+      "model": null,
+      "response_tool_calls": [],
+      "system_contains_wayfinder_skill": false,
+      "system_excerpt": "",
+      "tool_names": []
+    },
+    {
+      "message_roles": [
+        "system",
+        "user"
+      ],
+      "model": "local-wayfinder",
+      "response_tool_calls": [
+        {
+          "function": {
+            "arguments": "{}",
+            "name": "skills_list"
+          },
+          "id": "call-skills",
+          "type": "function"
+        }
+      ],
+      "system_contains_wayfinder_skill": true,
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "tool_names": [
+        "clarify",
+        "computer_use",
+        "cronjob",
+        "delegate_task",
+        "execute_code",
+        "kanban_comment",
+        "kanban_complete",
+        "kanban_show",
+        "kanban_unblock",
+        "loop_block",
+        "loop_create",
+        "loop_graph",
+        "loop_list_queue",
+        "loop_status",
+        "loop_update",
+        "memory",
+        "patch",
+        "process",
+        "project_create",
+        "project_list",
+        "project_switch",
+        "read_file",
+        "search_files",
+        "session_search",
+        "skill_manage",
+        "skill_view",
+        "skills_list",
+        "terminal",
+        "text_to_speech",
+        "todo",
+        "video_analyze",
+        "vision_analyze",
+        "work_map",
+        "write_file"
+      ]
+    },
+    {
+      "message_roles": [
+        "system",
+        "user",
+        "assistant",
+        "tool"
+      ],
+      "model": "local-wayfinder",
+      "response_tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"name\": \"wayfinder-pre-spec\"}",
+            "name": "skill_view"
+          },
+          "id": "call-view",
+          "type": "function"
+        }
+      ],
+      "system_contains_wayfinder_skill": true,
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "tool_names": [
+        "clarify",
+        "computer_use",
+        "cronjob",
+        "delegate_task",
+        "execute_code",
+        "kanban_comment",
+        "kanban_complete",
+        "kanban_show",
+        "kanban_unblock",
+        "loop_block",
+        "loop_create",
+        "loop_graph",
+        "loop_list_queue",
+        "loop_status",
+        "loop_update",
+        "memory",
+        "patch",
+        "process",
+        "project_create",
+        "project_list",
+        "project_switch",
+        "read_file",
+        "search_files",
+        "session_search",
+        "skill_manage",
+        "skill_view",
+        "skills_list",
+        "terminal",
+        "text_to_speech",
+        "todo",
+        "video_analyze",
+        "vision_analyze",
+        "work_map",
+        "write_file"
+      ]
+    },
+    {
+      "message_roles": [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "tool"
+      ],
+      "model": "local-wayfinder",
+      "response_tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"path\": \"README.md\"}",
+            "name": "read_file"
+          },
+          "id": "call-read",
+          "type": "function"
+        }
+      ],
+      "system_contains_wayfinder_skill": true,
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "tool_names": [
+        "clarify",
+        "computer_use",
+        "cronjob",
+        "delegate_task",
+        "execute_code",
+        "kanban_comment",
+        "kanban_complete",
+        "kanban_show",
+        "kanban_unblock",
+        "loop_block",
+        "loop_create",
+        "loop_graph",
+        "loop_list_queue",
+        "loop_status",
+        "loop_update",
+        "memory",
+        "patch",
+        "process",
+        "project_create",
+        "project_list",
+        "project_switch",
+        "read_file",
+        "search_files",
+        "session_search",
+        "skill_manage",
+        "skill_view",
+        "skills_list",
+        "terminal",
+        "text_to_speech",
+        "todo",
+        "video_analyze",
+        "vision_analyze",
+        "work_map",
+        "write_file"
+      ]
+    },
+    {
+      "message_roles": [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "tool",
+        "assistant",
+        "tool"
+      ],
+      "model": "local-wayfinder",
+      "response_tool_calls": [],
+      "system_contains_wayfinder_skill": true,
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "tool_names": [
+        "clarify",
+        "computer_use",
+        "cronjob",
+        "delegate_task",
+        "execute_code",
+        "kanban_comment",
+        "kanban_complete",
+        "kanban_show",
+        "kanban_unblock",
+        "loop_block",
+        "loop_create",
+        "loop_graph",
+        "loop_list_queue",
+        "loop_status",
+        "loop_update",
+        "memory",
+        "patch",
+        "process",
+        "project_create",
+        "project_list",
+        "project_switch",
+        "read_file",
+        "search_files",
+        "session_search",
+        "skill_manage",
+        "skill_view",
+        "skills_list",
+        "terminal",
+        "text_to_speech",
+        "todo",
+        "video_analyze",
+        "vision_analyze",
+        "work_map",
+        "write_file"
+      ]
+    }
+  ],
+  "tool_events": [
+    {
+      "arguments": {},
+      "name": "skills_list",
+      "phase": "call",
+      "request": 3
+    },
+    {
+      "content": "{\"success\": true, \"skills\": [{\"name\": \"wayfinder-pre-spec\", \"description\": \"Use when a feature has unresolved product or architecture decisions, or the user asks for Wayfinder. Research first, keep user-owned choices in the foreground, and hand off a decision-complete specification without production implementation.\", \"category\": \"software-development\"}], \"categories\": [\"software-development\"], \"count\": 1, \"hint\": \"Use skill_view(name) to see full content, tags, and linked files\"}",
+      "name": "skills_list",
+      "phase": "result",
+      "request": 4
+    },
+    {
+      "arguments": {
+        "name": "wayfinder-pre-spec"
+      },
+      "name": "skill_view",
+      "phase": "call",
+      "request": 4
+    },
+    {
+      "content": "{\"success\": true, \"name\": \"wayfinder-pre-spec\", \"description\": \"Use when a feature has unresolved product or architecture decisions, or the user asks for Wayfinder. Research first, keep user-owned choices in the foreground, and hand off a decision-complete specification without production implementation.\", \"tags\": [\"planning\", \"discovery\", \"decisions\", \"specifications\", \"wayfinder\"], \"related_skills\": [\"plan\", \"loop-triage\"], \"content\": \"---\\nname: wayfinder-pre-spec\\ndescription: Use when a fea",
+      "name": "skill_view",
+      "phase": "result",
+      "request": 5
+    },
+    {
+      "arguments": {
+        "path": "README.md"
+      },
+      "name": "read_file",
+      "phase": "call",
+      "request": 5
+    },
+    {
+      "content": "{\"content\": \"1|# Fixture\\n2|\\n3|Existing convention.\\n4|\", \"total_lines\": 3, \"file_size\": 32, \"truncated\": false, \"is_binary\": false, \"is_image\": false}",
+      "name": "read_file",
+      "phase": "result",
+      "request": 6
+    }
+  ]
+}

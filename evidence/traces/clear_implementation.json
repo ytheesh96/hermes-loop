@@ -1,0 +1,170 @@
+{
+  "case": "clear_implementation",
+  "changed_paths": [
+    "artifacts/runtime-artifact.txt"
+  ],
+  "checks": {
+    "bounded_write": true,
+    "foreground_choice": true,
+    "fresh_process": true,
+    "loop_route": true,
+    "production_unchanged": true,
+    "returncode": true,
+    "skill_discovery": true,
+    "tool_trace": true
+  },
+  "final_text": "Implemented the bounded request in the sandbox.",
+  "hook_events": [
+    {
+      "args": {
+        "content": "implemented",
+        "path": "artifacts/runtime-artifact.txt"
+      },
+      "duration_ms": 256,
+      "result": "{\"bytes_written\": 11, \"dirs_created\": true, \"lint\": {\"status\": \"skipped\", \"message\": \"No linter for .txt files\"}, \"resolved_path\": \"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-clear_implementation-z0_a6pct/sandbox/artifacts/runtime-artifact.txt\", \"files_modified\": [\"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-clear_implementation-z0_a6pct/sandbox/artifacts/runtime-artifact.txt\"]}",
+      "session_id": "20260727_024531_193fa0",
+      "status": "ok",
+      "task_id": "1acf4d4a-96bc-4d0a-a624-516ebdcc4897",
+      "tool_call_id": "call-write",
+      "tool_name": "write_file"
+    }
+  ],
+  "requests": [
+    {
+      "message_roles": [],
+      "model": null,
+      "response_tool_calls": [],
+      "system_contains_wayfinder_skill": false,
+      "system_excerpt": "",
+      "tool_names": []
+    },
+    {
+      "message_roles": [],
+      "model": null,
+      "response_tool_calls": [],
+      "system_contains_wayfinder_skill": false,
+      "system_excerpt": "",
+      "tool_names": []
+    },
+    {
+      "message_roles": [
+        "system",
+        "user"
+      ],
+      "model": "local-wayfinder",
+      "response_tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"path\": \"artifacts/runtime-artifact.txt\", \"content\": \"implemented\"}",
+            "name": "write_file"
+          },
+          "id": "call-write",
+          "type": "function"
+        }
+      ],
+      "system_contains_wayfinder_skill": true,
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "tool_names": [
+        "clarify",
+        "computer_use",
+        "cronjob",
+        "delegate_task",
+        "execute_code",
+        "kanban_comment",
+        "kanban_complete",
+        "kanban_show",
+        "kanban_unblock",
+        "loop_block",
+        "loop_create",
+        "loop_graph",
+        "loop_list_queue",
+        "loop_status",
+        "loop_update",
+        "memory",
+        "patch",
+        "process",
+        "project_create",
+        "project_list",
+        "project_switch",
+        "read_file",
+        "search_files",
+        "session_search",
+        "skill_manage",
+        "skill_view",
+        "skills_list",
+        "terminal",
+        "text_to_speech",
+        "todo",
+        "video_analyze",
+        "vision_analyze",
+        "work_map",
+        "write_file"
+      ]
+    },
+    {
+      "message_roles": [
+        "system",
+        "user",
+        "assistant",
+        "tool"
+      ],
+      "model": "local-wayfinder",
+      "response_tool_calls": [],
+      "system_contains_wayfinder_skill": true,
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "tool_names": [
+        "clarify",
+        "computer_use",
+        "cronjob",
+        "delegate_task",
+        "execute_code",
+        "kanban_comment",
+        "kanban_complete",
+        "kanban_show",
+        "kanban_unblock",
+        "loop_block",
+        "loop_create",
+        "loop_graph",
+        "loop_list_queue",
+        "loop_status",
+        "loop_update",
+        "memory",
+        "patch",
+        "process",
+        "project_create",
+        "project_list",
+        "project_switch",
+        "read_file",
+        "search_files",
+        "session_search",
+        "skill_manage",
+        "skill_view",
+        "skills_list",
+        "terminal",
+        "text_to_speech",
+        "todo",
+        "video_analyze",
+        "vision_analyze",
+        "work_map",
+        "write_file"
+      ]
+    }
+  ],
+  "tool_events": [
+    {
+      "arguments": {
+        "content": "implemented",
+        "path": "artifacts/runtime-artifact.txt"
+      },
+      "name": "write_file",
+      "phase": "call",
+      "request": 3
+    },
+    {
+      "content": "{\"bytes_written\": 11, \"dirs_created\": true, \"lint\": {\"status\": \"skipped\", \"message\": \"No linter for .txt files\"}, \"resolved_path\": \"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-clear_implementation-z0_a6pct/sandbox/artifacts/runtime-artifact.txt\", \"files_modified\": [\"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-clear_implementation-z0_a6pct/sandbox/artifacts/runtime-artifact.txt\"]}",
+      "name": "write_file",
+      "phase": "result",
+      "request": 4
+    }
+  ]
+}

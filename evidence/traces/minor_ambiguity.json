@@ -1,0 +1,257 @@
+{
+  "case": "minor_ambiguity",
+  "changed_paths": [
+    "README.md"
+  ],
+  "checks": {
+    "bounded_write": true,
+    "foreground_choice": true,
+    "foreground_only": true,
+    "fresh_process": true,
+    "inspected_convention": true,
+    "loop_route": true,
+    "production_unchanged": true,
+    "returncode": true,
+    "skill_discovery": true,
+    "tool_trace": true
+  },
+  "final_text": "I inspected the existing heading convention and added the small README note in the foreground.",
+  "hook_events": [
+    {
+      "args": {
+        "path": "README.md"
+      },
+      "duration_ms": 158,
+      "result": "{\"content\": \"1|# Fixture\\n2|\\n3|Existing convention.\\n4|\", \"total_lines\": 3, \"file_size\": 32, \"truncated\": false, \"is_binary\": false, \"is_image\": false}",
+      "session_id": "20260727_024552_c5d645",
+      "status": "ok",
+      "task_id": "2933c2e7-e656-439c-937d-07585311223c",
+      "tool_call_id": "call-read",
+      "tool_name": "read_file"
+    },
+    {
+      "args": {
+        "content": "# Fixture\n\nRuntime artifacts are disposable.\n",
+        "path": "README.md"
+      },
+      "duration_ms": 294,
+      "result": "{\"bytes_written\": 45, \"dirs_created\": true, \"lint\": {\"status\": \"skipped\", \"message\": \"No linter for .md files\"}, \"resolved_path\": \"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-minor_ambiguity-lqy22kds/sandbox/README.md\", \"files_modified\": [\"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-minor_ambiguity-lqy22kds/sandbox/README.md\"]}",
+      "session_id": "20260727_024552_c5d645",
+      "status": "ok",
+      "task_id": "2933c2e7-e656-439c-937d-07585311223c",
+      "tool_call_id": "call-write",
+      "tool_name": "write_file"
+    }
+  ],
+  "requests": [
+    {
+      "message_roles": [],
+      "model": null,
+      "response_tool_calls": [],
+      "system_contains_wayfinder_skill": false,
+      "system_excerpt": "",
+      "tool_names": []
+    },
+    {
+      "message_roles": [],
+      "model": null,
+      "response_tool_calls": [],
+      "system_contains_wayfinder_skill": false,
+      "system_excerpt": "",
+      "tool_names": []
+    },
+    {
+      "message_roles": [
+        "system",
+        "user"
+      ],
+      "model": "local-wayfinder",
+      "response_tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"path\": \"README.md\"}",
+            "name": "read_file"
+          },
+          "id": "call-read",
+          "type": "function"
+        }
+      ],
+      "system_contains_wayfinder_skill": true,
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "tool_names": [
+        "clarify",
+        "computer_use",
+        "cronjob",
+        "delegate_task",
+        "execute_code",
+        "kanban_comment",
+        "kanban_complete",
+        "kanban_show",
+        "kanban_unblock",
+        "loop_block",
+        "loop_create",
+        "loop_graph",
+        "loop_list_queue",
+        "loop_status",
+        "loop_update",
+        "memory",
+        "patch",
+        "process",
+        "project_create",
+        "project_list",
+        "project_switch",
+        "read_file",
+        "search_files",
+        "session_search",
+        "skill_manage",
+        "skill_view",
+        "skills_list",
+        "terminal",
+        "text_to_speech",
+        "todo",
+        "video_analyze",
+        "vision_analyze",
+        "work_map",
+        "write_file"
+      ]
+    },
+    {
+      "message_roles": [
+        "system",
+        "user",
+        "assistant",
+        "tool"
+      ],
+      "model": "local-wayfinder",
+      "response_tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"path\": \"README.md\", \"content\": \"# Fixture\\n\\nRuntime artifacts are disposable.\\n\"}",
+            "name": "write_file"
+          },
+          "id": "call-write",
+          "type": "function"
+        }
+      ],
+      "system_contains_wayfinder_skill": true,
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "tool_names": [
+        "clarify",
+        "computer_use",
+        "cronjob",
+        "delegate_task",
+        "execute_code",
+        "kanban_comment",
+        "kanban_complete",
+        "kanban_show",
+        "kanban_unblock",
+        "loop_block",
+        "loop_create",
+        "loop_graph",
+        "loop_list_queue",
+        "loop_status",
+        "loop_update",
+        "memory",
+        "patch",
+        "process",
+        "project_create",
+        "project_list",
+        "project_switch",
+        "read_file",
+        "search_files",
+        "session_search",
+        "skill_manage",
+        "skill_view",
+        "skills_list",
+        "terminal",
+        "text_to_speech",
+        "todo",
+        "video_analyze",
+        "vision_analyze",
+        "work_map",
+        "write_file"
+      ]
+    },
+    {
+      "message_roles": [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "tool"
+      ],
+      "model": "local-wayfinder",
+      "response_tool_calls": [],
+      "system_contains_wayfinder_skill": true,
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "tool_names": [
+        "clarify",
+        "computer_use",
+        "cronjob",
+        "delegate_task",
+        "execute_code",
+        "kanban_comment",
+        "kanban_complete",
+        "kanban_show",
+        "kanban_unblock",
+        "loop_block",
+        "loop_create",
+        "loop_graph",
+        "loop_list_queue",
+        "loop_status",
+        "loop_update",
+        "memory",
+        "patch",
+        "process",
+        "project_create",
+        "project_list",
+        "project_switch",
+        "read_file",
+        "search_files",
+        "session_search",
+        "skill_manage",
+        "skill_view",
+        "skills_list",
+        "terminal",
+        "text_to_speech",
+        "todo",
+        "video_analyze",
+        "vision_analyze",
+        "work_map",
+        "write_file"
+      ]
+    }
+  ],
+  "tool_events": [
+    {
+      "arguments": {
+        "path": "README.md"
+      },
+      "name": "read_file",
+      "phase": "call",
+      "request": 3
+    },
+    {
+      "content": "{\"content\": \"1|# Fixture\\n2|\\n3|Existing convention.\\n4|\", \"total_lines\": 3, \"file_size\": 32, \"truncated\": false, \"is_binary\": false, \"is_image\": false}",
+      "name": "read_file",
+      "phase": "result",
+      "request": 4
+    },
+    {
+      "arguments": {
+        "content": "# Fixture\n\nRuntime artifacts are disposable.\n",
+        "path": "README.md"
+      },
+      "name": "write_file",
+      "phase": "call",
+      "request": 4
+    },
+    {
+      "content": "{\"bytes_written\": 45, \"dirs_created\": true, \"lint\": {\"status\": \"skipped\", \"message\": \"No linter for .md files\"}, \"resolved_path\": \"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-minor_ambiguity-lqy22kds/sandbox/README.md\", \"files_modified\": [\"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-minor_ambiguity-lqy22kds/sandbox/README.md\"]}",
+      "name": "write_file",
+      "phase": "result",
+      "request": 5
+    }
+  ]
+}

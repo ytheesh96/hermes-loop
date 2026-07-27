@@ -1,0 +1,193 @@
+{
+  "case": "explicit_loop",
+  "changed_paths": [],
+  "checks": {
+    "bounded_write": true,
+    "foreground_choice": true,
+    "fresh_process": true,
+    "loop_route": true,
+    "production_unchanged": true,
+    "returncode": true,
+    "skill_discovery": true,
+    "tool_trace": true
+  },
+  "final_text": "The approved implementation was routed through the ordinary durable Loop primitive.",
+  "hook_events": [
+    {
+      "args": {
+        "context": "Approved implementation; preserve the sandbox boundary and verify the result.",
+        "mode": "loop",
+        "tasks": [
+          {
+            "id": "runtime-artifact",
+            "title": "Implement the approved runtime artifact change"
+          }
+        ]
+      },
+      "duration_ms": 67,
+      "result": "{\"status\": \"dispatched\", \"mode\": \"loop\", \"count\": 1, \"items\": [{\"client_id\": \"runtime-artifact\", \"loop_item_id\": \"t_f2811c81\", \"status\": \"triage\", \"needs_specification\": true, \"assignee\": null, \"parents\": [], \"reused\": false}], \"edges\": [], \"workflow_id\": \"wf_407e860d99ca0acb\", \"decomposition\": [{\"task_id\": \"t_f2811c81\", \"ok\": false, \"reason\": \"LLM returned malformed JSON\", \"fanout\": false, \"child_ids\": [], \"new_title\": null}], \"candidate_task_ids\": [], \"dispatch\": {\"spawned\": [], \"skipped_locke",
+      "session_id": "20260727_024540_41d40b",
+      "status": "ok",
+      "task_id": "549dab8f-217e-40fe-85dc-0acf75b76bf3",
+      "tool_call_id": "call-loop",
+      "tool_name": "delegate_task"
+    }
+  ],
+  "requests": [
+    {
+      "message_roles": [],
+      "model": null,
+      "response_tool_calls": [],
+      "system_contains_wayfinder_skill": false,
+      "system_excerpt": "",
+      "tool_names": []
+    },
+    {
+      "message_roles": [],
+      "model": null,
+      "response_tool_calls": [],
+      "system_contains_wayfinder_skill": false,
+      "system_excerpt": "",
+      "tool_names": []
+    },
+    {
+      "message_roles": [
+        "system",
+        "user"
+      ],
+      "model": "local-wayfinder",
+      "response_tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"mode\": \"loop\", \"tasks\": [{\"id\": \"runtime-artifact\", \"title\": \"Implement the approved runtime artifact change\"}], \"context\": \"Approved implementation; preserve the sandbox boundary and verify the result.\"}",
+            "name": "delegate_task"
+          },
+          "id": "call-loop",
+          "type": "function"
+        }
+      ],
+      "system_contains_wayfinder_skill": true,
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "tool_names": [
+        "clarify",
+        "computer_use",
+        "cronjob",
+        "delegate_task",
+        "execute_code",
+        "kanban_comment",
+        "kanban_complete",
+        "kanban_show",
+        "kanban_unblock",
+        "loop_block",
+        "loop_create",
+        "loop_graph",
+        "loop_list_queue",
+        "loop_status",
+        "loop_update",
+        "memory",
+        "patch",
+        "process",
+        "project_create",
+        "project_list",
+        "project_switch",
+        "read_file",
+        "search_files",
+        "session_search",
+        "skill_manage",
+        "skill_view",
+        "skills_list",
+        "terminal",
+        "text_to_speech",
+        "todo",
+        "video_analyze",
+        "vision_analyze",
+        "work_map",
+        "write_file"
+      ]
+    },
+    {
+      "message_roles": [
+        "system",
+        "user"
+      ],
+      "model": "local-wayfinder",
+      "response_tool_calls": [],
+      "system_contains_wayfinder_skill": false,
+      "system_excerpt": "",
+      "tool_names": []
+    },
+    {
+      "message_roles": [
+        "system",
+        "user",
+        "assistant",
+        "tool"
+      ],
+      "model": "local-wayfinder",
+      "response_tool_calls": [],
+      "system_contains_wayfinder_skill": true,
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "tool_names": [
+        "clarify",
+        "computer_use",
+        "cronjob",
+        "delegate_task",
+        "execute_code",
+        "kanban_comment",
+        "kanban_complete",
+        "kanban_show",
+        "kanban_unblock",
+        "loop_block",
+        "loop_create",
+        "loop_graph",
+        "loop_list_queue",
+        "loop_status",
+        "loop_update",
+        "memory",
+        "patch",
+        "process",
+        "project_create",
+        "project_list",
+        "project_switch",
+        "read_file",
+        "search_files",
+        "session_search",
+        "skill_manage",
+        "skill_view",
+        "skills_list",
+        "terminal",
+        "text_to_speech",
+        "todo",
+        "video_analyze",
+        "vision_analyze",
+        "work_map",
+        "write_file"
+      ]
+    }
+  ],
+  "tool_events": [
+    {
+      "arguments": {
+        "context": "Approved implementation; preserve the sandbox boundary and verify the result.",
+        "mode": "loop",
+        "tasks": [
+          {
+            "id": "runtime-artifact",
+            "title": "Implement the approved runtime artifact change"
+          }
+        ]
+      },
+      "name": "delegate_task",
+      "phase": "call",
+      "request": 3
+    },
+    {
+      "content": "{\"status\": \"dispatched\", \"mode\": \"loop\", \"count\": 1, \"items\": [{\"client_id\": \"runtime-artifact\", \"loop_item_id\": \"t_f2811c81\", \"status\": \"triage\", \"needs_specification\": true, \"assignee\": null, \"parents\": [], \"reused\": false}], \"edges\": [], \"workflow_id\": \"wf_407e860d99ca0acb\", \"decomposition\": [{\"task_id\": \"t_f2811c81\", \"ok\": false, \"reason\": \"LLM returned malformed JSON\", \"fanout\": false, \"child_ids\": [], \"new_title\": null}], \"candidate_task_ids\": [], \"dispatch\": {\"spawned\": [], \"skipped_locke",
+      "loop_item_id": "t_f2811c81",
+      "name": "delegate_task",
+      "phase": "result",
+      "request": 5,
+      "workflow_id": "wf_407e860d99ca0acb"
+    }
+  ]
+}

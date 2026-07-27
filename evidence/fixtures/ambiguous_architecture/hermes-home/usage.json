@@ -1,0 +1,18 @@
+{
+  "estimated_cost_usd": 0.0,
+  "cost_status": "unknown",
+  "cost_source": "none",
+  "input_tokens": 4,
+  "output_tokens": 4,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "reasoning_tokens": 0,
+  "total_tokens": 8,
+  "api_calls": 4,
+  "model": "local-wayfinder",
+  "provider": "custom",
+  "session_id": "20260727_024523_639d8d",
+  "completed": true,
+  "failed": false,
+  "service_tier": null
+}
