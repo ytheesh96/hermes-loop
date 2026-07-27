@@ -8,7 +8,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE_ROOT = ROOT / "evidence"
 REPORT_PATH = EVIDENCE_ROOT / "wayfinder-runtime-report.json"
-STALE_WORKSPACE_PREFIX = "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/"
+MACHINE_HOME_PREFIXES = ("/Users/", "/home/")
+TRANSIENT_FIXTURE_FILES = {
+    "auth.json",
+    "auth.lock",
+    "state.db",
+    "verification_evidence.db",
+}
 
 
 def resolve_locator(value: str) -> Path:
@@ -19,8 +25,8 @@ def resolve_locator(value: str) -> Path:
     return resolved
 
 
-def assert_no_stale_locators() -> None:
-    """Reject machine-specific task workspace paths in retained evidence."""
+def assert_no_machine_specific_paths() -> None:
+    """Reject machine-specific home and task-workspace paths in evidence."""
     for path in EVIDENCE_ROOT.rglob("*"):
         if not path.is_file() or path == Path(__file__).resolve():
             continue
@@ -28,13 +34,21 @@ def assert_no_stale_locators() -> None:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        assert STALE_WORKSPACE_PREFIX not in text, path
+        for prefix in MACHINE_HOME_PREFIXES:
+            assert prefix not in text, path
+
+
+def assert_no_transient_fixture_state() -> None:
+    """Do not retain session databases or auth metadata in repository evidence."""
+    for path in (EVIDENCE_ROOT / "fixtures").rglob("*"):
+        assert path.name not in TRANSIENT_FIXTURE_FILES, path
 
 
 report = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
 assert report["status"] == "passed"
 assert len(report["cases"]) == 4
-assert_no_stale_locators()
+assert_no_machine_specific_paths()
+assert_no_transient_fixture_state()
 for case in report["cases"]:
     evidence = case["evidence"]
     assert case["passed"] is True
@@ -57,3 +71,5 @@ print("fixture_roots=4")
 print("trace_artifacts=4")
 print("TRACE_JSON_VALID=4")
 print("PORTABLE_LOCATORS_VALID=4")
+print("MACHINE_PATHS_REDACTED=1")
+print("TRANSIENT_STATE_EXCLUDED=1")

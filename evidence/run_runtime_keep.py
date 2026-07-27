@@ -42,11 +42,14 @@ with contextlib.redirect_stdout(captured):
     status = module.main()
 raw_output = captured.getvalue()
 
-payload = json.loads(OUTPUT.read_text(encoding="utf-8"))
+payload = module.redact_machine_specific(
+    json.loads(OUTPUT.read_text(encoding="utf-8"))
+)
 TRACE_DIR.mkdir(parents=True, exist_ok=True)
 FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
 manifest = []
 path_replacements = []
+temporary_roots = []
 
 
 def locator(path: Path) -> str:
@@ -83,12 +86,25 @@ for index, result in enumerate(payload.get("cases", [])):
     fixture_root = roots[-1].resolve() if roots else None
     evidence = result.setdefault("evidence", {})
     if fixture_root is not None:
+        temporary_roots.append(fixture_root)
         retained_root = FIXTURE_DIR / case_id
         if retained_root.exists():
             shutil.rmtree(retained_root)
-        shutil.copytree(fixture_root, retained_root, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copytree(
+            fixture_root,
+            retained_root,
+            ignore=shutil.ignore_patterns(
+                "__pycache__",
+                "*.pyc",
+                "state.db",
+                "verification_evidence.db",
+                "auth.json",
+                "*.lock",
+            ),
+        )
         portable_root = locator(retained_root)
         portableize_fixture(retained_root, str(fixture_root), portable_root)
+        portableize_fixture(retained_root, str(Path.home()), "<USER_HOME>")
         path_replacements.append((str(fixture_root), portable_root))
         evidence["fixture_root"] = portable_root
         evidence["hermes_home"] = f"{portable_root}/hermes-home"
@@ -117,6 +133,9 @@ payload["fixture_manifest"] = manifest
 OUTPUT.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 for source, replacement in path_replacements:
     raw_output = raw_output.replace(source, replacement)
+raw_output = module.redact_machine_specific(raw_output)
 (EVIDENCE_ROOT / "runtime-harness-output.txt").write_text(raw_output, encoding="utf-8")
+for root in temporary_roots:
+    shutil.rmtree(root, ignore_errors=True)
 print(raw_output, end="")
 raise SystemExit(status)

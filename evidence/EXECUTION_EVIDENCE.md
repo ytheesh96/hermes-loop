@@ -2,11 +2,11 @@
 
 ## Scope and checkout
 
-- Scratch checkout: this repository checkout (all evidence locators are portable)
-- HEAD before evidence packaging: `171dc440a` (`test: add runtime Wayfinder evaluation harness`)
+- Canonical checkout: this repository checkout (all evidence locators are portable)
+- Reviewed source lineage: harness `171dc440a`, evidence package `9cf8f8544`, and portability repair `eef211922`; adopted into local canonical `main` with cherry-pick provenance preserved.
 - Evaluation source under test: `scripts/eval_wayfinder_runtime.py`
 - The evaluator ran four fresh `python -m hermes_cli.main -z` subprocesses against its disposable local OpenAI-compatible model stub. Each case used a temporary `HERMES_HOME`, fixture sandbox, isolated Kanban database, and real `post_tool_call` observer plugin.
-- Canonical checkout was not modified. Native runtime/lifecycle code was not modified. The only workspace additions are this evidence bundle and its retained disposable fixtures.
+- Evaluation subprocesses did not modify production files. Native runtime/lifecycle code was not modified; the adopted changes are confined to the evaluator, its tests/documentation, and this sanitized evidence bundle.
 
 ## Exact commands and results
 
@@ -14,7 +14,7 @@
 
    `scripts/run_tests.sh tests/scripts/test_wayfinder_runtime.py`
 
-   Result: exit `0`; `1` file, `7` tests passed, `0` failed.
+   Result: exit `0`; `1` file, `8` tests passed, `0` failed.
    Full captured output: [`focused-harness-tests.txt`](focused-harness-tests.txt).
 
 2. Existing Wayfinder classifier and foreground-routing regressions:
@@ -34,7 +34,7 @@
 
    `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python evidence/validate_evidence.py`
 
-   Result: exit `0`; output was `status=passed`, `cases=4`, `fixture_roots=4`, `trace_artifacts=4`, `TRACE_JSON_VALID=4`, `PORTABLE_LOCATORS_VALID=4`.
+   Result: exit `0`; output was `status=passed`, `cases=4`, `fixture_roots=4`, `trace_artifacts=4`, `TRACE_JSON_VALID=4`, `PORTABLE_LOCATORS_VALID=4`, `MACHINE_PATHS_REDACTED=1`, and `TRANSIENT_STATE_EXCLUDED=1`.
    Full captured output: [`evidence-validation.txt`](evidence-validation.txt).
 
 5. Final source/evidence hygiene:
@@ -49,10 +49,10 @@ All machine-readable locators in `evidence/wayfinder-runtime-report.json` are re
 
 | Boundary | Fresh session | Hook events | Sandbox changes | Outcome | Trace artifact |
 |---|---|---:|---|---|---|
-| `ambiguous_architecture` | `20260727_030229_444c9d` | 3 | `[]` | PASS; `skills_list` → `skill_view` → `read_file`, then foreground choice; no production mutation | [`traces/ambiguous_architecture.json`](traces/ambiguous_architecture.json) |
-| `clear_implementation` | `20260727_030231_d579fd` | 1 | `artifacts/runtime-artifact.txt` | PASS; bounded foreground write | [`traces/clear_implementation.json`](traces/clear_implementation.json) |
-| `explicit_loop` | `20260727_030233_85435a` | 1 | `[]` | PASS; `delegate_task(mode="loop")` returned a workflow identity; no sandbox mutation | [`traces/explicit_loop.json`](traces/explicit_loop.json) |
-| `minor_ambiguity` | `20260727_030235_cc1a2f` | 2 | `README.md` | PASS; `read_file` preceded the small foreground write; no Wayfinder/delegation discovery | [`traces/minor_ambiguity.json`](traces/minor_ambiguity.json) |
+| `ambiguous_architecture` | `20260727_111908_245f96` | 3 | `[]` | PASS; `skills_list` → `skill_view` → `read_file`, then foreground choice; no production mutation | [`traces/ambiguous_architecture.json`](traces/ambiguous_architecture.json) |
+| `clear_implementation` | `20260727_111912_af8dbf` | 1 | `artifacts/runtime-artifact.txt` | PASS; bounded foreground write | [`traces/clear_implementation.json`](traces/clear_implementation.json) |
+| `explicit_loop` | `20260727_111915_48461b` | 1 | `[]` | PASS; `delegate_task(mode="loop")` returned isolated workflow `wf_6b9efdc12e6212fc`; no sandbox mutation | [`traces/explicit_loop.json`](traces/explicit_loop.json) |
+| `minor_ambiguity` | `20260727_111917_18e63e` | 2 | `README.md` | PASS; `read_file` preceded the small foreground write; no Wayfinder/delegation discovery | [`traces/minor_ambiguity.json`](traces/minor_ambiguity.json) |
 
 All hook events had status `ok`. The provider transcript and evaluator assertions for every case are in `evidence/wayfinder-runtime-report.json`; compact per-case copies are in `evidence/traces/`.
 
@@ -67,11 +67,11 @@ Retained, reviewable disposable fixtures are under `evidence/fixtures/`:
 - [`fixtures/explicit_loop/`](fixtures/explicit_loop/)
 - [`fixtures/minor_ambiguity/`](fixtures/minor_ambiguity/)
 
-Each case contains the captured temporary `hermes-home/` (including `config.yaml`, bundled Wayfinder skill, observer plugin, usage file, and `tool-hooks.jsonl`) and `sandbox/`. The explicit Loop case also contains its isolated `kanban.db`. Raw observer traces are available both in each fixture's `hermes-home/tool-hooks.jsonl` and as normalized JSON under `evidence/traces/`.
+Each case contains a privacy-sanitized capture of the temporary `hermes-home/` (including `config.yaml`, bundled Wayfinder skill, observer plugin, usage file, and `tool-hooks.jsonl`) and `sandbox/`. Machine-home paths are replaced with `<USER_HOME>`, and transient auth metadata plus session/verification databases are intentionally excluded. The explicit Loop case retains its isolated `kanban.db`, which contains only the synthetic evaluation workflow. Raw observer traces are available both in each fixture's `hermes-home/tool-hooks.jsonl` and as normalized JSON under `evidence/traces/`.
 
 ## Changed paths and local handle
 
-The harness commit under evaluation is `171dc440a`. The evidence bundle is committed locally on top of that harness commit. Local patch handle: `HEAD` (the exact hash is recorded in the worker handoff); this scratch-only evidence commit adds:
+The original harness commit under evaluation is `171dc440a`, followed by evidence package `9cf8f8544` and portability repair `eef211922`. Their canonical cherry-picks preserve those source IDs in commit trailers. The evidence bundle includes:
 
 - `evidence/wayfinder-runtime-report.json`
 - `evidence/runtime-harness-output.txt`
@@ -82,4 +82,4 @@ The harness commit under evaluation is `171dc440a`. The evidence bundle is commi
 - `evidence/fixtures/*/`
 - this report: `evidence/EXECUTION_EVIDENCE.md`
 
-The evidence bundle is intentionally local-only: no push, merge, or application to the canonical checkout was performed.
+The reviewed bundle has been adopted into the local canonical `main` checkout. No push was performed.

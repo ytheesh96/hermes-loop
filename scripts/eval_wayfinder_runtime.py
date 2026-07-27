@@ -163,6 +163,21 @@ def _text(value: str | bytes | None) -> str:
     return value or ""
 
 
+def redact_machine_specific(value: Any, *, home: str | None = None) -> Any:
+    """Replace the evaluator machine's home path in nested evidence values."""
+    source = str(Path.home()) if home is None else home
+    if isinstance(value, str):
+        return value.replace(source, "<USER_HOME>")
+    if isinstance(value, list):
+        return [redact_machine_specific(item, home=source) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: redact_machine_specific(item, home=source)
+            for key, item in value.items()
+        }
+    return value
+
+
 def _snapshot(root: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
@@ -256,7 +271,13 @@ def evaluate_trace(case: Case, evidence: dict[str, Any]) -> dict[str, Any]:
 
 
 def blocker_report(command: list[str], *, returncode: int, stderr: str, home: str) -> dict[str, Any]:
-    return {"status": "blocked", "command": command, "returncode": returncode, "stderr": stderr[-4000:], "home": home}
+    return redact_machine_specific({
+        "status": "blocked",
+        "command": command,
+        "returncode": returncode,
+        "stderr": stderr[-4000:],
+        "home": home,
+    })
 
 
 def _run_case(case: Case, timeout: int) -> dict[str, Any]:
@@ -361,7 +382,7 @@ def _run_case(case: Case, timeout: int) -> dict[str, Any]:
                 session_id = json.loads(usage.read_text(encoding="utf-8")).get("session_id")
             except (OSError, json.JSONDecodeError):
                 pass
-        evidence = {
+        evidence = redact_machine_specific({
             "fresh_process": fresh,
             "returncode": completed.returncode,
             "session_id": session_id,
@@ -373,7 +394,7 @@ def _run_case(case: Case, timeout: int) -> dict[str, Any]:
             "changed_paths": sorted(set(before) ^ set(after) | {path for path in before.keys() & after.keys() if before[path] != after[path]}),
             "final_text": _text(completed.stdout).strip(),
             "stderr": _text(completed.stderr)[-4000:],
-        }
+        })
         result = evaluate_trace(case, evidence)
         result["evidence"] = evidence
         if completed.returncode != 0:

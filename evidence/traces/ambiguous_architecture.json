@@ -18,9 +18,9 @@
       "args": {},
       "duration_ms": 0,
       "result": "{\"success\": true, \"skills\": [{\"name\": \"wayfinder-pre-spec\", \"description\": \"Use when a feature has unresolved product or architecture decisions, or the user asks for Wayfinder. Research first, keep user-owned choices in the foreground, and hand off a decision-complete specification without production implementation.\", \"category\": \"software-development\"}], \"categories\": [\"software-development\"], \"count\": 1, \"hint\": \"Use skill_view(name) to see full content, tags, and linked files\"}",
-      "session_id": "20260727_030229_444c9d",
+      "session_id": "20260727_111908_245f96",
       "status": "ok",
-      "task_id": "3fcd6d74-5a1a-405d-81d9-4a2e32ff907f",
+      "task_id": "3962c46a-b48b-41cc-9b8a-c4a8359a1e92",
       "tool_call_id": "call-skills",
       "tool_name": "skills_list"
     },
@@ -28,11 +28,11 @@
       "args": {
         "name": "wayfinder-pre-spec"
       },
-      "duration_ms": 2,
+      "duration_ms": 4,
       "result": "{\"success\": true, \"name\": \"wayfinder-pre-spec\", \"description\": \"Use when a feature has unresolved product or architecture decisions, or the user asks for Wayfinder. Research first, keep user-owned choices in the foreground, and hand off a decision-complete specification without production implementation.\", \"tags\": [\"planning\", \"discovery\", \"decisions\", \"specifications\", \"wayfinder\"], \"related_skills\": [\"plan\", \"loop-triage\"], \"content\": \"---\\nname: wayfinder-pre-spec\\ndescription: Use when a fea",
-      "session_id": "20260727_030229_444c9d",
+      "session_id": "20260727_111908_245f96",
       "status": "ok",
-      "task_id": "3fcd6d74-5a1a-405d-81d9-4a2e32ff907f",
+      "task_id": "3962c46a-b48b-41cc-9b8a-c4a8359a1e92",
       "tool_call_id": "call-view",
       "tool_name": "skill_view"
     },
@@ -40,11 +40,11 @@
       "args": {
         "path": "README.md"
       },
-      "duration_ms": 113,
+      "duration_ms": 486,
       "result": "{\"content\": \"1|# Fixture\\n2|\\n3|Existing convention.\\n4|\", \"total_lines\": 3, \"file_size\": 32, \"truncated\": false, \"is_binary\": false, \"is_image\": false}",
-      "session_id": "20260727_030229_444c9d",
+      "session_id": "20260727_111908_245f96",
       "status": "ok",
-      "task_id": "3fcd6d74-5a1a-405d-81d9-4a2e32ff907f",
+      "task_id": "3962c46a-b48b-41cc-9b8a-c4a8359a1e92",
       "tool_call_id": "call-read",
       "tool_name": "read_file"
     }
@@ -83,7 +83,7 @@
         }
       ],
       "system_contains_wayfinder_skill": true,
-      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: <USER_HOME>\nCurrent w",
       "tool_names": [
         "clarify",
         "close_terminal",
@@ -144,7 +144,7 @@
         }
       ],
       "system_contains_wayfinder_skill": true,
-      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: <USER_HOME>\nCurrent w",
       "tool_names": [
         "clarify",
         "close_terminal",
@@ -207,7 +207,7 @@
         }
       ],
       "system_contains_wayfinder_skill": true,
-      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: <USER_HOME>\nCurrent w",
       "tool_names": [
         "clarify",
         "close_terminal",
@@ -263,7 +263,7 @@
       "model": "local-wayfinder",
       "response_tool_calls": [],
       "system_contains_wayfinder_skill": true,
-      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
+      "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: <USER_HOME>\nCurrent w",
       "tool_names": [
         "clarify",
         "close_terminal",

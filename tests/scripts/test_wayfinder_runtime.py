@@ -164,3 +164,20 @@ def test_blocker_report_is_reproducible_and_actionable() -> None:
     assert report["command"] == ["hermes", "-z", "request"]
     assert "No inference provider configured" in report["stderr"]
     assert report["home"] == "/tmp/hermes-eval-home"
+
+
+def test_runtime_evidence_redacts_machine_specific_home_paths() -> None:
+    module = _load_module()
+    home = str(Path.home())
+    payload = {
+        "home": f"{home}/.hermes",
+        "nested": [home, {"path": f"{home}/repo"}],
+        "safe": "unchanged",
+    }
+
+    redacted = module.redact_machine_specific(payload)
+
+    assert home not in repr(redacted)
+    assert redacted["home"] == "<USER_HOME>/.hermes"
+    assert redacted["nested"] == ["<USER_HOME>", {"path": "<USER_HOME>/repo"}]
+    assert redacted["safe"] == "unchanged"
