@@ -1,0 +1,275 @@
+[
+  {
+    "id": "explicit_wayfinder_brownfield",
+    "prompt": "Use Wayfinder to figure out the authentication architecture for this existing multi-tenant app. Resolve the product and security decisions before implementation.",
+    "category": "positive_explicit",
+    "expected": {
+      "use_wayfinder": true,
+      "phase": "discovery",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": true,
+      "allow_production_changes": false
+    }
+  },
+  {
+    "id": "explicit_decision_map_only",
+    "prompt": "Chart the unresolved decisions in our existing settings flow and hand me an implementation-ready specification. Do not implement it yet.",
+    "category": "positive_explicit",
+    "expected": {
+      "use_wayfinder": true,
+      "phase": "discovery",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": true,
+      "allow_production_changes": false
+    }
+  },
+  {
+    "id": "implicit_ambiguous_brownfield",
+    "prompt": "Build a permissions system for this product. We have not decided the roles, inheritance model, audit requirements, or admin experience.",
+    "category": "positive_implicit",
+    "expected": {
+      "use_wayfinder": true,
+      "phase": "discovery",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": true,
+      "allow_production_changes": false
+    }
+  },
+  {
+    "id": "prototype_to_resolve_ui_choice",
+    "prompt": "I cannot picture whether the new workflow should use a sidebar or a full-page editor. Use Wayfinder and show the minimum disposable comparison needed to decide; do not ship either option.",
+    "category": "positive_prototype",
+    "expected": {
+      "use_wayfinder": true,
+      "phase": "discovery",
+      "evidence_method": "prototype",
+      "execution_mode": "foreground",
+      "user_decision_owner": true,
+      "allow_production_changes": false
+    }
+  },
+  {
+    "id": "parallel_research_before_decision",
+    "prompt": "Before we specify the enterprise export feature, use Wayfinder and run two independent research lanes for regulatory retention and provider API limits. Bring the evidence back so I can choose the retention policy.",
+    "category": "positive_ephemeral_research",
+    "expected": {
+      "use_wayfinder": true,
+      "phase": ["discovery", "research"],
+      "evidence_method": "research",
+      "execution_mode": "ephemeral",
+      "user_decision_owner": true,
+      "allow_production_changes": false
+    }
+  },
+  {
+    "id": "durable_wayfinder_research",
+    "prompt": "Use Wayfinder with a durable Loop to resolve the product, policy, and architecture decisions for the migration. Research may run in parallel, but keep trade-off decisions with me and do not implement production code.",
+    "category": "positive_durable",
+    "expected": {
+      "use_wayfinder": true,
+      "phase": ["discovery", "research"],
+      "evidence_method": ["inspect", "research"],
+      "execution_mode": "loop",
+      "user_decision_owner": true,
+      "allow_production_changes": false
+    }
+  },
+  {
+    "id": "dependent_decision_frontier",
+    "prompt": "Help me resolve the data-retention design in this repository before writing a spec: first determine what the current storage layer supports, then ask me to choose between the viable policy trade-offs.",
+    "category": "positive_dependency",
+    "expected": {
+      "use_wayfinder": true,
+      "phase": "discovery",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": true,
+      "allow_production_changes": false
+    }
+  },
+  {
+    "id": "spec_handoff_without_implementation",
+    "prompt": "Turn the unresolved behavior of our current notification system into a decision-complete implementation specification. Preserve evidence and rejected alternatives, but stop before implementation tickets execute.",
+    "category": "positive_handoff",
+    "expected": {
+      "use_wayfinder": true,
+      "phase": "discovery",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": true,
+      "allow_production_changes": false
+    }
+  },
+  {
+    "id": "clear_bug_fix",
+    "prompt": "Fix the null check in the existing token refresh handler and run its focused tests.",
+    "category": "negative_implementation",
+    "expected": {
+      "use_wayfinder": false,
+      "phase": "implementation",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": false,
+      "allow_production_changes": true
+    }
+  },
+  {
+    "id": "decision_complete_feature",
+    "prompt": "Implement the specified CSV export endpoint exactly as described in docs/export-contract.md and run its tests.",
+    "category": "negative_decision_complete",
+    "expected": {
+      "use_wayfinder": false,
+      "phase": "implementation",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": false,
+      "allow_production_changes": true
+    }
+  },
+  {
+    "id": "incidental_wayfinder_name",
+    "prompt": "Fix the typo in the Wayfinder documentation heading and verify the docs build.",
+    "category": "negative_incidental_name",
+    "expected": {
+      "use_wayfinder": false,
+      "phase": "implementation",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": false,
+      "allow_production_changes": true
+    }
+  },
+  {
+    "id": "explicit_loop_implementation",
+    "prompt": "Use Loop to implement the already-approved release migration and run the rollout tests.",
+    "category": "negative_explicit_loop",
+    "expected": {
+      "use_wayfinder": false,
+      "phase": "implementation",
+      "evidence_method": "inspect",
+      "execution_mode": "loop",
+      "user_decision_owner": false,
+      "allow_production_changes": true
+    }
+  },
+  {
+    "id": "standalone_research",
+    "prompt": "Research current browser passkey support and summarize the primary sources. No product decision or implementation is needed.",
+    "category": "negative_research",
+    "expected": {
+      "use_wayfinder": false,
+      "phase": "research",
+      "evidence_method": "research",
+      "execution_mode": "foreground",
+      "user_decision_owner": false,
+      "allow_production_changes": false
+    }
+  },
+  {
+    "id": "explain_existing_code",
+    "prompt": "Explain how foreground Loop routing currently works in this repository.",
+    "category": "negative_answer",
+    "expected": {
+      "use_wayfinder": false,
+      "phase": "answer",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": false,
+      "allow_production_changes": false
+    }
+  },
+  {
+    "id": "review_existing_evidence",
+    "prompt": "Review the worker evidence against the existing acceptance criteria and report whether it passes. Do not redesign the feature.",
+    "category": "negative_review",
+    "expected": {
+      "use_wayfinder": false,
+      "phase": "review",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": false,
+      "allow_production_changes": false
+    }
+  },
+  {
+    "id": "explicit_opt_out",
+    "prompt": "Implement the approved cache-key change without a new planning phase, then run the regression test.",
+    "category": "negative_opt_out",
+    "expected": {
+      "use_wayfinder": false,
+      "phase": "implementation",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": false,
+      "allow_production_changes": true
+    }
+  },
+  {
+    "id": "small_bounded_feature",
+    "prompt": "Add the documented --quiet flag to the status command and test it.",
+    "category": "negative_bounded",
+    "expected": {
+      "use_wayfinder": false,
+      "phase": "implementation",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": false,
+      "allow_production_changes": true
+    }
+  },
+  {
+    "id": "minor_ambiguity_safe_default",
+    "prompt": "Add an optional subtitle to the existing settings card. The exact spacing is unspecified; inspect the nearest card, follow its established convention, and proceed.",
+    "category": "negative_boundary",
+    "expected": {
+      "use_wayfinder": false,
+      "phase": "implementation",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": false,
+      "allow_production_changes": true
+    }
+  },
+  {
+    "id": "programming_loop_near_negative",
+    "prompt": "Use a loop in the retry helper to make three attempts before returning the error.",
+    "category": "negative_near_name",
+    "expected": {
+      "use_wayfinder": false,
+      "phase": "implementation",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": false,
+      "allow_production_changes": true
+    }
+  },
+  {
+    "id": "explicit_loop_research",
+    "prompt": "Use Loop to research the three provider APIs and return an evidence summary. There is no product decision or implementation in this task.",
+    "category": "negative_loop_research",
+    "expected": {
+      "use_wayfinder": false,
+      "phase": "research",
+      "evidence_method": "research",
+      "execution_mode": "loop",
+      "user_decision_owner": false,
+      "allow_production_changes": false
+    }
+  },
+  {
+    "id": "edit_wayfinder_itself",
+    "prompt": "Shorten the Wayfinder skill description without changing its behavior, then run the skill tests.",
+    "category": "negative_self_reference",
+    "expected": {
+      "use_wayfinder": false,
+      "phase": "implementation",
+      "evidence_method": "inspect",
+      "execution_mode": "foreground",
+      "user_decision_owner": false,
+      "allow_production_changes": true
+    }
+  }
+]
