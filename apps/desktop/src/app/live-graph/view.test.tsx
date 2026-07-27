@@ -2640,6 +2640,37 @@ describe('LiveGraphCanvas', () => {
     expect(task.getAttribute('aria-pressed')).toBe('true')
   })
 
+  it('opens a workflow inspector when a dense overview click lands just outside its tiny glyph', async () => {
+    const { container } = render(
+      <LiveGraphCanvas
+        autoFit={false}
+        graph={denseReadabilityGraph()}
+        initialState={{
+          ...DEFAULT_LIVE_GRAPH_VIEW_STATE,
+          camera: { scale: 0.2, x: 450, y: 300 },
+          focusDepth: 'all',
+          orphans: true
+        }}
+      />
+    )
+
+    const svg = await screen.findByRole('application', { name: 'Graph View' })
+    const workflow = await screen.findByRole('button', { name: /Workflow: Workflow A/ })
+    const world = container.querySelector('[data-live-graph-world]')!
+
+    const camera = graphCamera(world)
+    const position = graphNodePosition(workflow)
+    const radius = Number(workflow.querySelector('[data-live-graph-node-body]')?.getAttribute('r'))
+
+    fireEvent.click(svg, {
+      clientX: camera.x + position.x * camera.scale + radius * camera.scale + 4,
+      clientY: camera.y + position.y * camera.scale
+    })
+
+    expect(await screen.findByTestId('live-graph-selection-inspector')).toBeTruthy()
+    expect(workflow.getAttribute('aria-pressed')).toBe('true')
+  })
+
   it('attaches a Shift-clicked node without selecting it, then preserves normal click selection', async () => {
     const onAttachNode = vi.fn()
 

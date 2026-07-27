@@ -16,6 +16,7 @@ import {
 } from 'd3-force'
 import {
   type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
   type RefObject,
@@ -263,6 +264,7 @@ const EMPTY_PULSES: readonly LiveGraphPulse[] = []
 const EMPTY_RADIUS_BY_ID: ReadonlyMap<string, number> = new Map()
 const EMPTY_LABEL_IDS: ReadonlySet<string> = new Set()
 const DRAG_THRESHOLD = 4
+const LIVE_GRAPH_POINTER_HIT_SLOP = 6
 const GRAPH_REVEAL_NODE_DURATION = 220
 const GRAPH_REVEAL_WAVE_DELAY = 180
 const LIVE_GRAPH_NODE_BASE_RADIUS = 4.2
@@ -4300,6 +4302,38 @@ export function LiveGraphCanvas({
   }
 
   const selectNode = (node: LiveGraphNode) => setSelectedId(liveGraphNodeId(node))
+
+  const selectNearbyDenseNode = (event: ReactMouseEvent<SVGSVGElement>): boolean => {
+    if (!denseGraph) {
+      return false
+    }
+
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const camera = viewStateRef.current.camera
+    let nearestId = ''
+    let nearestSurfaceDistance = Infinity
+
+    for (const node of simulationNodesRef.current.values()) {
+      const screenX = bounds.left + camera.x + Number(node.x) * camera.scale
+      const screenY = bounds.top + camera.y + Number(node.y) * camera.scale
+      const screenRadius = node.radius * camera.scale
+      const surfaceDistance = Math.max(0, Math.hypot(event.clientX - screenX, event.clientY - screenY) - screenRadius)
+
+      if (surfaceDistance <= LIVE_GRAPH_POINTER_HIT_SLOP && surfaceDistance < nearestSurfaceDistance) {
+        nearestId = node.id
+        nearestSurfaceDistance = surfaceDistance
+      }
+    }
+
+    if (!nearestId) {
+      return false
+    }
+
+    setSelectedId(nearestId)
+
+    return true
+  }
+
   const kindLabels = t.liveGraph.kinds
 
   return (
@@ -4606,6 +4640,10 @@ export function LiveGraphCanvas({
                 if (performance.now() <= suppressedCanvasActivationRef.current) {
                   suppressedCanvasActivationRef.current = 0
 
+                  return
+                }
+
+                if (selectNearbyDenseNode(event)) {
                   return
                 }
 
