@@ -1096,7 +1096,6 @@ export const ja = defineLocale({
     result: '結果',
     status: 'ステータス',
     taskTitle: 'タスク',
-    taskViewAll: 'すべて',
     taskViewComments: 'コメント',
     taskViewActivity: 'アクティビティ',
     taskViewDetails: '詳細',

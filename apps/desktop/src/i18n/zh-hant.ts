@@ -1064,7 +1064,6 @@ export const zhHant = defineLocale({
     result: '結果',
     status: '狀態',
     taskTitle: '任務',
-    taskViewAll: '全部',
     taskViewComments: '留言',
     taskViewActivity: '活動',
     taskViewDetails: '詳細資料',

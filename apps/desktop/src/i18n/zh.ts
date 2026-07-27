@@ -1312,7 +1312,6 @@ export const zh: Translations = {
     result: '结果',
     status: '状态',
     taskTitle: '任务',
-    taskViewAll: '全部',
     taskViewComments: '评论',
     taskViewActivity: '活动',
     taskViewDetails: '详情',

@@ -984,7 +984,6 @@ export interface Translations {
     result: string
     status: string
     taskTitle: string
-    taskViewAll: string
     taskViewComments: string
     taskViewActivity: string
     taskViewDetails: string

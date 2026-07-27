@@ -23,7 +23,7 @@ export interface LiveGraphTaskTarget {
   workflowId?: string
 }
 
-type LiveGraphTaskInspectorFilter = 'activity' | 'all' | 'comments' | 'details'
+type LiveGraphTaskInspectorFilter = 'activity' | 'comments' | 'details'
 
 interface LiveGraphTaskInspectorContentProps {
   detail?: LoopTaskDetail | null
@@ -137,7 +137,7 @@ function LiveGraphTaskInspectorContent({
   workerSessionId
 }: LiveGraphTaskInspectorContentProps) {
   const { t } = useI18n()
-  const [filter, setFilter] = useState<LiveGraphTaskInspectorFilter>('all')
+  const [filter, setFilter] = useState<LiveGraphTaskInspectorFilter>('activity')
   const task = detail?.task
   const comments = detail?.comments ?? []
   const runs = detail?.runs ?? []
@@ -156,9 +156,9 @@ function LiveGraphTaskInspectorContent({
     { id: 'result', label: t.liveGraph.result, value: result }
   ].filter(section => section.value)
 
-  const showComments = filter === 'all' || filter === 'comments'
-  const showActivity = filter === 'all' || filter === 'activity'
-  const showDetails = filter === 'all' || filter === 'details'
+  const showComments = filter === 'comments'
+  const showActivity = filter === 'activity'
+  const showDetails = filter === 'details'
 
   return (
     <div className="min-w-0 max-w-full" data-live-graph-inspector-details>
@@ -167,7 +167,6 @@ function LiveGraphTaskInspectorContent({
           className="w-full"
           onChange={setFilter}
           options={[
-            { id: 'all', label: t.liveGraph.taskViewAll },
             { id: 'comments', label: t.liveGraph.taskViewComments },
             { id: 'activity', label: t.liveGraph.taskViewActivity },
             { id: 'details', label: t.liveGraph.taskViewDetails }

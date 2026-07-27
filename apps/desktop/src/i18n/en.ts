@@ -1117,7 +1117,6 @@ export const en: Translations = {
     result: 'Result',
     status: 'Status',
     taskTitle: 'Task',
-    taskViewAll: 'All',
     taskViewComments: 'Comments',
     taskViewActivity: 'Activity',
     taskViewDetails: 'Details',
