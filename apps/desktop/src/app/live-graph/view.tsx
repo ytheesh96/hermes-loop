@@ -3477,7 +3477,8 @@ export function LiveGraphCanvas({
   }, [selectedId, visibleNodeIds])
 
   const neighbors = layoutMetrics.analysis.neighbors
-  const emphasisId = denseGraph ? selectedId : hoveredId
+  const selectedTaskEmphasisId = taskFeedMode ? selectedId : null
+  const emphasisId = selectedTaskEmphasisId ?? (denseGraph ? selectedId : hoveredId)
 
   const clearDenseHoverEdges = useCallback(() => {
     denseHoveredNodeIdRef.current = null
@@ -3534,8 +3535,13 @@ export function LiveGraphCanvas({
   }, [taskFeedMode, viewState.workflowFilter, visible.nodes])
 
   const emphasizedIds = useMemo(
-    () => (emphasisId ? new Set([emphasisId, ...(neighbors.get(emphasisId) ?? [])]) : filteredTaskIds),
-    [emphasisId, filteredTaskIds, neighbors]
+    () =>
+      selectedTaskEmphasisId
+        ? new Set([selectedTaskEmphasisId])
+        : emphasisId
+          ? new Set([emphasisId, ...(neighbors.get(emphasisId) ?? [])])
+          : filteredTaskIds,
+    [emphasisId, filteredTaskIds, neighbors, selectedTaskEmphasisId]
   )
 
   const selectedNode = selectedId ? (allNodesById.get(selectedId) ?? null) : null

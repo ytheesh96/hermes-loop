@@ -2926,9 +2926,9 @@ describe('LiveGraphCanvas', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('live-graph-selection-inspector')).toBeTruthy()
-      expect(screen.getByRole('button', { name: /Task: Active task/ })).toBeTruthy()
-      expect(screen.getByRole('button', { name: /Task: Completed task/ })).toBeTruthy()
-      expect(screen.getByRole('button', { name: /Task: Attention task/ })).toBeTruthy()
+      expect(screen.getByRole('button', { name: /Task: Active task/ }).getAttribute('opacity')).toBe('1')
+      expect(screen.getByRole('button', { name: /Task: Completed task/ }).getAttribute('opacity')).toBe('0.2')
+      expect(screen.getByRole('button', { name: /Task: Attention task/ }).getAttribute('opacity')).toBe('0.2')
     })
   })
 
