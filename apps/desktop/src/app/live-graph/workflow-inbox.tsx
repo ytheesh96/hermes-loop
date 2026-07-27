@@ -50,6 +50,7 @@ const STATUS_PRESENTATION: Record<string, StatusPresentation> = {
 
 export interface LiveGraphWorkflowInboxProps {
   filter: LiveGraphTaskFilter
+  label?: string
   onFilterChange: (filter: LiveGraphTaskFilter) => void
   onSelectTask: (nodeId: string) => void
   tasks: readonly LiveGraphNode[]
@@ -269,12 +270,14 @@ function CompletedTaskRow({ nowMs, onSelect, reducedMotion, task }: CompletedTas
 
 export const LiveGraphWorkflowInbox = memo(function LiveGraphWorkflowInbox({
   filter,
+  label,
   onFilterChange,
   onSelectTask,
   tasks,
   workflowScope
 }: LiveGraphWorkflowInboxProps) {
   const { t } = useI18n()
+  const inboxLabel = label || t.liveGraph.taskInbox
   const reducedMotion = Boolean(useReducedMotion())
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [visibleCompletedCount, setVisibleCompletedCount] = useState(COMPLETED_PAGE_SIZE)
@@ -325,12 +328,12 @@ export const LiveGraphWorkflowInbox = memo(function LiveGraphWorkflowInbox({
   return (
     <LayoutGroup id={`live-graph-workflow-inbox:${workflowScope}`}>
       <div
-        aria-label={t.liveGraph.taskInbox}
+        aria-label={inboxLabel}
         className="grid min-w-0 gap-4 px-3 py-3"
         data-testid="live-graph-workflow-inbox"
         role="region"
       >
-        <div aria-label={t.liveGraph.taskInbox} className="flex min-w-0 flex-nowrap items-center gap-1" role="group">
+        <div aria-label={inboxLabel} className="flex min-w-0 flex-nowrap items-center gap-1" role="group">
           <Button
             aria-pressed={filter === 'all'}
             className="h-6 px-1.5 text-[0.625rem]"

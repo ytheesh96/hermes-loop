@@ -1314,6 +1314,7 @@ export const zh: Translations = {
     showMore: '显示更多',
     showLess: '收起',
     taskInbox: '工作流任务收件箱',
+    taskFeed: '任务动态',
     workflowInbox: '会话工作流收件箱',
     workflowFeed: '工作流动态',
     allTasks: '全部',

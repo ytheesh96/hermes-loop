@@ -1066,6 +1066,7 @@ export const zhHant = defineLocale({
     showMore: '顯示更多',
     showLess: '收起',
     taskInbox: '工作流程任務收件匣',
+    taskFeed: '任務動態',
     workflowInbox: '工作階段工作流程收件匣',
     workflowFeed: '工作流程動態',
     allTasks: '全部',

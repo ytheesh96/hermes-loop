@@ -2697,7 +2697,7 @@ describe('LiveGraphCanvas', () => {
     })
   })
 
-  it('uses the workflow feed to filter the graph by task-derived workflow state', async () => {
+  it('uses the task feed to filter task-only graph views by individual task state', async () => {
     const filteredGraph: LiveGraphSnapshot = {
       edges: [
         {
@@ -2828,22 +2828,24 @@ describe('LiveGraphCanvas', () => {
     expect(screen.getByRole('button', { name: /Task: Attention task/ })).toBeTruthy()
     expect(screen.queryByRole('button', { name: /Task: Task without workflow id/ })).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Workflow feed' }))
+    expect(screen.queryByRole('button', { name: 'Workflow feed' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Task feed' }))
 
-    const feed = await screen.findByTestId('live-graph-workflow-feed')
-    const activeFilter = feed.querySelector<HTMLButtonElement>('[data-live-graph-active-workflow-count]')!
-    const completedFilter = feed.querySelector<HTMLButtonElement>('[data-live-graph-completed-workflow-count]')!
-    const attentionFilter = feed.querySelector<HTMLButtonElement>('[data-live-graph-attention-workflow-count]')!
-    const allFilter = feed.querySelector<HTMLButtonElement>('[data-live-graph-all-workflows-filter]')!
+    const feed = await screen.findByTestId('live-graph-task-feed')
+    expect(within(feed).getByRole('region', { name: 'Task feed' })).toBeTruthy()
+    expect(within(feed).queryByRole('region', { name: 'Workflow task inbox' })).toBeNull()
+    const activeFilter = feed.querySelector<HTMLButtonElement>('[data-live-graph-active-count]')!
+    const completedFilter = feed.querySelector<HTMLButtonElement>('[data-live-graph-completed-count]')!
+    const attentionFilter = feed.querySelector<HTMLButtonElement>('[data-live-graph-attention-count]')!
+    const allFilter = feed.querySelector<HTMLButtonElement>('[data-live-graph-all-filter]')!
 
     expect(activeFilter.textContent).toContain('1')
     expect(completedFilter.textContent).toContain('1')
     expect(attentionFilter.textContent).toContain('1')
-    expect(
-      within(feed)
-        .getByRole('button', { name: 'View workflow: Active workflow' })
-        .querySelector('[data-live-graph-workflow-task-counts]')?.textContent
-    ).toContain('1 Active')
+    expect(within(feed).getByRole('button', { name: 'View task: Active task' })).toBeTruthy()
+    expect(within(feed).getByRole('button', { name: 'View task: Completed task' })).toBeTruthy()
+    expect(within(feed).getByRole('button', { name: 'View task: Attention task' })).toBeTruthy()
+    expect(within(feed).queryByRole('button', { name: /View workflow:/ })).toBeNull()
 
     fireEvent.click(activeFilter)
 
@@ -2852,8 +2854,9 @@ describe('LiveGraphCanvas', () => {
       expect(screen.queryByRole('button', { name: /Task: Completed task/ })).toBeNull()
       expect(screen.queryByRole('button', { name: /Task: Attention task/ })).toBeNull()
     })
-    expect(within(feed).getByRole('button', { name: 'View workflow: Active workflow' })).toBeTruthy()
-    expect(feed.querySelector('[data-live-graph-workflow-status="open"]')).toBeNull()
+    expect(within(feed).getByRole('button', { name: 'View task: Active task' })).toBeTruthy()
+    expect(within(feed).queryByRole('button', { name: 'View task: Completed task' })).toBeNull()
+    expect(within(feed).queryByRole('button', { name: 'View task: Attention task' })).toBeNull()
 
     fireEvent.click(completedFilter)
 
@@ -2862,7 +2865,8 @@ describe('LiveGraphCanvas', () => {
       expect(screen.getByRole('button', { name: /Task: Completed task/ })).toBeTruthy()
       expect(screen.queryByRole('button', { name: /Task: Attention task/ })).toBeNull()
     })
-    expect(within(feed).getByRole('button', { name: 'View workflow: Completed workflow' })).toBeTruthy()
+    expect(within(feed).getByRole('button', { name: 'View task: Completed task' })).toBeTruthy()
+    expect(within(feed).queryByRole('button', { name: 'View task: Active task' })).toBeNull()
 
     fireEvent.click(attentionFilter)
 
@@ -2871,7 +2875,8 @@ describe('LiveGraphCanvas', () => {
       expect(screen.queryByRole('button', { name: /Task: Completed task/ })).toBeNull()
       expect(screen.getByRole('button', { name: /Task: Attention task/ })).toBeTruthy()
     })
-    expect(within(feed).getByRole('button', { name: 'View workflow: Attention workflow' })).toBeTruthy()
+    expect(within(feed).getByRole('button', { name: 'View task: Attention task' })).toBeTruthy()
+    expect(within(feed).queryByRole('button', { name: 'View task: Active task' })).toBeNull()
 
     fireEvent.click(allFilter)
 

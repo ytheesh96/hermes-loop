@@ -1098,6 +1098,7 @@ export const ja = defineLocale({
     showMore: 'もっと見る',
     showLess: '折りたたむ',
     taskInbox: 'ワークフローのタスク受信箱',
+    taskFeed: 'タスクフィード',
     workflowInbox: 'セッションのワークフロー受信箱',
     workflowFeed: 'ワークフローフィード',
     allTasks: 'すべて',

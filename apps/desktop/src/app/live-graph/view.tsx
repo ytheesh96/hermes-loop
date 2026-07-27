@@ -1401,6 +1401,7 @@ export function visibleLiveGraph(
     enabledKinds: ReadonlySet<LiveGraphKind>
     focusDepth: LiveGraphFocusDepth
     focusId?: string | null
+    globalTaskFilter?: LiveGraphTaskFilter
     orphans: boolean
     search: string
     taskFilter?: LiveGraphTaskFilter
@@ -1439,10 +1440,17 @@ export function visibleLiveGraph(
       options.taskFilter === 'all' ||
       liveGraphTaskCategory(node) === options.taskFilter
 
+    const matchingGlobalTaskFilter =
+      kind !== 'task' ||
+      !options.globalTaskFilter ||
+      options.globalTaskFilter === 'all' ||
+      liveGraphTaskCategory(node) === options.globalTaskFilter
+
     return (
       options.enabledKinds.has(kind) &&
       workflowTask &&
       matchingTaskFilter &&
+      matchingGlobalTaskFilter &&
       (!workflowComponentIds || workflowComponentIds.has(id))
     )
   })
@@ -2652,6 +2660,8 @@ export function LiveGraphCanvas({
   }, [])
 
   const enabledKinds = useMemo(() => new Set(viewState.enabledKinds), [viewState.enabledKinds])
+  const taskFeedMode = enabledKinds.has('task') && !enabledKinds.has('workflow')
+  const feedLabel = taskFeedMode ? t.liveGraph.taskFeed : t.liveGraph.workflowFeed
   const focusId = selectedId
   const layoutRootId = selectedId || snapshotRootId(graph)
 
@@ -2661,16 +2671,18 @@ export function LiveGraphCanvas({
         enabledKinds,
         focusDepth: viewState.focusDepth,
         focusId,
+        globalTaskFilter: taskFeedMode ? viewState.workflowFilter : undefined,
         orphans: viewState.orphans,
         search: viewState.search,
         taskFilter: selectedWorkflowTaskFilter,
-        workflowFilter: viewState.workflowFilter
+        workflowFilter: taskFeedMode ? 'all' : viewState.workflowFilter
       }),
     [
       enabledKinds,
       focusId,
       graph,
       selectedWorkflowTaskFilter,
+      taskFeedMode,
       viewState.focusDepth,
       viewState.orphans,
       viewState.search,
@@ -2678,7 +2690,7 @@ export function LiveGraphCanvas({
     ]
   )
 
-  const workflowFeedGraph = useMemo(
+  const feedScopeGraph = useMemo(
     () =>
       visibleLiveGraph(graph, {
         enabledKinds: ALL_LIVE_GRAPH_KINDS,
@@ -3498,13 +3510,18 @@ export function LiveGraphCanvas({
 
   const workflowFeedItems = useMemo<LiveGraphWorkflowFeedItem[]>(() => {
     const visibleWorkflowIds = new Set(
-      workflowFeedGraph.nodes.filter(node => liveGraphNodeKind(node) === 'workflow').map(node => liveGraphNodeId(node))
+      feedScopeGraph.nodes.filter(node => liveGraphNodeKind(node) === 'workflow').map(node => liveGraphNodeId(node))
     )
 
     return liveGraphWorkflowFeedItems(snapshotNodes(graph)).filter(item =>
       visibleWorkflowIds.has(liveGraphNodeId(item.node))
     )
-  }, [graph, workflowFeedGraph.nodes])
+  }, [feedScopeGraph.nodes, graph])
+
+  const taskFeedItems = useMemo(
+    () => feedScopeGraph.nodes.filter(node => liveGraphNodeKind(node) === 'task'),
+    [feedScopeGraph.nodes]
+  )
 
   const selectWorkflowTask = useCallback(
     (nodeId: string) => {
@@ -4702,9 +4719,9 @@ export function LiveGraphCanvas({
                 </details>
               </PopoverContent>
             </Popover>
-            <Tip label={t.liveGraph.workflowFeed}>
+            <Tip label={feedLabel}>
               <Button
-                aria-label={t.liveGraph.workflowFeed}
+                aria-label={feedLabel}
                 aria-pressed={workflowFeedOpen}
                 className="border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated)/90 backdrop-blur-sm"
                 onClick={() => {
@@ -5251,18 +5268,29 @@ export function LiveGraphCanvas({
 
         {workflowFeedOpen ? (
           <aside
-            aria-label={t.liveGraph.workflowFeed}
+            aria-label={feedLabel}
             className="relative z-20 h-full min-w-[16rem] w-[clamp(16rem,46%,22rem)] shrink-0 overflow-x-hidden overflow-y-auto border-l border-(--stroke-nous) bg-(--ui-bg-elevated) [overflow-wrap:anywhere]"
-            data-testid="live-graph-workflow-feed"
+            data-testid={taskFeedMode ? 'live-graph-task-feed' : 'live-graph-workflow-feed'}
           >
-            <LiveGraphSessionWorkflowInbox
-              filter={viewState.workflowFilter}
-              label={t.liveGraph.workflowFeed}
-              onFilterChange={workflowFilter => commitState(current => ({ ...current, workflowFilter }))}
-              onSelectWorkflow={selectFeedWorkflow}
-              sessionScope={snapshotRootId(graph) || 'global'}
-              workflows={workflowFeedItems}
-            />
+            {taskFeedMode ? (
+              <LiveGraphWorkflowInbox
+                filter={viewState.workflowFilter}
+                label={feedLabel}
+                onFilterChange={workflowFilter => commitState(current => ({ ...current, workflowFilter }))}
+                onSelectTask={selectWorkflowTask}
+                tasks={taskFeedItems}
+                workflowScope={snapshotRootId(graph) || 'global'}
+              />
+            ) : (
+              <LiveGraphSessionWorkflowInbox
+                filter={viewState.workflowFilter}
+                label={feedLabel}
+                onFilterChange={workflowFilter => commitState(current => ({ ...current, workflowFilter }))}
+                onSelectWorkflow={selectFeedWorkflow}
+                sessionScope={snapshotRootId(graph) || 'global'}
+                workflows={workflowFeedItems}
+              />
+            )}
           </aside>
         ) : selectedNode ? (
           <aside
