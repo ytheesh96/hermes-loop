@@ -269,13 +269,13 @@ function LiveGraphTaskInspectorContent({
     <div className="flex h-full min-h-0 min-w-0 max-w-full flex-col" data-live-graph-inspector-details>
       <div
         aria-label={t.liveGraph.inspector}
-        className="flex min-w-0 shrink-0 flex-nowrap items-center gap-1 px-3 pt-3"
+        className="flex min-w-0 shrink-0 flex-nowrap items-center gap-1 px-3 pt-3 pb-2"
         role="group"
       >
         {[
-          { id: 'comments' as const, label: t.liveGraph.taskViewComments },
           { id: 'activity' as const, label: t.liveGraph.taskViewActivity },
-          { id: 'details' as const, label: t.liveGraph.taskViewDetails }
+          { id: 'comments' as const, label: t.liveGraph.taskViewComments },
+          { id: 'details' as const, label: t.liveGraph.description }
         ].map(option => (
           <Button
             aria-pressed={filter === option.id}
@@ -380,7 +380,7 @@ function LiveGraphTaskInspectorContent({
 
         {showDetails && (
           <div className="h-full overflow-y-auto">
-            <TaskInspectorSection label={t.liveGraph.taskViewDetails} testId="live-graph-task-details">
+            <TaskInspectorSection label={t.liveGraph.description} testId="live-graph-task-details">
               {description && (
                 <TaskInspectorTextSection
                   collapseLabel={t.liveGraph.showLess}

@@ -2849,7 +2849,7 @@ describe('LiveGraphCanvas', () => {
     expect(within(inspector).getByRole('button', { name: 'Activity' }).getAttribute('aria-pressed')).toBe('true')
     expect(within(inspector).queryByText('Desktop interaction is ready for review.')).toBeNull()
 
-    fireEvent.click(within(inspector).getByRole('button', { name: 'Details' }))
+    fireEvent.click(within(inspector).getByRole('button', { name: 'Description' }))
     expect(within(inspector).getByText('Verify live app')).toBeTruthy()
     expect(within(inspector).getByText('Desktop interaction is ready for review.')).toBeTruthy()
     expect(await screen.findByRole('button', { name: /Task: Verify live app/ })).toBeTruthy()
@@ -3174,16 +3174,18 @@ describe('LiveGraphCanvas', () => {
     expect(details.queryByText('Selection · Task')).toBeNull()
     expect(details.queryByRole('button', { name: 'Close' })).toBeNull()
     expect(details.queryByRole('button', { name: 'All' })).toBeNull()
-    expect(details.getByRole('button', { name: 'Comments' })).toBeTruthy()
-    expect(details.getByRole('button', { name: 'Activity' }).getAttribute('aria-pressed')).toBe('true')
-    expect(details.getByRole('button', { name: 'Details' })).toBeTruthy()
+    const tabs = details.getAllByRole('button').slice(0, 3)
+
+    expect(tabs.map(tab => tab.textContent)).toEqual(['Activity', 'Comments', 'Description'])
+    expect(tabs[0]?.getAttribute('aria-pressed')).toBe('true')
+    expect(tabs[0]?.parentElement?.className).toContain('pb-2')
 
     expect(details.queryByText('Desktop interaction is ready for review.')).toBeNull()
     expect(details.queryByText('The live verification passed.')).toBeNull()
     expect(details.queryByText('Exercise the installed app and capture the selected task state.')).toBeNull()
     expect(container.querySelectorAll('[data-live-graph-label]')).toHaveLength(0)
 
-    fireEvent.click(details.getByRole('button', { name: 'Details' }))
+    fireEvent.click(details.getByRole('button', { name: 'Description' }))
     expect(details.getByText('Exercise the installed app and capture the selected task state.')).toBeTruthy()
     expect(details.getByText('reviewer-qa')).toBeTruthy()
     expect(details.getByText('P2')).toBeTruthy()
@@ -3206,7 +3208,7 @@ describe('LiveGraphCanvas', () => {
     expect(details.queryByText('The live verification passed.')).toBeNull()
     expect(details.queryByText('Exercise the installed app and capture the selected task state.')).toBeNull()
 
-    fireEvent.click(details.getByRole('button', { name: 'Details' }))
+    fireEvent.click(details.getByRole('button', { name: 'Description' }))
     expect(details.getByText('Exercise the installed app and capture the selected task state.')).toBeTruthy()
     expect(details.getByText('Desktop interaction is ready for review.')).toBeTruthy()
     expect(details.getByText('The live verification passed.')).toBeTruthy()
@@ -3398,7 +3400,7 @@ describe('LiveGraphCanvas', () => {
     expect(await details.findByText('Ready for the final review.')).toBeTruthy()
     expect(details.getAllByTestId('live-graph-task-comment')).toHaveLength(2)
 
-    fireEvent.click(details.getByRole('button', { name: 'Details' }))
+    fireEvent.click(details.getByRole('button', { name: 'Description' }))
     expect(await details.findByText('Authoritative task description.')).toBeTruthy()
     expect(details.getByText('Authoritative task title')).toBeTruthy()
     expect(details.getByText('Completed')).toBeTruthy()
@@ -3481,7 +3483,7 @@ describe('LiveGraphCanvas', () => {
       screen.getByTestId('live-graph-task-activity').querySelector('[data-live-graph-inspector-section-text]')
     ).toBeNull()
 
-    fireEvent.click(details.getByRole('button', { name: 'Details' }))
+    fireEvent.click(details.getByRole('button', { name: 'Description' }))
 
     const detailTexts = screen
       .getByTestId('live-graph-task-details')
