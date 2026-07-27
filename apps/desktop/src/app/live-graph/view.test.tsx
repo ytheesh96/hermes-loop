@@ -2812,12 +2812,20 @@ describe('LiveGraphCanvas', () => {
     }
 
     render(
-      <LiveGraphCanvas graph={filteredGraph} initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }} />
+      <LiveGraphCanvas
+        graph={filteredGraph}
+        initialState={{
+          ...DEFAULT_LIVE_GRAPH_VIEW_STATE,
+          enabledKinds: ['task'],
+          focusDepth: 'all',
+          orphans: true
+        }}
+      />
     )
 
-    expect(await screen.findByRole('button', { name: /Workflow: Active workflow/ })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /Workflow: Completed workflow/ })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /Workflow: Attention workflow/ })).toBeTruthy()
+    expect(await screen.findByRole('button', { name: /Task: Active task/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Task: Completed task/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Task: Attention task/ })).toBeTruthy()
     expect(screen.queryByRole('button', { name: /Task: Task without workflow id/ })).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Workflow feed' }))
@@ -2840,9 +2848,9 @@ describe('LiveGraphCanvas', () => {
     fireEvent.click(activeFilter)
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Workflow: Active workflow/ })).toBeTruthy()
-      expect(screen.queryByRole('button', { name: /Workflow: Completed workflow/ })).toBeNull()
-      expect(screen.queryByRole('button', { name: /Workflow: Attention workflow/ })).toBeNull()
+      expect(screen.getByRole('button', { name: /Task: Active task/ })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: /Task: Completed task/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: /Task: Attention task/ })).toBeNull()
     })
     expect(within(feed).getByRole('button', { name: 'View workflow: Active workflow' })).toBeTruthy()
     expect(feed.querySelector('[data-live-graph-workflow-status="open"]')).toBeNull()
@@ -2850,27 +2858,27 @@ describe('LiveGraphCanvas', () => {
     fireEvent.click(completedFilter)
 
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: /Workflow: Active workflow/ })).toBeNull()
-      expect(screen.getByRole('button', { name: /Workflow: Completed workflow/ })).toBeTruthy()
-      expect(screen.queryByRole('button', { name: /Workflow: Attention workflow/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: /Task: Active task/ })).toBeNull()
+      expect(screen.getByRole('button', { name: /Task: Completed task/ })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: /Task: Attention task/ })).toBeNull()
     })
     expect(within(feed).getByRole('button', { name: 'View workflow: Completed workflow' })).toBeTruthy()
 
     fireEvent.click(attentionFilter)
 
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: /Workflow: Active workflow/ })).toBeNull()
-      expect(screen.queryByRole('button', { name: /Workflow: Completed workflow/ })).toBeNull()
-      expect(screen.getByRole('button', { name: /Workflow: Attention workflow/ })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: /Task: Active task/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: /Task: Completed task/ })).toBeNull()
+      expect(screen.getByRole('button', { name: /Task: Attention task/ })).toBeTruthy()
     })
     expect(within(feed).getByRole('button', { name: 'View workflow: Attention workflow' })).toBeTruthy()
 
     fireEvent.click(allFilter)
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Workflow: Active workflow/ })).toBeTruthy()
-      expect(screen.getByRole('button', { name: /Workflow: Completed workflow/ })).toBeTruthy()
-      expect(screen.getByRole('button', { name: /Workflow: Attention workflow/ })).toBeTruthy()
+      expect(screen.getByRole('button', { name: /Task: Active task/ })).toBeTruthy()
+      expect(screen.getByRole('button', { name: /Task: Completed task/ })).toBeTruthy()
+      expect(screen.getByRole('button', { name: /Task: Attention task/ })).toBeTruthy()
     })
   })
 

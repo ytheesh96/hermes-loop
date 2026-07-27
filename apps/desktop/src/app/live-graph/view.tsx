@@ -65,6 +65,8 @@ export const LIVE_GRAPH_KINDS = ['session', 'project', 'workflow', 'task', 'agen
 export type LiveGraphKind = (typeof LIVE_GRAPH_KINDS)[number]
 export type LiveGraphFocusDepth = 1 | 2 | 'all'
 
+const ALL_LIVE_GRAPH_KINDS = new Set<LiveGraphKind>(LIVE_GRAPH_KINDS)
+
 export interface Camera {
   scale: number
   x: number
@@ -2679,14 +2681,14 @@ export function LiveGraphCanvas({
   const workflowFeedGraph = useMemo(
     () =>
       visibleLiveGraph(graph, {
-        enabledKinds,
+        enabledKinds: ALL_LIVE_GRAPH_KINDS,
         focusDepth: viewState.focusDepth,
         focusId,
         orphans: viewState.orphans,
         search: viewState.search,
         workflowFilter: 'all'
       }),
-    [enabledKinds, focusId, graph, viewState.focusDepth, viewState.orphans, viewState.search]
+    [focusId, graph, viewState.focusDepth, viewState.orphans, viewState.search]
   )
 
   const graphNodes = snapshotNodes(graph)
