@@ -18,7 +18,8 @@ const COMPLETED_PAGE_SIZE = 10
 const COMPLETED_PAGE_INCREMENT = 25
 const TASK_AGE_REFRESH_INTERVAL_MS = 60_000
 
-type WorkflowInboxFilter = 'active' | 'all' | 'attention' | 'completed'
+export type LiveGraphTaskFilter = 'active' | 'all' | 'attention' | 'completed'
+export type LiveGraphTaskCategory = Exclude<LiveGraphTaskFilter, 'all'>
 
 interface StatusPresentation {
   color: string
@@ -48,6 +49,8 @@ const STATUS_PRESENTATION: Record<string, StatusPresentation> = {
 }
 
 export interface LiveGraphWorkflowInboxProps {
+  filter: LiveGraphTaskFilter
+  onFilterChange: (filter: LiveGraphTaskFilter) => void
   onSelectTask: (nodeId: string) => void
   tasks: readonly LiveGraphNode[]
   workflowScope: string
@@ -64,8 +67,18 @@ function statusPresentation(status: string): StatusPresentation {
   )
 }
 
-function needsAttention(status: unknown): boolean {
-  return LIVE_GRAPH_ATTENTION_STATUSES.has(normalizeLiveGraphStatus(status))
+export function liveGraphTaskCategory(task: LiveGraphNode): LiveGraphTaskCategory {
+  const status = normalizeLiveGraphStatus(task.status)
+
+  if (LIVE_GRAPH_COMPLETED_STATUSES.has(status)) {
+    return 'completed'
+  }
+
+  if (LIVE_GRAPH_ATTENTION_STATUSES.has(status)) {
+    return 'attention'
+  }
+
+  return 'active'
 }
 
 function taskSort(left: LiveGraphNode, right: LiveGraphNode): number {
@@ -255,13 +268,14 @@ function CompletedTaskRow({ nowMs, onSelect, reducedMotion, task }: CompletedTas
 }
 
 export const LiveGraphWorkflowInbox = memo(function LiveGraphWorkflowInbox({
+  filter,
+  onFilterChange,
   onSelectTask,
   tasks,
   workflowScope
 }: LiveGraphWorkflowInboxProps) {
   const { t } = useI18n()
   const reducedMotion = Boolean(useReducedMotion())
-  const [filter, setFilter] = useState<WorkflowInboxFilter>('all')
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [visibleCompletedCount, setVisibleCompletedCount] = useState(COMPLETED_PAGE_SIZE)
 
@@ -277,12 +291,21 @@ export const LiveGraphWorkflowInbox = memo(function LiveGraphWorkflowInbox({
     const completed: LiveGraphNode[] = []
 
     for (const task of tasks) {
-      if (LIVE_GRAPH_COMPLETED_STATUSES.has(normalizeLiveGraphStatus(task.status))) {
-        completed.push(task)
-      } else if (needsAttention(task.status)) {
-        attention.push(task)
-      } else {
-        active.push(task)
+      switch (liveGraphTaskCategory(task)) {
+        case 'active':
+          active.push(task)
+
+          break
+
+        case 'attention':
+          attention.push(task)
+
+          break
+
+        case 'completed':
+          completed.push(task)
+
+          break
       }
     }
 
@@ -303,7 +326,7 @@ export const LiveGraphWorkflowInbox = memo(function LiveGraphWorkflowInbox({
     <LayoutGroup id={`live-graph-workflow-inbox:${workflowScope}`}>
       <div
         aria-label={t.liveGraph.taskInbox}
-        className="grid min-w-0 gap-4 border-t border-(--ui-stroke-tertiary) px-3 py-3"
+        className="grid min-w-0 gap-4 px-3 py-3"
         data-testid="live-graph-workflow-inbox"
         role="region"
       >
@@ -312,7 +335,7 @@ export const LiveGraphWorkflowInbox = memo(function LiveGraphWorkflowInbox({
             aria-pressed={filter === 'all'}
             className="h-6 px-1.5 text-[0.625rem]"
             data-live-graph-all-filter
-            onClick={() => setFilter('all')}
+            onClick={() => onFilterChange('all')}
             size="xs"
             type="button"
             variant={filter === 'all' ? 'secondary' : 'ghost'}
@@ -323,7 +346,7 @@ export const LiveGraphWorkflowInbox = memo(function LiveGraphWorkflowInbox({
             aria-pressed={filter === 'active'}
             className="h-6 px-1.5 text-[0.625rem]"
             data-live-graph-active-count
-            onClick={() => setFilter('active')}
+            onClick={() => onFilterChange('active')}
             size="xs"
             type="button"
             variant={filter === 'active' ? 'secondary' : 'ghost'}
@@ -335,7 +358,7 @@ export const LiveGraphWorkflowInbox = memo(function LiveGraphWorkflowInbox({
             aria-pressed={filter === 'completed'}
             className="h-6 px-1.5 text-[0.625rem]"
             data-live-graph-completed-count
-            onClick={() => setFilter('completed')}
+            onClick={() => onFilterChange('completed')}
             size="xs"
             type="button"
             variant={filter === 'completed' ? 'secondary' : 'ghost'}
@@ -347,7 +370,7 @@ export const LiveGraphWorkflowInbox = memo(function LiveGraphWorkflowInbox({
             aria-pressed={filter === 'attention'}
             className="h-6 px-1.5 text-[0.625rem] text-(--ui-yellow)"
             data-live-graph-attention-count
-            onClick={() => setFilter('attention')}
+            onClick={() => onFilterChange('attention')}
             size="xs"
             type="button"
             variant={filter === 'attention' ? 'secondary' : 'ghost'}

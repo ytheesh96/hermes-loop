@@ -2533,6 +2533,12 @@ describe('LiveGraphCanvas', () => {
           kind: 'contains',
           sourceId: 'workflow:default:board:wf',
           targetId: 'task:default:board:completed'
+        },
+        {
+          id: 'edge:workflow-attention-task',
+          kind: 'contains',
+          sourceId: 'workflow:default:board:wf',
+          targetId: 'task:default:board:attention'
         }
       ],
       nodes: [
@@ -2557,6 +2563,16 @@ describe('LiveGraphCanvas', () => {
           workflowId: 'wf'
         },
         {
+          board: 'board',
+          createdAt: nowSeconds - 60 * 60,
+          entityId: 'attention',
+          id: 'task:default:board:attention',
+          kind: 'task',
+          label: 'Resolve blocked verification',
+          status: 'blocked',
+          workflowId: 'wf'
+        },
+        {
           board: 'other-board',
           createdAt: 3,
           entityId: 'task',
@@ -2572,7 +2588,7 @@ describe('LiveGraphCanvas', () => {
     render(
       <LiveGraphCanvas
         graph={workflowInboxGraph}
-        initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, enabledKinds: ['session', 'workflow'] }}
+        initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }}
       />
     )
 
@@ -2580,18 +2596,48 @@ describe('LiveGraphCanvas', () => {
 
     const workflowInspector = await screen.findByTestId('live-graph-selection-inspector')
     expect(within(workflowInspector).queryByText('Correct artifact')).toBeNull()
+    expect(within(workflowInspector).queryByText('Selection · Workflow')).toBeNull()
+    expect(within(workflowInspector).queryByRole('button', { name: 'Close' })).toBeNull()
 
     const inbox = await screen.findByTestId('live-graph-workflow-inbox')
     expect(within(inbox).getByRole('button', { name: 'View task: Verify live app' })).toBeTruthy()
     expect(within(inbox).getByRole('button', { name: 'View task: Package the release' })).toBeTruthy()
+    expect(within(inbox).getByRole('button', { name: 'View task: Resolve blocked verification' })).toBeTruthy()
     expect(within(inbox).queryByText('Same ids on another board')).toBeNull()
-    expect(inbox.querySelectorAll('[data-live-graph-task-card]')).toHaveLength(1)
+    expect(inbox.querySelectorAll('[data-live-graph-task-card]')).toHaveLength(2)
     expect(inbox.querySelectorAll('[data-live-graph-completed-task]')).toHaveLength(1)
     expect(within(inbox).queryByText('P2')).toBeNull()
     expect(
       Array.from(inbox.querySelectorAll('[data-live-graph-task-age]')).map(element => element.textContent)
-    ).toEqual(['2h ago', '5h ago'])
+    ).toEqual(['1h ago', '2h ago', '5h ago'])
     expect(inbox.querySelector('[data-live-graph-task-age] .codicon')).toBeNull()
+    expect(screen.getByRole('button', { name: /^Task: Verify live app/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /^Task: Package the release/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /^Task: Resolve blocked verification/ })).toBeTruthy()
+
+    fireEvent.click(inbox.querySelector<HTMLButtonElement>('[data-live-graph-completed-count]')!)
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /^Task: Verify live app/ })).toBeNull()
+      expect(screen.getByRole('button', { name: /^Task: Package the release/ })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: /^Task: Resolve blocked verification/ })).toBeNull()
+    })
+
+    fireEvent.click(inbox.querySelector<HTMLButtonElement>('[data-live-graph-attention-count]')!)
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /^Task: Verify live app/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: /^Task: Package the release/ })).toBeNull()
+      expect(screen.getByRole('button', { name: /^Task: Resolve blocked verification/ })).toBeTruthy()
+    })
+
+    fireEvent.click(inbox.querySelector<HTMLButtonElement>('[data-live-graph-active-count]')!)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Task: Verify live app/ })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: /^Task: Package the release/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: /^Task: Resolve blocked verification/ })).toBeNull()
+    })
 
     fireEvent.click(within(inbox).getByRole('button', { name: 'View task: Verify live app' }))
 
@@ -2620,6 +2666,8 @@ describe('LiveGraphCanvas', () => {
 
     expect(feedButton.getAttribute('aria-pressed')).toBe('true')
     expect(within(feed).getByRole('region', { name: 'Workflow feed' })).toBeTruthy()
+    expect(within(feed).queryByText('Workflow feed')).toBeNull()
+    expect(within(feed).queryByRole('button', { name: 'Close' })).toBeNull()
     expect(workflow.querySelector('[data-live-graph-workflow-task-counts]')?.textContent).toContain('1 Active')
     expect(workflow.querySelector('[data-live-graph-workflow-task-counts]')?.textContent).toContain('0 Completed')
 
@@ -2638,6 +2686,15 @@ describe('LiveGraphCanvas', () => {
     expect(
       (await screen.findByRole('button', { name: /Workflow: Correct artifact/ })).getAttribute('aria-pressed')
     ).toBe('true')
+
+    const selectedInbox = await screen.findByTestId('live-graph-workflow-inbox')
+    fireEvent.click(within(selectedInbox).getByRole('button', { name: '0 Completed' }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('live-graph-selection-inspector')).toBeTruthy()
+      expect(screen.getByRole('button', { name: /Workflow: Correct artifact/ })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: /^Task: Verify live app/ })).toBeNull()
+    })
   })
 
   it('uses the workflow feed to filter the graph by task-derived workflow state', async () => {

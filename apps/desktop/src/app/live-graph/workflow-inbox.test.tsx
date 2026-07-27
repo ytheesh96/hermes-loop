@@ -1,9 +1,9 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import type { HTMLAttributes, ReactNode } from 'react'
+import { type HTMLAttributes, type ReactNode, useState } from 'react'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import type { LiveGraphNode } from './model'
-import { LiveGraphWorkflowInbox } from './workflow-inbox'
+import { type LiveGraphTaskFilter, LiveGraphWorkflowInbox, type LiveGraphWorkflowInboxProps } from './workflow-inbox'
 
 interface TestMotionProps extends HTMLAttributes<HTMLElement> {
   exit?: unknown
@@ -45,6 +45,12 @@ function task(id: string, status: string, overrides: Partial<LiveGraphNode> = {}
   }
 }
 
+function TestWorkflowInbox(props: Omit<LiveGraphWorkflowInboxProps, 'filter' | 'onFilterChange'>) {
+  const [filter, setFilter] = useState<LiveGraphTaskFilter>('all')
+
+  return <LiveGraphWorkflowInbox {...props} filter={filter} onFilterChange={setFilter} />
+}
+
 beforeAll(() => {
   vi.stubGlobal(
     'matchMedia',
@@ -84,7 +90,7 @@ describe('LiveGraphWorkflowInbox', () => {
     ]
 
     const { container } = render(
-      <LiveGraphWorkflowInbox onSelectTask={onSelectTask} tasks={tasks} workflowScope="workflow:work:board:workflow" />
+      <TestWorkflowInbox onSelectTask={onSelectTask} tasks={tasks} workflowScope="workflow:work:board:workflow" />
     )
 
     const activeSection = container.querySelector('[data-live-graph-active-tasks]')!
@@ -111,7 +117,7 @@ describe('LiveGraphWorkflowInbox', () => {
     expect(runningCard.querySelector('[data-live-graph-task-card-description]')?.textContent).toBe(
       'Implementing the task inbox.'
     )
-    expect(runningCard.querySelector('[data-live-graph-task-card-metadata]')?.textContent).toContain('P2')
+    expect(runningCard.querySelector('[data-live-graph-task-card-metadata]')?.textContent).not.toContain('P2')
     expect(runningCard.querySelector('[data-live-graph-task-card-metadata]')?.textContent).not.toContain('running')
     expect(runningCard.querySelector('[data-live-graph-task-status="running"]')?.className).toContain('shrink-0')
     expect(blockedCard.querySelector('.codicon-warning')).toBeTruthy()
@@ -153,7 +159,7 @@ describe('LiveGraphWorkflowInbox', () => {
 
   it('filters the inbox while preserving aggregate task counts', () => {
     const { container } = render(
-      <LiveGraphWorkflowInbox
+      <TestWorkflowInbox
         onSelectTask={vi.fn()}
         tasks={[task('running', 'running'), task('blocked', 'blocked'), task('completed', 'done')]}
         workflowScope="workflow:work:board:workflow"
@@ -202,7 +208,7 @@ describe('LiveGraphWorkflowInbox', () => {
 
   it('keeps zero-count filters available and explains empty categories', () => {
     render(
-      <LiveGraphWorkflowInbox
+      <TestWorkflowInbox
         onSelectTask={vi.fn()}
         tasks={[task('running', 'running')]}
         workflowScope="workflow:work:board:workflow"
@@ -220,14 +226,14 @@ describe('LiveGraphWorkflowInbox', () => {
     const running = task('one', 'running')
 
     const { container, rerender } = render(
-      <LiveGraphWorkflowInbox onSelectTask={vi.fn()} tasks={[running]} workflowScope="workflow:work:board:workflow" />
+      <TestWorkflowInbox onSelectTask={vi.fn()} tasks={[running]} workflowScope="workflow:work:board:workflow" />
     )
 
     expect(container.querySelectorAll('[data-live-graph-task-card]')).toHaveLength(1)
     expect(container.querySelectorAll('[data-live-graph-completed-task]')).toHaveLength(0)
 
     rerender(
-      <LiveGraphWorkflowInbox
+      <TestWorkflowInbox
         onSelectTask={vi.fn()}
         tasks={[{ ...running, status: 'done' }]}
         workflowScope="workflow:work:board:workflow"
@@ -246,7 +252,7 @@ describe('LiveGraphWorkflowInbox', () => {
     const tasks = Array.from({ length: 12 }, (_, index) => task(String(index + 1), 'done'))
 
     const { container } = render(
-      <LiveGraphWorkflowInbox onSelectTask={vi.fn()} tasks={tasks} workflowScope="workflow:work:board:history" />
+      <TestWorkflowInbox onSelectTask={vi.fn()} tasks={tasks} workflowScope="workflow:work:board:history" />
     )
 
     expect(container.querySelectorAll('[data-live-graph-completed-task]')).toHaveLength(10)

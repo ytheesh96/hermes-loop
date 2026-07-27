@@ -59,7 +59,7 @@ import {
   type LiveGraphWorkflowFeedItem,
   type LiveGraphWorkflowFilter
 } from './session-workflow-inbox'
-import { LiveGraphWorkflowInbox } from './workflow-inbox'
+import { liveGraphTaskCategory, type LiveGraphTaskFilter, LiveGraphWorkflowInbox } from './workflow-inbox'
 
 export const LIVE_GRAPH_KINDS = ['session', 'project', 'workflow', 'task', 'agent', 'artifact'] as const
 export type LiveGraphKind = (typeof LIVE_GRAPH_KINDS)[number]
@@ -1401,6 +1401,7 @@ export function visibleLiveGraph(
     focusId?: string | null
     orphans: boolean
     search: string
+    taskFilter?: LiveGraphTaskFilter
     workflowFilter?: LiveGraphWorkflowFilter
   }
 ): VisibleGraph {
@@ -1417,12 +1418,31 @@ export function visibleLiveGraph(
       ? liveGraphWorkflowComponentNodeIds(graphNodes, graphEdges, options.workflowFilter)
       : null
 
+  const focusedNode = options.focusId ? graphNodes.find(node => liveGraphNodeId(node) === options.focusId) : undefined
+
+  const focusedWorkflowEnvelope =
+    focusedNode && liveGraphNodeKind(focusedNode) === 'workflow' ? liveGraphWorkflowEnvelopeId(focusedNode) : ''
+
   const nodes = graphNodes.filter(node => {
     const id = liveGraphNodeId(node)
     const kind = liveGraphNodeKind(node)
     const workflowTask = kind !== 'task' || !options.workflowFilter || Boolean(liveGraphWorkflowEnvelopeId(node))
 
-    return options.enabledKinds.has(kind) && workflowTask && (!workflowComponentIds || workflowComponentIds.has(id))
+    const focusedWorkflowTask =
+      focusedWorkflowEnvelope && kind === 'task' && liveGraphWorkflowEnvelopeId(node) === focusedWorkflowEnvelope
+
+    const matchingTaskFilter =
+      !focusedWorkflowTask ||
+      !options.taskFilter ||
+      options.taskFilter === 'all' ||
+      liveGraphTaskCategory(node) === options.taskFilter
+
+    return (
+      options.enabledKinds.has(kind) &&
+      workflowTask &&
+      matchingTaskFilter &&
+      (!workflowComponentIds || workflowComponentIds.has(id))
+    )
   })
 
   const nodeIds = new Set(nodes.map(liveGraphNodeId))
@@ -1435,7 +1455,11 @@ export function visibleLiveGraph(
 
   const eligibleNodes = options.orphans
     ? nodes
-    : nodes.filter(node => (neighbors.get(liveGraphNodeId(node))?.size ?? 0) > 0)
+    : nodes.filter(node => {
+        const id = liveGraphNodeId(node)
+
+        return id === options.focusId || (neighbors.get(id)?.size ?? 0) > 0
+      })
 
   const eligibleIds = new Set(eligibleNodes.map(liveGraphNodeId))
   const selectedFocusId = options.focusId && eligibleIds.has(options.focusId) ? options.focusId : null
@@ -1463,16 +1487,12 @@ export function visibleLiveGraph(
       )
     : null
 
-  if (options.focusDepth === 'all' || !selectedFocusId) {
-    for (const id of eligibleIds) {
-      allowedByDepth.add(id)
-    }
-  } else if (workflowScopeIds) {
+  if (workflowScopeIds && (options.taskFilter !== undefined || options.focusDepth !== 'all')) {
     for (const id of workflowScopeIds) {
       allowedByDepth.add(id)
     }
 
-    if (options.focusDepth === 2) {
+    if (options.focusDepth !== 1) {
       for (const id of workflowScopeIds) {
         for (const neighborId of neighbors.get(id) ?? []) {
           const neighbor = eligibleNodesById.get(neighborId)
@@ -1492,6 +1512,10 @@ export function visibleLiveGraph(
           }
         }
       }
+    }
+  } else if (options.focusDepth === 'all' || !selectedFocusId) {
+    for (const id of eligibleIds) {
+      allowedByDepth.add(id)
     }
   } else {
     const pending: Array<{ depth: number; id: string }> = [{ depth: 0, id: selectedFocusId }]
@@ -2431,6 +2455,7 @@ export function LiveGraphCanvas({
   const [denseLod, setDenseLod] = useState<DenseGraphLod>(initialDenseLod)
   const [viewport, setViewport] = useState<Viewport>({ height: 0, width: 0 })
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedWorkflowTaskFilter, setSelectedWorkflowTaskFilter] = useState<LiveGraphTaskFilter>('all')
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [workflowFeedOpen, setWorkflowFeedOpen] = useState(false)
@@ -2485,6 +2510,7 @@ export function LiveGraphCanvas({
 
   const openNodeSelection = useCallback((nodeId: string) => {
     setWorkflowFeedOpen(false)
+    setSelectedWorkflowTaskFilter('all')
     setSelectedId(nodeId)
   }, [])
 
@@ -2635,9 +2661,19 @@ export function LiveGraphCanvas({
         focusId,
         orphans: viewState.orphans,
         search: viewState.search,
+        taskFilter: selectedWorkflowTaskFilter,
         workflowFilter: viewState.workflowFilter
       }),
-    [enabledKinds, focusId, graph, viewState.focusDepth, viewState.orphans, viewState.search, viewState.workflowFilter]
+    [
+      enabledKinds,
+      focusId,
+      graph,
+      selectedWorkflowTaskFilter,
+      viewState.focusDepth,
+      viewState.orphans,
+      viewState.search,
+      viewState.workflowFilter
+    ]
   )
 
   const workflowFeedGraph = useMemo(
@@ -5217,22 +5253,6 @@ export function LiveGraphCanvas({
             className="relative z-20 h-full min-w-[16rem] w-[clamp(16rem,46%,22rem)] shrink-0 overflow-x-hidden overflow-y-auto border-l border-(--stroke-nous) bg-(--ui-bg-elevated) [overflow-wrap:anywhere]"
             data-testid="live-graph-workflow-feed"
           >
-            <div className="flex min-w-0 items-center gap-2 p-3">
-              <Codicon className="shrink-0 text-(--ui-text-tertiary)" name="inbox" />
-              <div className="min-w-0 flex-1 text-[0.625rem] font-medium tracking-wide text-(--ui-text-tertiary) uppercase">
-                {t.liveGraph.workflowFeed}
-              </div>
-              <Tip label={t.common.close}>
-                <Button
-                  aria-label={t.common.close}
-                  onClick={() => setWorkflowFeedOpen(false)}
-                  size="icon-xs"
-                  variant="ghost"
-                >
-                  <Codicon name="close" />
-                </Button>
-              </Tip>
-            </div>
             <LiveGraphSessionWorkflowInbox
               filter={viewState.workflowFilter}
               label={t.liveGraph.workflowFeed}
@@ -5248,35 +5268,40 @@ export function LiveGraphCanvas({
             className="relative z-20 h-full min-w-[16rem] w-[clamp(16rem,46%,22rem)] shrink-0 overflow-x-hidden overflow-y-auto border-l border-(--stroke-nous) bg-(--ui-bg-elevated) [overflow-wrap:anywhere]"
             data-testid="live-graph-selection-inspector"
           >
-            <div className="flex min-w-0 items-start gap-2 p-3">
-              <Codicon
-                className="mt-0.5 shrink-0"
-                name={KIND_ICON[liveGraphNodeKind(selectedNode)]}
-                style={{ color: KIND_COLOR[liveGraphNodeKind(selectedNode)] }}
-              />
-              <div className="min-w-0 max-w-full flex-1">
-                <div className="text-[0.625rem] font-medium tracking-wide text-(--ui-text-tertiary) uppercase">
-                  {t.liveGraph.inspector} · {kindLabels[liveGraphNodeKind(selectedNode)]}
-                </div>
-                {!selectedWorkflowNode && (
+            {!selectedWorkflowNode && (
+              <div className="flex min-w-0 items-start gap-2 p-3">
+                <Codicon
+                  className="mt-0.5 shrink-0"
+                  name={KIND_ICON[liveGraphNodeKind(selectedNode)]}
+                  style={{ color: KIND_COLOR[liveGraphNodeKind(selectedNode)] }}
+                />
+                <div className="min-w-0 max-w-full flex-1">
+                  <div className="text-[0.625rem] font-medium tracking-wide text-(--ui-text-tertiary) uppercase">
+                    {t.liveGraph.inspector} · {kindLabels[liveGraphNodeKind(selectedNode)]}
+                  </div>
                   <div className="mt-1 break-words text-sm leading-5 font-semibold text-(--ui-text-primary)">
                     {liveGraphNodeLabel(selectedNode)}
                   </div>
-                )}
-                <div className="mt-2 flex items-center gap-1.5 text-[0.625rem] text-(--ui-text-tertiary)">
-                  <span
-                    className="size-1.5 rounded-full"
-                    style={{ backgroundColor: statusColor(liveGraphNodeStatus(selectedNode)) }}
-                  />
-                  {localizedStatus(liveGraphNodeStatus(selectedNode))}
+                  <div className="mt-2 flex items-center gap-1.5 text-[0.625rem] text-(--ui-text-tertiary)">
+                    <span
+                      className="size-1.5 rounded-full"
+                      style={{ backgroundColor: statusColor(liveGraphNodeStatus(selectedNode)) }}
+                    />
+                    {localizedStatus(liveGraphNodeStatus(selectedNode))}
+                  </div>
                 </div>
+                <Tip label={t.common.close}>
+                  <Button
+                    aria-label={t.common.close}
+                    onClick={() => setSelectedId(null)}
+                    size="icon-xs"
+                    variant="ghost"
+                  >
+                    <Codicon name="close" />
+                  </Button>
+                </Tip>
               </div>
-              <Tip label={t.common.close}>
-                <Button aria-label={t.common.close} onClick={() => setSelectedId(null)} size="icon-xs" variant="ghost">
-                  <Codicon name="close" />
-                </Button>
-              </Tip>
-            </div>
+            )}
             {!selectedTaskNode && liveGraphNodeDetail(selectedNode) && (
               <p className="m-0 border-t border-(--ui-stroke-tertiary) px-3 py-3 whitespace-pre-wrap text-[0.6875rem] leading-4 text-(--ui-text-secondary)">
                 {liveGraphNodeDetail(selectedNode)}
@@ -5284,7 +5309,9 @@ export function LiveGraphCanvas({
             )}
             {selectedWorkflowNode && (
               <LiveGraphWorkflowInbox
+                filter={selectedWorkflowTaskFilter}
                 key={liveGraphNodeId(selectedWorkflowNode)}
+                onFilterChange={setSelectedWorkflowTaskFilter}
                 onSelectTask={selectWorkflowTask}
                 tasks={selectedWorkflowTasks}
                 workflowScope={liveGraphNodeId(selectedWorkflowNode)}

@@ -311,7 +311,7 @@ export const LiveGraphSessionWorkflowInbox = memo(function LiveGraphSessionWorkf
     <LayoutGroup id={`live-graph-session-workflow-inbox:${sessionScope}`}>
       <div
         aria-label={inboxLabel}
-        className="grid min-w-0 gap-4 border-t border-(--ui-stroke-tertiary) px-3 py-3"
+        className="grid min-w-0 gap-4 px-3 py-3"
         data-testid="live-graph-session-workflow-inbox"
         role="region"
       >
