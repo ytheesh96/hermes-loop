@@ -2573,6 +2573,95 @@ describe('LiveGraphCanvas', () => {
     ).toBe('true')
   })
 
+  it('keeps the workflow feed synchronized with the active-only graph filter', async () => {
+    const filteredGraph: LiveGraphSnapshot = {
+      edges: [
+        {
+          id: 'edge:session-active',
+          kind: 'contains',
+          sourceId: 'session:default:root',
+          targetId: 'workflow:default:board:active'
+        },
+        {
+          id: 'edge:active-task',
+          kind: 'contains',
+          sourceId: 'workflow:default:board:active',
+          targetId: 'task:default:board:active'
+        },
+        {
+          id: 'edge:session-completed',
+          kind: 'contains',
+          sourceId: 'session:default:root',
+          targetId: 'workflow:default:board:completed'
+        },
+        {
+          id: 'edge:completed-task',
+          kind: 'contains',
+          sourceId: 'workflow:default:board:completed',
+          targetId: 'task:default:board:completed'
+        }
+      ],
+      nodes: [
+        { entityId: 'root', id: 'session:default:root', kind: 'session', label: 'Session' },
+        {
+          board: 'board',
+          entityId: 'active',
+          id: 'workflow:default:board:active',
+          kind: 'workflow',
+          label: 'Active workflow',
+          status: 'running',
+          workflowId: 'active'
+        },
+        {
+          board: 'board',
+          entityId: 'active',
+          id: 'task:default:board:active',
+          kind: 'task',
+          label: 'Active task',
+          status: 'running',
+          workflowId: 'active'
+        },
+        {
+          board: 'board',
+          entityId: 'completed',
+          id: 'workflow:default:board:completed',
+          kind: 'workflow',
+          label: 'Completed workflow',
+          status: 'completed',
+          workflowId: 'completed'
+        },
+        {
+          board: 'board',
+          entityId: 'completed',
+          id: 'task:default:board:completed',
+          kind: 'task',
+          label: 'Completed task',
+          status: 'completed',
+          workflowId: 'completed'
+        }
+      ],
+      rootId: 'session:default:root'
+    }
+
+    render(
+      <LiveGraphCanvas
+        graph={filteredGraph}
+        initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, activeOnly: true, focusDepth: 'all' }}
+      />
+    )
+
+    expect(await screen.findByRole('button', { name: /Workflow: Active workflow/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Workflow: Completed workflow/ })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Workflow feed' }))
+
+    const feed = await screen.findByTestId('live-graph-workflow-feed')
+
+    expect(within(feed).getByRole('button', { name: 'View workflow: Active workflow' })).toBeTruthy()
+    expect(within(feed).queryByRole('button', { name: 'View workflow: Completed workflow' })).toBeNull()
+    expect(within(feed).getByRole('button', { name: '0 Completed' })).toBeTruthy()
+  })
+
   it('shows full task details on a single click', async () => {
     const onOpenTask = vi.fn()
 

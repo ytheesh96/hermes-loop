@@ -3464,7 +3464,7 @@ export function LiveGraphCanvas({
   )
 
   const workflowFeedItems = useMemo<LiveGraphWorkflowFeedItem[]>(() => {
-    const nodes = snapshotNodes(graph)
+    const nodes = visible.nodes
 
     const taskCountsByWorkflow = new Map<
       string,
@@ -3510,7 +3510,7 @@ export function LiveGraphCanvas({
         ...(taskCountsByWorkflow.get(liveGraphWorkflowEnvelopeId(node)) || {}),
         node
       }))
-  }, [graph])
+  }, [visible.nodes])
 
   const selectWorkflowTask = useCallback(
     (nodeId: string) => {
