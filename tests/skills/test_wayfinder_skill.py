@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-SKILL = ROOT / "skills" / "software-development" / "wayfinder-pre-spec" / "SKILL.md"
+SKILL = ROOT / "skills" / "software-development" / "wayfinder" / "SKILL.md"
 CASES = ROOT / "evals" / "wayfinder_skill_cases.json"
 EVAL_SCRIPT = ROOT / "scripts" / "eval_wayfinder_skill.py"
 DIMENSIONS = {
@@ -47,34 +47,40 @@ def test_skill_frontmatter_and_trigger_are_specific() -> None:
     match = re.search(r"^---\n(.*?)\n---\n", text, re.DOTALL)
     assert match, "SKILL.md missing YAML frontmatter"
     frontmatter = yaml.safe_load(match.group(1))
-    assert frontmatter["name"] == "wayfinder-pre-spec"
+    assert frontmatter["name"] == "wayfinder"
     assert frontmatter["description"].startswith(
-        "Use when a feature has unresolved product or architecture decisions"
+        "Use when a large, foggy plan needs a durable Loop map."
     )
-    assert len(frontmatter["description"]) <= 1024
+    assert len(frontmatter["description"]) <= 60
+    assert frontmatter["description"].endswith(".")
     assert set(frontmatter["platforms"]) >= {"linux", "macos", "windows"}
 
 
-def test_skill_is_behavioral_and_uses_existing_primitives() -> None:
+def test_skill_is_a_compact_loop_native_wayfinder_map() -> None:
     text = SKILL.read_text(encoding="utf-8")
+    assert len(text) < 7_000, "Wayfinder must remain a compact map, not a policy manual"
+    assert len(text.splitlines()) < 180
+
     for required in (
-        "inspect",
-        "user-owned",
-        "production code",
-        "decision-complete specification",
+        "destination",
+        "Plan, don't do",
+        "Production changes are never part",
+        "shared map",
+        "decision task",
         'delegate_task(mode="loop"',
-        "multi-lane investigation",
-        "entirely in the foreground",
-        "explicitly invoked",
-        "Explicit invocation takes precedence",
-        "Multiple unresolved questions do not by themselves",
-        "One repository supplies evidence for several linked decisions",
-        "runtime records",
-        "ordinary implementation",
-        "incidental",
-        "evidence",
+        "depends_on",
+        "blocks",
+        "frontier",
+        "Not yet specified",
+        "Out of scope",
+        "Research",
+        "Prototype",
+        "Decision",
+        "Task",
+        "foreground",
+        "refer to tasks by title",
     ):
-        assert required in text, f"skill is missing behavioral contract: {required!r}"
+        assert required in text, f"skill is missing Wayfinder map contract: {required!r}"
 
     for native_surface in (
         'mode="wayfinder"',
@@ -117,9 +123,12 @@ def test_boundary_cases_encode_skill_first_not_native_wayfinder() -> None:
     assert by_id["explicit_loop_implementation"]["use_wayfinder"] is False
     assert by_id["explicit_loop_implementation"]["execution_mode"] == "loop"
     assert by_id["durable_wayfinder_research"]["execution_mode"] == "loop"
+    assert by_id["prototype_to_resolve_ui_choice"]["execution_mode"] == "loop"
+    assert by_id["dependent_decision_frontier"]["execution_mode"] == "loop"
     assert by_id["explicit_wayfinder_cross_component_debugging"][
         "execution_mode"
-    ] == ["ephemeral", "loop"]
+    ] == "loop"
+    assert by_id["parallel_research_before_decision"]["execution_mode"] == "loop"
     assert by_id["explicit_wayfinder_cross_component_debugging"][
         "allow_production_changes"
     ] is False
@@ -219,7 +228,7 @@ def test_score_cases_reports_under_and_over_delegation() -> None:
     module = _load_eval_module()
     by_id = {case["id"]: case for case in _raw_cases()}
     cases = [
-        by_id["explicit_wayfinder_brownfield"],
+        by_id["small_bounded_feature"],
         by_id["explicit_wayfinder_cross_component_debugging"],
     ]
     perfect = {
@@ -240,7 +249,7 @@ def test_score_cases_reports_under_and_over_delegation() -> None:
     assert report["delegation_overroutes"] == 0
 
     over = deepcopy(perfect)
-    over["explicit_wayfinder_brownfield"]["execution_mode"] = "ephemeral"
+    over["small_bounded_feature"]["execution_mode"] = "loop"
     report = module.score_cases(cases, [over])
     assert report["execution_mode_mismatches"] == 1
     assert report["delegation_misses"] == 0

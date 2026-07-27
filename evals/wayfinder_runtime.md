@@ -20,7 +20,9 @@ The harness records:
 Four outcome boundaries are checked:
 
 1. `ambiguous_architecture`: `skills_list` → `skill_view` → repository
-   inspection, then a foreground-owned choice; no sandbox mutation.
+   inspection → `delegate_task(mode="loop")`; the durable Wayfinder map returns a
+   workflow identity, keeps the choice foreground-owned, and makes no sandbox
+   mutation.
 2. `clear_implementation`: no Wayfinder tool discovery; a bounded file write in
    the disposable sandbox.
 3. `explicit_loop`: no Wayfinder discovery; `delegate_task(mode="loop")` must

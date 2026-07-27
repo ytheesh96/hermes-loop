@@ -7,7 +7,7 @@
       "use_wayfinder": true,
       "phase": "discovery",
       "evidence_method": "inspect",
-      "execution_mode": "foreground",
+      "execution_mode": "loop",
       "user_decision_owner": true,
       "allow_production_changes": false
     }
@@ -20,7 +20,7 @@
       "use_wayfinder": true,
       "phase": "discovery",
       "evidence_method": "inspect",
-      "execution_mode": "foreground",
+      "execution_mode": "loop",
       "user_decision_owner": true,
       "allow_production_changes": false
     }
@@ -33,7 +33,7 @@
       "use_wayfinder": true,
       "phase": "discovery",
       "evidence_method": "inspect",
-      "execution_mode": "foreground",
+      "execution_mode": "loop",
       "user_decision_owner": true,
       "allow_production_changes": false
     }
@@ -46,7 +46,7 @@
       "use_wayfinder": true,
       "phase": "discovery",
       "evidence_method": "prototype",
-      "execution_mode": "foreground",
+      "execution_mode": "loop",
       "user_decision_owner": true,
       "allow_production_changes": false
     }
@@ -57,22 +57,28 @@
     "category": "positive_ephemeral_research",
     "expected": {
       "use_wayfinder": true,
-      "phase": ["discovery", "research"],
+      "phase": [
+        "discovery",
+        "research"
+      ],
       "evidence_method": "research",
-      "execution_mode": "ephemeral",
+      "execution_mode": "loop",
       "user_decision_owner": true,
       "allow_production_changes": false
     }
   },
   {
     "id": "explicit_wayfinder_cross_component_debugging",
-    "prompt": "/wayfinder-pre-spec I often see duplicate workflow re-entries. Use Ultra effort, inspect the Desktop evidence, trace workflow delivery, session persistence, and UI rendering, find the root cause, and fix it.",
+    "prompt": "/wayfinder I often see duplicate workflow re-entries. Use Ultra effort, inspect the Desktop evidence, trace workflow delivery, session persistence, and UI rendering, find the root cause, and fix it.",
     "category": "positive_cross_component",
     "expected": {
       "use_wayfinder": true,
-      "phase": ["discovery", "research"],
+      "phase": [
+        "discovery",
+        "research"
+      ],
       "evidence_method": "inspect",
-      "execution_mode": ["ephemeral", "loop"],
+      "execution_mode": "loop",
       "user_decision_owner": false,
       "allow_production_changes": false
     }
@@ -83,8 +89,14 @@
     "category": "positive_durable",
     "expected": {
       "use_wayfinder": true,
-      "phase": ["discovery", "research"],
-      "evidence_method": ["inspect", "research"],
+      "phase": [
+        "discovery",
+        "research"
+      ],
+      "evidence_method": [
+        "inspect",
+        "research"
+      ],
       "execution_mode": "loop",
       "user_decision_owner": true,
       "allow_production_changes": false
@@ -98,7 +110,7 @@
       "use_wayfinder": true,
       "phase": "discovery",
       "evidence_method": "inspect",
-      "execution_mode": "foreground",
+      "execution_mode": "loop",
       "user_decision_owner": true,
       "allow_production_changes": false
     }
@@ -111,7 +123,7 @@
       "use_wayfinder": true,
       "phase": "discovery",
       "evidence_method": "inspect",
-      "execution_mode": "foreground",
+      "execution_mode": "loop",
       "user_decision_owner": true,
       "allow_production_changes": false
     }

@@ -29,6 +29,19 @@ def test_runtime_cases_cover_the_four_outcome_boundaries() -> None:
     assert all(case.expected for case in module.CASES)
 
 
+def test_runtime_fresh_foreground_env_clears_delegated_lineage(monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", "1")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_parent")
+    monkeypatch.setenv("HERMES_WORKFLOW_ID", "wf_parent")
+
+    env = module._fresh_foreground_env()
+
+    assert "HERMES_DELEGATED_CHILD_CONTEXT" not in env
+    assert "HERMES_KANBAN_TASK" not in env
+    assert "HERMES_WORKFLOW_ID" not in env
+
+
 def test_trace_evaluator_requires_fresh_runtime_and_inspectable_tools() -> None:
     module = _load_module()
     report = module.evaluate_trace(
@@ -37,10 +50,11 @@ def test_trace_evaluator_requires_fresh_runtime_and_inspectable_tools() -> None:
             "fresh_process": True,
             "returncode": 0,
             "session_id": "session-1",
+            "workflow_id": "wf-wayfinder",
             "requests": [
                 {
                     "messages": [
-                        {"role": "system", "content": "wayfinder-pre-spec"},
+                        {"role": "system", "content": "<available_skills>\n- wayfinder: durable decision map\n</available_skills>"},
                         {"role": "user", "content": module.CASES[0].prompt},
                     ],
                     "tools": [{"function": {"name": "skills_list"}}],
@@ -57,6 +71,12 @@ def test_trace_evaluator_requires_fresh_runtime_and_inspectable_tools() -> None:
                 {"name": "skill_view", "phase": "result"},
                 {"name": "read_file", "phase": "call"},
                 {"name": "read_file", "phase": "result"},
+                {
+                    "name": "delegate_task",
+                    "phase": "call",
+                    "arguments": {"mode": "loop"},
+                },
+                {"name": "delegate_task", "phase": "result"},
             ],
             "hook_events": [{"tool_name": "read_file", "duration_ms": 1, "status": "ok"}],
             "sandbox_changed": False,
@@ -67,6 +87,7 @@ def test_trace_evaluator_requires_fresh_runtime_and_inspectable_tools() -> None:
     assert report["checks"]["skill_discovery"] is True
     assert report["checks"]["tool_trace"] is True
     assert report["checks"]["production_unchanged"] is True
+    assert report["checks"]["loop_route"] is True
 
 
 def test_ambiguous_boundary_requires_inspection_after_wayfinder_discovery() -> None:

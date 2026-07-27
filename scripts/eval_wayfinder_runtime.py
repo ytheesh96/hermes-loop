@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL_SOURCE = ROOT / "skills" / "software-development" / "wayfinder-pre-spec"
+SKILL_SOURCE = ROOT / "skills" / "software-development" / "wayfinder"
+SKILL_NAME = "wayfinder"
 MODEL = "local-wayfinder"
 
 
@@ -138,10 +139,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if request_number == 1:
                 return _completion(calls=[_tool_call("skills_list", {}, "call-skills")])
             if request_number == 2:
-                return _completion(calls=[_tool_call("skill_view", {"name": "wayfinder-pre-spec"}, "call-view")])
+                return _completion(calls=[_tool_call("skill_view", {"name": SKILL_NAME}, "call-view")])
             if request_number == 3:
                 return _completion(calls=[_tool_call("read_file", {"path": "README.md"}, "call-read")])
-            return _completion(content="I inspected the repository first. The choice between session cookies, JWTs, and passkeys changes security and product behavior; which option should the foreground approve? No production change was made.")
+            if request_number == 4:
+                return _completion(calls=[_tool_call("delegate_task", {
+                    "mode": "loop",
+                    "tasks": [{
+                        "id": "authentication-boundary",
+                        "title": "Choose the authentication boundary",
+                        "context": "Wayfinder decision task: inspect the viable authentication boundaries and block rather than choosing any human-owned trade-off.",
+                    }],
+                    "context": "Destination: a decision-complete authentication architecture. Planning only; do not implement production behavior.",
+                }, "call-wayfinder-map")])
+            return _completion(content="I inspected the repository and charted the authentication decision as a durable Loop map. The foreground retains the final choice; no production change was made.")
         if case.expected == "loop":
             if request_number == 1:
                 return _completion(calls=[_tool_call("delegate_task", {"mode": "loop", "tasks": [{"id": "runtime-artifact", "title": "Implement the approved runtime artifact change"}], "context": "Approved implementation; preserve the sandbox boundary and verify the result."}, "call-loop")])
@@ -216,8 +227,8 @@ def _trace_payload(requests: list[dict[str, Any]], response_tools: list[list[dic
         system = next((m.get("content", "") for m in body.get("messages", []) if m.get("role") == "system"), "")
         compact.append({
             "model": body.get("model"),
-            "system_contains_wayfinder_skill": "wayfinder-pre-spec" in str(system),
-            "system_excerpt": str(system)[max(0, str(system).find("wayfinder-pre-spec") - 120):str(system).find("wayfinder-pre-spec") + 300] if "wayfinder-pre-spec" in str(system) else "",
+            "system_contains_wayfinder_skill": "- wayfinder:" in str(system),
+            "system_excerpt": str(system)[max(0, str(system).find("- wayfinder:") - 120):str(system).find("- wayfinder:") + 300] if "- wayfinder:" in str(system) else "",
             "message_roles": [m.get("role") for m in body.get("messages", [])],
             "tool_names": [t.get("function", {}).get("name") for t in body.get("tools", []) if isinstance(t, dict)],
             "response_tool_calls": tools,
@@ -245,7 +256,7 @@ def _expected_checks(case: Case, evidence: dict[str, Any], events: list[dict[str
         "production_unchanged": evidence.get("sandbox_changed") is False if case.expected == "wayfinder" or case.expected == "loop" else True,
         "foreground_choice": "choice" in evidence.get("final_text", "").lower() if case.expected == "wayfinder" else True,
         "bounded_write": case.expected != "implementation" or evidence.get("sandbox_changed") is True,
-        "loop_route": case.expected != "loop" or (
+        "loop_route": case.expected not in {"loop", "wayfinder"} or (
             bool(evidence.get("workflow_id"))
             and any(
                 event.get("name") == "delegate_task"
@@ -257,7 +268,12 @@ def _expected_checks(case: Case, evidence: dict[str, Any], events: list[dict[str
     }
     if case.expected == "wayfinder":
         call_names = [event.get("name") for event in calls]
-        checks["inspect_before_choice"] = call_names[:3] == ["skills_list", "skill_view", "read_file"]
+        checks["inspect_before_choice"] = call_names[:4] == [
+            "skills_list",
+            "skill_view",
+            "read_file",
+            "delegate_task",
+        ]
     if case.id == "minor_ambiguity":
         checks["inspected_convention"] = names[:2] == ["read_file", "read_file"] or "read_file" in names
         checks["foreground_only"] = not any(name in {"delegate_task", "skills_list", "skill_view"} for name in names)
@@ -280,13 +296,31 @@ def blocker_report(command: list[str], *, returncode: int, stderr: str, home: st
     })
 
 
+def _fresh_foreground_env() -> dict[str, str]:
+    """Build an evaluator env with no inherited worker/delegate lineage."""
+
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("HERMES_KANBAN_")
+        and not key.startswith("HERMES_WORKFLOW_")
+        and key
+        not in {
+            "HERMES_DELEGATED_CHILD_CONTEXT",
+            "TERMINAL_CWD",
+            "HERMES_SESSION_KEY",
+            "HERMES_TASK_ID",
+        }
+    }
+
+
 def _run_case(case: Case, timeout: int) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix=f".hermes-wayfinder-{case.id}-", dir=ROOT) as tmp:
         root = Path(tmp)
         home = root / "hermes-home"
         sandbox = root / "sandbox"
         (home / "skills" / "software-development").mkdir(parents=True)
-        shutil.copytree(SKILL_SOURCE, home / "skills" / "software-development" / "wayfinder-pre-spec")
+        shutil.copytree(SKILL_SOURCE, home / "skills" / "software-development" / SKILL_NAME)
         trace_path = home / "tool-hooks.jsonl"
         plugin_dir = home / "plugins" / "eval_trace"
         plugin_dir.mkdir(parents=True)
@@ -332,13 +366,7 @@ def _run_case(case: Case, timeout: int) -> dict[str, Any]:
         )
         usage = home / "usage.json"
         command = [sys.executable, "-m", "hermes_cli.main", "--provider", "custom:local", "--model", MODEL, "-z", case.prompt, "--toolsets", "all", "--usage-file", str(usage)]
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith("HERMES_KANBAN_")
-            and not key.startswith("HERMES_WORKFLOW_")
-            and key not in {"TERMINAL_CWD", "HERMES_SESSION_KEY", "HERMES_TASK_ID"}
-        }
+        env = _fresh_foreground_env()
         env.update({
             "HERMES_HOME": str(home),
             "PYTHONPATH": str(ROOT),

@@ -22,9 +22,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = ROOT / "evals" / "wayfinder_skill_cases.json"
-DEFAULT_SKILL = (
-    ROOT / "skills" / "software-development" / "wayfinder-pre-spec" / "SKILL.md"
-)
+DEFAULT_SKILL = ROOT / "skills" / "software-development" / "wayfinder" / "SKILL.md"
 
 DIMENSIONS = (
     "use_wayfinder",
