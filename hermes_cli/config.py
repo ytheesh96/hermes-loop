@@ -2344,10 +2344,11 @@ DEFAULT_CONFIG = {
     # from delegation.max_concurrent_children (which limits ephemeral agents).
     "loop": {
         "enabled": True,
-        # Route substantive foreground turns whose canonical reasoning intent
-        # is ``ultra`` through one explicit Loop planning call.  This is read
-        # before provider adapters clamp effort for the wire protocol.  Set to
-        # ``off`` to preserve ordinary foreground behavior.
+        # In ``ultra`` reasoning, hard-route only explicit user requests for
+        # Hermes' durable Loop. Ordinary substantive turns remain under
+        # foreground discretion and may delegate after assessment/planning.
+        # This is read before provider adapters clamp wire-level effort. Set to
+        # ``off`` to disable the explicit-Loop first-round guard as well.
         "foreground_routing": "ultra",
         "max_graph_nodes": 32,
         # Durable JIT-specification retry/lease windows. The lease prevents two

@@ -86,7 +86,29 @@ class TestRunConversationCodexPath:
         assert result["codex_thread_id"] == "thread-stub-1"
         assert result["codex_turn_id"] == "turn-stub-1"
 
-    def test_canonical_ultra_codex_turn_enforces_loop_before_app_server(
+    def test_canonical_ultra_codex_turn_preserves_foreground_discretion(
+        self, fake_session, monkeypatch
+    ):
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+        agent = _make_codex_agent()
+        agent.reasoning_config = {"enabled": True, "effort": "ultra"}
+        calls = []
+        monkeypatch.setattr(
+            "tools.delegate_tool.delegate_task",
+            lambda **kwargs: calls.append(kwargs),
+        )
+
+        with patch.object(agent, "_spawn_background_review", return_value=None):
+            result = agent.run_conversation("Implement the migration and verify the rollout.")
+
+        assert calls == []
+        assert result["completed"] is True
+        assert result["final_response"] == (
+            "echo: Implement the migration and verify the rollout."
+        )
+        assert result["codex_thread_id"] == "thread-stub-1"
+
+    def test_explicit_loop_codex_turn_enforces_before_app_server(
         self, fake_session, monkeypatch
     ):
         monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
@@ -100,7 +122,9 @@ class TestRunConversationCodexPath:
 
         monkeypatch.setattr("tools.delegate_tool.delegate_task", delegate)
         with patch.object(agent, "_spawn_background_review", return_value=None):
-            result = agent.run_conversation("Implement the migration and verify the rollout.")
+            result = agent.run_conversation(
+                "Use Loop to implement the migration and verify the rollout."
+            )
 
         assert len(calls) == 1
         assert calls[0]["mode"] == "loop"
@@ -108,7 +132,32 @@ class TestRunConversationCodexPath:
         assert result["completed"] is True
         assert result["codex_thread_id"] == "thread-stub-1"
 
-    def test_canonical_ultra_codex_turn_fails_closed_if_loop_cannot_be_enforced(
+    def test_canonical_ultra_learn_turn_stays_in_foreground(
+        self, fake_session, monkeypatch
+    ):
+        from agent.learn_prompt import build_learn_prompt
+
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+        agent = _make_codex_agent()
+        agent.reasoning_config = {"enabled": True, "effort": "ultra"}
+        calls = []
+        monkeypatch.setattr(
+            "tools.delegate_tool.delegate_task",
+            lambda **kwargs: calls.append(kwargs),
+        )
+        learn_prompt = build_learn_prompt(
+            "Review the workflow and distill it into a reusable skill."
+        )
+
+        with patch.object(agent, "_spawn_background_review", return_value=None):
+            result = agent.run_conversation(learn_prompt)
+
+        assert calls == []
+        assert result["completed"] is True
+        assert result["final_response"] == f"echo: {learn_prompt}"
+        assert result["codex_thread_id"] == "thread-stub-1"
+
+    def test_explicit_loop_codex_turn_fails_closed_if_loop_cannot_be_enforced(
         self, fake_session, monkeypatch
     ):
         monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
@@ -119,7 +168,9 @@ class TestRunConversationCodexPath:
             lambda **kwargs: '{"error":"planning unavailable"}',
         )
         with patch.object(agent, "_run_codex_app_server_turn") as app_server:
-            result = agent.run_conversation("Implement the migration and verify the rollout.")
+            result = agent.run_conversation(
+                "Use Loop to implement the migration and verify the rollout."
+            )
 
         assert result["completed"] is False
         assert result["partial"] is True

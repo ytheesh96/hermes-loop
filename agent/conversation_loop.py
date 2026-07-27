@@ -1007,7 +1007,7 @@ def run_conversation(
     _foreground_loop_required = _foreground_loop_decision.route
     if _foreground_loop_required:
         logger.info(
-            "Foreground ultra request routed through Loop planning (%s, session=%s)",
+            "Explicit foreground Loop request routed through durable planning (%s, session=%s)",
             _foreground_loop_decision.reason,
             getattr(agent, "session_id", None) or "-",
         )
@@ -5728,11 +5728,11 @@ def run_conversation(
                         if tc.function.name in agent.valid_tool_names
                     ]
 
-                # A canonical ultra foreground turn cannot silently degrade
-                # into an ordinary answer or ephemeral delegation.  Validate
-                # the first model round's Loop plan before any tool side effect
-                # runs; malformed plans receive matching tool results and are
-                # retried with the named-tool guard still active.
+                # An explicit user request for durable Loop cannot silently
+                # degrade into an ordinary answer or ephemeral delegation.
+                # Validate its first model round before any tool side effect;
+                # malformed plans receive matching tool results and retry with
+                # the named-tool guard still active.
                 if _foreground_loop_required:
                     _loop_plan_error = "the first round did not call delegate_task(mode='loop')"
                     _loop_plan_valid = False

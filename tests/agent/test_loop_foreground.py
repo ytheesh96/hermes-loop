@@ -13,7 +13,7 @@ class Agent:
     _foreground_loop_routed = False
 
 
-def test_ultra_substantive_foreground_request_routes_without_prompt_mutation(monkeypatch):
+def test_ultra_substantive_foreground_request_preserves_foreground_discretion(monkeypatch):
     from agent.loop_foreground import decide_foreground_loop_route
 
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
@@ -23,8 +23,8 @@ def test_ultra_substantive_foreground_request_routes_without_prompt_mutation(mon
         config={"loop": {"enabled": True, "foreground_routing": "ultra"}},
     )
 
-    assert decision.route is True
-    assert decision.reason == "canonical_ultra_substantive_foreground_request"
+    assert decision.route is False
+    assert decision.reason == "foreground_discretion"
 
 
 def test_informational_status_and_diagnostic_questions_bypass_loop(monkeypatch):
@@ -46,18 +46,55 @@ def test_informational_status_and_diagnostic_questions_bypass_loop(monkeypatch):
         assert decision.reason == "informational_question"
 
 
-def test_substantive_question_still_routes_through_loop(monkeypatch):
+def test_foreground_owned_requests_bypass_loop(monkeypatch):
+    from agent.learn_prompt import build_learn_prompt
+    from agent.loop_foreground import decide_foreground_loop_route
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    for message in (
+        build_learn_prompt("Review the workflow and distill it into a reusable skill."),
+        "progress update",
+        "Review the worker evidence and decide whether the implementation is accepted.",
+        "Can you review the worker evidence and decide whether it is accepted?",
+        "Review the test results and summarize the failures.",
+        "How should we implement the migration and verify the rollout?",
+    ):
+        decision = decide_foreground_loop_route(
+            Agent(),
+            message,
+            config={"loop": {"enabled": True, "foreground_routing": "ultra"}},
+        )
+
+        assert decision.route is False
+        assert decision.reason == "foreground_owned_request"
+
+
+def test_explicit_loop_request_routes_even_for_foreground_owned_work(monkeypatch):
     from agent.loop_foreground import decide_foreground_loop_route
 
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     decision = decide_foreground_loop_route(
         Agent(),
-        "How should we implement the migration and verify the rollout?",
+        "Use Loop to review the worker evidence and prepare a progress update.",
         config={"loop": {"enabled": True, "foreground_routing": "ultra"}},
     )
 
     assert decision.route is True
-    assert decision.reason == "canonical_ultra_substantive_foreground_request"
+    assert decision.reason == "explicit_loop_request"
+
+
+def test_foreground_review_with_requested_code_change_preserves_discretion(monkeypatch):
+    from agent.loop_foreground import decide_foreground_loop_route
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    decision = decide_foreground_loop_route(
+        Agent(),
+        "Review the failure and fix the bug.",
+        config={"loop": {"enabled": True, "foreground_routing": "ultra"}},
+    )
+
+    assert decision.route is False
+    assert decision.reason == "foreground_discretion"
 
 
 def test_foreground_loop_policy_has_explicit_bypasses(monkeypatch):

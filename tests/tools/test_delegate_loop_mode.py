@@ -317,6 +317,9 @@ def test_delegate_task_loop_schema_and_prompt_explain_live_graph_ownership():
     assert "tasks[].blocks" in _build_tasks_param_description()
     assert "You own workflow decisions and graph mutation" in KANBAN_FOREGROUND_GUIDANCE
     assert '`delegate_task(mode="loop", tasks=[...])`' in KANBAN_FOREGROUND_GUIDANCE
+    assert "Foreground first assesses and plans" in KANBAN_FOREGROUND_GUIDANCE
+    assert "Only an explicit user request for Loop is hard-routed" in KANBAN_FOREGROUND_GUIDANCE
+    assert "must not create a Loop root" in KANBAN_FOREGROUND_GUIDANCE
     assert "`tasks[].blocks`" in KANBAN_FOREGROUND_GUIDANCE
     assert "`kanban_create(...)`" not in KANBAN_FOREGROUND_GUIDANCE
 

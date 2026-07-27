@@ -1,0 +1,110 @@
+[
+  {
+    "id": "learn_command",
+    "prompt": "/learn Review this debugging workflow and save the reusable lessons.",
+    "hard_route": false,
+    "category": "foreground_command"
+  },
+  {
+    "id": "progress_update",
+    "prompt": "Give me a progress update on the migration.",
+    "hard_route": false,
+    "category": "status"
+  },
+  {
+    "id": "evidence_review",
+    "prompt": "Review the worker evidence and decide whether to accept it.",
+    "hard_route": false,
+    "category": "review"
+  },
+  {
+    "id": "implementation_plan",
+    "prompt": "How should we implement the migration and verify the rollout?",
+    "hard_route": false,
+    "category": "planning"
+  },
+  {
+    "id": "small_fix",
+    "prompt": "Fix the typo in the README.",
+    "hard_route": false,
+    "category": "bounded_execution"
+  },
+  {
+    "id": "diagnostic",
+    "prompt": "Investigate why the deployment check is failing.",
+    "hard_route": false,
+    "category": "analysis"
+  },
+  {
+    "id": "writing",
+    "prompt": "Write a tailored cover letter for this job posting.",
+    "hard_route": false,
+    "category": "content"
+  },
+  {
+    "id": "test_summary",
+    "prompt": "Run the focused tests and summarize any failures.",
+    "hard_route": false,
+    "category": "bounded_execution"
+  },
+  {
+    "id": "substantive_implementation",
+    "prompt": "Implement OAuth token refresh and verify it with tests.",
+    "hard_route": false,
+    "category": "substantive_execution"
+  },
+  {
+    "id": "feature_build",
+    "prompt": "Build a settings screen with validation and tests.",
+    "hard_route": false,
+    "category": "substantive_execution"
+  },
+  {
+    "id": "research",
+    "prompt": "Research current best practices and recommend an approach.",
+    "hard_route": false,
+    "category": "research"
+  },
+  {
+    "id": "programming_loop",
+    "prompt": "Use a loop to retry the HTTP request three times.",
+    "hard_route": false,
+    "category": "near_negative"
+  },
+  {
+    "id": "generic_delegate",
+    "prompt": "Delegate this task to a worker and report back.",
+    "hard_route": false,
+    "category": "near_negative"
+  },
+  {
+    "id": "explicit_opt_out",
+    "prompt": "Implement the migration without Loop delegation.",
+    "hard_route": false,
+    "category": "opt_out"
+  },
+  {
+    "id": "explicit_loop",
+    "prompt": "Use Loop to implement the migration and verify the rollout.",
+    "hard_route": true,
+    "category": "explicit_loop"
+  },
+  {
+    "id": "hermes_loop",
+    "prompt": "Run this release migration through Hermes Loop.",
+    "hard_route": true,
+    "category": "explicit_loop"
+  },
+  {
+    "id": "durable_loop",
+    "prompt": "Use a durable Loop for this multi-stage migration.",
+    "hard_route": true,
+    "category": "explicit_loop"
+  },
+  {
+    "id": "create_loop_workflow",
+    "prompt": "Create a durable Loop workflow for the release.",
+    "hard_route": true,
+    "category": "explicit_loop"
+  }
+]

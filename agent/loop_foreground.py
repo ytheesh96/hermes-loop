@@ -24,6 +24,11 @@ _SUBSTANTIVE_ACTION_RE = re.compile(
     r"test|update|verify|write)\b"
 )
 
+_EXECUTION_ACTION_RE = re.compile(
+    r"\b(?:add|build|change|configure|create|delete|deploy|develop|execute|"
+    r"fix|implement|migrate|refactor|remove|update|write)\b"
+)
+
 
 @dataclass(frozen=True)
 class ForegroundLoopDecision:
@@ -40,6 +45,57 @@ def _config_value(config: Mapping[str, Any] | None, key: str, default: Any) -> A
 
 def _has_substantive_action(text: str) -> bool:
     return bool(_SUBSTANTIVE_ACTION_RE.search(text.lower()))
+
+
+def _is_learn_request(text: str) -> bool:
+    """Recognize the canonical /learn prompt before its action-heavy body."""
+    return bool(re.match(r"^\s*(?:\[/learn\]|/learn(?:\s|$))", text, re.IGNORECASE))
+
+
+def _is_explicit_loop_request(text: str) -> bool:
+    """Keep an explicit user request for durable Loop routing authoritative."""
+    stripped = text.strip()
+    normalized = text.lower().strip()
+    return bool(
+        re.search(
+            r"^(?:(?i:please)\s+)?(?i:use|start|run|create)\s+"
+            r"(?:(?i:hermes)\s+)?Loop\b",
+            stripped,
+        )
+        or re.search(
+            r"\b(?i:through|via)\s+(?:(?i:the)\s+)?"
+            r"(?:(?i:hermes)\s+)?Loop\b",
+            stripped,
+        )
+        or re.search(
+            r"^(?:please\s+)?(?:use|start|run|create)\s+(?:a\s+)?durable\s+loop\b",
+            normalized,
+        )
+        or re.search(
+            r"\b(?:through|via)\s+(?:(?:a|the)\s+)?durable\s+loop\b",
+            normalized,
+        )
+    )
+
+
+def _is_foreground_owned_request(text: str) -> bool:
+    """Return True for planning, reporting, and review that stay foreground-local."""
+    normalized = text.lower().strip()
+    if re.match(
+        r"^(?:please\s+)?(?:(?:give|provide|show|share)\s+(?:me\s+)?)?"
+        r"(?:a\s+)?(?:progress|status)(?:\s+(?:update|report))?\b",
+        normalized,
+    ):
+        return True
+    if re.match(r"^(?:how|what|which)\b.*\bshould\b", normalized):
+        return True
+    if re.match(
+        r"^(?:(?:please\s+)|(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?))?"
+        r"(?:assess|plan|review|summarize|synthesi[sz]e)\b",
+        normalized,
+    ) and not _EXECUTION_ACTION_RE.search(normalized):
+        return True
+    return False
 
 
 def _is_informational_question(text: str) -> bool:
@@ -186,14 +242,20 @@ def decide_foreground_loop_route(
         return ForegroundLoopDecision(False, "loop_tools_unavailable")
     if _is_opt_out(text):
         return ForegroundLoopDecision(False, "request_opt_out")
-    if _is_informational_question(text):
-        return ForegroundLoopDecision(False, "informational_question")
+    if _is_learn_request(text):
+        return ForegroundLoopDecision(False, "foreground_owned_request")
+    if _is_explicit_loop_request(text):
+        return ForegroundLoopDecision(True, "explicit_loop_request")
     if _is_clarification_dependency(text):
         return ForegroundLoopDecision(False, "clarification_dependency")
+    if _is_foreground_owned_request(text):
+        return ForegroundLoopDecision(False, "foreground_owned_request")
+    if _is_informational_question(text):
+        return ForegroundLoopDecision(False, "informational_question")
     if _is_trivial_or_single_step(text):
         return ForegroundLoopDecision(False, "trivial_or_single_step")
 
-    return ForegroundLoopDecision(True, "canonical_ultra_substantive_foreground_request")
+    return ForegroundLoopDecision(False, "foreground_discretion")
 
 
 def foreground_loop_tool_choice(agent: Any) -> dict[str, Any] | str | None:
@@ -246,14 +308,14 @@ def validate_loop_plan_arguments(arguments: Any) -> tuple[bool, str]:
 
 
 def enforce_foreground_loop_plan(agent: Any, user_message: Any) -> tuple[bool, str]:
-    """Create the one required foreground Loop boundary.
+    """Create the Loop boundary explicitly requested by the user.
 
-    The normal Hermes conversation loop enforces this boundary by requiring
-    the first model round to call ``delegate_task(mode="loop")``.  The Codex
-    app-server runtime does not pass through that model-tool loop, so it must
-    use the same foreground tool directly before handing the turn to Codex.
-    This keeps the policy model-agnostic and fail-closed without downgrading
-    or silently bypassing the selected app-server runtime.
+    The normal Hermes conversation loop enforces an explicit durable-Loop
+    request by requiring its first model round to call
+    ``delegate_task(mode="loop")``. The Codex app-server runtime does not pass
+    through that model-tool loop, so it must use the same foreground tool
+    directly before handing the turn to Codex. Ordinary substantive requests
+    never enter this function; they remain under foreground discretion.
     """
     if getattr(agent, "_foreground_loop_plan_attempted", False):
         return False, "foreground Loop planning was already attempted for this turn"

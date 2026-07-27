@@ -112,10 +112,14 @@ class TestGuidanceConstants:
             in KANBAN_FOREGROUND_GUIDANCE
         )
         assert "`kanban_create(...)`" not in KANBAN_FOREGROUND_GUIDANCE
-        assert "directly in the first model round" in KANBAN_FOREGROUND_GUIDANCE
-        assert "built-in foreground contract is complete" in (
+        assert "Foreground first assesses and plans" in KANBAN_FOREGROUND_GUIDANCE
+        assert "directly in the first model round" not in KANBAN_FOREGROUND_GUIDANCE
+        assert "Only an explicit user request for Loop is hard-routed" in (
             KANBAN_FOREGROUND_GUIDANCE
         )
+        assert "`/learn`" in KANBAN_FOREGROUND_GUIDANCE
+        assert "progress/status requests" in KANBAN_FOREGROUND_GUIDANCE
+        assert "must not create a Loop root" in KANBAN_FOREGROUND_GUIDANCE
         assert "do not load skills, related recipes" in KANBAN_FOREGROUND_GUIDANCE
         assert "adjacent Kanban/Hermes guidance" in KANBAN_FOREGROUND_GUIDANCE
         assert "unless the direct native call is blocked" in (

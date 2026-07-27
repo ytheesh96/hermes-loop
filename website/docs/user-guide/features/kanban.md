@@ -239,11 +239,12 @@ kanban:
   dispatch_interval_seconds: 60    # default
 ```
 
-### Explicit Ultra foreground routing
+### Ultra foreground discretion and explicit Loop routing
 
-Foreground sessions can opt into a durable Loop planning boundary by keeping
-the canonical reasoning effort at `ultra` (the provider adapter may still
-clamp the wire-level effort to the provider's supported value). The default
+At canonical reasoning effort `ultra`, foreground sessions keep authority over
+ordinary requests while supporting a fail-closed boundary when the user
+explicitly asks for Hermes' durable Loop. The provider adapter may still clamp
+the wire-level reasoning effort to the provider's supported value. The default
 profile configuration is:
 
 ```yaml
@@ -253,26 +254,30 @@ loop:
   foreground_routing: ultra
 ```
 
-With this setting, a substantive actionable request in an eligible foreground
-session has a single required first model round: the model must plan the work
-and call `delegate_task(mode: "loop")` with a goal/tasks packet plus context
-that states boundaries and acceptance criteria. The existing Loop service and
-dispatcher then own durable graph specification, dependency routing, and
-worker execution. `auxiliary.kanban_decomposer` only normalizes and routes the
-foreground-authored skeleton; it does not replace the foreground plan or
-review its evidence.
+With this setting, substantive wording alone does **not** create durable work.
+The foreground first assesses and plans, then may delegate a concrete bounded
+implementation, research, testing, or independent-verification lane when a
+worker provides genuine leverage. Planning, progress/status reporting,
+evidence review, `/learn`, and ordinary direct work remain in the foreground.
 
-When `codex_app_server` is selected, the same boundary is enforced by a
-model-agnostic Hermes `delegate_task(mode: "loop")` preflight before the Codex
-subprocess receives the turn. If that preflight cannot safely dispatch a
-workflow, Hermes fails closed and does not silently downgrade or bypass the
-selected Codex runtime.
+Only an explicit request such as “Use Loop…” or “run this through Hermes Loop”
+is hard-routed. Its first model round must call `delegate_task(mode: "loop")`
+with a goal/tasks packet plus context that states boundaries and acceptance
+criteria. The existing Loop service and dispatcher then own durable graph
+specification, dependency routing, and worker execution.
+`auxiliary.kanban_decomposer` only normalizes and routes the foreground-authored
+skeleton; it does not replace foreground planning or evidence review.
 
-The policy is intentionally bypassed for greetings and deterministic
-single-step requests, real clarification/input dependencies, an active Loop
-workflow, dispatcher workers, delegated children, internal completion/boundary
-wakes, unavailable Loop tools, and an explicit request opt-out. To preserve
-ordinary foreground behavior, set the policy off in the active profile:
+When `codex_app_server` is selected, that same explicit user request is enforced
+by a model-agnostic Hermes `delegate_task(mode: "loop")` preflight before the
+Codex subprocess receives the turn. If the explicitly requested workflow cannot
+safely dispatch, Hermes fails closed and does not silently downgrade or bypass
+the selected Codex runtime. Ordinary substantive requests go directly to Codex.
+
+The runtime guard is also bypassed for an active Loop workflow, dispatcher
+workers, delegated children, internal completion/boundary wakes, unavailable
+Loop tools, and an explicit request opt-out. To disable even the explicit-Loop
+first-round guard in the active profile:
 
 ```yaml
 loop:
@@ -291,7 +296,8 @@ Verification commands:
 # Inspect the active profile's merged settings.
 hermes config get loop.foreground_routing
 
-# Run the focused policy and Loop tests (the wrapper preserves CI parity).
+# Run the deterministic routing eval and focused policy tests.
+./venv/bin/python scripts/eval_foreground_loop_routing.py --enforce
 scripts/run_tests.sh tests/agent/test_loop_foreground.py tests/tools/test_delegate_loop_mode.py
 ```
 
