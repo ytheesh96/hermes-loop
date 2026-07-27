@@ -1426,7 +1426,7 @@ export function visibleLiveGraph(
   const focusedWorkflowEnvelope =
     focusedNode && liveGraphNodeKind(focusedNode) === 'workflow' ? liveGraphWorkflowEnvelopeId(focusedNode) : ''
 
-  const nodes = graphNodes.filter(node => {
+  const candidateNodes = graphNodes.filter(node => {
     const id = liveGraphNodeId(node)
     const kind = liveGraphNodeKind(node)
     const workflowTask = kind !== 'task' || !options.workflowFilter || Boolean(liveGraphWorkflowEnvelopeId(node))
@@ -1440,24 +1440,46 @@ export function visibleLiveGraph(
       options.taskFilter === 'all' ||
       liveGraphTaskCategory(node) === options.taskFilter
 
-    const matchingGlobalTaskFilter =
-      kind !== 'task' ||
-      !options.globalTaskFilter ||
-      options.globalTaskFilter === 'all' ||
-      liveGraphTaskCategory(node) === options.globalTaskFilter
-
     return (
       options.enabledKinds.has(kind) &&
       workflowTask &&
       matchingTaskFilter &&
-      matchingGlobalTaskFilter &&
       (!workflowComponentIds || workflowComponentIds.has(id))
     )
   })
 
+  const candidateNodeIds = new Set(candidateNodes.map(liveGraphNodeId))
+
+  const candidateEdges = graphEdges.filter(
+    edge => candidateNodeIds.has(liveGraphEdgeSource(edge)) && candidateNodeIds.has(liveGraphEdgeTarget(edge))
+  )
+
+  const matchingGlobalTaskIds =
+    options.globalTaskFilter && options.globalTaskFilter !== 'all'
+      ? new Set(
+          candidateNodes
+            .filter(
+              node => liveGraphNodeKind(node) === 'task' && liveGraphTaskCategory(node) === options.globalTaskFilter
+            )
+            .map(liveGraphNodeId)
+        )
+      : null
+
+  const connectedTaskIds = matchingGlobalTaskIds
+    ? new Set(
+        analyzeLiveGraphTopology(candidateNodes, candidateEdges)
+          .components.filter(component => component.some(id => matchingGlobalTaskIds.has(id)))
+          .flat()
+      )
+    : null
+
+  const nodes = connectedTaskIds
+    ? candidateNodes.filter(node => connectedTaskIds.has(liveGraphNodeId(node)))
+    : candidateNodes
+
   const nodeIds = new Set(nodes.map(liveGraphNodeId))
 
-  const edges = graphEdges.filter(
+  const edges = candidateEdges.filter(
     edge => nodeIds.has(liveGraphEdgeSource(edge)) && nodeIds.has(liveGraphEdgeTarget(edge))
   )
 
@@ -1468,7 +1490,7 @@ export function visibleLiveGraph(
     : nodes.filter(node => {
         const id = liveGraphNodeId(node)
 
-        return id === options.focusId || (neighbors.get(id)?.size ?? 0) > 0
+        return matchingGlobalTaskIds?.has(id) || id === options.focusId || (neighbors.get(id)?.size ?? 0) > 0
       })
 
   const eligibleIds = new Set(eligibleNodes.map(liveGraphNodeId))
@@ -3484,13 +3506,22 @@ export function LiveGraphCanvas({
     }
   }, [denseGraph, denseLod, viewState.arrows])
 
-  const emphasizedIds = useMemo(() => {
-    if (!emphasisId) {
+  const filteredTaskIds = useMemo(() => {
+    if (!taskFeedMode || viewState.workflowFilter === 'all') {
       return null
     }
 
-    return new Set([emphasisId, ...(neighbors.get(emphasisId) ?? [])])
-  }, [emphasisId, neighbors])
+    return new Set(
+      visible.nodes
+        .filter(node => liveGraphNodeKind(node) === 'task' && liveGraphTaskCategory(node) === viewState.workflowFilter)
+        .map(liveGraphNodeId)
+    )
+  }, [taskFeedMode, viewState.workflowFilter, visible.nodes])
+
+  const emphasizedIds = useMemo(
+    () => (emphasisId ? new Set([emphasisId, ...(neighbors.get(emphasisId) ?? [])]) : filteredTaskIds),
+    [emphasisId, filteredTaskIds, neighbors]
+  )
 
   const selectedNode = selectedId ? (allNodesById.get(selectedId) ?? null) : null
   const selectedTaskNode = selectedNode && liveGraphNodeKind(selectedNode) === 'task' ? selectedNode : null
@@ -5006,6 +5037,7 @@ export function LiveGraphCanvas({
                   const workMarkerRadius = clamp(radius * 0.24 + 1.7, 2.8, 5.2)
                   const nodeKindIconSize = clamp(radius * 1.15, 4, 18)
                   const selected = selectedId === id
+                  const filterContext = filteredTaskIds !== null && !filteredTaskIds.has(id)
                   const dimmed = emphasizedIds !== null && !emphasizedIds.has(id)
                   const label = liveGraphNodeLabel(node)
                   const localizedKind = kindLabels[kind]
@@ -5048,6 +5080,7 @@ export function LiveGraphCanvas({
                       aria-label={localizedKind + ': ' + label + ', ' + localizedNodeStatus}
                       aria-pressed={selected}
                       className="cursor-pointer outline-none"
+                      data-live-graph-filter-context={filterContext || undefined}
                       data-live-graph-node
                       data-live-graph-node-degree={degree}
                       data-live-graph-node-id={id}

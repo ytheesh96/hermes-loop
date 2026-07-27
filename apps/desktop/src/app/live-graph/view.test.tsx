@@ -2741,6 +2741,18 @@ describe('LiveGraphCanvas', () => {
           kind: 'contains',
           sourceId: 'workflow:default:board:attention',
           targetId: 'task:default:board:attention'
+        },
+        {
+          id: 'edge:active-completed',
+          kind: 'depends_on',
+          sourceId: 'task:default:board:active',
+          targetId: 'task:default:board:completed'
+        },
+        {
+          id: 'edge:completed-attention',
+          kind: 'depends_on',
+          sourceId: 'task:default:board:completed',
+          targetId: 'task:default:board:attention'
         }
       ],
       nodes: [
@@ -2817,8 +2829,7 @@ describe('LiveGraphCanvas', () => {
         initialState={{
           ...DEFAULT_LIVE_GRAPH_VIEW_STATE,
           enabledKinds: ['task'],
-          focusDepth: 'all',
-          orphans: true
+          focusDepth: 'all'
         }}
       />
     )
@@ -2850,9 +2861,16 @@ describe('LiveGraphCanvas', () => {
     fireEvent.click(activeFilter)
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Task: Active task/ })).toBeTruthy()
-      expect(screen.queryByRole('button', { name: /Task: Completed task/ })).toBeNull()
-      expect(screen.queryByRole('button', { name: /Task: Attention task/ })).toBeNull()
+      const activeNode = screen.getByRole('button', { name: /Task: Active task/ })
+      const completedNode = screen.getByRole('button', { name: /Task: Completed task/ })
+      const attentionNode = screen.getByRole('button', { name: /Task: Attention task/ })
+
+      expect(activeNode.getAttribute('data-live-graph-filter-context')).toBeNull()
+      expect(activeNode.getAttribute('opacity')).toBe('1')
+      expect(completedNode.getAttribute('data-live-graph-filter-context')).toBe('true')
+      expect(completedNode.getAttribute('opacity')).toBe('0.2')
+      expect(attentionNode.getAttribute('data-live-graph-filter-context')).toBe('true')
+      expect(attentionNode.getAttribute('opacity')).toBe('0.2')
     })
     expect(within(feed).getByRole('button', { name: 'View task: Active task' })).toBeTruthy()
     expect(within(feed).queryByRole('button', { name: 'View task: Completed task' })).toBeNull()
@@ -2861,9 +2879,15 @@ describe('LiveGraphCanvas', () => {
     fireEvent.click(completedFilter)
 
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: /Task: Active task/ })).toBeNull()
-      expect(screen.getByRole('button', { name: /Task: Completed task/ })).toBeTruthy()
-      expect(screen.queryByRole('button', { name: /Task: Attention task/ })).toBeNull()
+      expect(
+        screen.getByRole('button', { name: /Task: Active task/ }).getAttribute('data-live-graph-filter-context')
+      ).toBe('true')
+      expect(
+        screen.getByRole('button', { name: /Task: Completed task/ }).getAttribute('data-live-graph-filter-context')
+      ).toBeNull()
+      expect(
+        screen.getByRole('button', { name: /Task: Attention task/ }).getAttribute('data-live-graph-filter-context')
+      ).toBe('true')
     })
     expect(within(feed).getByRole('button', { name: 'View task: Completed task' })).toBeTruthy()
     expect(within(feed).queryByRole('button', { name: 'View task: Active task' })).toBeNull()
@@ -2871,9 +2895,15 @@ describe('LiveGraphCanvas', () => {
     fireEvent.click(attentionFilter)
 
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: /Task: Active task/ })).toBeNull()
-      expect(screen.queryByRole('button', { name: /Task: Completed task/ })).toBeNull()
-      expect(screen.getByRole('button', { name: /Task: Attention task/ })).toBeTruthy()
+      expect(
+        screen.getByRole('button', { name: /Task: Active task/ }).getAttribute('data-live-graph-filter-context')
+      ).toBe('true')
+      expect(
+        screen.getByRole('button', { name: /Task: Completed task/ }).getAttribute('data-live-graph-filter-context')
+      ).toBe('true')
+      expect(
+        screen.getByRole('button', { name: /Task: Attention task/ }).getAttribute('data-live-graph-filter-context')
+      ).toBeNull()
     })
     expect(within(feed).getByRole('button', { name: 'View task: Attention task' })).toBeTruthy()
     expect(within(feed).queryByRole('button', { name: 'View task: Active task' })).toBeNull()
@@ -2881,9 +2911,15 @@ describe('LiveGraphCanvas', () => {
     fireEvent.click(allFilter)
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Task: Active task/ })).toBeTruthy()
-      expect(screen.getByRole('button', { name: /Task: Completed task/ })).toBeTruthy()
-      expect(screen.getByRole('button', { name: /Task: Attention task/ })).toBeTruthy()
+      expect(
+        screen.getByRole('button', { name: /Task: Active task/ }).getAttribute('data-live-graph-filter-context')
+      ).toBeNull()
+      expect(
+        screen.getByRole('button', { name: /Task: Completed task/ }).getAttribute('data-live-graph-filter-context')
+      ).toBeNull()
+      expect(
+        screen.getByRole('button', { name: /Task: Attention task/ }).getAttribute('data-live-graph-filter-context')
+      ).toBeNull()
     })
   })
 
