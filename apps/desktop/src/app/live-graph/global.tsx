@@ -1,7 +1,7 @@
 import { useStore } from '@nanostores/react'
 import { replaceEqualDeep, useQuery } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 
 import type { TenantLoopSource } from '@/app/chat/loop-state'
 import { sessionRoute } from '@/app/routes'
@@ -19,9 +19,44 @@ import {
   type LiveGraphSnapshot,
   type SessionLiveGraphInput
 } from './model'
+import { type LiveGraphNavigationTarget, readLiveGraphNavigationTarget } from './navigation'
 import { DEFAULT_LIVE_GRAPH_VIEW_STATE, LiveGraphPaneView } from './view'
 
 const GLOBAL_REFETCH_MS = 5_000
+
+export function globalLiveGraphSelectionId(
+  graph: LiveGraphSnapshot,
+  response: Pick<WorkflowOverviewResponse, 'sessions'>,
+  profile: string,
+  target: LiveGraphNavigationTarget | null
+): string | null {
+  if (!target || target.kind === 'feed') {
+    return null
+  }
+
+  if (target.kind === 'session') {
+    const session = response.sessions.find(candidate =>
+      new Set([candidate.id, candidate.current_session_id, ...candidate.lineage_session_ids]).has(target.entityId)
+    )
+
+    const nodeId = liveGraphNodeId('session', profile, session?.id || target.entityId)
+
+    return graph.nodes.some(node => node.id === nodeId) ? nodeId : null
+  }
+
+  const exactId = target.board ? liveGraphNodeId('task', profile, target.board, target.entityId) : ''
+
+  if (exactId && graph.nodes.some(node => node.id === exactId)) {
+    return exactId
+  }
+
+  return (
+    graph.nodes.find(
+      node =>
+        node.kind === 'task' && node.entityId === target.entityId && (!target.board || node.board === target.board)
+    )?.id ?? null
+  )
+}
 
 export function mergeWorkflowOverviewBoards(
   previous: readonly WorkflowOverviewBoard[],
@@ -247,6 +282,7 @@ export function buildGlobalOverviewSnapshot(
 
 function GlobalLiveGraphProfileView({ profile }: { profile: string }) {
   const { t } = useI18n()
+  const location = useLocation()
   const navigate = useNavigate()
   const projects = useStore($projects)
   useStore($projectTree)
@@ -291,6 +327,12 @@ function GlobalLiveGraphProfileView({ profile }: { profile: string }) {
   }, [activeGraph, pulses])
 
   const graph = activeGraph ?? lastGraphRef.current
+  const navigationTarget = useMemo(() => readLiveGraphNavigationTarget(location.state), [location.state])
+
+  const initialSelectedNodeId =
+    graph && currentOverview ? globalLiveGraphSelectionId(graph, currentOverview, profile, navigationTarget) : null
+
+  const initialTaskFeedOpen = navigationTarget?.kind === 'feed' || Boolean(navigationTarget && !initialSelectedNodeId)
 
   const error =
     currentOverview === null && overview.error
@@ -305,6 +347,8 @@ function GlobalLiveGraphProfileView({ profile }: { profile: string }) {
       descriptor={{ key: 'global', profile, title: t.liveGraph.globalTitle }}
       error={error}
       graph={graph}
+      initialSelectedNodeId={initialSelectedNodeId}
+      initialTaskFeedOpen={initialTaskFeedOpen}
       loading={currentOverview === null && overview.isLoading}
       onOpenSession={sessionId => navigate(sessionRoute(sessionId))}
       pulses={pulses}

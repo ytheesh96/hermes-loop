@@ -19,7 +19,7 @@ import { DesktopInstallOverlay } from '@/components/desktop-install-overlay'
 import { GatewayConnectingOverlay } from '@/components/gateway-connecting-overlay'
 import { NotificationStack } from '@/components/notifications'
 import { DesktopOnboardingOverlay } from '@/components/onboarding'
-import { $newSessionTabAction, revealTreePane } from '@/components/pane-shell/tree/store'
+import { $newSessionTabAction } from '@/components/pane-shell/tree/store'
 import { FloatingPet } from '@/components/pet/floating-pet'
 import { RemoteDisplayBanner } from '@/components/remote-display-banner'
 import { emitGatewayEvent } from '@/contrib/events'
@@ -63,11 +63,11 @@ import { useSkinCommand } from '@/themes/use-skin-command'
 import { requestComposerInsert } from '../chat/composer/focus'
 import { useComposerActions } from '../chat/hooks/use-composer-actions'
 import type { LoopWorkflowRef } from '../chat/loop-state'
-import { useLoopPanelController } from '../chat/use-loop-panel-controller'
 import { CommandPalette } from '../command-palette'
 import { useGatewayBoot } from '../gateway/hooks/use-gateway-boot'
 import { useGatewayRequest } from '../gateway/hooks/use-gateway-request'
 import { useKeybinds } from '../hooks/use-keybinds'
+import { liveGraphNavigationState } from '../live-graph/navigation'
 import { ModelPickerOverlay } from '../model-picker-overlay'
 import { ModelVisibilityOverlay } from '../model-visibility-overlay'
 import { PetGenerateOverlay } from '../pet-generate/pet-generate-overlay'
@@ -76,7 +76,14 @@ import { RemoteFolderPicker } from '../right-sidebar/files/remote-picker'
 import { resetProjectTreeState } from '../right-sidebar/files/use-project-tree'
 import { PersistentTerminal } from '../right-sidebar/terminal/persistent'
 import { closeAllTerminals } from '../right-sidebar/terminal/terminals'
-import { CRON_ROUTE, routeSessionId, sessionRoute, SETTINGS_ROUTE, syncWorkspaceIsPage } from '../routes'
+import {
+  CRON_ROUTE,
+  LIVE_GRAPH_ROUTE,
+  routeSessionId,
+  sessionRoute,
+  SETTINGS_ROUTE,
+  syncWorkspaceIsPage
+} from '../routes'
 import { SessionPickerOverlay } from '../session-picker-overlay'
 import { SessionSwitcher } from '../session-switcher'
 import { useBackgroundQueueDrain } from '../session/hooks/use-background-queue-drain'
@@ -103,13 +110,7 @@ import { useBackgroundSync } from './hooks/use-background-sync'
 import { useDesktopIntegrations } from './hooks/use-desktop-integrations'
 import { usePetBridge } from './hooks/use-pet-bridge'
 import { useSessionTileDelegate } from './hooks/use-session-tile-delegate'
-import {
-  $loopPanelController,
-  $restartPreviewServer,
-  loopNewWorkflowPaneId,
-  loopWorkflowPaneId,
-  useTitlebarToolContributions
-} from './panes'
+import { $restartPreviewServer, useTitlebarToolContributions } from './panes'
 import { ChatRoutesSurface, SidebarSurface, StatusbarSurface, TerminalSurface } from './surfaces'
 import type { WiringActions, WiringApi } from './types'
 
@@ -522,92 +523,42 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
   const composer = useComposerActions({ activeSessionId, currentCwd, requestGateway })
 
-  // Loop rows belong to the durable route/session key, not the volatile runtime
-  // id. A fresh draft lazily creates its backend session before adding a task.
-  const loopSourceSessionId = routedSessionId || selectedStoredSessionId || activeSessionId || ''
+  // Task summaries belong to the durable route/session key, not the volatile
+  // runtime id. Graph View canonicalizes lineage ids against the overview.
+  const taskFeedSessionId = routedSessionId || selectedStoredSessionId || activeSessionId || ''
 
-  const ensureLoopSourceSessionId = useCallback(async () => {
-    if (loopSourceSessionId) {
-      return loopSourceSessionId
-    }
-
-    const runtimeSessionId = await createBackendSessionForSend()
-
-    return selectedStoredSessionIdRef.current || runtimeSessionId
-  }, [createBackendSessionForSend, loopSourceSessionId, selectedStoredSessionIdRef])
-
-  const loopController = useLoopPanelController({
-    activeSessionId,
-    ensureLoopSourceSessionId,
-    gatewayOpen: chatOpen && gatewayState === 'open',
-    loopSourceSessionId
-  })
-
-  const loopControllerRef = useRef(loopController)
-  loopControllerRef.current = loopController
-
-  // Publish the latest controller before the reveal effect below. The pane
-  // mirror synchronously registers/adopts any newly opened workflow, so the
-  // exact native tab exists by the time revealTreePane fronts it.
-  useEffect(() => {
-    $loopPanelController.set(loopController)
-  }, [loopController])
-
-  useEffect(
-    () => () => {
-      const controller = loopControllerRef.current
-
-      if ($loopPanelController.get() === controller) {
-        $loopPanelController.set(null)
-      }
+  const openTaskFeed = useCallback(
+    (sessionId = taskFeedSessionId) => {
+      navigate(LIVE_GRAPH_ROUTE, {
+        state: liveGraphNavigationState(sessionId ? { entityId: sessionId, kind: 'session' } : { kind: 'feed' })
+      })
     },
-    []
+    [navigate, taskFeedSessionId]
   )
 
-  const lastLoopFocusRequestRef = useRef('')
+  const openGraphTask = useCallback(
+    (taskId: string, workflow?: LoopWorkflowRef) => {
+      navigate(LIVE_GRAPH_ROUTE, {
+        state: liveGraphNavigationState({
+          ...(workflow?.board ? { board: workflow.board } : {}),
+          entityId: taskId,
+          kind: 'task'
+        })
+      })
+    },
+    [navigate]
+  )
 
-  const loopFocusRequestId =
-    loopController.focusRequestKey > 0 ? `${loopController.workflowPaneScopeKey}:${loopController.focusRequestKey}` : ''
-
-  useEffect(() => {
-    if (
-      !loopFocusRequestId ||
-      !loopController.open ||
-      loopController.hidden ||
-      lastLoopFocusRequestRef.current === loopFocusRequestId
-    ) {
-      return
-    }
-
-    lastLoopFocusRequestRef.current = loopFocusRequestId
-    const workflow = loopController.activeWorkflowRef
-
-    revealTreePane(
-      workflow
-        ? loopWorkflowPaneId(loopController.workflowPaneScopeKey, workflow)
-        : loopNewWorkflowPaneId(loopController.workflowPaneScopeKey)
-    )
-  }, [
-    loopController.activeWorkflowRef,
-    loopController.hidden,
-    loopController.open,
-    loopController.workflowPaneScopeKey,
-    loopFocusRequestId
-  ])
-
-  const openLoopPanel = useCallback((taskId?: string, workflow?: LoopWorkflowRef) => {
-    if (workflow) {
-      loopControllerRef.current.onOpen(taskId, workflow)
-    } else if (taskId) {
-      loopControllerRef.current.onOpen(taskId)
-    } else {
-      loopControllerRef.current.onOpen()
-    }
-  }, [])
-
-  const openLoopWorkflowPanel = useCallback((workflow: LoopWorkflowRef) => {
-    loopControllerRef.current.onSelectWorkflowId(workflow)
-  }, [])
+  const openLoopGraph = useCallback(
+    (taskId?: string) => {
+      if (taskId) {
+        openGraphTask(taskId)
+      } else {
+        openTaskFeed()
+      }
+    },
+    [openGraphTask, openTaskFeed]
+  )
 
   const branchInNewChat = useCallback(
     async (messageId?: string) => {
@@ -644,7 +595,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     getRuntimeIdForStoredSession,
     getRouteToken,
     handleSkinCommand,
-    onOpenLoop: openLoopPanel,
+    onOpenLoop: openLoopGraph,
     openMemoryGraph: openStarmap,
     refreshSessions,
     requestGateway,
@@ -888,9 +839,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     onPickFiles: () => void composer.pickContextPaths('file'),
     onPickFolders: () => void composer.pickContextPaths('folder'),
     onPickImages: () => void composer.pickImages(),
-    onOpenLoop: openLoopPanel,
-    onOpenLoopWorkflow: openLoopWorkflowPanel,
-    onOpenKanbanTask: openLoopPanel,
+    onOpenTaskFeed: openTaskFeed,
+    onOpenKanbanTask: openGraphTask,
     onReload: reloadFromMessage,
     onRemoveAttachment: id => void composer.removeAttachment(id),
     onRestoreToMessage: restoreToMessage,

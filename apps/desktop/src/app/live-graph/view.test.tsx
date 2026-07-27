@@ -2901,6 +2901,24 @@ describe('LiveGraphCanvas', () => {
     })
   })
 
+  it('opens a session-scoped task feed from an initial Graph View selection', async () => {
+    const sessionNodeId = 'session:types'
+
+    render(
+      <LiveGraphCanvas
+        graph={sixKindGraph}
+        initialSelectedNodeId={sessionNodeId}
+        initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }}
+      />
+    )
+
+    const feed = await screen.findByTestId('live-graph-workflow-inbox')
+
+    expect(within(feed).getByRole('button', { name: 'View task: Running task' })).toBeTruthy()
+    expect(within(feed).getByRole('button', { name: 'View task: Blocked task' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Session: Session/ }).getAttribute('aria-pressed')).toBe('true')
+  })
+
   it('uses the task feed to filter task-only graph views and keeps the selected component navigable', async () => {
     const filteredGraph: LiveGraphSnapshot = {
       edges: [

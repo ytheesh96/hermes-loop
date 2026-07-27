@@ -41,7 +41,7 @@ export interface ComposerStatusItem {
   id: string
   /** background process: captured stdout/stderr tail for the inline viewer. */
   output?: string
-  /** Kanban/Loop task id. Row click focuses the durable task in the Loop side panel. */
+  /** Kanban/Loop task id. Row click focuses the durable task in Graph View. */
   kanbanTaskId?: string
   /** Owning board for board-aware workflow/task routing. */
   kanbanBoard?: string
@@ -54,7 +54,7 @@ export interface ComposerStatusItem {
   /** subagent: its own stored session id — ordinary subagent and Loop worker
    *  rows open read-only watch surfaces (ordinary children in a window,
    *  Loop workers in a tab backed by their durable transcript). Workflow/task
-   *  rows still prefer kanbanTaskId so the user lands on the Loop canvas/task
+   *  rows still prefer kanbanTaskId so the user lands on the Graph View task
    *  first. */
   sessionId?: string
   state: StatusItemState

@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import type { WorkflowOverviewBoard, WorkflowOverviewResponse } from '@/hermes'
 
-import { buildGlobalOverviewSnapshot, mergeWorkflowOverview, mergeWorkflowOverviewBoards } from './global'
+import {
+  buildGlobalOverviewSnapshot,
+  globalLiveGraphSelectionId,
+  mergeWorkflowOverview,
+  mergeWorkflowOverviewBoards
+} from './global'
 import { liveGraphNodeId } from './model'
 
 const board = (slug: string, sourceRevision: number): WorkflowOverviewBoard => ({
@@ -65,6 +70,59 @@ describe('mergeWorkflowOverviewBoards', () => {
 })
 
 describe('buildGlobalOverviewSnapshot', () => {
+  it('resolves a runtime lineage id to the canonical session hub', () => {
+    const response: WorkflowOverviewResponse = {
+      boards: [],
+      errors: [],
+      schema_version: 1,
+      sessions: [
+        {
+          current_session_id: 'runtime-tip',
+          cwd: null,
+          id: 'logical-root',
+          lineage_session_ids: ['logical-root', 'runtime-tip'],
+          title: 'Session'
+        }
+      ]
+    }
+
+    const sessionId = liveGraphNodeId('session', 'work', 'logical-root')
+
+    const graph = {
+      edges: [],
+      nodes: [{ entityId: 'logical-root', id: sessionId, kind: 'session' as const, label: 'Session' }]
+    }
+
+    expect(globalLiveGraphSelectionId(graph, response, 'work', { entityId: 'runtime-tip', kind: 'session' })).toBe(
+      sessionId
+    )
+  })
+
+  it('resolves a task target on its exact board', () => {
+    const taskId = liveGraphNodeId('task', 'work', 'alpha', 'task-1')
+
+    const graph = {
+      edges: [],
+      nodes: [
+        {
+          board: 'alpha',
+          entityId: 'task-1',
+          id: taskId,
+          kind: 'task' as const,
+          label: 'Task'
+        }
+      ]
+    }
+
+    expect(
+      globalLiveGraphSelectionId(graph, { sessions: [] }, 'work', {
+        board: 'alpha',
+        entityId: 'task-1',
+        kind: 'task'
+      })
+    ).toBe(taskId)
+  })
+
   it('keeps immediate same-workflow DAG links and preserves cross-workflow dependencies', () => {
     const workflowBoard: WorkflowOverviewBoard = {
       links: [

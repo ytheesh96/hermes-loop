@@ -2376,7 +2376,9 @@ export interface LiveGraphCanvasProps {
   emptyDesc?: string
   emptyTitle?: string
   graph: LiveGraphSnapshot
+  initialSelectedNodeId?: null | string
   initialState?: LiveGraphViewState
+  initialTaskFeedOpen?: boolean
   onAttachNode?: (node: LiveGraphNode) => void
   onOpenSession?: (sessionId: string) => void
   onOpenTask?: (target: LiveGraphTaskTarget) => void
@@ -2391,7 +2393,9 @@ export function LiveGraphCanvas({
   emptyDesc,
   emptyTitle,
   graph,
+  initialSelectedNodeId = null,
   initialState = DEFAULT_LIVE_GRAPH_VIEW_STATE,
+  initialTaskFeedOpen = false,
   onAttachNode,
   onOpenSession,
   onOpenTask,
@@ -2466,12 +2470,12 @@ export function LiveGraphCanvas({
   const [viewState, setViewState] = useState(() => normalizeLiveGraphViewState(initialState))
   const [denseLod, setDenseLod] = useState<DenseGraphLod>(initialDenseLod)
   const [viewport, setViewport] = useState<Viewport>({ height: 0, width: 0 })
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(initialSelectedNodeId)
   const [selectedWorkflowTaskFilter, setSelectedWorkflowTaskFilter] = useState<LiveGraphTaskFilter>('all')
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [feedHoveredTaskId, setFeedHoveredTaskId] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [workflowFeedOpen, setWorkflowFeedOpen] = useState(false)
+  const [workflowFeedOpen, setWorkflowFeedOpen] = useState(initialTaskFeedOpen)
   const [clock, setClock] = useState(0)
   const [activePulses, setActivePulses] = useState<ActivePulse[]>([])
   const [announcement, setAnnouncement] = useState('')
@@ -5425,6 +5429,8 @@ export interface LiveGraphPaneViewProps {
   descriptor?: LiveGraphPaneDescriptorLike
   error?: unknown
   graph?: LiveGraphSnapshot | null
+  initialSelectedNodeId?: null | string
+  initialTaskFeedOpen?: boolean
   loading?: boolean
   onAttachNode?: (node: LiveGraphNode) => void
   onOpenSession?: (sessionId: string) => void
@@ -5445,6 +5451,8 @@ export function LiveGraphPaneView({
   descriptor,
   error,
   graph,
+  initialSelectedNodeId = null,
+  initialTaskFeedOpen = false,
   loading = false,
   onAttachNode,
   onOpenSession,
@@ -5510,12 +5518,14 @@ export function LiveGraphPaneView({
   return (
     <div className="flex size-full min-h-0 flex-col bg-(--ui-surface-background)">
       <LiveGraphCanvas
-        autoFit={!persistedState}
+        autoFit={!persistedState || Boolean(initialSelectedNodeId) || initialTaskFeedOpen}
         emptyDesc={global ? t.liveGraph.globalEmptyDesc : t.liveGraph.emptyDesc}
         emptyTitle={global ? t.liveGraph.globalEmptyTitle : t.liveGraph.emptyTitle}
         graph={graph}
+        initialSelectedNodeId={initialSelectedNodeId}
         initialState={initialState}
-        key={storageKey}
+        initialTaskFeedOpen={initialTaskFeedOpen}
+        key={`${storageKey}:${initialSelectedNodeId || (initialTaskFeedOpen ? 'feed' : 'default')}`}
         onAttachNode={attachNode}
         onOpenSession={onOpenSession}
         onOpenTask={onOpenTask}

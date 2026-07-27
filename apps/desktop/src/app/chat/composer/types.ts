@@ -43,8 +43,7 @@ export interface ChatBarProps {
   sessionId?: string | null
   cwd?: string | null
   onCancel: () => Promise<void> | void
-  onOpenLoop?: () => void
-  onOpenLoopWorkflow?: (workflow: LoopWorkflowRef) => void
+  onOpenTaskFeed?: (sessionId: string) => void
   onOpenKanbanTask?: (taskId: string, workflow?: LoopWorkflowRef) => void
   onAddContextRef?: (refText: string, label?: string, detail?: string) => void
   onAddUrl?: (url: string) => void

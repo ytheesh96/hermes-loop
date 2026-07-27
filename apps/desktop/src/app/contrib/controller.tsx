@@ -73,7 +73,7 @@ import { watchLiveGraphPanes } from '../live-graph/pane'
 import { $terminalTakeover, setTerminalTakeover } from '../right-sidebar/store'
 import { $workspaceIsPage } from '../routes'
 
-import { FilesPane, LogsPane, PreviewRailPane, ReviewPaneContent, watchLoopWorkflowPanes } from './panes'
+import { FilesPane, LogsPane, PreviewRailPane, ReviewPaneContent } from './panes'
 import { ContribWiring, WiredPane } from './wiring'
 
 /**
@@ -349,12 +349,7 @@ const DEFAULT_TREE = split(
   'row',
   [
     group(['sessions'], { id: 'grp-sessions' }),
-    split(
-      'row',
-      [group(['workspace'], { id: 'grp-main' }), group(['loop'], { id: 'grp-loop' })],
-      [2, 3],
-      'spl-main-loop'
-    ),
+    group(['workspace'], { id: 'grp-main' }),
     split(
       'column',
       [
@@ -380,18 +375,14 @@ const DEFAULT_TREE = split(
 
 const FOCUS_TREE = split(
   'row',
-  [group(['sessions']), group(['workspace', 'loop', 'files', 'preview', 'review', 'terminal'])],
+  [group(['sessions']), group(['workspace', 'files', 'preview', 'review', 'terminal'])],
   [1, 4.6]
 )
 
 const TERMINAL_TREE = split(
   'column',
   [
-    split(
-      'row',
-      [group(['sessions']), group(['workspace', 'loop']), group(['files', 'preview', 'review'])],
-      [1, 3.2, 1.2]
-    ),
+    split('row', [group(['sessions']), group(['workspace']), group(['files', 'preview', 'review'])], [1, 3.2, 1.2]),
     group(['terminal'])
   ],
   [3, 1]
@@ -400,7 +391,7 @@ const TERMINAL_TREE = split(
 const QUAD_TREE = split(
   'column',
   [
-    split('row', [group(['sessions', 'files']), group(['workspace', 'loop'])], [1, 3]),
+    split('row', [group(['sessions', 'files']), group(['workspace'])], [1, 3]),
     split('row', [group(['terminal']), group(['preview', 'review', 'logs'])], [1.4, 1])
   ],
   [3, 1]
@@ -428,7 +419,6 @@ watchContributedPanes()
 // main.
 watchSessionTiles()
 watchRouteTiles()
-watchLoopWorkflowPanes()
 watchLiveGraphPanes()
 
 // The main tab reads as its SESSION (the loaded title, "New session" on a
@@ -552,7 +542,7 @@ $panesFlipped.listen(flipped => {
 // The sessions sidebar keeps semantic side-collapse behavior so ⌘B follows it
 // through flips and rearrangement. Files is pane-scoped below: collapsing the
 // file browser must not also hide independently owned right-side panes such as
-// Loop, preview, review, or terminal.
+// preview, review, or terminal.
 bindTreeSideVisibility('left', $sidebarOpen, setSidebarOpen)
 
 // Workspace-scoped surfaces: the file tree and git diff only mean something

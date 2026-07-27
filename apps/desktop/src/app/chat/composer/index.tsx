@@ -56,7 +56,7 @@ import {
 import { useComposerScope } from './scope'
 import { ComposerStatusStack } from './status-stack'
 import { CodingStatusRow } from './status-stack/coding-row'
-import { LoopLauncherRow } from './status-stack/loop-launcher-row'
+import { TaskFeedLauncherRow } from './status-stack/task-feed-launcher-row'
 import { extractClipboardImageBlobs } from './text-utils'
 import { ComposerTriggerPopover } from './trigger-popover'
 import type { ChatBarProps } from './types'
@@ -74,8 +74,7 @@ export function ChatBar({
   sessionId,
   state,
   onCancel,
-  onOpenLoop,
-  onOpenLoopWorkflow,
+  onOpenTaskFeed,
   onOpenKanbanTask,
   onAddUrl,
   onAttachDroppedItems,
@@ -989,7 +988,7 @@ export function ChatBar({
                 )}
               />
               <div className="min-w-0 overflow-hidden rounded-t-[inherit]" data-slot="composer-status-rows">
-                <LoopLauncherRow onOpen={onOpenLoop} onOpenWorkflow={onOpenLoopWorkflow} sessionId={statusSessionId} />
+                <TaskFeedLauncherRow onOpen={onOpenTaskFeed} sessionId={statusSessionId} />
                 <CodingStatusRow
                   onBranchOff={handleBranchOff}
                   onConvertBranch={handleConvertBranch}
