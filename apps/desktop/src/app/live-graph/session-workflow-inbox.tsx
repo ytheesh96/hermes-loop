@@ -8,7 +8,6 @@ import { formatAgo } from '@/lib/time'
 
 import {
   LIVE_GRAPH_ATTENTION_STATUSES,
-  LIVE_GRAPH_COMPLETED_STATUSES,
   LIVE_GRAPH_WAITING_STATUSES,
   type LiveGraphNode,
   normalizeLiveGraphStatus
@@ -18,7 +17,8 @@ const COMPLETED_PAGE_SIZE = 10
 const COMPLETED_PAGE_INCREMENT = 25
 const WORKFLOW_AGE_REFRESH_INTERVAL_MS = 60_000
 
-type SessionWorkflowInboxFilter = 'active' | 'all' | 'attention' | 'completed'
+export type LiveGraphWorkflowFilter = 'active' | 'all' | 'attention' | 'completed'
+export type LiveGraphWorkflowCategory = Exclude<LiveGraphWorkflowFilter, 'all'>
 
 interface StatusPresentation {
   color: string
@@ -44,7 +44,6 @@ const STATUS_PRESENTATION: Record<string, StatusPresentation> = {
   completed: { color: 'var(--ui-green)', icon: 'pass-filled', rank: 4 },
   failed: { color: 'var(--ui-red)', icon: 'error', rank: 2 },
   interrupted: { color: 'var(--ui-yellow)', icon: 'warning', rank: 1 },
-  open: { color: 'var(--ui-cyan)', icon: 'circle-filled', rank: 0 },
   running: { color: 'var(--ui-cyan)', icon: 'sync', rank: 0 }
 }
 
@@ -56,7 +55,9 @@ export interface LiveGraphWorkflowFeedItem {
 }
 
 export interface LiveGraphSessionWorkflowInboxProps {
+  filter: LiveGraphWorkflowFilter
   label?: string
+  onFilterChange: (filter: LiveGraphWorkflowFilter) => void
   onSelectWorkflow: (nodeId: string) => void
   sessionScope: string
   workflows: readonly LiveGraphWorkflowFeedItem[]
@@ -73,8 +74,18 @@ function statusPresentation(status: string): StatusPresentation {
   )
 }
 
-function needsAttention(status: unknown): boolean {
-  return LIVE_GRAPH_ATTENTION_STATUSES.has(normalizeLiveGraphStatus(status))
+export function liveGraphWorkflowCategory(item: LiveGraphWorkflowFeedItem): LiveGraphWorkflowCategory {
+  const status = normalizeLiveGraphStatus(item.node.status)
+
+  if (item.attentionTaskCount > 0 || LIVE_GRAPH_ATTENTION_STATUSES.has(status)) {
+    return 'attention'
+  }
+
+  if (item.activeTaskCount > 0) {
+    return 'active'
+  }
+
+  return 'completed'
 }
 
 function workflowSort(left: LiveGraphWorkflowFeedItem, right: LiveGraphWorkflowFeedItem): number {
@@ -106,6 +117,11 @@ function workflowTimestampMs(workflow: LiveGraphNode): number | null {
 function WorkflowStatus({ status }: { status: string }) {
   const { t } = useI18n()
   const normalized = normalizeLiveGraphStatus(status)
+
+  if (normalized === 'open') {
+    return null
+  }
+
   const presentation = statusPresentation(normalized)
   const label = (t.liveGraph.statuses as Record<string, string>)[normalized] || status || t.liveGraph.statuses.unknown
 
@@ -235,7 +251,9 @@ function CompletedWorkflowRow({ item, nowMs, onSelect, reducedMotion }: Complete
 }
 
 export const LiveGraphSessionWorkflowInbox = memo(function LiveGraphSessionWorkflowInbox({
+  filter,
   label,
+  onFilterChange,
   onSelectWorkflow,
   sessionScope,
   workflows
@@ -243,7 +261,6 @@ export const LiveGraphSessionWorkflowInbox = memo(function LiveGraphSessionWorkf
   const { t } = useI18n()
   const inboxLabel = label || t.liveGraph.workflowInbox
   const reducedMotion = Boolean(useReducedMotion())
-  const [filter, setFilter] = useState<SessionWorkflowInboxFilter>('all')
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [visibleCompletedCount, setVisibleCompletedCount] = useState(COMPLETED_PAGE_SIZE)
 
@@ -259,12 +276,21 @@ export const LiveGraphSessionWorkflowInbox = memo(function LiveGraphSessionWorkf
     const completed: LiveGraphWorkflowFeedItem[] = []
 
     for (const workflow of workflows) {
-      if (LIVE_GRAPH_COMPLETED_STATUSES.has(normalizeLiveGraphStatus(workflow.node.status))) {
-        completed.push(workflow)
-      } else if (needsAttention(workflow.node.status)) {
-        attention.push(workflow)
-      } else {
-        active.push(workflow)
+      switch (liveGraphWorkflowCategory(workflow)) {
+        case 'active':
+          active.push(workflow)
+
+          break
+
+        case 'attention':
+          attention.push(workflow)
+
+          break
+
+        case 'completed':
+          completed.push(workflow)
+
+          break
       }
     }
 
@@ -294,7 +320,7 @@ export const LiveGraphSessionWorkflowInbox = memo(function LiveGraphSessionWorkf
             aria-pressed={filter === 'all'}
             className="h-6 px-1.5 text-[0.625rem]"
             data-live-graph-all-workflows-filter
-            onClick={() => setFilter('all')}
+            onClick={() => onFilterChange('all')}
             size="xs"
             type="button"
             variant={filter === 'all' ? 'secondary' : 'ghost'}
@@ -305,7 +331,7 @@ export const LiveGraphSessionWorkflowInbox = memo(function LiveGraphSessionWorkf
             aria-pressed={filter === 'active'}
             className="h-6 px-1.5 text-[0.625rem]"
             data-live-graph-active-workflow-count
-            onClick={() => setFilter('active')}
+            onClick={() => onFilterChange('active')}
             size="xs"
             type="button"
             variant={filter === 'active' ? 'secondary' : 'ghost'}
@@ -317,7 +343,7 @@ export const LiveGraphSessionWorkflowInbox = memo(function LiveGraphSessionWorkf
             aria-pressed={filter === 'completed'}
             className="h-6 px-1.5 text-[0.625rem]"
             data-live-graph-completed-workflow-count
-            onClick={() => setFilter('completed')}
+            onClick={() => onFilterChange('completed')}
             size="xs"
             type="button"
             variant={filter === 'completed' ? 'secondary' : 'ghost'}
@@ -329,7 +355,7 @@ export const LiveGraphSessionWorkflowInbox = memo(function LiveGraphSessionWorkf
             aria-pressed={filter === 'attention'}
             className="h-6 px-1.5 text-[0.625rem] text-(--ui-yellow)"
             data-live-graph-attention-workflow-count
-            onClick={() => setFilter('attention')}
+            onClick={() => onFilterChange('attention')}
             size="xs"
             type="button"
             variant={filter === 'attention' ? 'secondary' : 'ghost'}

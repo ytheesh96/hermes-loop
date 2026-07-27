@@ -248,9 +248,30 @@ const sixKindGraph: LiveGraphSnapshot = {
   nodes: [
     { entityId: 'types', id: 'session:types', kind: 'session', label: 'Session', status: 'queued' },
     { entityId: 'types', id: 'project:types', kind: 'project', label: 'Project', status: 'queued' },
-    { entityId: 'types', id: 'workflow:types', kind: 'workflow', label: 'Workflow', status: 'running' },
-    { entityId: 'running', id: 'task:running', kind: 'task', label: 'Running task', status: 'running' },
-    { entityId: 'blocked', id: 'task:blocked', kind: 'task', label: 'Blocked task', status: 'blocked' },
+    {
+      entityId: 'types',
+      id: 'workflow:types',
+      kind: 'workflow',
+      label: 'Workflow',
+      status: 'running',
+      workflowId: 'types'
+    },
+    {
+      entityId: 'running',
+      id: 'task:running',
+      kind: 'task',
+      label: 'Running task',
+      status: 'running',
+      workflowId: 'types'
+    },
+    {
+      entityId: 'blocked',
+      id: 'task:blocked',
+      kind: 'task',
+      label: 'Blocked task',
+      status: 'blocked',
+      workflowId: 'types'
+    },
     { entityId: 'types', id: 'agent:types', kind: 'agent', label: 'Agent', status: 'completed' },
     { entityId: 'types', id: 'artifact:types', kind: 'artifact', label: 'Artifact', status: 'failed' }
   ],
@@ -293,17 +314,33 @@ function twoSessionGraph(): LiveGraphSnapshot {
         entityId: 'a',
         id: 'workflow:default:board:a',
         kind: 'workflow',
-        label: 'Workflow A'
+        label: 'Workflow A',
+        workflowId: 'a'
       },
       {
         board: 'board',
         entityId: 'b',
         id: 'workflow:default:board:b',
         kind: 'workflow',
-        label: 'Workflow B'
+        label: 'Workflow B',
+        workflowId: 'b'
       },
-      { board: 'board', entityId: 'a', id: 'task:default:board:a', kind: 'task', label: 'Task A' },
-      { board: 'board', entityId: 'b', id: 'task:default:board:b', kind: 'task', label: 'Task B' }
+      {
+        board: 'board',
+        entityId: 'a',
+        id: 'task:default:board:a',
+        kind: 'task',
+        label: 'Task A',
+        workflowId: 'a'
+      },
+      {
+        board: 'board',
+        entityId: 'b',
+        id: 'task:default:board:b',
+        kind: 'task',
+        label: 'Task B',
+        workflowId: 'b'
+      }
     ],
     rootId: 'session:default:a'
   }
@@ -313,11 +350,23 @@ function denseReadabilityGraph(): LiveGraphSnapshot {
   const nodes: LiveGraphSnapshot['nodes'] = [
     { entityId: 'session', id: 'session:root', kind: 'session', label: 'Session' },
     { entityId: 'project', id: 'project:root', kind: 'project', label: 'Project' },
-    { entityId: 'workflow-a', id: 'workflow:a', kind: 'workflow', label: 'Workflow A' },
-    { entityId: 'workflow-b', id: 'workflow:b', kind: 'workflow', label: 'Workflow B' },
-    { entityId: 'selected', id: 'task:selected', kind: 'task', label: 'Selected task' },
+    { entityId: 'workflow-a', id: 'workflow:a', kind: 'workflow', label: 'Workflow A', workflowId: 'workflow-a' },
+    { entityId: 'workflow-b', id: 'workflow:b', kind: 'workflow', label: 'Workflow B', workflowId: 'workflow-b' },
+    {
+      entityId: 'selected',
+      id: 'task:selected',
+      kind: 'task',
+      label: 'Selected task',
+      workflowId: 'workflow-a'
+    },
     { entityId: 'neighbor', id: 'agent:neighbor', kind: 'agent', label: 'Neighbor agent' },
-    { entityId: 'unrelated', id: 'task:unrelated', kind: 'task', label: 'Unrelated task' }
+    {
+      entityId: 'unrelated',
+      id: 'task:unrelated',
+      kind: 'task',
+      label: 'Unrelated task',
+      workflowId: 'workflow-b'
+    }
   ]
 
   for (let index = 0; index < 793; index += 1) {
@@ -365,14 +414,16 @@ function denseManyEdgeGraph(): LiveGraphSnapshot {
 function forceStarGraph(): LiveGraphSnapshot {
   const hubId = 'workflow:force:hub'
 
-  const nodes: LiveGraphSnapshot['nodes'] = [{ entityId: 'hub', id: hubId, kind: 'workflow', label: 'Force hub' }]
+  const nodes: LiveGraphSnapshot['nodes'] = [
+    { entityId: 'hub', id: hubId, kind: 'workflow', label: 'Force hub', workflowId: 'force-hub' }
+  ]
 
   const edges: LiveGraphSnapshot['edges'] = []
 
   for (let index = 0; index < 8; index += 1) {
     const id = `task:force:${index}`
 
-    nodes.push({ entityId: String(index), id, kind: 'task', label: `Force task ${index}` })
+    nodes.push({ entityId: String(index), id, kind: 'task', label: `Force task ${index}`, workflowId: 'force-hub' })
     edges.push({ id: `edge:force:${index}`, kind: 'contains', sourceId: hubId, targetId: id })
   }
 
@@ -913,7 +964,7 @@ describe('Graph View model', () => {
     ])
   })
 
-  it('ignores open workflow containers while preserving the full context of active tasks', () => {
+  it('ignores open workflow containers while preserving the full context of attention tasks', () => {
     const activeAndSettled = twoSessionGraph()
 
     const statuses = new Map([
@@ -932,11 +983,11 @@ describe('Graph View model', () => {
         }))
       },
       {
-        activeOnly: true,
         enabledKinds: new Set(DEFAULT_LIVE_GRAPH_VIEW_STATE.enabledKinds),
         focusDepth: 'all',
         orphans: true,
-        search: ''
+        search: '',
+        workflowFilter: 'attention'
       }
     )
 
@@ -979,32 +1030,42 @@ describe('Graph View model', () => {
           id: 'workflow:active',
           kind: 'workflow',
           label: 'Active workflow',
-          status: 'open'
+          status: 'open',
+          workflowId: 'active'
         },
-        { entityId: 'active', id: 'task:active', kind: 'task', label: 'Active task', status: 'running' },
+        {
+          entityId: 'active',
+          id: 'task:active',
+          kind: 'task',
+          label: 'Active task',
+          status: 'running',
+          workflowId: 'active'
+        },
         {
           entityId: 'settled',
           id: 'workflow:settled',
           kind: 'workflow',
           label: 'Settled workflow',
-          status: 'closed'
+          status: 'closed',
+          workflowId: 'settled'
         },
         {
           entityId: 'settled',
           id: 'task:settled',
           kind: 'task',
           label: 'Settled task',
-          status: 'completed'
+          status: 'completed',
+          workflowId: 'settled'
         }
       ]
     }
 
     const filtered = visibleLiveGraph(sharedSessionGraph, {
-      activeOnly: true,
       enabledKinds: new Set(DEFAULT_LIVE_GRAPH_VIEW_STATE.enabledKinds),
       focusDepth: 'all',
       orphans: true,
-      search: ''
+      search: '',
+      workflowFilter: 'active'
     })
 
     expect(filtered.nodes.map(node => node.label).sort()).toEqual(['Active task', 'Active workflow', 'Shared session'])
@@ -1637,7 +1698,6 @@ describe('Graph View model', () => {
         textFadeThreshold: 999
       })
     ).toMatchObject({
-      activeOnly: true,
       arrows: false,
       camera: { scale: 4, x: 12, y: -4 },
       enabledKinds: ['task'],
@@ -1646,7 +1706,8 @@ describe('Graph View model', () => {
       linkForce: 100,
       nodeSize: 200,
       search: 'verify',
-      textFadeThreshold: 200
+      textFadeThreshold: 200,
+      workflowFilter: 'active'
     })
 
     expect(normalizeLiveGraphViewState({ camera: { scale: 0.03, x: 1, y: 2 } }).camera).toEqual({
@@ -1659,7 +1720,9 @@ describe('Graph View model', () => {
     expect(normalizeLiveGraphViewState({ nodeSize: 1 }).nodeSize).toBe(50)
     expect(normalizeLiveGraphViewState({ nodeSize: Number.NaN }).nodeSize).toBe(100)
     expect(normalizeLiveGraphViewState({}).nodeSize).toBe(100)
-    expect(normalizeLiveGraphViewState({}).activeOnly).toBe(false)
+    expect(normalizeLiveGraphViewState({}).workflowFilter).toBe('all')
+    expect(normalizeLiveGraphViewState({ activeOnly: true }).workflowFilter).toBe('active')
+    expect(normalizeLiveGraphViewState({ workflowFilter: 'completed' }).workflowFilter).toBe('completed')
     expect(normalizeLiveGraphViewState({}).textFadeThreshold).toBe(200)
   })
 
@@ -1726,8 +1789,8 @@ describe('LiveGraphCanvas', () => {
     const settings = await screen.findByRole('dialog', { name: 'Graph settings' })
 
     expect(within(settings).getByRole('textbox', { name: 'Search graph…' })).toBeTruthy()
-    expect(within(settings).getAllByRole('switch')).toHaveLength(10)
-    expect(within(settings).getByRole('switch', { name: 'Active only' })).toBeTruthy()
+    expect(within(settings).getAllByRole('switch')).toHaveLength(9)
+    expect(within(settings).queryByRole('switch', { name: 'Active only' })).toBeNull()
     expect(within(settings).getByRole('slider', { name: 'Center force' })).toBeTruthy()
     expect(within(settings).getByRole('slider', { name: 'Repel force' })).toBeTruthy()
     expect(within(settings).getByRole('slider', { name: 'Link force' })).toBeTruthy()
@@ -1929,13 +1992,14 @@ describe('LiveGraphCanvas', () => {
     expect(container.querySelectorAll('[data-live-graph-node-selection]')).toHaveLength(1)
   })
 
-  it('recedes settled task context when Active only is enabled', async () => {
+  it('recedes settled task context when the Active workflow filter is enabled', async () => {
     const completedTask: LiveGraphNode = {
       entityId: 'completed',
       id: 'task:completed',
       kind: 'task',
       label: 'Completed context',
-      status: 'completed'
+      status: 'completed',
+      workflowId: 'types'
     }
 
     render(
@@ -1951,9 +2015,12 @@ describe('LiveGraphCanvas', () => {
               targetId: completedTask.id
             }
           ],
-          nodes: [...sixKindGraph.nodes, completedTask]
+          nodes: [
+            ...sixKindGraph.nodes.map(node => (node.id === 'task:blocked' ? { ...node, status: 'completed' } : node)),
+            completedTask
+          ]
         }}
-        initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, activeOnly: true, focusDepth: 'all' }}
+        initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all', workflowFilter: 'active' }}
       />
     )
 
@@ -2573,7 +2640,7 @@ describe('LiveGraphCanvas', () => {
     ).toBe('true')
   })
 
-  it('keeps the workflow feed synchronized with the active-only graph filter', async () => {
+  it('uses the workflow feed to filter the graph by task-derived workflow state', async () => {
     const filteredGraph: LiveGraphSnapshot = {
       edges: [
         {
@@ -2589,6 +2656,12 @@ describe('LiveGraphCanvas', () => {
           targetId: 'task:default:board:active'
         },
         {
+          id: 'edge:task-without-workflow-id',
+          kind: 'contains',
+          sourceId: 'workflow:default:board:active',
+          targetId: 'task:default:board:standalone'
+        },
+        {
           id: 'edge:session-completed',
           kind: 'contains',
           sourceId: 'session:default:root',
@@ -2599,6 +2672,18 @@ describe('LiveGraphCanvas', () => {
           kind: 'contains',
           sourceId: 'workflow:default:board:completed',
           targetId: 'task:default:board:completed'
+        },
+        {
+          id: 'edge:session-attention',
+          kind: 'contains',
+          sourceId: 'session:default:root',
+          targetId: 'workflow:default:board:attention'
+        },
+        {
+          id: 'edge:attention-task',
+          kind: 'contains',
+          sourceId: 'workflow:default:board:attention',
+          targetId: 'task:default:board:attention'
         }
       ],
       nodes: [
@@ -2609,7 +2694,7 @@ describe('LiveGraphCanvas', () => {
           id: 'workflow:default:board:active',
           kind: 'workflow',
           label: 'Active workflow',
-          status: 'running',
+          status: 'open',
           workflowId: 'active'
         },
         {
@@ -2623,11 +2708,19 @@ describe('LiveGraphCanvas', () => {
         },
         {
           board: 'board',
+          entityId: 'standalone',
+          id: 'task:default:board:standalone',
+          kind: 'task',
+          label: 'Task without workflow id',
+          status: 'running'
+        },
+        {
+          board: 'board',
           entityId: 'completed',
           id: 'workflow:default:board:completed',
           kind: 'workflow',
           label: 'Completed workflow',
-          status: 'completed',
+          status: 'open',
           workflowId: 'completed'
         },
         {
@@ -2638,28 +2731,90 @@ describe('LiveGraphCanvas', () => {
           label: 'Completed task',
           status: 'completed',
           workflowId: 'completed'
+        },
+        {
+          board: 'board',
+          entityId: 'attention',
+          id: 'workflow:default:board:attention',
+          kind: 'workflow',
+          label: 'Attention workflow',
+          status: 'open',
+          workflowId: 'attention'
+        },
+        {
+          board: 'board',
+          entityId: 'attention',
+          id: 'task:default:board:attention',
+          kind: 'task',
+          label: 'Attention task',
+          status: 'blocked',
+          workflowId: 'attention'
         }
       ],
       rootId: 'session:default:root'
     }
 
     render(
-      <LiveGraphCanvas
-        graph={filteredGraph}
-        initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, activeOnly: true, focusDepth: 'all' }}
-      />
+      <LiveGraphCanvas graph={filteredGraph} initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }} />
     )
 
     expect(await screen.findByRole('button', { name: /Workflow: Active workflow/ })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /Workflow: Completed workflow/ })).toBeNull()
+    expect(screen.getByRole('button', { name: /Workflow: Completed workflow/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Workflow: Attention workflow/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Task: Task without workflow id/ })).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Workflow feed' }))
 
     const feed = await screen.findByTestId('live-graph-workflow-feed')
+    const activeFilter = feed.querySelector<HTMLButtonElement>('[data-live-graph-active-workflow-count]')!
+    const completedFilter = feed.querySelector<HTMLButtonElement>('[data-live-graph-completed-workflow-count]')!
+    const attentionFilter = feed.querySelector<HTMLButtonElement>('[data-live-graph-attention-workflow-count]')!
+    const allFilter = feed.querySelector<HTMLButtonElement>('[data-live-graph-all-workflows-filter]')!
 
+    expect(activeFilter.textContent).toContain('1')
+    expect(completedFilter.textContent).toContain('1')
+    expect(attentionFilter.textContent).toContain('1')
+    expect(
+      within(feed)
+        .getByRole('button', { name: 'View workflow: Active workflow' })
+        .querySelector('[data-live-graph-workflow-task-counts]')?.textContent
+    ).toContain('1 Active')
+
+    fireEvent.click(activeFilter)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Workflow: Active workflow/ })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: /Workflow: Completed workflow/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: /Workflow: Attention workflow/ })).toBeNull()
+    })
     expect(within(feed).getByRole('button', { name: 'View workflow: Active workflow' })).toBeTruthy()
-    expect(within(feed).queryByRole('button', { name: 'View workflow: Completed workflow' })).toBeNull()
-    expect(within(feed).getByRole('button', { name: '0 Completed' })).toBeTruthy()
+    expect(feed.querySelector('[data-live-graph-workflow-status="open"]')).toBeNull()
+
+    fireEvent.click(completedFilter)
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Workflow: Active workflow/ })).toBeNull()
+      expect(screen.getByRole('button', { name: /Workflow: Completed workflow/ })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: /Workflow: Attention workflow/ })).toBeNull()
+    })
+    expect(within(feed).getByRole('button', { name: 'View workflow: Completed workflow' })).toBeTruthy()
+
+    fireEvent.click(attentionFilter)
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Workflow: Active workflow/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: /Workflow: Completed workflow/ })).toBeNull()
+      expect(screen.getByRole('button', { name: /Workflow: Attention workflow/ })).toBeTruthy()
+    })
+    expect(within(feed).getByRole('button', { name: 'View workflow: Attention workflow' })).toBeTruthy()
+
+    fireEvent.click(allFilter)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Workflow: Active workflow/ })).toBeTruthy()
+      expect(screen.getByRole('button', { name: /Workflow: Completed workflow/ })).toBeTruthy()
+      expect(screen.getByRole('button', { name: /Workflow: Attention workflow/ })).toBeTruthy()
+    })
   })
 
   it('shows full task details on a single click', async () => {

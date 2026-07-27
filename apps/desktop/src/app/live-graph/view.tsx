@@ -53,7 +53,12 @@ import {
   type LiveGraphSnapshot,
   normalizeLiveGraphStatus
 } from './model'
-import { LiveGraphSessionWorkflowInbox, type LiveGraphWorkflowFeedItem } from './session-workflow-inbox'
+import {
+  LiveGraphSessionWorkflowInbox,
+  liveGraphWorkflowCategory,
+  type LiveGraphWorkflowFeedItem,
+  type LiveGraphWorkflowFilter
+} from './session-workflow-inbox'
 import { LiveGraphWorkflowInbox } from './workflow-inbox'
 
 export const LIVE_GRAPH_KINDS = ['session', 'project', 'workflow', 'task', 'agent', 'artifact'] as const
@@ -67,7 +72,6 @@ export interface Camera {
 }
 
 export interface LiveGraphViewState {
-  activeOnly: boolean
   arrows: boolean
   camera: Camera
   centerForce: number
@@ -81,6 +85,7 @@ export interface LiveGraphViewState {
   repelForce: number
   search: string
   textFadeThreshold: number
+  workflowFilter: LiveGraphWorkflowFilter
 }
 
 export interface SettledGraphNode {
@@ -377,7 +382,6 @@ const LIVE_GRAPH_TEXT_FADE_THRESHOLD_DEFAULT = 200
 const LIVE_GRAPH_TEXT_FADE_THRESHOLD_MAX = 200
 
 export const DEFAULT_LIVE_GRAPH_VIEW_STATE: LiveGraphViewState = {
-  activeOnly: false,
   arrows: true,
   camera: DEFAULT_CAMERA,
   centerForce: 72,
@@ -390,7 +394,8 @@ export const DEFAULT_LIVE_GRAPH_VIEW_STATE: LiveGraphViewState = {
   orphans: false,
   repelForce: 62,
   search: '',
-  textFadeThreshold: LIVE_GRAPH_TEXT_FADE_THRESHOLD_DEFAULT
+  textFadeThreshold: LIVE_GRAPH_TEXT_FADE_THRESHOLD_DEFAULT,
+  workflowFilter: 'all'
 }
 
 function liveGraphLayoutSettings(state: LiveGraphViewState): LayoutSettings {
@@ -635,101 +640,67 @@ function liveGraphNodeWorkState(node: LiveGraphNode): LiveGraphWorkState {
   return 'active'
 }
 
-function liveGraphActiveWorkflowNodeIds(
-  nodes: readonly LiveGraphNode[],
-  edges: readonly LiveGraphEdge[]
-): ReadonlySet<string> {
-  const nodesById = new Map(nodes.map(node => [liveGraphNodeId(node), node]))
-  const parentIdsById = new Map<string, Set<string>>()
-
-  const addParent = (childId: string, parentId: string) => {
-    const parentIds = parentIdsById.get(childId)
-
-    if (parentIds) {
-      parentIds.add(parentId)
-    } else {
-      parentIdsById.set(childId, new Set([parentId]))
-    }
-  }
-
-  for (const edge of edges) {
-    const sourceId = liveGraphEdgeSource(edge)
-    const targetId = liveGraphEdgeTarget(edge)
-    const source = nodesById.get(sourceId)
-    const target = nodesById.get(targetId)
-
-    if (!source || !target) {
-      continue
-    }
-
-    if (edge.kind === 'contains' || edge.kind === 'delegated_to') {
-      addParent(targetId, sourceId)
-    } else if (edge.kind === 'depends_on') {
-      const sourceWorkflow = liveGraphWorkflowEnvelopeId(source)
-      const targetWorkflow = liveGraphWorkflowEnvelopeId(target)
-
-      if (!sourceWorkflow || !targetWorkflow || sourceWorkflow === targetWorkflow) {
-        addParent(sourceId, targetId)
-      }
-    }
-  }
-
-  const activeWorkflowIds = new Set<string>()
+export function liveGraphWorkflowFeedItems(nodes: readonly LiveGraphNode[]): LiveGraphWorkflowFeedItem[] {
+  const taskCountsByWorkflow = new Map<
+    string,
+    Pick<LiveGraphWorkflowFeedItem, 'activeTaskCount' | 'attentionTaskCount' | 'completedTaskCount'>
+  >()
 
   for (const node of nodes) {
-    const workState = liveGraphNodeWorkState(node)
-
-    if (workState === 'none' || workState === 'settled') {
+    if (liveGraphNodeKind(node) !== 'task') {
       continue
     }
 
-    const pending = [liveGraphNodeId(node)]
-    const visited = new Set<string>()
+    const workflowEnvelope = liveGraphWorkflowEnvelopeId(node)
 
-    while (pending.length > 0) {
-      const id = pending.pop()!
-
-      if (visited.has(id)) {
-        continue
-      }
-
-      visited.add(id)
-
-      const ancestor = nodesById.get(id)
-
-      if (!ancestor) {
-        continue
-      }
-
-      const kind = liveGraphNodeKind(ancestor)
-
-      if (kind === 'workflow') {
-        activeWorkflowIds.add(id)
-
-        continue
-      }
-
-      if (kind === 'project' || kind === 'session') {
-        continue
-      }
-
-      for (const parentId of parentIdsById.get(id) ?? []) {
-        pending.push(parentId)
-      }
+    if (!workflowEnvelope) {
+      continue
     }
+
+    const counts = taskCountsByWorkflow.get(workflowEnvelope) || {
+      activeTaskCount: 0,
+      attentionTaskCount: 0,
+      completedTaskCount: 0
+    }
+
+    const status = normalizeLiveGraphStatus(node.status)
+
+    if (LIVE_GRAPH_ATTENTION_STATUSES.has(status)) {
+      counts.attentionTaskCount += 1
+    } else if (LIVE_GRAPH_COMPLETED_STATUSES.has(status)) {
+      counts.completedTaskCount += 1
+    } else {
+      counts.activeTaskCount += 1
+    }
+
+    taskCountsByWorkflow.set(workflowEnvelope, counts)
   }
 
-  return activeWorkflowIds
+  return nodes
+    .filter(node => liveGraphNodeKind(node) === 'workflow')
+    .map(node => ({
+      activeTaskCount: 0,
+      attentionTaskCount: 0,
+      completedTaskCount: 0,
+      ...(taskCountsByWorkflow.get(liveGraphWorkflowEnvelopeId(node)) || {}),
+      node
+    }))
 }
 
-export function liveGraphActiveComponentNodeIds(
+export function liveGraphWorkflowComponentNodeIds(
   nodes: readonly LiveGraphNode[],
-  edges: readonly LiveGraphEdge[]
+  edges: readonly LiveGraphEdge[],
+  filter: Exclude<LiveGraphWorkflowFilter, 'all'>
 ): ReadonlySet<string> {
   const nodesById = new Map(nodes.map(node => [liveGraphNodeId(node), node]))
-  const activeWorkflowIds = liveGraphActiveWorkflowNodeIds(nodes, edges)
 
-  const activeContextEdges = edges.filter(edge => {
+  const matchingWorkflowIds = new Set(
+    liveGraphWorkflowFeedItems(nodes)
+      .filter(item => liveGraphWorkflowCategory(item) === filter)
+      .map(item => liveGraphNodeId(item.node))
+  )
+
+  const workflowContextEdges = edges.filter(edge => {
     const source = nodesById.get(liveGraphEdgeSource(edge))
     const targetId = liveGraphEdgeTarget(edge)
     const target = nodesById.get(targetId)
@@ -739,7 +710,7 @@ export function liveGraphActiveComponentNodeIds(
     }
 
     if (edge.kind === 'contains' && liveGraphNodeKind(target) === 'workflow') {
-      return activeWorkflowIds.has(targetId)
+      return matchingWorkflowIds.has(targetId)
     }
 
     if (edge.kind === 'depends_on') {
@@ -754,29 +725,25 @@ export function liveGraphActiveComponentNodeIds(
     return true
   })
 
-  const activeIds = new Set<string>()
+  const matchingIds = new Set<string>()
 
-  for (const component of analyzeLiveGraphTopology(nodes, activeContextEdges).components) {
-    const active = component.some(id => {
-      const node = nodesById.get(id)
+  for (const component of analyzeLiveGraphTopology(nodes, workflowContextEdges).components) {
+    const matches = component.some(id => matchingWorkflowIds.has(id))
 
-      if (!node) {
-        return false
-      }
-
-      const workState = liveGraphNodeWorkState(node)
-
-      return workState !== 'none' && workState !== 'settled'
-    })
-
-    if (active) {
+    if (matches) {
       for (const id of component) {
-        activeIds.add(id)
+        const node = nodesById.get(id)
+
+        if (node && liveGraphNodeKind(node) === 'task' && !liveGraphWorkflowEnvelopeId(node)) {
+          continue
+        }
+
+        matchingIds.add(id)
       }
     }
   }
 
-  return activeIds
+  return matchingIds
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {
@@ -1429,12 +1396,12 @@ function liveGraphLayoutMetrics(
 export function visibleLiveGraph(
   graph: LiveGraphSnapshot,
   options: {
-    activeOnly?: boolean
     enabledKinds: ReadonlySet<LiveGraphKind>
     focusDepth: LiveGraphFocusDepth
     focusId?: string | null
     orphans: boolean
     search: string
+    workflowFilter?: LiveGraphWorkflowFilter
   }
 ): VisibleGraph {
   const graphNodes = snapshotNodes(graph)
@@ -1445,12 +1412,17 @@ export function visibleLiveGraph(
     edge => graphNodeIds.has(liveGraphEdgeSource(edge)) && graphNodeIds.has(liveGraphEdgeTarget(edge))
   )
 
-  const activeComponentIds = options.activeOnly ? liveGraphActiveComponentNodeIds(graphNodes, graphEdges) : null
+  const workflowComponentIds =
+    options.workflowFilter && options.workflowFilter !== 'all'
+      ? liveGraphWorkflowComponentNodeIds(graphNodes, graphEdges, options.workflowFilter)
+      : null
 
   const nodes = graphNodes.filter(node => {
     const id = liveGraphNodeId(node)
+    const kind = liveGraphNodeKind(node)
+    const workflowTask = kind !== 'task' || !options.workflowFilter || Boolean(liveGraphWorkflowEnvelopeId(node))
 
-    return options.enabledKinds.has(liveGraphNodeKind(node)) && (!activeComponentIds || activeComponentIds.has(id))
+    return options.enabledKinds.has(kind) && workflowTask && (!workflowComponentIds || workflowComponentIds.has(id))
   })
 
   const nodeIds = new Set(nodes.map(liveGraphNodeId))
@@ -2237,8 +2209,17 @@ export function normalizeLiveGraphViewState(value: unknown): LiveGraphViewState 
   const focusDepth =
     record.focusDepth === 1 || record.focusDepth === 2 || record.focusDepth === 'all' ? record.focusDepth : 2
 
+  const workflowFilter: LiveGraphWorkflowFilter =
+    record.workflowFilter === 'active' ||
+    record.workflowFilter === 'all' ||
+    record.workflowFilter === 'attention' ||
+    record.workflowFilter === 'completed'
+      ? record.workflowFilter
+      : record.activeOnly === true
+        ? 'active'
+        : 'all'
+
   return {
-    activeOnly: typeof record.activeOnly === 'boolean' ? record.activeOnly : false,
     arrows: typeof record.arrows === 'boolean' ? record.arrows : true,
     camera: validCamera(record.camera),
     centerForce: typeof record.centerForce === 'number' ? clamp(record.centerForce, 0, 100) : 72,
@@ -2257,7 +2238,8 @@ export function normalizeLiveGraphViewState(value: unknown): LiveGraphViewState 
     textFadeThreshold:
       typeof record.textFadeThreshold === 'number'
         ? clamp(record.textFadeThreshold, 0, LIVE_GRAPH_TEXT_FADE_THRESHOLD_MAX)
-        : LIVE_GRAPH_TEXT_FADE_THRESHOLD_DEFAULT
+        : LIVE_GRAPH_TEXT_FADE_THRESHOLD_DEFAULT,
+    workflowFilter
   }
 }
 
@@ -2648,14 +2630,27 @@ export function LiveGraphCanvas({
   const visible = useMemo(
     () =>
       visibleLiveGraph(graph, {
-        activeOnly: viewState.activeOnly,
         enabledKinds,
         focusDepth: viewState.focusDepth,
         focusId,
         orphans: viewState.orphans,
-        search: viewState.search
+        search: viewState.search,
+        workflowFilter: viewState.workflowFilter
       }),
-    [enabledKinds, focusId, graph, viewState.activeOnly, viewState.focusDepth, viewState.orphans, viewState.search]
+    [enabledKinds, focusId, graph, viewState.focusDepth, viewState.orphans, viewState.search, viewState.workflowFilter]
+  )
+
+  const workflowFeedGraph = useMemo(
+    () =>
+      visibleLiveGraph(graph, {
+        enabledKinds,
+        focusDepth: viewState.focusDepth,
+        focusId,
+        orphans: viewState.orphans,
+        search: viewState.search,
+        workflowFilter: 'all'
+      }),
+    [enabledKinds, focusId, graph, viewState.focusDepth, viewState.orphans, viewState.search]
   )
 
   const graphNodes = snapshotNodes(graph)
@@ -3464,61 +3459,22 @@ export function LiveGraphCanvas({
   )
 
   const workflowFeedItems = useMemo<LiveGraphWorkflowFeedItem[]>(() => {
-    const nodes = visible.nodes
+    const visibleWorkflowIds = new Set(
+      workflowFeedGraph.nodes.filter(node => liveGraphNodeKind(node) === 'workflow').map(node => liveGraphNodeId(node))
+    )
 
-    const taskCountsByWorkflow = new Map<
-      string,
-      Pick<LiveGraphWorkflowFeedItem, 'activeTaskCount' | 'attentionTaskCount' | 'completedTaskCount'>
-    >()
-
-    for (const node of nodes) {
-      if (liveGraphNodeKind(node) !== 'task') {
-        continue
-      }
-
-      const workflowEnvelope = liveGraphWorkflowEnvelopeId(node)
-
-      if (!workflowEnvelope) {
-        continue
-      }
-
-      const counts = taskCountsByWorkflow.get(workflowEnvelope) || {
-        activeTaskCount: 0,
-        attentionTaskCount: 0,
-        completedTaskCount: 0
-      }
-
-      const status = normalizeLiveGraphStatus(node.status)
-
-      if (LIVE_GRAPH_COMPLETED_STATUSES.has(status)) {
-        counts.completedTaskCount += 1
-      } else if (LIVE_GRAPH_ATTENTION_STATUSES.has(status)) {
-        counts.attentionTaskCount += 1
-      } else {
-        counts.activeTaskCount += 1
-      }
-
-      taskCountsByWorkflow.set(workflowEnvelope, counts)
-    }
-
-    return nodes
-      .filter(node => liveGraphNodeKind(node) === 'workflow')
-      .map(node => ({
-        activeTaskCount: 0,
-        attentionTaskCount: 0,
-        completedTaskCount: 0,
-        ...(taskCountsByWorkflow.get(liveGraphWorkflowEnvelopeId(node)) || {}),
-        node
-      }))
-  }, [visible.nodes])
+    return liveGraphWorkflowFeedItems(snapshotNodes(graph)).filter(item =>
+      visibleWorkflowIds.has(liveGraphNodeId(item.node))
+    )
+  }, [graph, workflowFeedGraph.nodes])
 
   const selectWorkflowTask = useCallback(
     (nodeId: string) => {
       commitState(current => ({
         ...current,
-        activeOnly: false,
         enabledKinds: current.enabledKinds.includes('task') ? current.enabledKinds : [...current.enabledKinds, 'task'],
-        search: ''
+        search: '',
+        workflowFilter: 'all'
       }))
       openNodeSelection(nodeId)
     },
@@ -3529,11 +3485,11 @@ export function LiveGraphCanvas({
     (nodeId: string) => {
       commitState(current => ({
         ...current,
-        activeOnly: false,
         enabledKinds: current.enabledKinds.includes('workflow')
           ? current.enabledKinds
           : [...current.enabledKinds, 'workflow'],
-        search: ''
+        search: '',
+        workflowFilter: 'all'
       }))
       openNodeSelection(nodeId)
     },
@@ -4492,16 +4448,6 @@ export function LiveGraphCanvas({
                       placeholder={t.liveGraph.searchPlaceholder}
                       value={viewState.search}
                     />
-                    <label className="flex cursor-pointer items-center gap-2 text-[0.6875rem] text-(--ui-text-secondary)">
-                      <Codicon className="text-(--ui-text-tertiary)" name="pulse" />
-                      <span className="flex-1">{t.liveGraph.activeOnly}</span>
-                      <Switch
-                        aria-label={t.liveGraph.activeOnly}
-                        checked={viewState.activeOnly}
-                        onCheckedChange={activeOnly => commitState(current => ({ ...current, activeOnly }))}
-                        size="xs"
-                      />
-                    </label>
                     <div className="grid gap-2">
                       {LIVE_GRAPH_KINDS.map(kind => {
                         const enabled = enabledKinds.has(kind)
@@ -5000,7 +4946,7 @@ export function LiveGraphCanvas({
                   const activeWork = workState === 'active' || workState === 'blocked' || workState === 'running'
                   const blockedTask = kind === 'task' && workState === 'blocked'
                   const runningTask = kind === 'task' && workState === 'running'
-                  const settledContext = viewState.activeOnly && workState === 'settled'
+                  const settledContext = viewState.workflowFilter === 'active' && workState === 'settled'
                   const workColor = statusColor(status)
                   const workMarkerRadius = clamp(radius * 0.24 + 1.7, 2.8, 5.2)
                   const nodeKindIconSize = clamp(radius * 1.15, 4, 18)
@@ -5288,7 +5234,9 @@ export function LiveGraphCanvas({
               </Tip>
             </div>
             <LiveGraphSessionWorkflowInbox
+              filter={viewState.workflowFilter}
               label={t.liveGraph.workflowFeed}
+              onFilterChange={workflowFilter => commitState(current => ({ ...current, workflowFilter }))}
               onSelectWorkflow={selectFeedWorkflow}
               sessionScope={snapshotRootId(graph) || 'global'}
               workflows={workflowFeedItems}
