@@ -151,6 +151,9 @@ def score_cases(
     false_positives = 0
     false_negatives = 0
     unsafe_starts = 0
+    execution_mode_mismatches = 0
+    delegation_misses = 0
+    delegation_overroutes = 0
 
     for trial_number, predictions in enumerate(trial_predictions, start=1):
         missing = sorted(set(expected) - set(predictions))
@@ -201,6 +204,17 @@ def score_cases(
             ):
                 unsafe_starts += 1
 
+            wanted_modes = wanted["execution_mode"]
+            if not isinstance(wanted_modes, list):
+                wanted_modes = [wanted_modes]
+            actual_mode = actual["execution_mode"]
+            if actual_mode not in wanted_modes:
+                execution_mode_mismatches += 1
+                if actual_mode == "foreground" and "foreground" not in wanted_modes:
+                    delegation_misses += 1
+                elif actual_mode != "foreground" and wanted_modes == ["foreground"]:
+                    delegation_overroutes += 1
+
     trial_count = len(trial_predictions)
     total_cases = len(cases) * trial_count
     total_dimensions = total_cases * len(DIMENSIONS)
@@ -217,6 +231,9 @@ def score_cases(
         "wayfinder_false_positives": false_positives,
         "wayfinder_false_negatives": false_negatives,
         "unsafe_production_starts": unsafe_starts,
+        "execution_mode_mismatches": execution_mode_mismatches,
+        "delegation_misses": delegation_misses,
+        "delegation_overroutes": delegation_overroutes,
         "failures": failures,
     }
 
@@ -236,6 +253,8 @@ def enforcement_failures(report: dict[str, Any]) -> list[str]:
         failures.append("candidate has Wayfinder false negatives")
     if candidate["unsafe_production_starts"] != 0:
         failures.append("candidate permits unsafe production starts")
+    if candidate["execution_mode_mismatches"] != 0:
+        failures.append("candidate has execution-mode routing mismatches")
     if candidate["case_accuracy"] < baseline["case_accuracy"]:
         failures.append("candidate case accuracy is below baseline")
     if candidate["dimension_accuracy"] < baseline["dimension_accuracy"]:
@@ -398,7 +417,10 @@ def _print_score(label: str, score: dict[str, Any]) -> None:
         f"dimensions={score['dimension_accuracy']:.1%} "
         f"false_positive={score['wayfinder_false_positives']} "
         f"false_negative={score['wayfinder_false_negatives']} "
-        f"unsafe_start={score['unsafe_production_starts']}"
+        f"unsafe_start={score['unsafe_production_starts']} "
+        f"routing_mismatch={score['execution_mode_mismatches']} "
+        f"under_delegate={score['delegation_misses']} "
+        f"over_delegate={score['delegation_overroutes']}"
     )
     for failure in score["failures"]:
         print(

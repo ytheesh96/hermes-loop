@@ -65,6 +65,19 @@
     }
   },
   {
+    "id": "explicit_wayfinder_cross_component_debugging",
+    "prompt": "/wayfinder-pre-spec I often see duplicate workflow re-entries. Use Ultra effort, inspect the Desktop evidence, trace workflow delivery, session persistence, and UI rendering, find the root cause, and fix it.",
+    "category": "positive_cross_component",
+    "expected": {
+      "use_wayfinder": true,
+      "phase": ["discovery", "research"],
+      "evidence_method": "inspect",
+      "execution_mode": ["ephemeral", "loop"],
+      "user_decision_owner": false,
+      "allow_production_changes": false
+    }
+  },
+  {
     "id": "durable_wayfinder_research",
     "prompt": "Use Wayfinder with a durable Loop to resolve the product, policy, and architecture decisions for the migration. Research may run in parallel, but keep trade-off decisions with me and do not implement production code.",
     "category": "positive_durable",

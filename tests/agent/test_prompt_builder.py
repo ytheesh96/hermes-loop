@@ -117,6 +117,15 @@ class TestGuidanceConstants:
         assert "Only an explicit user request for Loop is hard-routed" in (
             KANBAN_FOREGROUND_GUIDANCE
         )
+        assert "Hard-routed is not the same as delegation-worthy" in (
+            KANBAN_FOREGROUND_GUIDANCE
+        )
+        assert "multiple independent lanes" in KANBAN_FOREGROUND_GUIDANCE
+        assert "Multiple open questions alone do not make independent lanes" in (
+            KANBAN_FOREGROUND_GUIDANCE
+        )
+        assert "explicitly invoked skill" in KANBAN_FOREGROUND_GUIDANCE
+        assert "one foreground context" in KANBAN_FOREGROUND_GUIDANCE
         assert "`/learn`" in KANBAN_FOREGROUND_GUIDANCE
         assert "progress/status requests" in KANBAN_FOREGROUND_GUIDANCE
         assert "must not create a Loop root" in KANBAN_FOREGROUND_GUIDANCE

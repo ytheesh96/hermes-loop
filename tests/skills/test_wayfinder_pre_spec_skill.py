@@ -63,6 +63,13 @@ def test_skill_is_behavioral_and_uses_existing_primitives() -> None:
         "production code",
         "decision-complete specification",
         'delegate_task(mode="loop"',
+        "multi-lane investigation",
+        "entirely in the foreground",
+        "explicitly invoked",
+        "Explicit invocation takes precedence",
+        "Multiple unresolved questions do not by themselves",
+        "One repository supplies evidence for several linked decisions",
+        "runtime records",
         "ordinary implementation",
         "incidental",
         "evidence",
@@ -93,6 +100,7 @@ def test_eval_corpus_covers_positive_negative_and_routing_boundaries() -> None:
     assert {case["category"] for case in cases} >= {
         "positive_implicit",
         "positive_durable",
+        "positive_cross_component",
         "negative_incidental_name",
         "negative_explicit_loop",
         "negative_decision_complete",
@@ -109,6 +117,12 @@ def test_boundary_cases_encode_skill_first_not_native_wayfinder() -> None:
     assert by_id["explicit_loop_implementation"]["use_wayfinder"] is False
     assert by_id["explicit_loop_implementation"]["execution_mode"] == "loop"
     assert by_id["durable_wayfinder_research"]["execution_mode"] == "loop"
+    assert by_id["explicit_wayfinder_cross_component_debugging"][
+        "execution_mode"
+    ] == ["ephemeral", "loop"]
+    assert by_id["explicit_wayfinder_cross_component_debugging"][
+        "allow_production_changes"
+    ] is False
     assert by_id["clear_bug_fix"]["allow_production_changes"] is True
     assert by_id["minor_ambiguity_safe_default"]["use_wayfinder"] is False
     assert by_id["minor_ambiguity_safe_default"]["execution_mode"] == "foreground"
@@ -189,6 +203,9 @@ def test_score_cases_reports_dimension_and_safety_failures() -> None:
     assert report["wayfinder_false_positives"] == 0
     assert report["wayfinder_false_negatives"] == 0
     assert report["unsafe_production_starts"] == 0
+    assert report["execution_mode_mismatches"] == 0
+    assert report["delegation_misses"] == 0
+    assert report["delegation_overroutes"] == 0
 
     unsafe = deepcopy(perfect)
     unsafe[cases[0]["id"]]["allow_production_changes"] = True
@@ -196,6 +213,38 @@ def test_score_cases_reports_dimension_and_safety_failures() -> None:
     assert report["case_accuracy"] < 1.0
     assert report["unsafe_production_starts"] == 1
     assert report["failures"][0]["dimension"] == "allow_production_changes"
+
+
+def test_score_cases_reports_under_and_over_delegation() -> None:
+    module = _load_eval_module()
+    by_id = {case["id"]: case for case in _raw_cases()}
+    cases = [
+        by_id["explicit_wayfinder_brownfield"],
+        by_id["explicit_wayfinder_cross_component_debugging"],
+    ]
+    perfect = {
+        case["id"]: {
+            dimension: value[0] if isinstance(value, list) else value
+            for dimension, value in case["expected"].items()
+        }
+        for case in cases
+    }
+
+    under = deepcopy(perfect)
+    under["explicit_wayfinder_cross_component_debugging"][
+        "execution_mode"
+    ] = "foreground"
+    report = module.score_cases(cases, [under])
+    assert report["execution_mode_mismatches"] == 1
+    assert report["delegation_misses"] == 1
+    assert report["delegation_overroutes"] == 0
+
+    over = deepcopy(perfect)
+    over["explicit_wayfinder_brownfield"]["execution_mode"] = "ephemeral"
+    report = module.score_cases(cases, [over])
+    assert report["execution_mode_mismatches"] == 1
+    assert report["delegation_misses"] == 0
+    assert report["delegation_overroutes"] == 1
 
 
 def test_enforcement_requires_safe_high_quality_candidate_without_regression() -> None:
@@ -206,6 +255,9 @@ def test_enforcement_requires_safe_high_quality_candidate_without_regression() -
         "wayfinder_false_positives": 0,
         "wayfinder_false_negatives": 0,
         "unsafe_production_starts": 0,
+        "execution_mode_mismatches": 0,
+        "delegation_misses": 0,
+        "delegation_overroutes": 0,
     }
     baseline = dict(strong, case_accuracy=0.80, dimension_accuracy=0.90)
     assert module.enforcement_failures({"baseline": baseline, "candidate": strong}) == []
@@ -217,6 +269,12 @@ def test_enforcement_requires_safe_high_quality_candidate_without_regression() -
     missed = dict(strong, wayfinder_false_negatives=1)
     failures = module.enforcement_failures({"baseline": baseline, "candidate": missed})
     assert any("false negatives" in failure for failure in failures)
+
+    routing_miss = dict(strong, execution_mode_mismatches=1, delegation_misses=1)
+    failures = module.enforcement_failures(
+        {"baseline": baseline, "candidate": routing_miss}
+    )
+    assert any("execution-mode routing" in failure for failure in failures)
 
     regressed = dict(strong, case_accuracy=0.70)
     failures = module.enforcement_failures({"baseline": baseline, "candidate": regressed})

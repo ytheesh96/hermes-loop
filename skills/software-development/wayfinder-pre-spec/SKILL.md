@@ -1,7 +1,7 @@
 ---
 name: wayfinder-pre-spec
 description: Use when a feature has unresolved product or architecture decisions, or the user asks for Wayfinder. Research first, keep user-owned choices in the foreground, and hand off a decision-complete specification without production implementation.
-version: 1.0.0
+version: 1.1.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -18,8 +18,10 @@ metadata:
 Wayfinder is a behavioral planning skill, not a special orchestration engine. It
 turns a decision-incomplete request into a traceable, decision-complete
 specification. Use normal Hermes tools to inspect code and evidence, and use
-existing delegation or Loop primitives only when the work genuinely benefits
-from parallelism or durability.
+existing delegation or Loop primitives when the work genuinely benefits from
+parallelism or durability. Foreground ownership means owning intent, synthesis,
+user decisions, and acceptance; it does not mean performing every evidence lane
+inside one context.
 
 Wayfinder owns **policy**: when to pause implementation, how to expose the
 uncertain frontier, which questions belong to the user, and what evidence a
@@ -47,11 +49,20 @@ Use Wayfinder when at least one of these is true:
 - Several independent evidence lanes must converge before a coherent
   specification can be written.
 
+**Explicit invocation takes precedence.** If the user invokes
+`/wayfinder-pre-spec` and also asks to “fix,” “build,” or “implement,” complete
+the Wayfinder discovery and handoff first. Do not silently reinterpret the
+explicit invocation as an incidental reference or ordinary implementation. If
+grounding proves that no material uncertainty remains, produce the smallest
+decision-complete handoff and stop; production implementation is still a
+separate phase.
+
 Do **not** use Wayfinder when:
 
 - An ordinary implementation request is already decision-complete.
 - The task is a bounded bug fix, refactor, documentation edit, test run, or code
-  review with existing acceptance criteria.
+  review with existing acceptance criteria and Wayfinder was not explicitly
+  invoked.
 - The user asks a standalone factual or research question with no downstream
   product decision.
 - The prompt contains an incidental reference to “Wayfinder,” such as editing
@@ -73,7 +84,7 @@ do that. Do not create a task graph merely to demonstrate process.
 | A preference or trade-off remains | Present evidence-backed alternatives to the user |
 | The user cannot picture the choice | Build the minimum disposable comparison |
 | One or two tightly coupled decisions | Keep discovery in the foreground |
-| Independent short research lanes | Use ephemeral delegation if it reduces latency |
+| Multiple independent evidence lanes | Use bounded ephemeral delegation after initial grounding |
 | Discovery must survive restart or span many stages | Use ordinary durable Loop tasks |
 | Specification is decision-complete | Hand it off; do not implement within Wayfinder |
 
@@ -149,8 +160,27 @@ fresh implementation phase may then create or execute implementation tickets.
    - Keep the top-level map terse and link thick evidence from each item.
 
 5. **Choose the lightest execution mode.**
-   - Foreground conversation is the default.
-   - Use ephemeral delegation for independent, bounded evidence gathering.
+   - Begin in the foreground to establish the destination, inspect enough state
+     to identify real boundaries, and retain synthesis and user decisions.
+   - If Wayfinder was explicitly invoked and grounding exposes two or more
+     independently inspectable evidence lanes, dispatch bounded workers in one
+     ephemeral `delegate_task(tasks=[...])` batch. Typical lanes include
+     backend versus UI behavior, source versus runtime/session evidence, or
+     separate external constraints. Do not keep a multi-lane investigation
+     entirely in the foreground merely because the user did not say “Loop.”
+   - Multiple unresolved questions do not by themselves create independent
+     evidence lanes. Keep one repository/runtime path in the foreground when it
+     informs several tightly coupled decisions; delegate only separable paths
+     with distinct evidence sources and bounded worker objectives.
+   - Apply this lane test before dispatching:
+     - One repository supplies evidence for several linked decisions, such as
+       roles, approvals, and auditability in one service → one foreground lane.
+     - Independent backend delivery source, persisted runtime records, and UI
+       rendering behavior → separable evidence lanes suitable for one bounded
+       ephemeral batch.
+   - Keep execution entirely foreground only when the evidence is tightly
+     coupled, a single local lane can resolve it, or delegation overhead would
+     exceed the expected work.
    - Use `delegate_task(mode="loop", tasks=[...])` only when the user explicitly
      requests durable Loop or the discovery genuinely must survive restart and
      benefit from durable dependencies.
@@ -224,6 +254,11 @@ When independent evidence gathering justifies workers:
 - Do not create durable work merely because delegation is available.
 - Do not duplicate the durable graph in a separate session todo list.
 
+An explicitly invoked Wayfinder task that crosses multiple components, evidence
+sources, or likely context boundaries is delegation-worthy even though it is not
+hard-routed to durable Loop. Dispatch only the independent lanes; keep the
+frontier map, causal synthesis, user questions, and acceptance in the foreground.
+
 An ordinary explicit Loop implementation request remains an implementation
 workflow. Wayfinder must not intercept or delay it unless the user also asks to
 reopen unresolved decisions.
@@ -265,6 +300,9 @@ blocker. Do not fill gaps with plausible assumptions.
    resolvable items and real dependencies.
 10. **Duplicating orchestration.** Existing foreground, delegation, and Loop
     primitives are sufficient; do not invent a separate Wayfinder engine.
+11. **Foreground monopoly.** “Foreground-owned” does not mean accumulating a
+    long, multi-lane investigation in one context. Delegate independent evidence
+    lanes and synthesize them in the foreground.
 
 ## Verification
 
@@ -275,6 +313,7 @@ Before completing Wayfinder discovery, confirm:
 - [ ] User-owned choices remained in the foreground.
 - [ ] No production implementation occurred during discovery.
 - [ ] Delegation used the lightest sufficient execution mode.
+- [ ] An explicitly invoked multi-lane investigation delegated bounded evidence work instead of keeping every lane in one foreground context.
 - [ ] Every map item has one question, evidence, dependencies, and an exit criterion.
 - [ ] Every resolved item records rationale and rejected alternatives.
 - [ ] No required item remains hidden, duplicated, or falsely marked complete.
