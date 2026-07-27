@@ -3,6 +3,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { StrictMode } from 'react'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
+import type * as HermesApi from '@/hermes'
+
 import {
   type LiveGraphEdge,
   type LiveGraphNode,
@@ -49,12 +51,14 @@ import {
 } from './view'
 
 const hermesMocks = vi.hoisted(() => ({
-  getLoopTaskDetail: vi.fn()
+  getLoopTaskDetail: vi.fn(),
+  getSessionMessages: vi.fn()
 }))
 
 vi.mock('@/hermes', async importOriginal => ({
-  ...(await importOriginal<typeof import('@/hermes')>()),
-  getLoopTaskDetail: hermesMocks.getLoopTaskDetail
+  ...(await importOriginal<typeof HermesApi>()),
+  getLoopTaskDetail: hermesMocks.getLoopTaskDetail,
+  getSessionMessages: hermesMocks.getSessionMessages
 }))
 
 function graphNodePosition(node: Element): { x: number; y: number } {
@@ -648,6 +652,7 @@ beforeAll(() => {
 afterEach(() => {
   cleanup()
   hermesMocks.getLoopTaskDetail.mockReset()
+  hermesMocks.getSessionMessages.mockReset()
   window.localStorage.clear()
 })
 
@@ -3033,7 +3038,39 @@ describe('LiveGraphCanvas', () => {
     expect(container.querySelectorAll('[data-live-graph-label]').length).toBeGreaterThan(0)
   })
 
-  it('loads comments and run activity for the selected task feed', async () => {
+  it('loads comments and the latest worker transcript for the selected task feed', async () => {
+    hermesMocks.getSessionMessages.mockResolvedValue({
+      messages: [
+        {
+          content: 'Complete the assigned visual verification.',
+          role: 'user',
+          timestamp: Date.now() / 1000
+        },
+        {
+          content: 'Internal worker setup that must stay hidden.',
+          role: 'system',
+          timestamp: Date.now() / 1000
+        },
+        {
+          content: 'Inspected the running Electron window.',
+          role: 'assistant',
+          timestamp: Date.now() / 1000
+        },
+        {
+          content: 'Screenshot captured.',
+          role: 'tool',
+          timestamp: Date.now() / 1000,
+          tool_name: 'computer'
+        },
+        {
+          content: 'Hidden transport message.',
+          display_kind: 'hidden',
+          role: 'assistant',
+          timestamp: Date.now() / 1000
+        }
+      ],
+      session_id: 'worker-session'
+    })
     hermesMocks.getLoopTaskDetail.mockResolvedValue({
       comments: [
         {
@@ -3048,7 +3085,11 @@ describe('LiveGraphCanvas', () => {
         {
           ended_at: Date.now() / 1000,
           id: 12,
+          metadata: {
+            worker_session_id: 'worker-session'
+          },
           outcome: 'completed',
+          profile: 'worker-profile',
           status: 'done',
           summary: 'Captured the production evidence.',
           task_id: 'task'
@@ -3059,6 +3100,12 @@ describe('LiveGraphCanvas', () => {
         id: 'task',
         status: 'completed',
         title: 'Authoritative task title',
+        worker_activity: {
+          profile: 'worker-profile',
+          run_id: 12,
+          task_id: 'task',
+          worker_session_id: 'worker-session'
+        },
         workflow_id: 'wf'
       }
     })
@@ -3087,6 +3134,12 @@ describe('LiveGraphCanvas', () => {
     expect(await details.findByText('Verified in the live app.')).toBeTruthy()
 
     fireEvent.click(details.getByRole('button', { name: 'Activity' }))
+    await waitFor(() => expect(hermesMocks.getSessionMessages).toHaveBeenCalledWith('worker-session', 'worker-profile'))
+    expect(await details.findByText('Complete the assigned visual verification.')).toBeTruthy()
+    expect(details.getByText('Inspected the running Electron window.')).toBeTruthy()
+    expect(details.getByText('Screenshot captured.')).toBeTruthy()
+    expect(details.queryByText('Internal worker setup that must stay hidden.')).toBeNull()
+    expect(details.queryByText('Hidden transport message.')).toBeNull()
     expect(await details.findByText('Captured the production evidence.')).toBeTruthy()
 
     fireEvent.click(details.getByRole('button', { name: 'Details' }))
@@ -3123,6 +3176,7 @@ describe('LiveGraphCanvas', () => {
     const description = screen
       .getByTestId('live-graph-task-details')
       .querySelector('[data-live-graph-inspector-section-text]')!
+
     const activitySection = screen.getByTestId('live-graph-task-activity')
     const activityTexts = activitySection.querySelectorAll('[data-live-graph-inspector-section-text]')
     const summary = activityTexts[0]!

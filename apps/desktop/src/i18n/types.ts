@@ -992,6 +992,14 @@ export interface Translations {
     taskDetailLoadFailed: string
     taskCommentsEmpty: string
     taskActivityEmpty: string
+    taskWorkerTranscript: string
+    taskWorkerTranscriptLoading: string
+    taskWorkerTranscriptLoadFailed: string
+    taskWorkerTranscriptEmpty: string
+    taskTranscriptUser: string
+    taskTranscriptWorker: string
+    taskTranscriptTool: string
+    taskRunHistory: string
     unknownCommentAuthor: string
     openTask: string
     showMore: string
