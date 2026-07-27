@@ -3,17 +3,15 @@
 ▶ pre-compiling bytecode cache
 ▶ launching test runner
 Discovered 1 test files (~7 tests) under ['tests/scripts/test_wayfinder_runtime.py']; running with -j 16
-[100.0% |     7/~7 | ✓7 | ✗0] ✓ tests/scripts/test_wayfinder_runtime.py (7✓, 1.8s)
+[100.0% |     7/~7 | ✓7 | ✗0] ✓ tests/scripts/test_wayfinder_runtime.py (7✓, 0.5s)
 
-=== Summary: 1 files, 7 tests passed, 0 failed (100% complete) in 1.8s (16 workers) ===
+=== Summary: 1 files, 7 tests passed, 0 failed (100% complete) in 0.5s (16 workers) ===
   Durations cached to test_durations.json (1 files)
 
 === Per-file subprocess time distribution ===
   Files:   1
-  Total subprocess CPU-wall: 1.8s  (runner wall: 1.8s, parallelism: 16x)
-  P50: 1.81s  P90: 1.81s  P95: 1.81s  P99: 1.81s  Max: 1.81s
-  <1s: 0 files (0%)  <2s: 1 files (100%)
+  Total subprocess CPU-wall: 0.5s  (runner wall: 0.5s, parallelism: 16x)
+  P50: 0.50s  P90: 0.50s  P95: 0.50s  P99: 0.50s  Max: 0.50s
+  <1s: 1 files (100%)  <2s: 1 files (100%)
   Top 10 slowest:
-      1.81s  tests/scripts/test_wayfinder_runtime.py
-
-EXIT_CODE=0
+      0.50s  tests/scripts/test_wayfinder_runtime.py

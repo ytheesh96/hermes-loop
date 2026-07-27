@@ -4,7 +4,7 @@ model:
   api_mode: chat_completions
 custom_providers:
   - name: local
-    base_url: http://127.0.0.1:59763/v1
+    base_url: http://127.0.0.1:61002/v1
     api_key: local-key
     model: local-wayfinder
 plugins:

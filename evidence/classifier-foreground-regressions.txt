@@ -3,21 +3,19 @@
 ▶ pre-compiling bytecode cache
 ▶ launching test runner
 Discovered 3 test files (~27 tests) under ['tests/skills/test_wayfinder_pre_spec_skill.py', 'tests/agent/test_loop_foreground.py', 'tests/hermes_cli/test_kanban_foreground_handoff.py']; running with -j 16
-[ 40.7% |    11/~27 | ✓11 | ✗ 0] ✓ tests/skills/test_wayfinder_pre_spec_skill.py (11✓, 0.6s)
-[ 51.9% |    14/~27 | ✓14 | ✗ 0] ✓ tests/hermes_cli/test_kanban_foreground_handoff.py (3✓, 0.6s)
-[100.0% |    27/~27 | ✓27 | ✗ 0] ✓ tests/agent/test_loop_foreground.py (13✓, 1.6s)
+[ 40.7% |    11/~27 | ✓11 | ✗ 0] ✓ tests/skills/test_wayfinder_pre_spec_skill.py (11✓, 0.4s)
+[ 51.9% |    14/~27 | ✓14 | ✗ 0] ✓ tests/hermes_cli/test_kanban_foreground_handoff.py (3✓, 0.4s)
+[100.0% |    27/~27 | ✓27 | ✗ 0] ✓ tests/agent/test_loop_foreground.py (13✓, 0.6s)
 
-=== Summary: 3 files, 27 tests passed, 0 failed (100% complete) in 1.6s (16 workers) ===
+=== Summary: 3 files, 27 tests passed, 0 failed (100% complete) in 0.6s (16 workers) ===
   Durations cached to test_durations.json (3 files)
 
 === Per-file subprocess time distribution ===
   Files:   3
-  Total subprocess CPU-wall: 2.7s  (runner wall: 1.6s, parallelism: 16x)
-  P50: 0.58s  P90: 1.58s  P95: 1.58s  P99: 1.58s  Max: 1.58s
-  <1s: 2 files (67%)  <2s: 3 files (100%)
+  Total subprocess CPU-wall: 1.4s  (runner wall: 0.6s, parallelism: 16x)
+  P50: 0.43s  P90: 0.58s  P95: 0.58s  P99: 0.58s  Max: 0.58s
+  <1s: 3 files (100%)  <2s: 3 files (100%)
   Top 10 slowest:
-      1.58s  tests/agent/test_loop_foreground.py
-      0.58s  tests/hermes_cli/test_kanban_foreground_handoff.py
-      0.55s  tests/skills/test_wayfinder_pre_spec_skill.py
-
-EXIT_CODE=0
+      0.58s  tests/agent/test_loop_foreground.py
+      0.43s  tests/hermes_cli/test_kanban_foreground_handoff.py
+      0.36s  tests/skills/test_wayfinder_pre_spec_skill.py

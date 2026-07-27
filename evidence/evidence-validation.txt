@@ -3,5 +3,4 @@ cases=4
 fixture_roots=4
 trace_artifacts=4
 TRACE_JSON_VALID=4
-
-EXIT_CODE=0
+PORTABLE_LOCATORS_VALID=4

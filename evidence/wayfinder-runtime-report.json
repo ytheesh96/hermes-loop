@@ -15,17 +15,17 @@
       "evidence": {
         "changed_paths": [],
         "final_text": "I inspected the repository first. The choice between session cookies, JWTs, and passkeys changes security and product behavior; which option should the foreground approve? No production change was made.",
-        "fixture_root": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/ambiguous_architecture",
+        "fixture_root": "fixtures/ambiguous_architecture",
         "fresh_process": true,
-        "hermes_home": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/ambiguous_architecture/hermes-home",
+        "hermes_home": "fixtures/ambiguous_architecture/hermes-home",
         "hook_events": [
           {
             "args": {},
             "duration_ms": 0,
             "result": "{\"success\": true, \"skills\": [{\"name\": \"wayfinder-pre-spec\", \"description\": \"Use when a feature has unresolved product or architecture decisions, or the user asks for Wayfinder. Research first, keep user-owned choices in the foreground, and hand off a decision-complete specification without production implementation.\", \"category\": \"software-development\"}], \"categories\": [\"software-development\"], \"count\": 1, \"hint\": \"Use skill_view(name) to see full content, tags, and linked files\"}",
-            "session_id": "20260727_024523_639d8d",
+            "session_id": "20260727_030229_444c9d",
             "status": "ok",
-            "task_id": "48c3c0d4-0ef3-4fc4-bb1f-5a0ac9015968",
+            "task_id": "3fcd6d74-5a1a-405d-81d9-4a2e32ff907f",
             "tool_call_id": "call-skills",
             "tool_name": "skills_list"
           },
@@ -33,11 +33,11 @@
             "args": {
               "name": "wayfinder-pre-spec"
             },
-            "duration_ms": 3,
+            "duration_ms": 2,
             "result": "{\"success\": true, \"name\": \"wayfinder-pre-spec\", \"description\": \"Use when a feature has unresolved product or architecture decisions, or the user asks for Wayfinder. Research first, keep user-owned choices in the foreground, and hand off a decision-complete specification without production implementation.\", \"tags\": [\"planning\", \"discovery\", \"decisions\", \"specifications\", \"wayfinder\"], \"related_skills\": [\"plan\", \"loop-triage\"], \"content\": \"---\\nname: wayfinder-pre-spec\\ndescription: Use when a fea",
-            "session_id": "20260727_024523_639d8d",
+            "session_id": "20260727_030229_444c9d",
             "status": "ok",
-            "task_id": "48c3c0d4-0ef3-4fc4-bb1f-5a0ac9015968",
+            "task_id": "3fcd6d74-5a1a-405d-81d9-4a2e32ff907f",
             "tool_call_id": "call-view",
             "tool_name": "skill_view"
           },
@@ -45,11 +45,11 @@
             "args": {
               "path": "README.md"
             },
-            "duration_ms": 119,
+            "duration_ms": 113,
             "result": "{\"content\": \"1|# Fixture\\n2|\\n3|Existing convention.\\n4|\", \"total_lines\": 3, \"file_size\": 32, \"truncated\": false, \"is_binary\": false, \"is_image\": false}",
-            "session_id": "20260727_024523_639d8d",
+            "session_id": "20260727_030229_444c9d",
             "status": "ok",
-            "task_id": "48c3c0d4-0ef3-4fc4-bb1f-5a0ac9015968",
+            "task_id": "3fcd6d74-5a1a-405d-81d9-4a2e32ff907f",
             "tool_call_id": "call-read",
             "tool_name": "read_file"
           }
@@ -91,10 +91,12 @@
             "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
             "tool_names": [
               "clarify",
+              "close_terminal",
               "computer_use",
               "cronjob",
               "delegate_task",
               "execute_code",
+              "focus_pane",
               "kanban_comment",
               "kanban_complete",
               "kanban_show",
@@ -106,12 +108,14 @@
               "loop_status",
               "loop_update",
               "memory",
+              "open_preview",
               "patch",
               "process",
               "project_create",
               "project_list",
               "project_switch",
               "read_file",
+              "read_terminal",
               "search_files",
               "session_search",
               "skill_manage",
@@ -148,10 +152,12 @@
             "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
             "tool_names": [
               "clarify",
+              "close_terminal",
               "computer_use",
               "cronjob",
               "delegate_task",
               "execute_code",
+              "focus_pane",
               "kanban_comment",
               "kanban_complete",
               "kanban_show",
@@ -163,12 +169,14 @@
               "loop_status",
               "loop_update",
               "memory",
+              "open_preview",
               "patch",
               "process",
               "project_create",
               "project_list",
               "project_switch",
               "read_file",
+              "read_terminal",
               "search_files",
               "session_search",
               "skill_manage",
@@ -207,10 +215,12 @@
             "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
             "tool_names": [
               "clarify",
+              "close_terminal",
               "computer_use",
               "cronjob",
               "delegate_task",
               "execute_code",
+              "focus_pane",
               "kanban_comment",
               "kanban_complete",
               "kanban_show",
@@ -222,12 +232,14 @@
               "loop_status",
               "loop_update",
               "memory",
+              "open_preview",
               "patch",
               "process",
               "project_create",
               "project_list",
               "project_switch",
               "read_file",
+              "read_terminal",
               "search_files",
               "session_search",
               "skill_manage",
@@ -259,10 +271,12 @@
             "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
             "tool_names": [
               "clarify",
+              "close_terminal",
               "computer_use",
               "cronjob",
               "delegate_task",
               "execute_code",
+              "focus_pane",
               "kanban_comment",
               "kanban_complete",
               "kanban_show",
@@ -274,12 +288,14 @@
               "loop_status",
               "loop_update",
               "memory",
+              "open_preview",
               "patch",
               "process",
               "project_create",
               "project_list",
               "project_switch",
               "read_file",
+              "read_terminal",
               "search_files",
               "session_search",
               "skill_manage",
@@ -296,9 +312,9 @@
           }
         ],
         "returncode": 0,
-        "sandbox": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/ambiguous_architecture/sandbox",
+        "sandbox": "fixtures/ambiguous_architecture/sandbox",
         "sandbox_changed": false,
-        "session_id": "20260727_024523_639d8d",
+        "session_id": "20260727_030229_444c9d",
         "stderr": "",
         "tool_events": [
           {
@@ -342,8 +358,8 @@
             "request": 6
           }
         ],
-        "trace_artifact": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/traces/ambiguous_architecture.json",
-        "trace_path": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/ambiguous_architecture/hermes-home/tool-hooks.jsonl",
+        "trace_artifact": "traces/ambiguous_architecture.json",
+        "trace_path": "fixtures/ambiguous_architecture/hermes-home/tool-hooks.jsonl",
         "workflow_id": null
       },
       "failed_checks": [],
@@ -366,20 +382,20 @@
           "artifacts/runtime-artifact.txt"
         ],
         "final_text": "Implemented the bounded request in the sandbox.",
-        "fixture_root": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/clear_implementation",
+        "fixture_root": "fixtures/clear_implementation",
         "fresh_process": true,
-        "hermes_home": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/clear_implementation/hermes-home",
+        "hermes_home": "fixtures/clear_implementation/hermes-home",
         "hook_events": [
           {
             "args": {
               "content": "implemented",
               "path": "artifacts/runtime-artifact.txt"
             },
-            "duration_ms": 256,
-            "result": "{\"bytes_written\": 11, \"dirs_created\": true, \"lint\": {\"status\": \"skipped\", \"message\": \"No linter for .txt files\"}, \"resolved_path\": \"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-clear_implementation-z0_a6pct/sandbox/artifacts/runtime-artifact.txt\", \"files_modified\": [\"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-clear_implementation-z0_a6pct/sandbox/artifacts/runtime-artifact.txt\"]}",
-            "session_id": "20260727_024531_193fa0",
+            "duration_ms": 111,
+            "result": "{\"bytes_written\": 11, \"dirs_created\": true, \"lint\": {\"status\": \"skipped\", \"message\": \"No linter for .txt files\"}, \"resolved_path\": \"fixtures/clear_implementation/sandbox/artifacts/runtime-artifact.txt\", \"files_modified\": [\"fixtures/clear_implementation/sandbox/artifacts/runtime-artifact.txt\"]}",
+            "session_id": "20260727_030231_d579fd",
             "status": "ok",
-            "task_id": "1acf4d4a-96bc-4d0a-a624-516ebdcc4897",
+            "task_id": "893c26af-d4e3-466e-8573-fb8375857289",
             "tool_call_id": "call-write",
             "tool_name": "write_file"
           }
@@ -421,10 +437,12 @@
             "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
             "tool_names": [
               "clarify",
+              "close_terminal",
               "computer_use",
               "cronjob",
               "delegate_task",
               "execute_code",
+              "focus_pane",
               "kanban_comment",
               "kanban_complete",
               "kanban_show",
@@ -436,12 +454,14 @@
               "loop_status",
               "loop_update",
               "memory",
+              "open_preview",
               "patch",
               "process",
               "project_create",
               "project_list",
               "project_switch",
               "read_file",
+              "read_terminal",
               "search_files",
               "session_search",
               "skill_manage",
@@ -469,10 +489,12 @@
             "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
             "tool_names": [
               "clarify",
+              "close_terminal",
               "computer_use",
               "cronjob",
               "delegate_task",
               "execute_code",
+              "focus_pane",
               "kanban_comment",
               "kanban_complete",
               "kanban_show",
@@ -484,12 +506,14 @@
               "loop_status",
               "loop_update",
               "memory",
+              "open_preview",
               "patch",
               "process",
               "project_create",
               "project_list",
               "project_switch",
               "read_file",
+              "read_terminal",
               "search_files",
               "session_search",
               "skill_manage",
@@ -506,9 +530,9 @@
           }
         ],
         "returncode": 0,
-        "sandbox": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/clear_implementation/sandbox",
+        "sandbox": "fixtures/clear_implementation/sandbox",
         "sandbox_changed": true,
-        "session_id": "20260727_024531_193fa0",
+        "session_id": "20260727_030231_d579fd",
         "stderr": "",
         "tool_events": [
           {
@@ -521,14 +545,14 @@
             "request": 3
           },
           {
-            "content": "{\"bytes_written\": 11, \"dirs_created\": true, \"lint\": {\"status\": \"skipped\", \"message\": \"No linter for .txt files\"}, \"resolved_path\": \"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-clear_implementation-z0_a6pct/sandbox/artifacts/runtime-artifact.txt\", \"files_modified\": [\"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-clear_implementation-z0_a6pct/sandbox/artifacts/runtime-artifact.txt\"]}",
+            "content": "{\"bytes_written\": 11, \"dirs_created\": true, \"lint\": {\"status\": \"skipped\", \"message\": \"No linter for .txt files\"}, \"resolved_path\": \"fixtures/clear_implementation/sandbox/artifacts/runtime-artifact.txt\", \"files_modified\": [\"fixtures/clear_implementation/sandbox/artifacts/runtime-artifact.txt\"]}",
             "name": "write_file",
             "phase": "result",
             "request": 4
           }
         ],
-        "trace_artifact": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/traces/clear_implementation.json",
-        "trace_path": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/clear_implementation/hermes-home/tool-hooks.jsonl",
+        "trace_artifact": "traces/clear_implementation.json",
+        "trace_path": "fixtures/clear_implementation/hermes-home/tool-hooks.jsonl",
         "workflow_id": null
       },
       "failed_checks": [],
@@ -549,9 +573,9 @@
       "evidence": {
         "changed_paths": [],
         "final_text": "The approved implementation was routed through the ordinary durable Loop primitive.",
-        "fixture_root": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/explicit_loop",
+        "fixture_root": "fixtures/explicit_loop",
         "fresh_process": true,
-        "hermes_home": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/explicit_loop/hermes-home",
+        "hermes_home": "fixtures/explicit_loop/hermes-home",
         "hook_events": [
           {
             "args": {
@@ -564,11 +588,11 @@
                 }
               ]
             },
-            "duration_ms": 67,
-            "result": "{\"status\": \"dispatched\", \"mode\": \"loop\", \"count\": 1, \"items\": [{\"client_id\": \"runtime-artifact\", \"loop_item_id\": \"t_f2811c81\", \"status\": \"triage\", \"needs_specification\": true, \"assignee\": null, \"parents\": [], \"reused\": false}], \"edges\": [], \"workflow_id\": \"wf_407e860d99ca0acb\", \"decomposition\": [{\"task_id\": \"t_f2811c81\", \"ok\": false, \"reason\": \"LLM returned malformed JSON\", \"fanout\": false, \"child_ids\": [], \"new_title\": null}], \"candidate_task_ids\": [], \"dispatch\": {\"spawned\": [], \"skipped_locke",
-            "session_id": "20260727_024540_41d40b",
+            "duration_ms": 56,
+            "result": "{\"status\": \"dispatched\", \"mode\": \"loop\", \"count\": 1, \"items\": [{\"client_id\": \"runtime-artifact\", \"loop_item_id\": \"t_95bdf4a8\", \"status\": \"triage\", \"needs_specification\": true, \"assignee\": null, \"parents\": [], \"reused\": false}], \"edges\": [], \"workflow_id\": \"wf_84366e3cfacee711\", \"decomposition\": [{\"task_id\": \"t_95bdf4a8\", \"ok\": false, \"reason\": \"LLM returned malformed JSON\", \"fanout\": false, \"child_ids\": [], \"new_title\": null}], \"candidate_task_ids\": [], \"dispatch\": {\"spawned\": [], \"skipped_locke",
+            "session_id": "20260727_030233_85435a",
             "status": "ok",
-            "task_id": "549dab8f-217e-40fe-85dc-0acf75b76bf3",
+            "task_id": "9d48ef4e-194d-4dfa-920a-56978460fd09",
             "tool_call_id": "call-loop",
             "tool_name": "delegate_task"
           }
@@ -610,10 +634,12 @@
             "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
             "tool_names": [
               "clarify",
+              "close_terminal",
               "computer_use",
               "cronjob",
               "delegate_task",
               "execute_code",
+              "focus_pane",
               "kanban_comment",
               "kanban_complete",
               "kanban_show",
@@ -625,12 +651,14 @@
               "loop_status",
               "loop_update",
               "memory",
+              "open_preview",
               "patch",
               "process",
               "project_create",
               "project_list",
               "project_switch",
               "read_file",
+              "read_terminal",
               "search_files",
               "session_search",
               "skill_manage",
@@ -669,10 +697,12 @@
             "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
             "tool_names": [
               "clarify",
+              "close_terminal",
               "computer_use",
               "cronjob",
               "delegate_task",
               "execute_code",
+              "focus_pane",
               "kanban_comment",
               "kanban_complete",
               "kanban_show",
@@ -684,12 +714,14 @@
               "loop_status",
               "loop_update",
               "memory",
+              "open_preview",
               "patch",
               "process",
               "project_create",
               "project_list",
               "project_switch",
               "read_file",
+              "read_terminal",
               "search_files",
               "session_search",
               "skill_manage",
@@ -706,9 +738,9 @@
           }
         ],
         "returncode": 0,
-        "sandbox": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/explicit_loop/sandbox",
+        "sandbox": "fixtures/explicit_loop/sandbox",
         "sandbox_changed": false,
-        "session_id": "20260727_024540_41d40b",
+        "session_id": "20260727_030233_85435a",
         "stderr": "",
         "tool_events": [
           {
@@ -727,17 +759,17 @@
             "request": 3
           },
           {
-            "content": "{\"status\": \"dispatched\", \"mode\": \"loop\", \"count\": 1, \"items\": [{\"client_id\": \"runtime-artifact\", \"loop_item_id\": \"t_f2811c81\", \"status\": \"triage\", \"needs_specification\": true, \"assignee\": null, \"parents\": [], \"reused\": false}], \"edges\": [], \"workflow_id\": \"wf_407e860d99ca0acb\", \"decomposition\": [{\"task_id\": \"t_f2811c81\", \"ok\": false, \"reason\": \"LLM returned malformed JSON\", \"fanout\": false, \"child_ids\": [], \"new_title\": null}], \"candidate_task_ids\": [], \"dispatch\": {\"spawned\": [], \"skipped_locke",
-            "loop_item_id": "t_f2811c81",
+            "content": "{\"status\": \"dispatched\", \"mode\": \"loop\", \"count\": 1, \"items\": [{\"client_id\": \"runtime-artifact\", \"loop_item_id\": \"t_95bdf4a8\", \"status\": \"triage\", \"needs_specification\": true, \"assignee\": null, \"parents\": [], \"reused\": false}], \"edges\": [], \"workflow_id\": \"wf_84366e3cfacee711\", \"decomposition\": [{\"task_id\": \"t_95bdf4a8\", \"ok\": false, \"reason\": \"LLM returned malformed JSON\", \"fanout\": false, \"child_ids\": [], \"new_title\": null}], \"candidate_task_ids\": [], \"dispatch\": {\"spawned\": [], \"skipped_locke",
+            "loop_item_id": "t_95bdf4a8",
             "name": "delegate_task",
             "phase": "result",
             "request": 5,
-            "workflow_id": "wf_407e860d99ca0acb"
+            "workflow_id": "wf_84366e3cfacee711"
           }
         ],
-        "trace_artifact": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/traces/explicit_loop.json",
-        "trace_path": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/explicit_loop/hermes-home/tool-hooks.jsonl",
-        "workflow_id": "wf_407e860d99ca0acb"
+        "trace_artifact": "traces/explicit_loop.json",
+        "trace_path": "fixtures/explicit_loop/hermes-home/tool-hooks.jsonl",
+        "workflow_id": "wf_84366e3cfacee711"
       },
       "failed_checks": [],
       "id": "explicit_loop",
@@ -761,19 +793,19 @@
           "README.md"
         ],
         "final_text": "I inspected the existing heading convention and added the small README note in the foreground.",
-        "fixture_root": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/minor_ambiguity",
+        "fixture_root": "fixtures/minor_ambiguity",
         "fresh_process": true,
-        "hermes_home": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/minor_ambiguity/hermes-home",
+        "hermes_home": "fixtures/minor_ambiguity/hermes-home",
         "hook_events": [
           {
             "args": {
               "path": "README.md"
             },
-            "duration_ms": 158,
+            "duration_ms": 104,
             "result": "{\"content\": \"1|# Fixture\\n2|\\n3|Existing convention.\\n4|\", \"total_lines\": 3, \"file_size\": 32, \"truncated\": false, \"is_binary\": false, \"is_image\": false}",
-            "session_id": "20260727_024552_c5d645",
+            "session_id": "20260727_030235_cc1a2f",
             "status": "ok",
-            "task_id": "2933c2e7-e656-439c-937d-07585311223c",
+            "task_id": "2e7ab827-22e2-4c79-8057-42b3be7b81fc",
             "tool_call_id": "call-read",
             "tool_name": "read_file"
           },
@@ -782,11 +814,11 @@
               "content": "# Fixture\n\nRuntime artifacts are disposable.\n",
               "path": "README.md"
             },
-            "duration_ms": 294,
-            "result": "{\"bytes_written\": 45, \"dirs_created\": true, \"lint\": {\"status\": \"skipped\", \"message\": \"No linter for .md files\"}, \"resolved_path\": \"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-minor_ambiguity-lqy22kds/sandbox/README.md\", \"files_modified\": [\"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-minor_ambiguity-lqy22kds/sandbox/README.md\"]}",
-            "session_id": "20260727_024552_c5d645",
+            "duration_ms": 132,
+            "result": "{\"bytes_written\": 45, \"dirs_created\": true, \"lint\": {\"status\": \"skipped\", \"message\": \"No linter for .md files\"}, \"resolved_path\": \"fixtures/minor_ambiguity/sandbox/README.md\", \"files_modified\": [\"fixtures/minor_ambiguity/sandbox/README.md\"]}",
+            "session_id": "20260727_030235_cc1a2f",
             "status": "ok",
-            "task_id": "2933c2e7-e656-439c-937d-07585311223c",
+            "task_id": "2e7ab827-22e2-4c79-8057-42b3be7b81fc",
             "tool_call_id": "call-write",
             "tool_name": "write_file"
           }
@@ -828,10 +860,12 @@
             "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
             "tool_names": [
               "clarify",
+              "close_terminal",
               "computer_use",
               "cronjob",
               "delegate_task",
               "execute_code",
+              "focus_pane",
               "kanban_comment",
               "kanban_complete",
               "kanban_show",
@@ -843,12 +877,14 @@
               "loop_status",
               "loop_update",
               "memory",
+              "open_preview",
               "patch",
               "process",
               "project_create",
               "project_list",
               "project_switch",
               "read_file",
+              "read_terminal",
               "search_files",
               "session_search",
               "skill_manage",
@@ -885,10 +921,12 @@
             "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
             "tool_names": [
               "clarify",
+              "close_terminal",
               "computer_use",
               "cronjob",
               "delegate_task",
               "execute_code",
+              "focus_pane",
               "kanban_comment",
               "kanban_complete",
               "kanban_show",
@@ -900,12 +938,14 @@
               "loop_status",
               "loop_update",
               "memory",
+              "open_preview",
               "patch",
               "process",
               "project_create",
               "project_list",
               "project_switch",
               "read_file",
+              "read_terminal",
               "search_files",
               "session_search",
               "skill_manage",
@@ -935,10 +975,12 @@
             "system_excerpt": "mands, or needed pitfalls you discovered, update it before finishing.\n\n<available_skills>\n  software-development:\n    - wayfinder-pre-spec: Use when a feature has unresolved product or architecture...\n</available_skills>\n\nOutside the explicit native-fast-path exception above, only proceed without loading a skill if genuinely none are relevant to the task.\n\nHost: macOS (26.5.2)\nUser home directory: /Users/yt\nCurrent w",
             "tool_names": [
               "clarify",
+              "close_terminal",
               "computer_use",
               "cronjob",
               "delegate_task",
               "execute_code",
+              "focus_pane",
               "kanban_comment",
               "kanban_complete",
               "kanban_show",
@@ -950,12 +992,14 @@
               "loop_status",
               "loop_update",
               "memory",
+              "open_preview",
               "patch",
               "process",
               "project_create",
               "project_list",
               "project_switch",
               "read_file",
+              "read_terminal",
               "search_files",
               "session_search",
               "skill_manage",
@@ -972,9 +1016,9 @@
           }
         ],
         "returncode": 0,
-        "sandbox": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/minor_ambiguity/sandbox",
+        "sandbox": "fixtures/minor_ambiguity/sandbox",
         "sandbox_changed": true,
-        "session_id": "20260727_024552_c5d645",
+        "session_id": "20260727_030235_cc1a2f",
         "stderr": "",
         "tool_events": [
           {
@@ -1001,14 +1045,14 @@
             "request": 4
           },
           {
-            "content": "{\"bytes_written\": 45, \"dirs_created\": true, \"lint\": {\"status\": \"skipped\", \"message\": \"No linter for .md files\"}, \"resolved_path\": \"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-minor_ambiguity-lqy22kds/sandbox/README.md\", \"files_modified\": [\"/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/.hermes-wayfinder-minor_ambiguity-lqy22kds/sandbox/README.md\"]}",
+            "content": "{\"bytes_written\": 45, \"dirs_created\": true, \"lint\": {\"status\": \"skipped\", \"message\": \"No linter for .md files\"}, \"resolved_path\": \"fixtures/minor_ambiguity/sandbox/README.md\", \"files_modified\": [\"fixtures/minor_ambiguity/sandbox/README.md\"]}",
             "name": "write_file",
             "phase": "result",
             "request": 5
           }
         ],
-        "trace_artifact": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/traces/minor_ambiguity.json",
-        "trace_path": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/minor_ambiguity/hermes-home/tool-hooks.jsonl",
+        "trace_artifact": "traces/minor_ambiguity.json",
+        "trace_path": "fixtures/minor_ambiguity/hermes-home/tool-hooks.jsonl",
         "workflow_id": null
       },
       "failed_checks": [],
@@ -1020,23 +1064,23 @@
   "fixture_manifest": [
     {
       "case": "ambiguous_architecture",
-      "fixture_root": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/ambiguous_architecture",
-      "trace_artifact": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/traces/ambiguous_architecture.json"
+      "fixture_root": "fixtures/ambiguous_architecture",
+      "trace_artifact": "traces/ambiguous_architecture.json"
     },
     {
       "case": "clear_implementation",
-      "fixture_root": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/clear_implementation",
-      "trace_artifact": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/traces/clear_implementation.json"
+      "fixture_root": "fixtures/clear_implementation",
+      "trace_artifact": "traces/clear_implementation.json"
     },
     {
       "case": "explicit_loop",
-      "fixture_root": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/explicit_loop",
-      "trace_artifact": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/traces/explicit_loop.json"
+      "fixture_root": "fixtures/explicit_loop",
+      "trace_artifact": "traces/explicit_loop.json"
     },
     {
       "case": "minor_ambiguity",
-      "fixture_root": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/fixtures/minor_ambiguity",
-      "trace_artifact": "/Users/yt/.hermes/kanban/boards/hermes-agent/workspaces/t_ef15dbf1/evidence/traces/minor_ambiguity.json"
+      "fixture_root": "fixtures/minor_ambiguity",
+      "trace_artifact": "traces/minor_ambiguity.json"
     }
   ],
   "status": "passed"
