@@ -923,6 +923,14 @@ describe('Graph View model', () => {
     })
   })
 
+  it('keeps task-context connections visible around an emphasized task', () => {
+    expect(liveGraphEdgeAppearance(false, 'detail', 'x', 'a', 'b', true)).toEqual({
+      emphasized: false,
+      opacity: 0.48,
+      strokeWidth: 1.1
+    })
+  })
+
   it('keeps every connected node eligible when no node is selected', () => {
     const depthOne = visibleLiveGraph(graph, {
       enabledKinds: new Set(DEFAULT_LIVE_GRAPH_VIEW_STATE.enabledKinds),
@@ -2823,7 +2831,7 @@ describe('LiveGraphCanvas', () => {
       rootId: 'session:default:root'
     }
 
-    render(
+    const { container } = render(
       <LiveGraphCanvas
         graph={filteredGraph}
         initialState={{
@@ -2929,6 +2937,22 @@ describe('LiveGraphCanvas', () => {
       expect(screen.getByRole('button', { name: /Task: Active task/ }).getAttribute('opacity')).toBe('1')
       expect(screen.getByRole('button', { name: /Task: Completed task/ }).getAttribute('opacity')).toBe('0.2')
       expect(screen.getByRole('button', { name: /Task: Attention task/ }).getAttribute('opacity')).toBe('0.2')
+      expect(
+        container
+          .querySelector(
+            '[data-live-graph-edge-source="task:default:board:active"]' +
+              '[data-live-graph-edge-target="task:default:board:completed"]'
+          )
+          ?.getAttribute('opacity')
+      ).toBe('1')
+      expect(
+        container
+          .querySelector(
+            '[data-live-graph-edge-source="task:default:board:completed"]' +
+              '[data-live-graph-edge-target="task:default:board:attention"]'
+          )
+          ?.getAttribute('opacity')
+      ).toBe('0.48')
     })
   })
 

@@ -1329,7 +1329,8 @@ export function liveGraphEdgeAppearance(
   denseLod: DenseGraphLod,
   emphasisId: string | null,
   sourceId: string,
-  targetId: string
+  targetId: string,
+  preserveContextEdges = false
 ): { emphasized: boolean; opacity: number; strokeWidth: number } {
   const emphasized = Boolean(emphasisId && (sourceId === emphasisId || targetId === emphasisId))
 
@@ -1338,7 +1339,11 @@ export function liveGraphEdgeAppearance(
       return { emphasized, opacity: 0.48, strokeWidth: 1.1 }
     }
 
-    return emphasized ? { emphasized, opacity: 1, strokeWidth: 1.8 } : { emphasized, opacity: 0.07, strokeWidth: 0.65 }
+    return emphasized
+      ? { emphasized, opacity: 1, strokeWidth: 1.8 }
+      : preserveContextEdges
+        ? { emphasized, opacity: 0.48, strokeWidth: 1.1 }
+        : { emphasized, opacity: 0.07, strokeWidth: 0.65 }
   }
 
   if (emphasisId) {
@@ -4913,7 +4918,14 @@ export function LiveGraphCanvas({
                       return null
                     }
 
-                    const appearance = liveGraphEdgeAppearance(denseGraph, denseLod, emphasisId, sourceId, targetId)
+                    const appearance = liveGraphEdgeAppearance(
+                      denseGraph,
+                      denseLod,
+                      emphasisId,
+                      sourceId,
+                      targetId,
+                      taskFeedMode
+                    )
 
                     const segment = trimLiveGraphEdge(
                       source,
