@@ -1399,6 +1399,7 @@ export function visibleLiveGraph(
   graph: LiveGraphSnapshot,
   options: {
     enabledKinds: ReadonlySet<LiveGraphKind>
+    focusComponent?: boolean
     focusDepth: LiveGraphFocusDepth
     focusId?: string | null
     globalTaskFilter?: LiveGraphTaskFilter
@@ -1465,17 +1466,30 @@ export function visibleLiveGraph(
         )
       : null
 
+  const focusedComponentId = options.focusComponent ? options.focusId : null
+
+  const candidateTopology =
+    matchingGlobalTaskIds || focusedComponentId ? analyzeLiveGraphTopology(candidateNodes, candidateEdges) : null
+
   const connectedTaskIds = matchingGlobalTaskIds
     ? new Set(
-        analyzeLiveGraphTopology(candidateNodes, candidateEdges)
-          .components.filter(component => component.some(id => matchingGlobalTaskIds.has(id)))
+        (candidateTopology?.components ?? [])
+          .filter(component => component.some(id => matchingGlobalTaskIds.has(id)))
           .flat()
       )
     : null
 
-  const nodes = connectedTaskIds
-    ? candidateNodes.filter(node => connectedTaskIds.has(liveGraphNodeId(node)))
-    : candidateNodes
+  const focusedComponent = focusedComponentId
+    ? candidateTopology?.components.find(component => component.includes(focusedComponentId))
+    : undefined
+
+  const focusedComponentIds = focusedComponent ? new Set(focusedComponent) : null
+
+  const nodes = candidateNodes.filter(node => {
+    const id = liveGraphNodeId(node)
+
+    return (!connectedTaskIds || connectedTaskIds.has(id)) && (!focusedComponentIds || focusedComponentIds.has(id))
+  })
 
   const nodeIds = new Set(nodes.map(liveGraphNodeId))
 
@@ -1545,7 +1559,7 @@ export function visibleLiveGraph(
         }
       }
     }
-  } else if (options.focusDepth === 'all' || !selectedFocusId) {
+  } else if (options.focusComponent || options.focusDepth === 'all' || !selectedFocusId) {
     for (const id of eligibleIds) {
       allowedByDepth.add(id)
     }
@@ -2691,6 +2705,7 @@ export function LiveGraphCanvas({
     () =>
       visibleLiveGraph(graph, {
         enabledKinds,
+        focusComponent: taskFeedMode,
         focusDepth: viewState.focusDepth,
         focusId,
         globalTaskFilter: taskFeedMode ? viewState.workflowFilter : undefined,

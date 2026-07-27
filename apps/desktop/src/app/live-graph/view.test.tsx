@@ -2697,7 +2697,7 @@ describe('LiveGraphCanvas', () => {
     })
   })
 
-  it('uses the task feed to filter task-only graph views by individual task state', async () => {
+  it('uses the task feed to filter task-only graph views and keeps the selected component navigable', async () => {
     const filteredGraph: LiveGraphSnapshot = {
       edges: [
         {
@@ -2829,7 +2829,7 @@ describe('LiveGraphCanvas', () => {
         initialState={{
           ...DEFAULT_LIVE_GRAPH_VIEW_STATE,
           enabledKinds: ['task'],
-          focusDepth: 'all'
+          focusDepth: 1
         }}
       />
     )
@@ -2920,6 +2920,15 @@ describe('LiveGraphCanvas', () => {
       expect(
         screen.getByRole('button', { name: /Task: Attention task/ }).getAttribute('data-live-graph-filter-context')
       ).toBeNull()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Task: Active task/ }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('live-graph-selection-inspector')).toBeTruthy()
+      expect(screen.getByRole('button', { name: /Task: Active task/ })).toBeTruthy()
+      expect(screen.getByRole('button', { name: /Task: Completed task/ })).toBeTruthy()
+      expect(screen.getByRole('button', { name: /Task: Attention task/ })).toBeTruthy()
     })
   })
 
