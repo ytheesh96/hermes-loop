@@ -3047,19 +3047,29 @@ describe('LiveGraphCanvas', () => {
           timestamp: Date.now() / 1000
         },
         {
-          content: 'Internal worker setup that must stay hidden.',
+          content: 'Worker session initialized.',
           role: 'system',
           timestamp: Date.now() / 1000
         },
         {
-          content: 'Inspected the running Electron window.',
+          content: 'Inspected **the running Electron window**.\n\n- The activity feed is ready.',
           role: 'assistant',
-          timestamp: Date.now() / 1000
+          timestamp: Date.now() / 1000,
+          tool_calls: [
+            {
+              function: {
+                arguments: '{"action":"screenshot"}',
+                name: 'computer'
+              },
+              id: 'computer-call'
+            }
+          ]
         },
         {
-          content: 'Screenshot captured.',
+          content: '{"context":"Screenshot captured."}',
           role: 'tool',
           timestamp: Date.now() / 1000,
+          tool_call_id: 'computer-call',
           tool_name: 'computer'
         },
         {
@@ -3135,10 +3145,18 @@ describe('LiveGraphCanvas', () => {
 
     fireEvent.click(details.getByRole('button', { name: 'Activity' }))
     await waitFor(() => expect(hermesMocks.getSessionMessages).toHaveBeenCalledWith('worker-session', 'worker-profile'))
-    expect(await details.findByText('Complete the assigned visual verification.')).toBeTruthy()
-    expect(details.getByText('Inspected the running Electron window.')).toBeTruthy()
-    expect(details.getByText('Screenshot captured.')).toBeTruthy()
-    expect(details.queryByText('Internal worker setup that must stay hidden.')).toBeNull()
+    const sessionFeed = await details.findByTestId('live-graph-task-worker-transcript')
+    expect(within(sessionFeed).getByText('Complete the assigned visual verification.')).toBeTruthy()
+    expect(
+      within(sessionFeed).getByText('the running Electron window').closest('[data-live-graph-session-markdown]')
+    ).toBeTruthy()
+    expect(within(sessionFeed).getByText('The activity feed is ready.').closest('li')).toBeTruthy()
+    expect(within(sessionFeed).getByText(/Screenshot captured/)).toBeTruthy()
+    expect(sessionFeed.querySelectorAll('[data-role="assistant"]').length).toBeGreaterThan(0)
+    expect(sessionFeed.querySelector('[data-role="user"]')).toBeTruthy()
+    expect(sessionFeed.querySelector('[data-role="system"]')).toBeTruthy()
+    expect(sessionFeed.querySelector('[data-live-graph-session-tool]')).toBeTruthy()
+    expect(details.getByText('Worker session initialized.')).toBeTruthy()
     expect(details.queryByText('Hidden transport message.')).toBeNull()
     expect(await details.findByText('Captured the production evidence.')).toBeTruthy()
 

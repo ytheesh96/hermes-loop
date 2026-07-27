@@ -2,7 +2,6 @@ import { useQuery } from '@tanstack/react-query'
 import { type ReactNode, useState } from 'react'
 
 import type { LoopLatestRun, LoopTaskDetail, LoopTaskRun } from '@/app/chat/loop-state'
-import { messageContentText } from '@/components/assistant-ui/thread/content'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Loader } from '@/components/ui/loader'
@@ -13,6 +12,7 @@ import { relativeTime } from '@/lib/time'
 import type { SessionMessage } from '@/types/hermes'
 
 import { type LiveGraphNode, normalizeLiveGraphStatus } from './model'
+import { WorkerSessionFeed } from './worker-session-feed'
 
 const INSPECTOR_PREVIEW_CHARACTERS = 240
 const INSPECTOR_PREVIEW_LINES = 5
@@ -94,30 +94,6 @@ function taskTimestamp(timestamp?: null | number): string {
   return Number.isFinite(timestampMs) ? relativeTime(timestampMs) : ''
 }
 
-function sessionMessageText(message: SessionMessage): string {
-  for (const value of [message.content, message.text, message.context]) {
-    const text = messageContentText(value)
-
-    if (text) {
-      return text
-    }
-  }
-
-  return ''
-}
-
-function visibleWorkerTranscript(messages: SessionMessage[]): Array<{ message: SessionMessage; text: string }> {
-  return messages.flatMap(message => {
-    if (message.hidden || message.display_kind === 'hidden' || message.role === 'system') {
-      return []
-    }
-
-    const text = sessionMessageText(message)
-
-    return text ? [{ message, text }] : []
-  })
-}
-
 function workerSessionIdFromRun(run?: LoopLatestRun | null): string {
   if (run?.worker_session_id) {
     return run.worker_session_id.trim()
@@ -134,58 +110,6 @@ function workerSessionIdFromRun(run?: LoopLatestRun | null): string {
 
 function runLabel(run: LoopTaskRun, index: number): string {
   return `#${run.id ?? index + 1}`
-}
-
-function WorkerTranscriptMessage({
-  collapseLabel,
-  expandLabel,
-  label,
-  message,
-  value
-}: {
-  collapseLabel: string
-  expandLabel: string
-  label: string
-  message: SessionMessage
-  value: string
-}) {
-  const [expanded, setExpanded] = useState(false)
-  const lineCount = value.split(/\r?\n/).length
-  const collapsible = value.length > INSPECTOR_PREVIEW_CHARACTERS || lineCount > INSPECTOR_PREVIEW_LINES
-  const timestamp = taskTimestamp(message.timestamp)
-
-  return (
-    <article className="grid min-w-0 gap-1 border-b border-(--ui-stroke-tertiary) pb-2 last:border-b-0 last:pb-0">
-      <div className="flex min-w-0 items-center gap-2 text-[0.625rem] text-(--ui-text-tertiary)">
-        <span className="truncate font-medium text-(--ui-text-secondary)">{label}</span>
-        {timestamp && <time className="ml-auto shrink-0">{timestamp}</time>}
-      </div>
-      <p
-        className={
-          'm-0 whitespace-pre-wrap break-words text-[0.6875rem] leading-4 text-(--ui-text-secondary)' +
-          (collapsible && !expanded ? ' line-clamp-5' : '')
-        }
-        data-live-graph-worker-transcript-message
-        data-live-graph-worker-transcript-truncated={collapsible && !expanded ? 'true' : undefined}
-      >
-        {value}
-      </p>
-      {collapsible && (
-        <Button
-          aria-expanded={expanded}
-          aria-label={(expanded ? collapseLabel : expandLabel) + ' ' + label}
-          className="-ml-2 h-5 w-fit justify-start px-2 text-[0.625rem]"
-          onClick={() => setExpanded(current => !current)}
-          size="xs"
-          type="button"
-          variant="text"
-        >
-          <Codicon name={expanded ? 'chevron-up' : 'chevron-down'} />
-          {expanded ? collapseLabel : expandLabel}
-        </Button>
-      )}
-    </article>
-  )
 }
 
 function TaskInspectorSection({ children, label, testId }: { children: ReactNode; label: string; testId: string }) {
@@ -226,7 +150,6 @@ function LiveGraphTaskInspectorContent({
   const assignee = task?.assignee || node.assignee || ''
   const priority = task?.priority ?? node.priority
   const workflowId = task?.workflow_id || target.workflowId || ''
-  const transcript = visibleWorkerTranscript(transcriptMessages)
 
   const activityTextSections = [
     { id: 'summary', label: t.liveGraph.summary, value: summary },
@@ -300,49 +223,24 @@ function LiveGraphTaskInspectorContent({
 
         {showActivity && (
           <TaskInspectorSection label={t.liveGraph.taskViewActivity} testId="live-graph-task-activity">
-            <div className="grid min-w-0 gap-2" data-testid="live-graph-task-worker-transcript">
-              <h4 className="m-0 text-[0.625rem] font-semibold tracking-wide text-(--ui-text-tertiary) uppercase">
-                {t.liveGraph.taskWorkerTranscript}
-              </h4>
-              {transcriptLoading ? (
-                <Loader
-                  aria-label={t.liveGraph.taskWorkerTranscriptLoading}
-                  className="size-6 text-(--ui-text-tertiary)"
-                  label={t.liveGraph.taskWorkerTranscriptLoading}
-                  type="lemniscate-bloom"
-                />
-              ) : transcriptError || detailError ? (
-                <p className="m-0 text-[0.6875rem] leading-4 text-(--ui-text-tertiary)">
-                  {t.liveGraph.taskWorkerTranscriptLoadFailed}
-                </p>
-              ) : transcript.length === 0 ? (
-                <p className="m-0 text-[0.6875rem] leading-4 text-(--ui-text-tertiary)">
-                  {t.liveGraph.taskWorkerTranscriptEmpty}
-                </p>
-              ) : (
-                <div className="grid min-w-0 gap-2">
-                  {transcript.map(({ message, text }, index) => {
-                    const label =
-                      message.role === 'user'
-                        ? t.liveGraph.taskTranscriptUser
-                        : message.role === 'assistant'
-                          ? t.liveGraph.taskTranscriptWorker
-                          : message.tool_name || message.name || t.liveGraph.taskTranscriptTool
-
-                    return (
-                      <WorkerTranscriptMessage
-                        collapseLabel={t.liveGraph.showLess}
-                        expandLabel={t.liveGraph.showMore}
-                        key={`${workerSessionId || target.taskId}:${message.timestamp ?? 'undated'}:${message.role}:${index}`}
-                        label={label}
-                        message={message}
-                        value={text}
-                      />
-                    )
-                  })}
-                </div>
-              )}
-            </div>
+            {transcriptLoading ? (
+              <Loader
+                aria-label={t.liveGraph.taskWorkerTranscriptLoading}
+                className="size-6 text-(--ui-text-tertiary)"
+                label={t.liveGraph.taskWorkerTranscriptLoading}
+                type="lemniscate-bloom"
+              />
+            ) : transcriptError || detailError ? (
+              <p className="m-0 text-[0.6875rem] leading-4 text-(--ui-text-tertiary)">
+                {t.liveGraph.taskWorkerTranscriptLoadFailed}
+              </p>
+            ) : (
+              <WorkerSessionFeed
+                emptyLabel={t.liveGraph.taskWorkerTranscriptEmpty}
+                messages={transcriptMessages}
+                sessionId={workerSessionId}
+              />
+            )}
 
             {(activityTextSections.length > 0 || runs.length > 0) && (
               <div className="grid min-w-0 gap-2 border-t border-(--ui-stroke-tertiary) pt-2">
