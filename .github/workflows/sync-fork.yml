@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
   issues: write
 
 concurrency:
@@ -16,40 +17,114 @@ concurrency:
 
 jobs:
   sync:
-    name: Merge upstream into fork main
-    if: ${{ github.repository == 'ytheesh96/hermes-agent' }}
+    name: Open upstream sync pull request
+    if: ${{ github.repository == 'ytheesh96/hermes-loop' }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
-      SYNC_BRANCH: ${{ github.event.repository.default_branch }}
+      BASE_BRANCH: ${{ github.event.repository.default_branch }}
+      SYNC_BRANCH: upstream-sync
+      UPSTREAM_REPOSITORY: NousResearch/hermes-agent
       ISSUE_LABEL: upstream-sync
     steps:
-      - name: Sync fork branch
+      - name: Checkout fork history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Prepare upstream sync branch
         id: sync
         run: |
           set -euo pipefail
 
-          echo "Syncing ${GITHUB_REPOSITORY}:${SYNC_BRANCH} with its upstream parent..."
-          if output=$(gh api \
-              --method POST \
-              "repos/${GITHUB_REPOSITORY}/merge-upstream" \
-              -f branch="${SYNC_BRANCH}" \
-              2>&1); then
-            echo "${output}"
-            echo "status=success" >> "${GITHUB_OUTPUT}"
-          else
-            echo "${output}" >&2
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags origin "${BASE_BRANCH}"
+          git fetch --no-tags upstream "${BASE_BRANCH}"
+          git fetch --no-tags origin \
+            "${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" 2>/dev/null || true
+          git checkout -B "${SYNC_BRANCH}" "origin/${BASE_BRANCH}"
+
+          base_sha=$(git rev-parse HEAD)
+          if ! details=$(git merge --no-edit --no-ff "upstream/${BASE_BRANCH}" 2>&1); then
+            git merge --abort || true
             {
-              echo "status=failure"
+              echo "status=conflict"
+              echo "base_sha=${base_sha}"
               echo "details<<EOF"
-              echo "${output}"
+              echo "${details}"
               echo "EOF"
             } >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
+          head_sha=$(git rev-parse HEAD)
+          if [ "${head_sha}" = "${base_sha}" ]; then
+            {
+              echo "status=noop"
+              echo "base_sha=${base_sha}"
+              echo "head_sha=${head_sha}"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          git push --force-with-lease origin "HEAD:refs/heads/${SYNC_BRANCH}"
+          {
+            echo "status=updated"
+            echo "base_sha=${base_sha}"
+            echo "head_sha=${head_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Open or refresh upstream sync pull request
+        if: steps.sync.outputs.status == 'updated'
+        env:
+          BASE_SHA: ${{ steps.sync.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.sync.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          body_file=$(mktemp)
+          cat > "${body_file}" <<EOF
+          This draft PR refreshes the fork from \
+          [${UPSTREAM_REPOSITORY}:${BASE_BRANCH}](https://github.com/${UPSTREAM_REPOSITORY}/commits/${BASE_BRANCH}) \
+          without writing directly to protected \\`${BASE_BRANCH}\\`.
+
+          - Fork base: \\`${BASE_SHA}\\`
+          - Proposed sync head: \\`${HEAD_SHA}\\`
+          - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Keep this PR in draft until the exact head passes CI and fork-specific review.
+          EOF
+
+          pr_number=$(gh pr list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --state open \
+            --head "${SYNC_BRANCH}" \
+            --base "${BASE_BRANCH}" \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [ -n "${pr_number}" ]; then
+            gh pr edit "${pr_number}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "chore: sync fork with upstream" \
+              --body-file "${body_file}"
+            gh pr comment "${pr_number}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --body "Refreshed to \\`${HEAD_SHA}\\` by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+          else
+            gh pr create \
+              --repo "${GITHUB_REPOSITORY}" \
+              --draft \
+              --head "${SYNC_BRANCH}" \
+              --base "${BASE_BRANCH}" \
+              --title "chore: sync fork with upstream" \
+              --body-file "${body_file}"
+          fi
+
       - name: Close resolved upstream-sync issues
-        if: steps.sync.outputs.status == 'success'
+        if: steps.sync.outputs.status == 'updated' || steps.sync.outputs.status == 'noop'
         run: |
           set -euo pipefail
 
@@ -61,12 +136,13 @@ jobs:
               --jq '.[].number'); do
             gh issue close "${issue}" \
               --repo "${GITHUB_REPOSITORY}" \
-              --comment "The scheduled upstream sync succeeded, so this alert is resolved."
+              --comment "The latest scheduled upstream merge completed without conflicts, so this alert is resolved."
           done
 
       - name: Open conflict issue
-        if: steps.sync.outputs.status != 'success'
+        if: steps.sync.outputs.status == 'conflict'
         env:
+          BASE_SHA: ${{ steps.sync.outputs.base_sha }}
           SYNC_DETAILS: ${{ steps.sync.outputs.details }}
         run: |
           set -euo pipefail
@@ -86,24 +162,17 @@ jobs:
 
           body_file=$(mktemp)
           cat > "${body_file}" <<EOF
-          The scheduled fork sync could not merge upstream into \`${SYNC_BRANCH}\` automatically.
+          The scheduled fork sync could not merge \
+          \\`${UPSTREAM_REPOSITORY}:${BASE_BRANCH}\\` into a branch based on \
+          \\`${GITHUB_REPOSITORY}:${BASE_BRANCH}\\` at \\`${BASE_SHA}\\`.
 
-          **Repository:** \`${GITHUB_REPOSITORY}\`
           **Workflow run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 
           ~~~
           ${SYNC_DETAILS}
           ~~~
 
-          Suggested manual recovery:
-
-          ~~~bash
-          git fetch origin upstream
-          git checkout ${SYNC_BRANCH}
-          git merge upstream/${SYNC_BRANCH}
-          # Resolve conflicts, run tests, then:
-          git push origin ${SYNC_BRANCH}
-          ~~~
+          Resolve this in a worktree, push the result to \\`${SYNC_BRANCH}\\`, and open or refresh the PR to \\`${BASE_BRANCH}\\`. Do not push the merge directly to \\`${BASE_BRANCH}\\`.
           EOF
 
           if [ -n "${existing_issue}" ]; then
