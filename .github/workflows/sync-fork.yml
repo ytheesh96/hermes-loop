@@ -85,17 +85,17 @@ jobs:
           set -euo pipefail
 
           body_file=$(mktemp)
-          cat > "${body_file}" <<EOF
-          This draft PR refreshes the fork from \
-          [${UPSTREAM_REPOSITORY}:${BASE_BRANCH}](https://github.com/${UPSTREAM_REPOSITORY}/commits/${BASE_BRANCH}) \
-          without writing directly to protected \\`${BASE_BRANCH}\\`.
-
-          - Fork base: \\`${BASE_SHA}\\`
-          - Proposed sync head: \\`${HEAD_SHA}\\`
-          - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-
-          Keep this PR in draft until the exact head passes CI and fork-specific review.
-          EOF
+          printf 'This draft PR refreshes the fork from [%s:%s](https://github.com/%s/commits/%s) without writing directly to protected `%s`.\n\n- Fork base: `%s`\n- Proposed sync head: `%s`\n- Workflow run: %s/%s/actions/runs/%s\n\nKeep this PR in draft until the exact head passes CI and fork-specific review.\n' \
+            "${UPSTREAM_REPOSITORY}" \
+            "${BASE_BRANCH}" \
+            "${UPSTREAM_REPOSITORY}" \
+            "${BASE_BRANCH}" \
+            "${BASE_BRANCH}" \
+            "${BASE_SHA}" \
+            "${HEAD_SHA}" \
+            "${GITHUB_SERVER_URL}" \
+            "${GITHUB_REPOSITORY}" \
+            "${GITHUB_RUN_ID}" > "${body_file}"
 
           pr_number=$(gh pr list \
             --repo "${GITHUB_REPOSITORY}" \
@@ -110,9 +110,14 @@ jobs:
               --repo "${GITHUB_REPOSITORY}" \
               --title "chore: sync fork with upstream" \
               --body-file "${body_file}"
+            refresh_comment=$(printf 'Refreshed to `%s` by %s/%s/actions/runs/%s.' \
+              "${HEAD_SHA}" \
+              "${GITHUB_SERVER_URL}" \
+              "${GITHUB_REPOSITORY}" \
+              "${GITHUB_RUN_ID}")
             gh pr comment "${pr_number}" \
               --repo "${GITHUB_REPOSITORY}" \
-              --body "Refreshed to \\`${HEAD_SHA}\\` by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+              --body "${refresh_comment}"
           else
             gh pr create \
               --repo "${GITHUB_REPOSITORY}" \
@@ -161,19 +166,19 @@ jobs:
             --jq '.[0].number // empty')
 
           body_file=$(mktemp)
-          cat > "${body_file}" <<EOF
-          The scheduled fork sync could not merge \
-          \\`${UPSTREAM_REPOSITORY}:${BASE_BRANCH}\\` into a branch based on \
-          \\`${GITHUB_REPOSITORY}:${BASE_BRANCH}\\` at \\`${BASE_SHA}\\`.
-
-          **Workflow run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-
-          ~~~
-          ${SYNC_DETAILS}
-          ~~~
-
-          Resolve this in a worktree, push the result to \\`${SYNC_BRANCH}\\`, and open or refresh the PR to \\`${BASE_BRANCH}\\`. Do not push the merge directly to \\`${BASE_BRANCH}\\`.
-          EOF
+          printf 'The scheduled fork sync could not merge `%s:%s` into a branch based on `%s:%s` at `%s`.\n\n**Workflow run:** %s/%s/actions/runs/%s\n\n~~~\n%s\n~~~\n\nResolve this in a worktree, push the result to `%s`, and open or refresh the PR to `%s`. Do not push the merge directly to `%s`.\n' \
+            "${UPSTREAM_REPOSITORY}" \
+            "${BASE_BRANCH}" \
+            "${GITHUB_REPOSITORY}" \
+            "${BASE_BRANCH}" \
+            "${BASE_SHA}" \
+            "${GITHUB_SERVER_URL}" \
+            "${GITHUB_REPOSITORY}" \
+            "${GITHUB_RUN_ID}" \
+            "${SYNC_DETAILS}" \
+            "${SYNC_BRANCH}" \
+            "${BASE_BRANCH}" \
+            "${BASE_BRANCH}" > "${body_file}"
 
           if [ -n "${existing_issue}" ]; then
             gh issue comment "${existing_issue}" \
