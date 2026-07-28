@@ -37,6 +37,7 @@ from agent.model_metadata import (
 from agent.redact import redact_sensitive_text
 from agent.turn_context import drop_stale_api_content
 from tools.todo_tool import TODO_INJECTION_HEADER
+from tools.work_map_tool import WORK_MAP_INJECTION_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -3813,11 +3814,14 @@ This compaction should PRIORITISE preserving all information related to the focu
         if cls._is_context_summary_content(content):
             return True
         text = _content_text_for_contains(content).strip()
-        return text in {
+        if text in {
             COMPRESSION_CONTINUATION_USER_CONTENT,
             _LEGACY_COMPRESSION_CONTINUATION_USER_CONTENT,
-        } or text.startswith(
-            TODO_INJECTION_HEADER + "\n"
+        }:
+            return True
+        return any(
+            text == header or text.startswith(header + "\n")
+            for header in (TODO_INJECTION_HEADER, WORK_MAP_INJECTION_HEADER)
         )
 
     @staticmethod
