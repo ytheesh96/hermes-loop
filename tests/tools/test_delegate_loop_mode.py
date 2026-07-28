@@ -146,6 +146,13 @@ def test_delegate_task_loop_skeleton_batch_uses_minimal_live_graph_contract(
         delegate_tool.delegate_task(
             mode="loop",
             workflow_id="wf_existing",
+            attachments=[
+                {
+                    "filename": "SPEC.md",
+                    "content": "# Accepted spec\n",
+                    "content_type": "text/markdown",
+                }
+            ],
             tasks=[
                 {"id": "research", "title": "Research current behavior"},
                 {
@@ -180,6 +187,13 @@ def test_delegate_task_loop_skeleton_batch_uses_minimal_live_graph_contract(
     assert captured[0]["workflow_id"] == "wf_existing"
     assert "root_task_id" not in captured[0]
     assert captured[0]["shared_context"] is None
+    assert captured[0]["attachments"] == [
+        {
+            "filename": "SPEC.md",
+            "content": "# Accepted spec\n",
+            "content_type": "text/markdown",
+        }
+    ]
     assert captured[0]["nodes"] == [
         {
             "client_id": "research",
@@ -309,6 +323,24 @@ def test_delegate_task_loop_schema_and_prompt_explain_live_graph_ownership():
     assert "goal_mode" not in task_properties
     assert "goal_max_turns" not in properties
     assert "goal_max_turns" not in task_properties
+    assert properties["attachments"] == {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string"},
+                "content": {"type": "string"},
+                "content_type": {"type": "string"},
+            },
+            "required": ["filename", "content"],
+            "additionalProperties": False,
+        },
+        "description": (
+            "Loop/durable mode only. Inline UTF-8 text files copied to every "
+            "created task before JIT specification; use this for approved specs, "
+            "not arbitrary local file paths."
+        ),
+    }
     assert "title" in task_properties
     assert "blocks" in task_properties
     assert "auto-decomposer decides" in _build_top_level_description()
@@ -322,6 +354,20 @@ def test_delegate_task_loop_schema_and_prompt_explain_live_graph_ownership():
     assert "must not create a Loop root" in KANBAN_FOREGROUND_GUIDANCE
     assert "`tasks[].blocks`" in KANBAN_FOREGROUND_GUIDANCE
     assert "`kanban_create(...)`" not in KANBAN_FOREGROUND_GUIDANCE
+
+
+def test_delegate_task_rejects_inline_attachments_outside_loop_mode():
+    from tools import delegate_tool
+
+    out = json.loads(
+        delegate_tool.delegate_task(
+            goal="Read only",
+            attachments=[{"filename": "SPEC.md", "content": "# Spec\n"}],
+            parent_agent=DummyParent(),
+        )
+    )
+
+    assert out["error"] == "attachments are supported only in loop/durable mode."
 
 
 def test_delegate_task_loop_batch_bypasses_ephemeral_concurrency_without_flag(
@@ -402,6 +448,13 @@ def test_delegate_task_loop_mode_creates_durable_loop_item(loop_delegate_env, mo
             goal="Review the Loop adapter",
             context="Repo: /tmp/hermes-agent\nCheck routing and tests.",
             mode="loop",
+            attachments=[
+                {
+                    "filename": "SPEC.md",
+                    "content": "# Approved adapter spec\n",
+                    "content_type": "text/markdown",
+                }
+            ],
             assignee="reviewer-qa",
             parent_agent=DummyParent(),
         )
@@ -421,6 +474,7 @@ def test_delegate_task_loop_mode_creates_durable_loop_item(loop_delegate_env, mo
     conn = kb.connect()
     try:
         task = kb.get_task(conn, out["loop_item_id"])
+        attachments = kb.list_attachments(conn, out["loop_item_id"])
         subs = kb.list_workflow_notify_subs(conn, out["workflow_id"])
         legacy_task_subs = kb.list_notify_subs(conn, out["loop_item_id"])
     finally:
@@ -436,6 +490,11 @@ def test_delegate_task_loop_mode_creates_durable_loop_item(loop_delegate_env, mo
     assert task.created_by == "planner"
     assert task.workflow_id == out["workflow_id"]
     assert "Repo: /tmp/hermes-agent" in (task.body or "")
+    assert len(attachments) == 1
+    assert attachments[0].filename == "SPEC.md"
+    assert Path(attachments[0].stored_path).read_text(encoding="utf-8") == (
+        "# Approved adapter spec\n"
+    )
     assert [
         (s["platform"], s["chat_id"], s["notifier_profile"])
         for s in subs

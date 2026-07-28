@@ -849,7 +849,8 @@ def _decompose_task_impl(
 
     timing.switch("apply")
     try:
-        with kb.connect_closing() as conn:
+        source_board = kb.get_current_board()
+        with kb.connect_closing(board=source_board) as conn:
             child_ids = kb.decompose_triage_task(
                 conn,
                 task_id,
@@ -857,6 +858,7 @@ def _decompose_task_impl(
                     None if is_live_loop_skeleton else orchestrator
                 ),
                 children=children,
+                board=source_board,
                 author=audit_author,
                 auto_promote=auto_promote,
                 allowed_root_statuses=_LOOP_SAFE_STATUSES if loop_safe else None,

@@ -2543,6 +2543,7 @@ def _loop_skeleton_delegation_result(
     task_list,
     *,
     context,
+    attachments,
     tenant,
     board,
     workspace_kind,
@@ -2593,9 +2594,11 @@ def _loop_skeleton_delegation_result(
         "origin_session_id": origin_session_id,
         "session_key_present": bool(get_session_env("HERMES_SESSION_KEY")),
         "task_count": len(nodes),
+        "attachment_count": len(attachments or []),
     }
     create_args = {
         "nodes": nodes,
+        "attachments": attachments or [],
         "shared_context": context,
         "session_id": origin_session_id,
         "tenant": tenant,
@@ -2658,6 +2661,7 @@ def delegate_task(
     goal: Optional[str] = None,
     context: Optional[str] = None,
     tasks: Optional[List[Dict[str, Any]]] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
     role: Optional[str] = None,
     background: Optional[bool] = None,
@@ -2748,6 +2752,8 @@ def delegate_task(
     # Normalize to task list. Durable Loop graph size is governed by the Loop
     # graph service, not the ephemeral child-agent concurrency limit.
     loop_mode = str(mode or "").strip().lower() in _LOOP_DELEGATION_MODES
+    if attachments and not loop_mode:
+        return tool_error("attachments are supported only in loop/durable mode.")
     if loop_mode and os.environ.get("HERMES_KANBAN_TASK"):
         return tool_error(
             "delegate_task(mode='loop') is foreground/orchestrator-only for "
@@ -2813,6 +2819,7 @@ def delegate_task(
         return _loop_skeleton_delegation_result(
             task_list,
             context=context,
+            attachments=attachments,
             tenant=tenant,
             board=board,
             workspace_kind=workspace_kind,
@@ -3901,6 +3908,24 @@ DELEGATE_TASK_SCHEMA = {
                 "description": "Loop/durable mode workspace kind.",
             },
             "workspace_path": {"type": "string", "description": "Loop/durable mode workspace path."},
+            "attachments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {"type": "string"},
+                        "content": {"type": "string"},
+                        "content_type": {"type": "string"},
+                    },
+                    "required": ["filename", "content"],
+                    "additionalProperties": False,
+                },
+                "description": (
+                    "Loop/durable mode only. Inline UTF-8 text files copied to every "
+                    "created task before JIT specification; use this for approved specs, "
+                    "not arbitrary local file paths."
+                ),
+            },
             "tasks": {
                 "type": "array",
                 "items": {
@@ -4026,6 +4051,7 @@ registry.register(
         goal=args.get("goal"),
         context=args.get("context"),
         tasks=_strip_model_hidden_task_fields(args.get("tasks")),
+        attachments=args.get("attachments"),
         max_iterations=args.get("max_iterations"),
         role=args.get("role"),
         mode=args.get("mode"),

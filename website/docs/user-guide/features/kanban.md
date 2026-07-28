@@ -181,6 +181,30 @@ body and hoping it finds them.
 - **Upload** — open a task in the dashboard drawer and use the
   **Attachments** section's *Upload file* button (multiple files at once
   are fine). Each upload is capped at 25 MB.
+- **Inline text attachments for Loop** — foreground agents can pass UTF-8 text
+  files such as an approved spec through
+  `delegate_task(mode="loop", attachments=[...])`. Hermes stores each inline
+  attachment on every created task **before JIT specification**; if the
+  auto-decomposer expands a skeleton, generated worker children inherit their
+  own copy. This API accepts inline `filename` + `content`, not arbitrary local
+  file paths; use the dashboard upload flow for PDFs, images, and other binary
+  files.
+
+  ```json
+  {
+    "mode": "loop",
+    "attachments": [
+      {
+        "filename": "SPEC.md",
+        "content": "# Approved specification\n...",
+        "content_type": "text/markdown"
+      }
+    ],
+    "tasks": [
+      {"id": "build", "title": "Deliver the first vertical slice"}
+    ]
+  }
+  ```
 - **Storage** — files land under
   `<hermes-home>/kanban/attachments/<task_id>/` for the default board, or
   `<hermes-home>/kanban/boards/<slug>/attachments/<task_id>/` for a named

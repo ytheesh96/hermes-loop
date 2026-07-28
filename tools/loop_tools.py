@@ -572,6 +572,7 @@ def _handle_loop_create_graph(args: dict[str, Any], **_kwargs) -> str:
                 result = kb.create_loop_skeleton_graph(
                     conn,
                     nodes=nodes,
+                    attachments=args.get("attachments"),
                     workflow_id=(
                         str(args.get("workflow_id") or "").strip()
                         or get_current_workflow_id("")

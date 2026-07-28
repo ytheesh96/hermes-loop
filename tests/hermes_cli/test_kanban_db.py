@@ -628,6 +628,518 @@ def test_create_loop_skeleton_graph_replay_is_idempotent(kanban_home):
     assert len(links) == 1
 
 
+def test_create_loop_skeleton_graph_attaches_inline_spec_to_every_task(kanban_home):
+    spec = "# Accepted spec\n\nBuild one vertical slice.\n"
+    with kb.connect() as conn:
+        result = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[
+                {"client_id": "build", "title": "Build the slice"},
+                {"client_id": "verify", "title": "Verify the slice", "depends_on": ["build"]},
+            ],
+            attachments=[
+                {
+                    "filename": "SPEC.md",
+                    "content": spec,
+                    "content_type": "text/markdown",
+                }
+            ],
+            created_by="foreground-agent",
+        )
+
+        attached_by_task = {
+            item["task_id"]: kb.list_attachments(conn, item["task_id"])
+            for item in result["items"]
+        }
+
+    assert set(attached_by_task) == {
+        item["task_id"] for item in result["items"]
+    }
+    for task_id, attachments in attached_by_task.items():
+        assert len(attachments) == 1
+        attachment = attachments[0]
+        assert attachment.filename == "SPEC.md"
+        assert attachment.content_type == "text/markdown"
+        assert attachment.uploaded_by == "foreground-agent"
+        assert Path(attachment.stored_path).read_text(encoding="utf-8") == spec
+        assert Path(attachment.stored_path).parent == kb.task_attachments_dir(task_id)
+
+    first_task_id = result["items"][0]["task_id"]
+    with kb.connect() as conn:
+        worker_context = kb.build_worker_context(conn, first_task_id)
+    assert "## Attachments" in worker_context
+    assert "SPEC.md" in worker_context
+    assert str(kb.task_attachments_dir(first_task_id) / "SPEC.md") in worker_context
+
+
+def test_create_loop_skeleton_graph_scopes_sanitized_attachment_to_named_board(
+    kanban_home,
+):
+    board = "spec-board"
+    with kb.connect(board=board) as conn:
+        result = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "build", "title": "Build it"}],
+            attachments=[
+                {"filename": "../../SPEC.md", "content": "# Board spec\n"}
+            ],
+            board=board,
+        )
+        task_id = result["items"][0]["task_id"]
+        attachment = kb.list_attachments(conn, task_id)[0]
+
+    expected_dir = kb.task_attachments_dir(task_id, board=board)
+    assert attachment.filename == "SPEC.md"
+    assert Path(attachment.stored_path).parent == expected_dir
+    assert expected_dir.is_relative_to(kb.attachments_root(board=board))
+
+def test_decompose_triage_task_uses_board_scoped_attachment_root(
+    kanban_home,
+    monkeypatch,
+):
+    board = "decompose-board"
+    kb.create_board(board)
+    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+    assert kb.get_current_board() == kb.DEFAULT_BOARD
+
+    with kb.connect(board=board) as conn:
+        graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "shell", "title": "Shell"}],
+            attachments=[{"filename": "spec.md", "content": "spec"}],
+            board=board,
+        )
+        shell = graph["items"][0]["task_id"]
+        [child] = kb.decompose_triage_task(
+            conn,
+            shell,
+            root_assignee=None,
+            children=[{"title": "Child", "body": "child", "parents": []}],
+            board=board,
+        )
+        child_attachment = kb.list_attachments(conn, child)[0]
+
+    assert Path(child_attachment.stored_path).parent == kb.task_attachments_dir(
+        child, board=board
+    )
+    assert Path(child_attachment.stored_path).is_relative_to(
+        kb.attachments_root(board=board)
+    )
+
+
+def test_create_loop_skeleton_graph_oversize_attachment_creates_nothing(
+    kanban_home,
+    monkeypatch,
+):
+    monkeypatch.setattr(kb, "KANBAN_ATTACHMENT_MAX_BYTES", 8)
+    with kb.connect() as conn:
+        with pytest.raises(kb.AttachmentTooLarge):
+            kb.create_loop_skeleton_graph(
+                conn,
+                nodes=[{"client_id": "build", "title": "Build it"}],
+                attachments=[{"filename": "SPEC.md", "content": "123456789"}],
+            )
+        assert kb.list_tasks(conn, limit=20) == []
+
+    assert not kb.attachments_root().exists()
+
+
+def test_create_loop_skeleton_graph_rejects_replicated_attachment_count_before_mutation(
+    kanban_home, monkeypatch
+):
+    monkeypatch.setattr(kb, "KANBAN_INLINE_ATTACHMENT_MAX_COUNT", 2)
+
+    with kb.connect() as conn:
+        with pytest.raises(ValueError, match="inline attachment count"):
+            kb.create_loop_skeleton_graph(
+                conn,
+                nodes=[
+                    {"client_id": "first", "title": "First task"},
+                    {"client_id": "second", "title": "Second task"},
+                ],
+                attachments=[
+                    {"filename": "one.md", "content": "one"},
+                    {"filename": "two.md", "content": "two"},
+                ],
+            )
+
+        assert kb.list_tasks(conn) == []
+        assert conn.execute("SELECT COUNT(*) FROM task_attachments").fetchone()[0] == 0
+
+    assert not kb.attachments_root().exists()
+
+
+def test_create_loop_skeleton_graph_rejects_replicated_attachment_bytes_before_mutation(
+    kanban_home, monkeypatch
+):
+    monkeypatch.setattr(kb, "KANBAN_INLINE_ATTACHMENT_MAX_BYTES", 10)
+
+    with kb.connect() as conn:
+        with pytest.raises(ValueError, match="inline attachment bytes"):
+            kb.create_loop_skeleton_graph(
+                conn,
+                nodes=[
+                    {"client_id": "first", "title": "First task"},
+                    {"client_id": "second", "title": "Second task"},
+                ],
+                attachments=[{"filename": "spec.md", "content": "123456"}],
+            )
+
+        assert kb.list_tasks(conn) == []
+        assert conn.execute("SELECT COUNT(*) FROM task_attachments").fetchone()[0] == 0
+
+    assert not kb.attachments_root().exists()
+
+
+def test_decompose_rejects_replicated_inline_attachment_budget_before_mutation(
+    kanban_home, monkeypatch
+):
+    monkeypatch.setattr(kb, "KANBAN_INLINE_ATTACHMENT_MAX_COUNT", 2)
+
+    with kb.connect() as conn:
+        graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "shell", "title": "Shell"}],
+            attachments=[{"filename": "spec.md", "content": "spec"}],
+        )
+        shell = graph["items"][0]["task_id"]
+
+        with pytest.raises(ValueError, match="inline attachment count"):
+            kb.decompose_triage_task(
+                conn,
+                shell,
+                root_assignee=None,
+                children=[
+                    {"title": "First child", "body": "first", "parents": []},
+                    {"title": "Second child", "body": "second", "parents": []},
+                ],
+            )
+
+        assert len(kb.list_tasks(conn)) == 1
+        assert conn.execute("SELECT COUNT(*) FROM task_attachments").fetchone()[0] == 1
+
+
+def test_decompose_rejects_replicated_inline_attachment_bytes_before_mutation(
+    kanban_home, monkeypatch
+):
+    monkeypatch.setattr(kb, "KANBAN_INLINE_ATTACHMENT_MAX_BYTES", 10)
+
+    with kb.connect() as conn:
+        graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "shell", "title": "Shell"}],
+            attachments=[{"filename": "spec.md", "content": "123456"}],
+        )
+        shell = graph["items"][0]["task_id"]
+
+        with pytest.raises(ValueError, match="inline attachment bytes"):
+            kb.decompose_triage_task(
+                conn,
+                shell,
+                root_assignee=None,
+                children=[{"title": "Child", "body": "child", "parents": []}],
+            )
+
+        assert len(kb.list_tasks(conn)) == 1
+        assert conn.execute("SELECT COUNT(*) FROM task_attachments").fetchone()[0] == 1
+
+
+def test_decompose_rejects_inherited_attachment_outside_board_root(
+    kanban_home, tmp_path
+):
+    outside = tmp_path / "secret.txt"
+    outside.write_text("not for workers", encoding="utf-8")
+
+    with kb.connect() as conn:
+        graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "shell", "title": "Shell"}],
+            attachments=[{"filename": "spec.md", "content": "spec"}],
+        )
+        shell = graph["items"][0]["task_id"]
+        conn.execute(
+            "UPDATE task_attachments SET stored_path = ? WHERE task_id = ?",
+            (str(outside), shell),
+        )
+
+        with pytest.raises(ValueError, match="outside the board root"):
+            kb.decompose_triage_task(
+                conn,
+                shell,
+                root_assignee=None,
+                children=[{"title": "Child", "body": "child", "parents": []}],
+            )
+
+        assert len(kb.list_tasks(conn)) == 1
+        assert conn.execute("SELECT COUNT(*) FROM task_attachments").fetchone()[0] == 1
+
+
+def test_decompose_rejects_inherited_attachment_outside_source_task_root(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "shell", "title": "Shell"}],
+            attachments=[{"filename": "spec.md", "content": "spec"}],
+        )
+        shell = graph["items"][0]["task_id"]
+        sibling = kb.create_task(conn, title="sibling")
+        sibling_attachment_id = kb.store_attachment_bytes(
+            conn,
+            sibling,
+            "sibling.txt",
+            b"sibling secret",
+        )
+        sibling_attachment = kb.get_attachment(conn, sibling_attachment_id)
+        assert sibling_attachment is not None
+        conn.execute(
+            "UPDATE task_attachments SET stored_path = ?, size = ? WHERE task_id = ?",
+            (sibling_attachment.stored_path, sibling_attachment.size, shell),
+        )
+
+        with pytest.raises(ValueError, match="source task root"):
+            kb.decompose_triage_task(
+                conn,
+                shell,
+                root_assignee=None,
+                children=[{"title": "Child", "body": "child", "parents": []}],
+            )
+
+        assert len(kb.list_tasks(conn)) == 2
+        assert kb.list_attachments(conn, shell)
+        assert kb.list_attachments(conn, sibling)
+        assert not list(kb.task_attachments_dir(shell).glob("* (1).*"))
+
+
+def test_decompose_rejects_inherited_attachment_path_traversal(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "shell", "title": "Shell"}],
+            attachments=[{"filename": "spec.md", "content": "spec"}],
+        )
+        shell = graph["items"][0]["task_id"]
+        attachment = kb.list_attachments(conn, shell)[0]
+        traversal = kb.task_attachments_dir(shell) / ".." / "escaped.txt"
+        conn.execute(
+            "UPDATE task_attachments SET stored_path = ? WHERE id = ?",
+            (str(traversal), attachment.id),
+        )
+
+        with pytest.raises(ValueError, match="traversal"):
+            kb.decompose_triage_task(
+                conn,
+                shell,
+                root_assignee=None,
+                children=[{"title": "Child", "body": "child", "parents": []}],
+            )
+
+        assert len(kb.list_tasks(conn)) == 1
+        assert not (kb.attachments_root() / "escaped.txt").exists()
+
+
+def test_decompose_rejects_inherited_missing_attachment_without_partial_copy(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "shell", "title": "Shell"}],
+            attachments=[{"filename": "spec.md", "content": "spec"}],
+        )
+        shell = graph["items"][0]["task_id"]
+        attachment = kb.list_attachments(conn, shell)[0]
+        missing = kb.task_attachments_dir(shell) / "missing.txt"
+        conn.execute(
+            "UPDATE task_attachments SET stored_path = ? WHERE id = ?",
+            (str(missing), attachment.id),
+        )
+
+        with pytest.raises(ValueError, match="does not exist"):
+            kb.decompose_triage_task(
+                conn,
+                shell,
+                root_assignee=None,
+                children=[{"title": "Child", "body": "child", "parents": []}],
+            )
+
+        assert len(kb.list_tasks(conn)) == 1
+        assert not missing.exists()
+
+
+def test_decompose_rejects_inherited_non_regular_attachment_without_partial_copy(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "shell", "title": "Shell"}],
+            attachments=[{"filename": "spec.md", "content": "spec"}],
+        )
+        shell = graph["items"][0]["task_id"]
+        attachment = kb.list_attachments(conn, shell)[0]
+        directory = kb.task_attachments_dir(shell) / "directory"
+        directory.mkdir()
+        conn.execute(
+            "UPDATE task_attachments SET stored_path = ?, size = 0 WHERE id = ?",
+            (str(directory), attachment.id),
+        )
+
+        with pytest.raises(ValueError, match="regular file"):
+            kb.decompose_triage_task(
+                conn,
+                shell,
+                root_assignee=None,
+                children=[{"title": "Child", "body": "child", "parents": []}],
+            )
+
+        assert len(kb.list_tasks(conn)) == 1
+        assert not list(directory.glob("*"))
+
+
+def test_decompose_rejects_tampered_inherited_attachment_without_partial_copy(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "shell", "title": "Shell"}],
+            attachments=[{"filename": "spec.md", "content": "spec"}],
+        )
+        shell = graph["items"][0]["task_id"]
+        attachment = kb.list_attachments(conn, shell)[0]
+        Path(attachment.stored_path).write_bytes(b"tampered content")
+
+        with pytest.raises(ValueError, match="size metadata"):
+            kb.decompose_triage_task(
+                conn,
+                shell,
+                root_assignee=None,
+                children=[{"title": "Child", "body": "child", "parents": []}],
+            )
+
+        assert len(kb.list_tasks(conn)) == 1
+        assert kb.list_attachments(conn, shell)[0].size == len(b"spec")
+
+
+def test_decompose_rejects_inherited_symlink_without_partial_copy(
+    kanban_home, tmp_path
+):
+    outside = tmp_path / "secret.txt"
+    outside.write_text("not for workers", encoding="utf-8")
+
+    with kb.connect() as conn:
+        graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "shell", "title": "Shell"}],
+            attachments=[{"filename": "spec.md", "content": "spec"}],
+        )
+        shell = graph["items"][0]["task_id"]
+        attachment = kb.list_attachments(conn, shell)[0]
+        link = kb.task_attachments_dir(shell) / "link.txt"
+        link.symlink_to(outside)
+        conn.execute(
+            "UPDATE task_attachments SET stored_path = ? WHERE id = ?",
+            (str(link), attachment.id),
+        )
+
+        with pytest.raises(ValueError, match="symlinks"):
+            kb.decompose_triage_task(
+                conn,
+                shell,
+                root_assignee=None,
+                children=[{"title": "Child", "body": "child", "parents": []}],
+            )
+
+        assert len(kb.list_tasks(conn)) == 1
+        assert link.is_symlink()
+
+
+def test_worker_context_marks_omitted_attachment_metadata(kanban_home, monkeypatch):
+    monkeypatch.setattr(kb, "_CTX_MAX_ATTACHMENTS", 1)
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="bounded context")
+        kb.store_attachment_bytes(conn, task_id, "first.txt", b"first")
+        kb.store_attachment_bytes(conn, task_id, "second.txt", b"second")
+        context = kb.build_worker_context(conn, task_id)
+
+    assert "first.txt" in context
+    assert "second.txt" not in context
+    assert "1 attachment omitted" in context
+
+
+def test_create_loop_skeleton_graph_reuse_rejects_changed_inline_spec(kanban_home):
+    nodes = [{"client_id": "build", "title": "Build the slice"}]
+    with kb.connect() as conn:
+        first = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=nodes,
+            attachments=[{"filename": "SPEC.md", "content": "# Version one\n"}],
+            idempotency_scope="approved-spec-v1",
+        )
+        replay = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=nodes,
+            attachments=[{"filename": "SPEC.md", "content": "# Version one\n"}],
+            idempotency_scope="approved-spec-v1",
+        )
+
+        assert replay["items"][0]["task_id"] == first["items"][0]["task_id"]
+        assert replay["items"][0]["reused"] is True
+        assert len(kb.list_attachments(conn, first["items"][0]["task_id"])) == 1
+
+        with pytest.raises(ValueError, match="different durable attachments"):
+            kb.create_loop_skeleton_graph(
+                conn,
+                nodes=nodes,
+                attachments=[
+                    {"filename": "SPEC.md", "content": "# Changed without a new scope\n"}
+                ],
+                idempotency_scope="approved-spec-v1",
+            )
+
+        attachment = kb.list_attachments(conn, first["items"][0]["task_id"])[0]
+        assert Path(attachment.stored_path).read_text(encoding="utf-8") == "# Version one\n"
+
+
+def test_create_loop_skeleton_graph_cleans_attachment_files_when_write_fails(
+    kanban_home, monkeypatch
+):
+    original_write_bytes = Path.write_bytes
+    write_count = 0
+
+    def fail_second_write(path: Path, data: bytes) -> int:
+        nonlocal write_count
+        write_count += 1
+        if write_count == 2:
+            raise OSError("simulated attachment disk failure")
+        return original_write_bytes(path, data)
+
+    monkeypatch.setattr(Path, "write_bytes", fail_second_write)
+
+    with kb.connect() as conn:
+        with pytest.raises(OSError, match="simulated attachment disk failure"):
+            kb.create_loop_skeleton_graph(
+                conn,
+                nodes=[
+                    {"client_id": "first", "title": "First task"},
+                    {"client_id": "second", "title": "Second task"},
+                ],
+                attachments=[{"filename": "SPEC.md", "content": "# Spec\n"}],
+            )
+
+        assert kb.list_tasks(conn) == []
+        assert conn.execute("SELECT COUNT(*) FROM task_attachments").fetchone()[0] == 0
+
+    attachment_files = [
+        path for path in kb.attachments_root().rglob("*") if path.is_file()
+    ]
+    assert attachment_files == []
+
+
 def _loop_storage_counts(conn):
     return {
         table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
@@ -1442,6 +1954,63 @@ def test_guarded_dependency_edits_reject_shell_with_active_fanout_child(kanban_h
         assert kb.active_decomposition_child_ids(conn, shell) == []
         assert kb.active_decomposition_child_count(conn, shell) == 0
         assert kb.active_decomposition_child_counts(conn, [shell]) == {}
+
+
+def test_decompose_triage_task_inherits_inline_spec_not_unrelated_uploads(kanban_home):
+    spec = b"# Accepted spec\n\nThe attached contract is authoritative.\n"
+    with kb.connect() as conn:
+        graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[
+                {"client_id": "slice", "title": "Approved vertical slice"}
+            ],
+            attachments=[
+                {
+                    "filename": "SPEC.md",
+                    "content": spec.decode("utf-8"),
+                    "content_type": "text/markdown",
+                }
+            ],
+        )
+        shell = graph["items"][0]["task_id"]
+        source_attachment = kb.list_attachments(conn, shell)[0]
+        kb.store_attachment_bytes(
+            conn,
+            task_id=shell,
+            filename="reference.pdf",
+            data=b"not really a PDF",
+            content_type="application/pdf",
+            uploaded_by="dashboard-user",
+        )
+
+        child_ids = kb.decompose_triage_task(
+            conn,
+            shell,
+            root_assignee=None,
+            children=[
+                {"title": "Implement slice", "body": "Implement it", "parents": []},
+                {"title": "Verify slice", "body": "Verify it", "parents": [0]},
+            ],
+        )
+
+        assert child_ids is not None
+        inherited = {
+            child_id: kb.list_attachments(conn, child_id)
+            for child_id in child_ids
+        }
+
+    for child_id, attachments in inherited.items():
+        assert len(attachments) == 1
+        attachment = attachments[0]
+        assert attachment.filename == "SPEC.md"
+        assert attachment.content_type == "text/markdown"
+        assert attachment.uploaded_by == source_attachment.uploaded_by
+        attached_event = next(
+            event for event in kb.list_events(conn, child_id) if event.kind == "attached"
+        )
+        assert attached_event.payload["uploaded_by"] == source_attachment.uploaded_by
+        assert Path(attachment.stored_path).read_bytes() == spec
+        assert Path(attachment.stored_path).parent == kb.task_attachments_dir(child_id)
 
 
 def test_link_rejects_self_loop(kanban_home):

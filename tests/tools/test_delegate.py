@@ -2450,12 +2450,19 @@ class TestDispatchDelegateTask(unittest.TestCase):
                     "mode": "loop",
                     "decompose": True,
                     "root_task_id": "t_root",
+                    "attachments": [
+                        {"filename": "SPEC.md", "content": "# Spec\n"}
+                    ],
                     "tasks": [{"id": "build", "title": "Build it"}],
                 },
             )
 
         self.assertNotIn("root_task_id", captured)
         self.assertNotIn("decompose", captured)
+        self.assertEqual(
+            captured["attachments"],
+            [{"filename": "SPEC.md", "content": "# Spec\n"}],
+        )
         self.assertEqual(captured["tasks"], [{"id": "build", "title": "Build it"}])
 
 class TestDelegateEventEnum(unittest.TestCase):

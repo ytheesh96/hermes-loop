@@ -137,6 +137,11 @@ VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
+# Inline attachments are replicated to every task in a submitted graph and
+# to every generated child during decomposition. These budgets apply to the
+# replicated result, not merely to the caller's input list.
+KANBAN_INLINE_ATTACHMENT_MAX_COUNT = 32
+KANBAN_INLINE_ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024
 
 
 class TaskStatusConflictError(RuntimeError):
@@ -366,6 +371,7 @@ _CTX_MAX_PARENT_COMMENTS = 30     # most recent N comments across all parents
 _CTX_MAX_FIELD_BYTES    = 4 * 1024   # 4 KB per summary/error/metadata/result
 _CTX_MAX_BODY_BYTES     = 8 * 1024   # 8 KB per task.body (opening post)
 _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # 2 KB per comment
+_CTX_MAX_ATTACHMENTS    = 20         # first N attachment metadata rows
 
 
 def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
@@ -4148,10 +4154,167 @@ def _find_missing_parents(conn: sqlite3.Connection, parents: Iterable[str]) -> l
     return [p for p in parents if p not in present]
 
 
+@contextlib.contextmanager
+def _cleanup_attachment_paths_on_error(paths: list[Path]):
+    """Remove filesystem writes when the surrounding DB transaction fails."""
+    try:
+        yield
+    except BaseException:
+        parents: set[Path] = set()
+        for attachment_path in reversed(paths):
+            parents.add(attachment_path.parent)
+            with contextlib.suppress(OSError):
+                attachment_path.unlink()
+        for parent in sorted(parents, key=lambda path: len(path.parts), reverse=True):
+            with contextlib.suppress(OSError):
+                parent.rmdir()
+        raise
+
+
+def _store_attachment_bytes_in_txn(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    filename: str,
+    data: bytes,
+    content_type: Optional[str],
+    uploaded_by: Optional[str],
+    created_at: int,
+    written_paths: list[Path],
+    board: Optional[str] = None,
+    inherited_from_task_id: Optional[str] = None,
+    inherit_on_decompose: bool = False,
+) -> int:
+    """Persist one attachment while the caller owns the surrounding write txn."""
+    dest_dir = task_attachments_dir(task_id, board=board)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = _collision_free_path(dest_dir, filename)
+    written_paths.append(dest)
+    dest.write_bytes(data)
+    cur = conn.execute(
+        "INSERT INTO task_attachments "
+        "(task_id, filename, stored_path, content_type, size, "
+        " uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            task_id,
+            dest.name,
+            str(dest),
+            content_type,
+            len(data),
+            uploaded_by,
+            created_at,
+        ),
+    )
+    attachment_id = cur.lastrowid
+    if attachment_id is None:  # pragma: no cover - sqlite INSERT invariant
+        raise RuntimeError("attachment insert did not return an id")
+    event_payload: dict[str, Any] = {
+        "attachment_id": int(attachment_id),
+        "filename": dest.name,
+        "size": len(data),
+        "content_type": content_type,
+        "uploaded_by": uploaded_by,
+    }
+    if inherited_from_task_id:
+        event_payload["inherited_from_task_id"] = inherited_from_task_id
+    if inherit_on_decompose:
+        event_payload["inherit_on_decompose"] = True
+    _append_event(conn, task_id, "attached", event_payload)
+    return int(attachment_id)
+
+
+def _list_inheritable_attachments(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> list[Attachment]:
+    rows = conn.execute(
+        "SELECT DISTINCT CAST(json_extract(payload, '$.attachment_id') AS INTEGER) "
+        "AS attachment_id FROM task_events "
+        "WHERE task_id = ? AND kind = 'attached' AND json_valid(payload) "
+        "AND json_extract(payload, '$.inherit_on_decompose') = 1",
+        (task_id,),
+    ).fetchall()
+    inheritable_ids = {int(row["attachment_id"]) for row in rows}
+    return [
+        attachment
+        for attachment in list_attachments(conn, task_id)
+        if attachment.id in inheritable_ids
+    ]
+
+
+def _validate_inline_attachment_budget(
+    *,
+    attachment_count: int,
+    total_bytes: int,
+    replication_count: int,
+) -> None:
+    """Reject replicated inline attachments before any durable mutation."""
+    projected_count = attachment_count * replication_count
+    projected_bytes = total_bytes * replication_count
+    if projected_count > KANBAN_INLINE_ATTACHMENT_MAX_COUNT:
+        raise ValueError(
+            "inline attachment count exceeds graph budget: "
+            f"{projected_count} > {KANBAN_INLINE_ATTACHMENT_MAX_COUNT}"
+        )
+    if projected_bytes > KANBAN_INLINE_ATTACHMENT_MAX_BYTES:
+        raise ValueError(
+            "inline attachment bytes exceed graph budget: "
+            f"{projected_bytes} > {KANBAN_INLINE_ATTACHMENT_MAX_BYTES}"
+        )
+
+
+def _read_inheritable_attachment_bytes(
+    attachment: Attachment,
+    *,
+    board: Optional[str] = None,
+) -> bytes:
+    """Read an inherited blob only when it is inside its task's board root.
+
+    Attachment metadata is durable and can outlive the process that wrote it,
+    so the stored path is not trusted merely because it came from SQLite.
+    Reject symlinks at every path component to keep decomposition from
+    copying a secret file into generated child attachments.
+    """
+    raw_path = Path(attachment.stored_path)
+    root = attachments_root(board=board).resolve()
+    if not raw_path.is_absolute():
+        raise ValueError("inheritable attachment path must be absolute")
+    if ".." in raw_path.parts:
+        raise ValueError("inheritable attachment path cannot contain traversal")
+    task_root = task_attachments_dir(attachment.task_id, board=board).resolve()
+    if not task_root.is_relative_to(root):
+        raise ValueError("inheritable attachment task root is outside the board root")
+    current = raw_path
+    while True:
+        if current.is_symlink():
+            raise ValueError("inheritable attachment path cannot contain symlinks")
+        if current == root or current.parent == current:
+            break
+        current = current.parent
+    resolved = raw_path.resolve()
+    if not resolved.is_relative_to(root):
+        raise ValueError("inheritable attachment path is outside the board root")
+    if not resolved.is_relative_to(task_root):
+        raise ValueError("inheritable attachment path is outside the source task root")
+    if not resolved.exists():
+        raise ValueError("inheritable attachment file does not exist")
+    if resolved.is_symlink() or not resolved.is_file():
+        raise ValueError("inheritable attachment path must be a regular file")
+    try:
+        data = resolved.read_bytes()
+    except OSError as exc:
+        raise ValueError("inheritable attachment file could not be read") from exc
+    expected_size = max(0, int(attachment.size or 0))
+    if len(data) != expected_size:
+        raise ValueError("inheritable attachment size metadata does not match file")
+    return data
+
+
 def create_loop_skeleton_graph(
     conn: sqlite3.Connection,
     *,
     nodes: list[dict[str, Any]],
+    attachments: Optional[list[dict[str, Any]]] = None,
     workflow_id: Optional[str] = None,
     root_task_id: Optional[str] = None,
     shared_context: Optional[str] = None,
@@ -4178,6 +4341,52 @@ def create_loop_skeleton_graph(
     """
     if not isinstance(nodes, list) or not nodes:
         raise ValueError("nodes must be a non-empty list")
+    if attachments is None:
+        attachments = []
+    if not isinstance(attachments, list):
+        raise ValueError("attachments must be a list")
+    if len(attachments) * len(nodes) > KANBAN_INLINE_ATTACHMENT_MAX_COUNT:
+        raise ValueError(
+            "inline attachment count exceeds graph budget: "
+            f"{len(attachments) * len(nodes)} > "
+            f"{KANBAN_INLINE_ATTACHMENT_MAX_COUNT}"
+        )
+    normalized_attachments: list[dict[str, Any]] = []
+    attachment_filenames: set[str] = set()
+    for index, raw_attachment in enumerate(attachments):
+        if not isinstance(raw_attachment, dict):
+            raise ValueError(f"attachment[{index}] is not a dict")
+        filename = str(raw_attachment.get("filename") or "").strip()
+        content = raw_attachment.get("content")
+        if not filename:
+            raise ValueError(f"attachment[{index}].filename is required")
+        if not isinstance(content, str):
+            raise ValueError(f"attachment[{index}].content must be a string")
+        data = content.encode("utf-8")
+        if len(data) > KANBAN_ATTACHMENT_MAX_BYTES:
+            raise AttachmentTooLarge(
+                f"attachment exceeds {KANBAN_ATTACHMENT_MAX_BYTES} byte limit"
+            )
+        content_type = raw_attachment.get("content_type")
+        safe_filename = _safe_attachment_name(filename)
+        if safe_filename in attachment_filenames:
+            raise ValueError(f"duplicate attachment filename: {safe_filename}")
+        attachment_filenames.add(safe_filename)
+        normalized_attachments.append(
+            {
+                "filename": safe_filename,
+                "data": data,
+                "content_type": (
+                    str(content_type).strip() if content_type is not None else None
+                )
+                or None,
+            }
+        )
+    _validate_inline_attachment_budget(
+        attachment_count=len(normalized_attachments),
+        total_bytes=sum(len(item["data"]) for item in normalized_attachments),
+        replication_count=len(nodes),
+    )
     max_graph_nodes = 32
     try:
         from hermes_cli.config import load_config
@@ -4315,8 +4524,9 @@ def create_loop_skeleton_graph(
     reverse_edge_pairs: list[tuple[str, str]] = []
     edge_pairs: list[tuple[str, str]] = []
     external_relation_ids = external_parent_ids | external_child_ids
+    written_attachment_paths: list[Path] = []
 
-    with write_txn(conn):
+    with _cleanup_attachment_paths_on_error(written_attachment_paths), write_txn(conn):
         related_tasks = {}
         if external_relation_ids:
             rows = conn.execute(
@@ -4355,6 +4565,14 @@ def create_loop_skeleton_graph(
                 "workflow_id": workflow_id,
                 "shared_context": shared_context,
                 "nodes": normalized,
+                "attachments": [
+                    {
+                        "filename": attachment["filename"],
+                        "content_type": attachment["content_type"],
+                        "sha256": hashlib.sha256(attachment["data"]).hexdigest(),
+                    }
+                    for attachment in normalized_attachments
+                ],
             }
             if workflow_id is None:
                 digest_payload.update(
@@ -4619,6 +4837,33 @@ def create_loop_skeleton_graph(
                         f"reused alias {client_id!r} has different durable parents; "
                         "use the revision-guarded Loop graph patch API"
                     )
+                durable_attachments = {
+                    attachment.filename: attachment
+                    for attachment in list_attachments(conn, task_id)
+                }
+                for requested_attachment in normalized_attachments:
+                    durable_attachment = durable_attachments.get(
+                        requested_attachment["filename"]
+                    )
+                    matches = False
+                    if durable_attachment is not None:
+                        matches = (
+                            durable_attachment.content_type
+                            == requested_attachment["content_type"]
+                        )
+                        if matches:
+                            matches = (
+                                _read_inheritable_attachment_bytes(
+                                    durable_attachment,
+                                    board=board,
+                                )
+                                == requested_attachment["data"]
+                            )
+                    if not matches:
+                        raise ValueError(
+                            f"reused alias {client_id!r} has different durable "
+                            "attachments; use a new idempotency scope"
+                        )
                 continue
             parent_statuses = []
             if parent_task_ids:
@@ -4724,6 +4969,25 @@ def create_loop_skeleton_graph(
             "WHERE id = ?",
             (now, workflow_id),
         )
+
+        for node in normalized:
+            client_id = node["client_id"]
+            if reused[client_id]:
+                continue
+            task_id = item_ids[client_id]
+            for attachment in normalized_attachments:
+                _store_attachment_bytes_in_txn(
+                    conn,
+                    task_id=task_id,
+                    filename=attachment["filename"],
+                    data=attachment["data"],
+                    content_type=attachment["content_type"],
+                    uploaded_by=created_by,
+                    created_at=now,
+                    written_paths=written_attachment_paths,
+                    board=board,
+                    inherit_on_decompose=True,
+                )
 
     # The rows are already safely gated. Reuse the canonical promotion pass so
     # an external parent that completed just before commit routes its child to
@@ -8616,6 +8880,7 @@ def decompose_triage_task(
     auto_complete_shell: bool = False,
     loop_intake_payload: Optional[dict[str, Any]] = None,
     expected_specification_fingerprint: Optional[str] = None,
+    board: Optional[str] = None,
 ) -> Optional[list[str]]:
     """Fan a real aggregate task out into child tasks and park/promote it.
 
@@ -8640,6 +8905,10 @@ def decompose_triage_task(
     ``todo``. Loop-safe callers may pass ``allowed_root_statuses`` and
     ``root_next_status='scheduled'`` so scheduled planning rows can expand into
     scheduled, visible-but-non-dispatchable child options.
+
+    ``board`` pins attachment validation and child persistence to the source
+    task's board. Callers with an explicitly board-scoped connection should
+    pass the same board rather than relying on process-wide board resolution.
 
     When ``auto_promote`` is false, child tasks are created as ``scheduled``
     rows instead of ordinary ``todo`` rows. Leaving parent-free children as
@@ -8666,6 +8935,11 @@ def decompose_triage_task(
         raise ValueError(f"allowed_root_statuses contains invalid status: {bad_root_statuses[0]}")
     if root_next_status not in VALID_STATUSES:
         raise ValueError(f"root_next_status must be one of {sorted(VALID_STATUSES)}")
+    source_board = (
+        _normalize_board_slug(board)
+        if board is not None
+        else get_current_board()
+    )
     if root_assignee is not None:
         root_assignee = _canonical_assignee(root_assignee)
 
@@ -8720,7 +8994,8 @@ def decompose_triage_task(
     # _append_event calls.
     now = int(time.time())
     child_ids: list[str] = []
-    with write_txn(conn):
+    written_attachment_paths: list[Path] = []
+    with _cleanup_attachment_paths_on_error(written_attachment_paths), write_txn(conn):
         if (
             expected_specification_fingerprint is not None
             and _task_specification_fingerprint(conn, task_id)
@@ -8789,6 +9064,24 @@ def decompose_triage_task(
         ]
 
         child_initial_status = "todo" if auto_promote else "scheduled"
+        inherited_attachments: list[tuple[Attachment, bytes]] = []
+        for source_attachment in _list_inheritable_attachments(conn, task_id):
+            source_data = _read_inheritable_attachment_bytes(
+                source_attachment,
+                board=source_board,
+            )
+            if len(source_data) > KANBAN_ATTACHMENT_MAX_BYTES:
+                raise AttachmentTooLarge(
+                    f"attachment exceeds {KANBAN_ATTACHMENT_MAX_BYTES} byte limit"
+                )
+            inherited_attachments.append((source_attachment, source_data))
+        _validate_inline_attachment_budget(
+            attachment_count=len(inherited_attachments),
+            total_bytes=sum(len(data) for _, data in inherited_attachments),
+            # Include the source shell: it is part of the same live graph and
+            # remains alongside the generated child copies.
+            replication_count=len(children) + 1,
+        )
         # Create children. In activation mode, status is 'todo' regardless
         # of parents — we link them under the root AFTER creation so the
         # dispatcher sees a coherent state, and recompute_ready() at the end
@@ -8854,6 +9147,23 @@ def decompose_triage_task(
                 conn, new_id, "created",
                 created_payload,
             )
+            for source_attachment, source_data in inherited_attachments:
+                # The copied blob keeps the original uploader provenance;
+                # ``child_created_by`` identifies the generated task, not the
+                # person or agent that supplied the source attachment.
+                _store_attachment_bytes_in_txn(
+                    conn,
+                    task_id=new_id,
+                    filename=source_attachment.filename,
+                    data=source_data,
+                    content_type=source_attachment.content_type,
+                    uploaded_by=source_attachment.uploaded_by,
+                    created_at=now,
+                    written_paths=written_attachment_paths,
+                    board=source_board,
+                    inherited_from_task_id=task_id,
+                    inherit_on_decompose=True,
+                )
             if not auto_promote:
                 _append_event(
                     conn,
@@ -12628,12 +12938,20 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     # as-is; remote backends need the kanban attachments dir mounted.
     attachments = list_attachments(conn, task_id)
     if attachments:
+        omitted_attachments = max(0, len(attachments) - _CTX_MAX_ATTACHMENTS)
+        shown_attachments = attachments[:_CTX_MAX_ATTACHMENTS]
         lines.append("## Attachments")
         lines.append(
             "Files attached to this task. Read them with the file/terminal "
             "tools at the absolute paths below:"
         )
-        for att in attachments:
+        if omitted_attachments:
+            lines.append(
+                f"_({omitted_attachments} attachment"
+                f"{'s' if omitted_attachments != 1 else ''} omitted; "
+                f"showing first {len(shown_attachments)})_"
+            )
+        for att in shown_attachments:
             size_kb = max(1, (att.size + 1023) // 1024) if att.size else 0
             size_str = f", {size_kb} KB" if size_kb else ""
             ctype = f", {att.content_type}" if att.content_type else ""
