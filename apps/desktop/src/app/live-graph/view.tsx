@@ -5431,6 +5431,7 @@ export interface LiveGraphPaneDescriptorLike {
   key?: string
   profile?: string
   sessionRootId?: string
+  sourceProfile?: string
   title?: string
 }
 
@@ -5487,9 +5488,9 @@ export function LiveGraphPaneView({
         return
       }
 
-      attachLiveGraphNodeToComposer(node, descriptor?.profile)
+      attachLiveGraphNodeToComposer(node, descriptor?.sourceProfile ?? descriptor?.profile)
     },
-    [descriptor?.profile, onAttachNode]
+    [descriptor?.profile, descriptor?.sourceProfile, onAttachNode]
   )
 
   const global = scope === 'global'
@@ -5541,7 +5542,7 @@ export function LiveGraphPaneView({
         onOpenTask={onOpenTask}
         onStateChange={state => writeJson(storageKey, state)}
         pulses={pulses}
-        taskInspectorProfile={descriptor?.profile}
+        taskInspectorProfile={descriptor?.sourceProfile ?? descriptor?.profile}
         taskInspectorQueries
       />
     </div>

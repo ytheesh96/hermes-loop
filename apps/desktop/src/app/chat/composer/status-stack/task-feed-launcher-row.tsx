@@ -1,69 +1,51 @@
-import { useStore } from '@nanostores/react'
+import { useQuery } from '@tanstack/react-query'
 import { memo } from 'react'
 
+import {
+  LOOP_SOURCE_ACTIVE_REFETCH_INTERVAL_MS,
+  LOOP_SOURCE_IDLE_REFETCH_INTERVAL_MS,
+  loopSessionSourceRefetchInterval
+} from '@/app/chat/loop-refresh'
+import type { TenantLoopSource } from '@/app/chat/loop-state'
+import { liveGraphTaskProgress } from '@/app/live-graph/model'
 import { StatusRow } from '@/components/chat/status-row'
 import { Codicon } from '@/components/ui/codicon'
+import { getLoopSessionSources } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { $statusItemsBySession, type ComposerStatusItem } from '@/store/composer-status'
 
 interface TaskFeedLauncherRowProps {
-  onOpen?: (sessionId: string) => void
-  sessionId: null | string
+  enabled: boolean
+  onOpen?: (sessionId: string, dock: 'center' | 'right') => void
+  profile: string
+  sourceSessionId: null | string
 }
 
-interface TaskFeedProgress {
-  blocked: number
-  completed: number
-  pending: number
-  total: number
+function sourceRefetchInterval(sources?: readonly TenantLoopSource[]): number {
+  return sources?.some(source => loopSessionSourceRefetchInterval(source) === LOOP_SOURCE_ACTIVE_REFETCH_INTERVAL_MS)
+    ? LOOP_SOURCE_ACTIVE_REFETCH_INTERVAL_MS
+    : LOOP_SOURCE_IDLE_REFETCH_INTERVAL_MS
 }
 
-const emptyProgress = (): TaskFeedProgress => ({ blocked: 0, completed: 0, pending: 0, total: 0 })
-
-export function taskFeedProgress(items: readonly ComposerStatusItem[]): TaskFeedProgress {
-  const summaries = new Map<string, ComposerStatusItem>()
-
-  for (const item of items) {
-    if (item.type !== 'todo' || !item.kanbanTaskId) {
-      continue
-    }
-
-    const key = `${item.kanbanBoard || 'default'}:${item.kanbanWorkflowId || item.kanbanTaskId}`
-    const previous = summaries.get(key)
-
-    if (!previous || (item.taskProgress?.total || 0) >= (previous.taskProgress?.total || 0)) {
-      summaries.set(key, item)
-    }
-  }
-
-  return [...summaries.values()].reduce<TaskFeedProgress>((progress, item) => {
-    if (item.taskProgress) {
-      progress.blocked += item.taskProgress.blocked
-      progress.completed += item.taskProgress.completed
-      progress.pending += item.taskProgress.pending
-      progress.total += item.taskProgress.total
-
-      return progress
-    }
-
-    if (item.statusIndicator === 'attention' || item.statusIndicator === 'failed' || item.state === 'failed') {
-      progress.blocked += 1
-    } else if (item.todoStatus === 'completed' || item.state === 'done') {
-      progress.completed += 1
-    } else {
-      progress.pending += 1
-    }
-
-    progress.total += 1
-
-    return progress
-  }, emptyProgress())
-}
-
-export const TaskFeedLauncherRow = memo(function TaskFeedLauncherRow({ onOpen, sessionId }: TaskFeedLauncherRowProps) {
+export const TaskFeedLauncherRow = memo(function TaskFeedLauncherRow({
+  enabled,
+  onOpen,
+  profile,
+  sourceSessionId
+}: TaskFeedLauncherRowProps) {
   const { t } = useI18n()
-  const itemsBySession = useStore($statusItemsBySession)
-  const progress = taskFeedProgress(itemsBySession[sessionId || ''] ?? [])
+
+  const sourceQuery = useQuery({
+    queryKey: ['loop-session-source', profile, sourceSessionId],
+    queryFn: () => getLoopSessionSources(sourceSessionId!, profile),
+    enabled: enabled && Boolean(onOpen && profile && sourceSessionId),
+    notifyOnChangeProps: ['data'],
+    refetchInterval: query => sourceRefetchInterval(query.state.data),
+    refetchOnWindowFocus: true,
+    select: liveGraphTaskProgress,
+    staleTime: LOOP_SOURCE_ACTIVE_REFETCH_INTERVAL_MS
+  })
+
+  const progress = sourceQuery.data ?? { blocked: 0, completed: 0, pending: 0, total: 0 }
 
   const progressLabel = [
     progress.pending > 0 ? t.statusStack.pendingTasks(progress.pending) : null,
@@ -73,7 +55,7 @@ export const TaskFeedLauncherRow = memo(function TaskFeedLauncherRow({ onOpen, s
     .filter(Boolean)
     .join(', ')
 
-  if (!sessionId || !onOpen || progress.total === 0) {
+  if (!enabled || !sourceSessionId || !onOpen || progress.total === 0) {
     return null
   }
 
@@ -81,7 +63,7 @@ export const TaskFeedLauncherRow = memo(function TaskFeedLauncherRow({ onOpen, s
     <StatusRow
       className="task-feed-launcher-row min-h-7 rounded-t-[inherit] rounded-b-none border-b border-(--ui-stroke-tertiary) px-3.5 py-1.5 hover:bg-transparent"
       leading={<Codicon className="text-(--ui-blue)" name="inbox" size="0.8rem" />}
-      onActivate={() => onOpen(sessionId)}
+      onActivate={event => onOpen(sourceSessionId, event.shiftKey ? 'right' : 'center')}
       trailing={
         <span
           aria-label={progressLabel}

@@ -83,6 +83,9 @@ export function ChatBar({
   queueSessionKey,
   sessionId,
   state,
+  taskFeedEnabled = false,
+  taskFeedProfile = '',
+  taskFeedSessionId = null,
   onCancel,
   onOpenTaskFeed,
   onOpenKanbanTask,
@@ -1115,7 +1118,12 @@ export function ChatBar({
                 )}
               />
               <div className="min-w-0 overflow-hidden rounded-t-[inherit]" data-slot="composer-status-rows">
-                <TaskFeedLauncherRow onOpen={onOpenTaskFeed} sessionId={statusSessionId} />
+                <TaskFeedLauncherRow
+                  enabled={taskFeedEnabled}
+                  onOpen={onOpenTaskFeed}
+                  profile={taskFeedProfile}
+                  sourceSessionId={taskFeedSessionId}
+                />
                 <CodingStatusRow
                   onBranchOff={handleBranchOff}
                   onConvertBranch={handleConvertBranch}

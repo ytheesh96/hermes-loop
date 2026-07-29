@@ -79,8 +79,8 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
   const sourceQuery = useQuery({
     // Share the chat controller's source snapshot instead of starting a second
     // all-board poll for the same session when the graph is opened.
-    queryKey: ['loop-session-source', descriptor.profile, descriptor.sourceSessionId],
-    queryFn: () => getLoopSessionSources(descriptor.sourceSessionId, descriptor.profile),
+    queryKey: ['loop-session-source', descriptor.sourceProfile, descriptor.sourceSessionId],
+    queryFn: () => getLoopSessionSources(descriptor.sourceSessionId, descriptor.sourceProfile),
     enabled: active,
     refetchInterval: active ? ACTIVE_REFETCH_MS : false,
     refetchOnWindowFocus: true,
@@ -92,7 +92,7 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
       active && sourceQuery.data !== undefined
         ? buildSessionLiveGraph({
             loopagents,
-            profile: descriptor.profile,
+            profile: descriptor.sourceProfile,
             project: project ? { boardSlug: project.board_slug, id: project.id, name: project.name } : undefined,
             session: {
               cwd: descriptor.cwd || null,
@@ -106,7 +106,7 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
     [
       active,
       descriptor.cwd,
-      descriptor.profile,
+      descriptor.sourceProfile,
       descriptor.sessionRootId,
       descriptor.title,
       loopagents,

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { revealTreePane } from '@/components/pane-shell/tree/store'
 import type { SessionInfo } from '@/types/hermes'
 
 const STORAGE_KEY = 'hermes.desktop.liveGraphPanes.v1'
@@ -30,10 +31,59 @@ function session(overrides: Partial<SessionInfo> = {}): SessionInfo {
 
 beforeEach(() => {
   window.localStorage.clear()
+  vi.clearAllMocks()
   vi.resetModules()
 })
 
 describe('Graph View pane store', () => {
+  it('derives the pane source identity from the stored session owner and runtime tip', async () => {
+    const store = await import('./live-graph-panes')
+
+    expect(
+      store.liveGraphSessionSourceIdentity(
+        session({ _lineage_root_id: 'root-id', id: 'runtime-tip', profile: 'session-profile' }),
+        'active-profile'
+      )
+    ).toEqual({ sourceProfile: 'session-profile', sourceSessionId: 'runtime-tip' })
+  })
+
+  it('opens and reveals a cross-profile source in the active workspace without duplicating its pane', async () => {
+    const { $activeGatewayProfile } = await import('./profile')
+    $activeGatewayProfile.set('active-profile')
+    const store = await import('./live-graph-panes')
+
+    const storedSession = session({
+      _lineage_root_id: 'root-id',
+      cwd: '/repo',
+      id: 'runtime-tip',
+      profile: 'session-profile',
+      title: 'Cross-profile graph'
+    })
+
+    const sourceIdentity = store.liveGraphSessionSourceIdentity(storedSession, $activeGatewayProfile.get())
+    const paneId = store.openLiveGraphPane(storedSession)
+    store.openLiveGraphPane({ ...storedSession, title: 'Renamed graph' })
+    const persisted = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || '{}')
+
+    expect(paneId).toBe('live-graph:active-profile:root-id')
+    expect(sourceIdentity).toEqual({ sourceProfile: 'session-profile', sourceSessionId: 'runtime-tip' })
+    expect(store.$liveGraphPanes.get()).toEqual([
+      expect.objectContaining({
+        profile: 'active-profile',
+        sessionRootId: 'root-id',
+        sourceProfile: 'session-profile',
+        sourceSessionId: 'runtime-tip',
+        title: 'Renamed graph'
+      })
+    ])
+    expect(revealTreePane).toHaveBeenNthCalledWith(1, paneId)
+    expect(revealTreePane).toHaveBeenNthCalledWith(2, paneId)
+    expect(persisted['active-profile']).toEqual([
+      expect.objectContaining({ sourceProfile: 'session-profile', sourceSessionId: 'runtime-tip' })
+    ])
+    expect(persisted).not.toHaveProperty('session-profile')
+  })
+
   it('sanitizes persisted descriptors and drops malformed entries', async () => {
     window.localStorage.setItem(
       STORAGE_KEY,
@@ -64,6 +114,7 @@ describe('Graph View pane store', () => {
         profile: 'default',
         sessionRootId: 'root-id',
         sourcePaneId: 'workspace',
+        sourceProfile: 'default',
         sourceSessionId: 'root-id',
         title: 'Untitled session'
       }
@@ -102,6 +153,7 @@ describe('Graph View pane store', () => {
         replacesKey: 'work%3Aalpha:runtime%2Fid',
         sessionRootId: 'root/id',
         sourcePaneId: 'session-tile:runtime/id',
+        sourceProfile: 'work:alpha',
         sourceSessionId: 'tip/id',
         title: 'Renamed session'
       })
@@ -110,6 +162,37 @@ describe('Graph View pane store', () => {
     const persisted = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || '{}')
     expect(persisted['work:alpha'][0]).not.toHaveProperty('key')
     expect(persisted['work:alpha'][0]).not.toHaveProperty('replacesKey')
+  })
+
+  it('reloads an explicit cross-profile source without retargeting it to the workspace profile', async () => {
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        'active-profile': [
+          {
+            cwd: '/repo',
+            dock: 'center',
+            sessionRootId: 'root-id',
+            sourcePaneId: 'workspace',
+            sourceProfile: 'session-profile',
+            sourceSessionId: 'runtime-tip',
+            title: 'Cross-profile graph'
+          }
+        ]
+      })
+    )
+
+    const { $activeGatewayProfile } = await import('./profile')
+    $activeGatewayProfile.set('active-profile')
+    const store = await import('./live-graph-panes')
+
+    expect(store.$liveGraphPanes.get()).toEqual([
+      expect.objectContaining({
+        profile: 'active-profile',
+        sourceProfile: 'session-profile',
+        sourceSessionId: 'runtime-tip'
+      })
+    ])
   })
 
   it('keeps persisted open panes isolated by active gateway profile', async () => {

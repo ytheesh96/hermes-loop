@@ -30,7 +30,7 @@ import { cn } from '@/lib/utils'
 import { migrateSessionDraft } from '@/store/composer'
 import { migrateQueuedPrompts, parkQueuedPrompts } from '@/store/composer-queue'
 import { $pinnedSessionIds } from '@/store/layout'
-import { openLiveGraphPane } from '@/store/live-graph-panes'
+import { liveGraphSessionSourceIdentity, openLiveGraphPane } from '@/store/live-graph-panes'
 import { $petActive } from '@/store/pet'
 import { $petOverlayActive } from '@/store/pet-overlay'
 import { $activeGatewayProfile, $gatewaySwapTarget, $profiles } from '@/store/profile'
@@ -85,7 +85,7 @@ interface ChatViewProps extends Omit<React.ComponentProps<'div'>, 'onSubmit'> {
   onPickFiles: () => void
   onPickFolders: () => void
   onPickImages: () => void
-  onOpenTaskFeed?: (sessionId: string) => void
+  onOpenTaskFeed?: (sessionId: string, dock: 'center' | 'right') => void
   onOpenKanbanTask?: (taskId: string, workflow?: LoopWorkflowRef) => void
   onRemoveAttachment: (id: string) => void
   onSteer: (text: string) => Promise<boolean> | boolean
@@ -414,6 +414,13 @@ export function ChatView({
   const routedSessionId = isPrimary ? routeSessionId(location.pathname) : selectedSessionId
   const isRoutedSessionView = Boolean(routedSessionId)
 
+  const taskFeedSession =
+    sessions.find(session => sessionMatchesAnyId(session, [selectedSessionId, routedSessionId, activeSessionId])) || null
+
+  const taskFeedSource = taskFeedSession
+    ? liveGraphSessionSourceIdentity(taskFeedSession, activeGatewayProfile)
+    : null
+
   // The URL points at a session the store hasn't loaded yet (sidebar / cmd-K /
   // direct nav). Derived in render so the swap reads instantly: the same frame
   // the id changes we drop the old transcript and show the loader, instead of
@@ -655,6 +662,9 @@ export function ChatView({
               queueSessionKey={queueSessionKey}
               sessionId={activeSessionId}
               state={chatBarState}
+              taskFeedEnabled={isPrimary && gatewayOpen && Boolean(taskFeedSource?.sourceSessionId)}
+              taskFeedProfile={taskFeedSource?.sourceProfile}
+              taskFeedSessionId={taskFeedSource?.sourceSessionId}
             />
           </Suspense>
         )}

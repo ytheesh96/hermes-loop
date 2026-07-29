@@ -2,13 +2,18 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { TaskFeedLauncherRow } from '@/app/chat/composer/status-stack/task-feed-launcher-row'
+import type { TenantLoopSource } from '@/app/chat/loop-state'
 import type * as HermesExports from '@/hermes'
+import { I18nProvider } from '@/i18n'
 import type { SessionInfo } from '@/types/hermes'
 
+import type { LiveGraphSnapshot, SessionLiveGraphInput } from './model'
+
 const mocks = vi.hoisted(() => ({
-  buildGraph: vi.fn(() => ({ edges: [], nodes: [] })),
+  buildGraph: vi.fn<(input: SessionLiveGraphInput) => LiveGraphSnapshot>(() => ({ edges: [], nodes: [] })),
   detectPulses: vi.fn(() => []),
-  getSources: vi.fn(async () => [{ board: 'default', rows: [] }]),
+  getSources: vi.fn<() => Promise<TenantLoopSource[]>>(async () => [{ board: 'default', tasks: [] }]),
   view: vi.fn()
 }))
 
@@ -17,7 +22,8 @@ vi.mock('@/hermes', async importOriginal => ({
   getLoopSessionSources: mocks.getSources
 }))
 
-vi.mock('./model', () => ({
+vi.mock('./model', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   buildSessionLiveGraph: mocks.buildGraph,
   detectLiveGraphPulses: mocks.detectPulses
 }))
@@ -84,8 +90,74 @@ async function setup() {
 }
 
 describe('native Graph View panes', () => {
+  it('mounts a cross-profile pane and shares its source identity and task count with the composer row', async () => {
+    const sources: TenantLoopSource[] = [
+      {
+        board: 'default',
+        session_id: 'runtime-tip',
+        tasks: [
+          { id: 'pending', status: 'running', title: 'Pending' },
+          { id: 'completed', status: 'succeeded', title: 'Completed' },
+          { id: 'blocked', status: 'review_required', title: 'Blocked' }
+        ]
+      }
+    ]
+
+    mocks.getSources.mockResolvedValue(sources)
+
+    const { buildSessionLiveGraph } = (await vi.importActual('./model')) as {
+      buildSessionLiveGraph: (input: SessionLiveGraphInput) => LiveGraphSnapshot
+    }
+
+    mocks.buildGraph.mockImplementationOnce(buildSessionLiveGraph)
+
+    const { $activeGatewayProfile } = await import('@/store/profile')
+
+    $activeGatewayProfile.set('active-profile')
+    const { registry, store } = await setup()
+
+    const paneId = store.openLiveGraphPane(
+      session({ _lineage_root_id: 'root-id', id: 'runtime-tip', profile: 'session-profile' })
+    )
+
+    const descriptor = store.$liveGraphPanes.get()[0]!
+    const contribution = registry.getArea('panes').find(candidate => candidate.id === paneId)!
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    const { findByRole } = render(
+      <QueryClientProvider client={queryClient}>
+        <I18nProvider configClient={null}>
+          {contribution.render?.()}
+          <TaskFeedLauncherRow
+            enabled
+            onOpen={vi.fn()}
+            profile={descriptor.sourceProfile}
+            sourceSessionId={descriptor.sourceSessionId}
+          />
+        </I18nProvider>
+      </QueryClientProvider>
+    )
+
+    expect(descriptor).toEqual(
+      expect.objectContaining({ profile: 'active-profile', sourceProfile: 'session-profile', sourceSessionId: 'runtime-tip' })
+    )
+    expect(await findByRole('button', { name: /Task feed 1 pending task, 1 completed task, 1 blocked task/ })).toBeTruthy()
+    await waitFor(() => expect(mocks.getSources).toHaveBeenCalledWith('runtime-tip', 'session-profile'))
+    expect(queryClient.getQueryData(['loop-session-source', 'session-profile', 'runtime-tip'])).toEqual(sources)
+    expect(queryClient.getQueryData(['loop-session-source', 'active-profile', 'runtime-tip'])).toBeUndefined()
+    expect(mocks.buildGraph).toHaveBeenLastCalledWith(
+      expect.objectContaining({ profile: 'session-profile', sources })
+    )
+
+    const mountedGraph = (mocks.view.mock.calls.at(-1)?.[0] as {
+      graph?: { nodes: Array<{ kind: string }> }
+    }).graph
+
+    expect(mountedGraph?.nodes.filter(node => node.kind === 'task')).toHaveLength(3)
+  })
+
   it('waits for the first complete source snapshot before establishing the pulse baseline', async () => {
-    let resolveSources: ((value: Array<{ board: string; rows: never[] }>) => void) | undefined
+    let resolveSources: ((value: TenantLoopSource[]) => void) | undefined
     mocks.getSources.mockImplementationOnce(
       () =>
         new Promise(resolve => {
@@ -104,7 +176,7 @@ describe('native Graph View panes', () => {
     expect(mocks.buildGraph).not.toHaveBeenCalled()
     expect(mocks.detectPulses).not.toHaveBeenCalled()
 
-    await act(async () => resolveSources?.([{ board: 'default', rows: [] }]))
+    await act(async () => resolveSources?.([{ board: 'default', tasks: [] }]))
 
     await waitFor(() => expect(mocks.buildGraph).toHaveBeenCalledTimes(1))
     expect(mocks.detectPulses).toHaveBeenCalledWith(null, expect.anything())
@@ -112,7 +184,7 @@ describe('native Graph View panes', () => {
 
   it('keeps the last complete graph visible when an all-board refetch fails', async () => {
     mocks.getSources
-      .mockResolvedValueOnce([{ board: 'default', rows: [] }])
+      .mockResolvedValueOnce([{ board: 'default', tasks: [] }])
       .mockRejectedValueOnce(new Error('secondary board is unreadable'))
 
     const { registry, store } = await setup()

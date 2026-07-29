@@ -43,7 +43,7 @@ export interface ChatBarProps {
   sessionId?: string | null
   cwd?: string | null
   onCancel: () => Promise<void> | void
-  onOpenTaskFeed?: (sessionId: string) => void
+  onOpenTaskFeed?: (sessionId: string, dock: 'center' | 'right') => void
   onOpenKanbanTask?: (taskId: string, workflow?: LoopWorkflowRef) => void
   onAddContextRef?: (refText: string, label?: string, detail?: string) => void
   onAddUrl?: (url: string) => void
@@ -57,6 +57,9 @@ export interface ChatBarProps {
   onSteer?: (text: string) => Promise<boolean> | boolean
   onSubmit: (value: string, options?: SubmitTextOptions) => Promise<boolean> | boolean
   onTranscribeAudio?: (audio: Blob) => Promise<string>
+  taskFeedEnabled?: boolean
+  taskFeedProfile?: string
+  taskFeedSessionId?: string | null
 }
 
 export type VoiceStatus = 'idle' | 'recording' | 'transcribing'

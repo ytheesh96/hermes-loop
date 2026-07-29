@@ -41,6 +41,13 @@ export interface LiveGraphSnapshot {
   rootId?: string
 }
 
+export interface LiveGraphTaskProgress {
+  blocked: number
+  completed: number
+  pending: number
+  total: number
+}
+
 export interface SessionLiveGraphInput {
   loopagents: readonly LoopagentActivity[]
   profile: string
@@ -121,6 +128,34 @@ export function normalizeLiveGraphStatus(value: unknown): string {
   const status = clean(value).toLowerCase().replaceAll('-', '_').replaceAll(' ', '_') || 'unknown'
 
   return STATUS_ALIASES[status] || status
+}
+
+export function liveGraphTaskProgress(sources: readonly TenantLoopSource[]): LiveGraphTaskProgress {
+  const tasks = new Map<string, TenantLoopTask>()
+
+  for (const source of sources) {
+    const board = boardName(source)
+
+    for (const task of source.tasks || []) {
+      tasks.set(`${board}\u0000${task.id}`, task)
+    }
+  }
+
+  const progress: LiveGraphTaskProgress = { blocked: 0, completed: 0, pending: 0, total: tasks.size }
+
+  for (const task of tasks.values()) {
+    const status = normalizeLiveGraphStatus(task.status)
+
+    if (LIVE_GRAPH_COMPLETED_STATUSES.has(status)) {
+      progress.completed += 1
+    } else if (LIVE_GRAPH_ATTENTION_STATUSES.has(status)) {
+      progress.blocked += 1
+    } else {
+      progress.pending += 1
+    }
+  }
+
+  return progress
 }
 
 const normalizedStatus = (value: unknown): string | undefined => {

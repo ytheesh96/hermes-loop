@@ -15,8 +15,11 @@ const STORAGE_KEY = 'hermes.desktop.liveGraphPanes.v1'
 export interface LiveGraphPaneDescriptor {
   /** Stable pane-mirror key: encoded profile + logical session root. */
   key: string
+  /** Active workspace/profile that owns and reveals this native pane. */
   profile: string
   sessionRootId: string
+  /** Backend profile that owns the session and its Loop task sources. */
+  sourceProfile: string
   /** Current backend session id used to load this logical conversation. */
   sourceSessionId: string
   /** Chat pane this graph was opened from; closing returns focus here. */
@@ -32,6 +35,11 @@ export interface OpenLiveGraphPaneOptions {
   dock?: 'center' | 'right'
   profile?: string
   sourcePaneId?: string
+}
+
+export interface LiveGraphSessionSourceIdentity {
+  sourceProfile: string
+  sourceSessionId: string
 }
 
 type StoredLiveGraphPane = Omit<LiveGraphPaneDescriptor, 'key' | 'profile' | 'replacesKey'>
@@ -67,6 +75,7 @@ function decodeStoredPane(value: unknown, profile: string): LiveGraphPaneDescrip
   }
 
   const sourceSessionId = cleanString(raw.sourceSessionId) || sessionRootId
+  const sourceProfile = normalizeProfileKey(cleanString(raw.sourceProfile) || profile)
 
   return {
     cwd: cleanString(raw.cwd),
@@ -75,6 +84,7 @@ function decodeStoredPane(value: unknown, profile: string): LiveGraphPaneDescrip
     profile,
     sessionRootId,
     sourcePaneId: cleanSourcePaneId(raw.sourcePaneId),
+    sourceProfile,
     sourceSessionId,
     title: cleanString(raw.title) || 'Untitled session'
   }
@@ -125,6 +135,7 @@ function storedPane(descriptor: LiveGraphPaneDescriptor): StoredLiveGraphPane {
     dock: descriptor.dock,
     sessionRootId: descriptor.sessionRootId,
     sourcePaneId: descriptor.sourcePaneId,
+    sourceProfile: descriptor.sourceProfile,
     sourceSessionId: descriptor.sourceSessionId,
     title: descriptor.title
   }
@@ -164,15 +175,34 @@ if (!isSecondaryWindow()) {
   })
 }
 
-function sameLogicalSession(descriptor: LiveGraphPaneDescriptor, session: SessionInfo, rootId: string): boolean {
+function sameLogicalSession(
+  descriptor: LiveGraphPaneDescriptor,
+  session: SessionInfo,
+  rootId: string,
+  sourceProfile: string
+): boolean {
   const identities = new Set([rootId, session.id, ...(session._lineage_ids ?? [])])
 
-  return identities.has(descriptor.sessionRootId) || identities.has(descriptor.sourceSessionId)
+  return (
+    descriptor.sourceProfile === sourceProfile &&
+    (identities.has(descriptor.sessionRootId) || identities.has(descriptor.sourceSessionId))
+  )
+}
+
+export function liveGraphSessionSourceIdentity(
+  session: SessionInfo,
+  fallbackProfile = $activeGatewayProfile.get()
+): LiveGraphSessionSourceIdentity {
+  return {
+    sourceProfile: normalizeProfileKey(session.profile ?? fallbackProfile),
+    sourceSessionId: session.id.trim() || sessionPinId(session).trim()
+  }
 }
 
 /** Open or front exactly one native graph pane for a logical session. */
 export function openLiveGraphPane(session: SessionInfo, options: OpenLiveGraphPaneOptions = {}): string {
-  const profile = normalizeProfileKey(options.profile ?? session.profile ?? $activeGatewayProfile.get())
+  const sourceIdentity = liveGraphSessionSourceIdentity(session)
+  const profile = normalizeProfileKey(options.profile ?? activeProfile())
   const sessionRootId = sessionPinId(session).trim()
 
   if (!sessionRootId) {
@@ -180,7 +210,10 @@ export function openLiveGraphPane(session: SessionInfo, options: OpenLiveGraphPa
   }
 
   const current = panesByProfile[profile] ?? []
-  const existing = current.find(pane => sameLogicalSession(pane, session, sessionRootId))
+
+  const existing = current.find(pane =>
+    sameLogicalSession(pane, session, sessionRootId, sourceIdentity.sourceProfile)
+  )
 
   const descriptor: LiveGraphPaneDescriptor = {
     cwd: session.cwd?.trim() || '',
@@ -189,7 +222,8 @@ export function openLiveGraphPane(session: SessionInfo, options: OpenLiveGraphPa
     profile,
     sessionRootId,
     sourcePaneId: existing?.sourcePaneId ?? cleanSourcePaneId(options.sourcePaneId),
-    sourceSessionId: session.id.trim() || sessionRootId,
+    sourceProfile: sourceIdentity.sourceProfile,
+    sourceSessionId: sourceIdentity.sourceSessionId || sessionRootId,
     title: sessionTitle(session),
     ...(existing && existing.key !== liveGraphPaneKey(profile, sessionRootId) ? { replacesKey: existing.key } : {})
   }

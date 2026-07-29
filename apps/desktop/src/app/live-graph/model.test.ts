@@ -9,6 +9,7 @@ import {
   buildSessionLiveGraph,
   detectLiveGraphPulses,
   liveGraphNodeId,
+  liveGraphTaskProgress,
   type SessionLiveGraphInput
 } from './model'
 
@@ -62,6 +63,22 @@ const subagent = (overrides: Partial<SubagentProgress> = {}): SubagentProgress =
   taskIndex: 0,
   updatedAt: 100,
   ...overrides
+})
+
+describe('liveGraphTaskProgress', () => {
+  it('counts the de-duplicated scoped task nodes by normalized status', () => {
+    expect(
+      liveGraphTaskProgress([
+        taskSource('alpha', [
+          { id: 'pending', status: 'scheduled', title: 'Pending' },
+          { id: 'done', status: 'succeeded', title: 'Done' },
+          { id: 'blocked', status: 'review_required', title: 'Blocked' }
+        ]),
+        taskSource('alpha', [{ id: 'pending', status: 'running', title: 'Updated pending' }], 2),
+        taskSource('beta', [{ id: 'pending', status: 'failed', title: 'Same id, different board' }])
+      ])
+    ).toEqual({ blocked: 2, completed: 1, pending: 1, total: 4 })
+  })
 })
 
 describe('buildSessionLiveGraph', () => {

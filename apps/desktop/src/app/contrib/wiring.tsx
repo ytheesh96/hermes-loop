@@ -32,6 +32,7 @@ import { latestSessionTodos } from '@/lib/todos'
 import { $billingSettingsRequest } from '@/store/billing-block'
 import { setCronFocusJobId } from '@/store/cron'
 import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
+import { openLiveGraphPane } from '@/store/live-graph-panes'
 import { $previewTarget } from '@/store/preview'
 import { $activeGatewayProfile, $freshSessionRequest, $profileScope, refreshActiveProfile } from '@/store/profile'
 import { $startWorkSessionRequest, followActiveSessionCwd } from '@/store/projects'
@@ -548,6 +549,14 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     [navigate, taskFeedSessionId]
   )
 
+  const openScopedTaskFeed = useCallback((sessionId: string, dock: 'center' | 'right') => {
+    const session = $sessions.get().find(candidate => sessionMatchesStoredId(candidate, sessionId))
+
+    if (session) {
+      openLiveGraphPane(session, { dock, sourcePaneId: 'workspace' })
+    }
+  }, [])
+
   const openGraphTask = useCallback(
     (taskId: string, workflow?: LoopWorkflowRef) => {
       navigate(LIVE_GRAPH_ROUTE, {
@@ -855,7 +864,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     onPickFiles: () => void composer.pickContextPaths('file'),
     onPickFolders: () => void composer.pickContextPaths('folder'),
     onPickImages: () => void composer.pickImages(),
-    onOpenTaskFeed: openTaskFeed,
+    onOpenTaskFeed: openScopedTaskFeed,
     onOpenKanbanTask: openGraphTask,
     onReload: reloadFromMessage,
     onRemoveAttachment: id => void composer.removeAttachment(id),
