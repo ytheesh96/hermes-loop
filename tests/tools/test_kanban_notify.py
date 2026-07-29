@@ -2,6 +2,25 @@ from hermes_cli import kanban_db as kb
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
 
+def test_acp_loop_does_not_register_unfulfillable_async_subscription(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+
+    from gateway.session_context import reset_session_vars_for_tests, set_session_vars
+    from tools.kanban_notify import maybe_auto_subscribe
+
+    set_session_vars(source="acp", session_key="acp-session")
+    try:
+        with kb.connect() as conn:
+            task_id = kb.create_task(conn, title="sync workflow", assignee="worker")
+            assert maybe_auto_subscribe(conn, task_id) is False
+            assert kb.list_notify_subs(conn, task_id) == []
+    finally:
+        reset_session_vars_for_tests()
+
+
 def test_tui_auto_subscribe_uses_current_session_id_when_session_key_is_stale(monkeypatch, tmp_path):
     """Compression/resume can leave a stale session-key context; re-entry must target the live session."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))

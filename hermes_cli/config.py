@@ -3079,6 +3079,13 @@ DEFAULT_CONFIG = {
         # durable DB applies and final dispatch remain canonical. Runtime
         # clamps this to 1..3; two cuts model latency without creating a burst.
         "specification_concurrency": 2,
+        # ACP-originated Loop delegations stay in the originating prompt until
+        # a foreground boundary. Reserve ample host time for the ordinary final
+        # response; operators using a shorter ACP host cap should lower this.
+        "acp_sync_wait_seconds": 90 * 60,
+        # Protocol-only tool progress keeps the host idle watchdog alive without
+        # producing repeated user-visible chat messages.
+        "acp_sync_heartbeat_seconds": 30,
         # Stale detection: running tasks that have exceeded this many
         # seconds without a heartbeat (since ``last_heartbeat_at``) are
         # auto-reclaimed to ``ready`` on the next dispatcher tick. The

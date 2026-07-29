@@ -208,6 +208,191 @@ def _wait_for_loop_item(kb: Any, conn: Any, task_id: str, execution: dict[str, A
         time.sleep(0.05)
 
 
+def _acp_foreground_boundary_execution() -> dict[str, Any]:
+    """Resolve the conservative Hermes-owned wait budget for an ACP turn."""
+
+    wait_seconds = 90 * 60.0
+    heartbeat_seconds = 30.0
+    try:
+        from hermes_cli.config import load_config
+
+        kanban_cfg = load_config().get("kanban") or {}
+        wait_seconds = float(
+            kanban_cfg.get("acp_sync_wait_seconds", wait_seconds) or wait_seconds
+        )
+        heartbeat_seconds = float(
+            kanban_cfg.get("acp_sync_heartbeat_seconds", heartbeat_seconds)
+            or heartbeat_seconds
+        )
+    except Exception:
+        pass
+    try:
+        host_max = float(os.environ.get("BUZZ_ACP_MAX_TURN_DURATION") or 0)
+        if host_max > 0:
+            reserve = max(30.0, min(300.0, host_max * 0.10))
+            wait_seconds = min(wait_seconds, max(0.0, host_max - reserve))
+    except (TypeError, ValueError):
+        pass
+    try:
+        host_idle = float(os.environ.get("BUZZ_ACP_IDLE_TIMEOUT") or 0)
+        if host_idle > 0:
+            heartbeat_seconds = min(heartbeat_seconds, max(0.25, host_idle / 3.0))
+    except (TypeError, ValueError):
+        pass
+    return {
+        "mode": "sync",
+        "wait_until": "foreground_boundary",
+        "timeout_seconds": max(0.0, wait_seconds),
+        "heartbeat_seconds": max(0.25, heartbeat_seconds),
+    }
+
+
+def _workflow_boundary_snapshot(conn: Any, workflow_id: str) -> dict[str, Any] | None:
+    """Return a foreground-worthy workflow boundary, if one exists now."""
+
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import loop_graph as graph
+
+    workflow = kb.get_workflow(conn, workflow_id)
+    if workflow is None:
+        return {
+            "ok": False,
+            "workflow_id": workflow_id,
+            "boundary": "cancelled",
+            "reason": "workflow no longer exists",
+            "automatic_completion_delivery": False,
+        }
+    rows = conn.execute(
+        "SELECT id, title, status FROM tasks WHERE workflow_id = ? "
+        "AND status != 'archived' ORDER BY created_at, id",
+        (workflow_id,),
+    ).fetchall()
+    blockers = []
+    for row in rows:
+        status = str(row["status"])
+        if status not in {"blocked", "triage"}:
+            continue
+        event_kinds = (
+            ("block_loop_detected",)
+            if status == "triage"
+            else ("blocked", "block_loop_detected", "gave_up")
+        )
+        event = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? "
+            f"AND kind IN ({','.join('?' for _ in event_kinds)}) "
+            "ORDER BY id DESC LIMIT 1",
+            (row["id"], *event_kinds),
+        ).fetchone()
+        if event is None:
+            continue
+        reason = ""
+        if event["payload"]:
+            try:
+                payload = json.loads(event["payload"])
+                if isinstance(payload, dict):
+                    reason = str(
+                        payload.get("reason")
+                        or payload.get("error")
+                        or payload.get("summary")
+                        or ""
+                    ).strip()
+            except Exception:
+                pass
+        blockers.append(
+            {
+                "event_kind": str(event["kind"]),
+                "task_id": str(row["id"]),
+                "title": str(row["title"] or ""),
+                "reason": reason or "Human input required",
+            }
+        )
+    graph_state = graph.read_graph(conn, workflow_id, include_nodes=True)
+    base = {
+        "ok": True,
+        "workflow_id": workflow_id,
+        "graph_revision": graph_state["graph_revision"],
+        "nodes": graph_state.get("nodes") or [],
+        "automatic_completion_delivery": False,
+    }
+    if blockers:
+        return {
+            **base,
+            "boundary": "blocked",
+            "blocking_items": blockers,
+            "resumable": {
+                "action": "resume",
+                "workflow_id": workflow_id,
+                "expected_revision": graph_state["graph_revision"],
+            },
+        }
+    if not rows or all(str(row["status"]) in {"done", "archived"} for row in rows):
+        return {**base, "boundary": "completed"}
+    if not kb._workflow_has_autonomous_progress(conn, workflow_id):
+        return {**base, "boundary": "quiescent"}
+    return None
+
+
+def _wait_for_workflow_boundary(
+    kb: Any,
+    conn: Any,
+    workflow_id: str,
+    execution: dict[str, Any],
+    *,
+    progress_callback: Any = None,
+    cancelled: Any = None,
+    tool_name: str = "delegate_task",
+) -> dict[str, Any]:
+    """Wait until Loop reaches a foreground boundary or exhausts the turn budget."""
+
+    timeout = max(0.0, float(execution.get("timeout_seconds") or 0))
+    heartbeat_interval = max(0.25, float(execution.get("heartbeat_seconds") or 30.0))
+    deadline = time.monotonic() + timeout
+    next_heartbeat = time.monotonic() + heartbeat_interval
+    while True:
+        boundary = _workflow_boundary_snapshot(conn, workflow_id)
+        if boundary is not None:
+            return boundary
+        if callable(cancelled) and cancelled():
+            return {
+                "ok": True,
+                "workflow_id": workflow_id,
+                "boundary": "cancelled",
+                "automatic_completion_delivery": False,
+            }
+        now = time.monotonic()
+        if now >= deadline:
+            from hermes_cli import loop_graph as graph
+
+            state = graph.read_graph(conn, workflow_id, include_nodes=True)
+            return {
+                "ok": True,
+                "workflow_id": workflow_id,
+                "boundary": "budget_exhausted",
+                "graph_revision": state["graph_revision"],
+                "nodes": state.get("nodes") or [],
+                "automatic_completion_delivery": False,
+                "note": (
+                    "Durable work continues, but automatic final delivery is unavailable. "
+                    "Send another message to inspect or resume this workflow."
+                ),
+            }
+        if progress_callback is not None and now >= next_heartbeat:
+            try:
+                progress_callback(
+                    "tool.heartbeat",
+                    tool_name,
+                    "Waiting for Loop workflow foreground boundary",
+                    {"workflow_id": workflow_id},
+                )
+            except Exception:
+                pass
+            next_heartbeat = now + heartbeat_interval
+        sleep_for = min(1.0, max(0.0, deadline - now))
+        if progress_callback is not None:
+            sleep_for = min(sleep_for, max(0.0, next_heartbeat - now))
+        time.sleep(sleep_for)
+
+
 def _poke_dispatcher_once(
     _kb: Any,
     conn: Any,
@@ -233,7 +418,7 @@ def _loop_item_id(args: dict[str, Any]) -> str:
     return str(args.get("loop_item_id") or args.get("task_id") or args.get("loop_handle") or "").strip()
 
 
-def _handle_loop_graph(args: dict[str, Any], **_kwargs) -> str:
+def _handle_loop_graph(args: dict[str, Any], **kwargs: Any) -> str:
     from hermes_cli import kanban_db as kb
     from hermes_cli import loop_graph as graph
 
@@ -313,6 +498,82 @@ def _handle_loop_graph(args: dict[str, Any], **_kwargs) -> str:
                     ),
                     ensure_ascii=False,
                 )
+            if action == "resume":
+                expected_revision = args.get("expected_revision")
+                answers = args.get("answers")
+                mutation_id = str(args.get("mutation_id") or "").strip()
+                if expected_revision is None or not mutation_id or not isinstance(answers, list):
+                    return json.dumps(
+                        graph.error_response(
+                            graph.LoopError(
+                                "validation_failed",
+                                "resume requires expected_revision, mutation_id, and answers",
+                            ),
+                            conn,
+                            workflow_id,
+                        ),
+                        ensure_ascii=False,
+                    )
+                resumed = graph.resume_workflow(
+                    conn,
+                    workflow_id,
+                    expected_revision=int(expected_revision),
+                    mutation_id=mutation_id,
+                    answers=answers,
+                )
+                from hermes_cli import kanban_progress
+
+                resumed_ids = resumed.get("resumed_task_ids") or []
+                specification_ids = []
+                ready_ids = []
+                for resumed_task_id in resumed_ids:
+                    task = kb.get_task(conn, str(resumed_task_id))
+                    if task is None:
+                        continue
+                    if task.status == "triage" and bool(task.needs_specification):
+                        specification_ids.append(task.id)
+                    elif task.status in {"ready", "review"}:
+                        ready_ids.append(task.id)
+                progress = kanban_progress.decompose_and_dispatch(
+                    specification_ids,
+                    ready_task_ids=ready_ids,
+                    board=str(board or kb.get_current_board()).strip(),
+                    conn=conn,
+                    author="foreground-resume-auto-decomposer",
+                )
+                execution = _parse_execution(args)
+                execution["wait_until"] = "foreground_boundary"
+                if (
+                    get_session_env("HERMES_SESSION_SOURCE", "") == "acp"
+                    and not args.get("execution")
+                ):
+                    execution = _acp_foreground_boundary_execution()
+                boundary = _wait_for_workflow_boundary(
+                    kb,
+                    conn,
+                    workflow_id,
+                    execution,
+                    progress_callback=getattr(
+                        kwargs.get("parent_agent"), "tool_progress_callback", None
+                    ),
+                    cancelled=lambda: bool(
+                        getattr(
+                            kwargs.get("parent_agent"), "_interrupt_requested", False
+                        )
+                    ),
+                    tool_name="loop_graph",
+                )
+                return json.dumps(
+                    {
+                        **resumed,
+                        "decomposition": progress["decomposition"],
+                        "candidate_task_ids": progress["candidate_task_ids"],
+                        "dispatch": progress["dispatch"],
+                        "warnings": progress["warnings"],
+                        **boundary,
+                    },
+                    ensure_ascii=False,
+                )
             if action == "close":
                 closed = kb.close_workflow(conn, workflow_id)
                 if not closed:
@@ -330,7 +591,7 @@ def _handle_loop_graph(args: dict[str, Any], **_kwargs) -> str:
                     already_closed=False,
                 )
             return tool_error(
-                "action must be 'read', 'patch', 'triage', or 'close'"
+                "action must be 'read', 'patch', 'resume', 'triage', or 'close'"
             )
         except kb.WorkflowNotClosableError as exc:
             return _workflow_close_error(exc)
@@ -794,7 +1055,7 @@ LOOP_GRAPH_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["read", "patch", "triage", "close"],
+                "enum": ["read", "patch", "resume", "triage", "close"],
                 "description": (
                     "Use triage only after clarification/specification. Use "
                     "close only when the workflow needs no further follow-up; "
@@ -825,6 +1086,30 @@ LOOP_GRAPH_SCHEMA = {
                     "delegate_task(mode='loop')."
                 ),
                 "items": {"type": "object"},
+            },
+            "answers": {
+                "type": "array",
+                "description": "For resume, human answers for named blocked tasks.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string"},
+                        "note": {"type": "string"},
+                    },
+                    "required": ["task_id", "note"],
+                },
+            },
+            "execution": {
+                "type": "object",
+                "description": "For resume, bounded synchronous wait settings.",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["sync"]},
+                    "wait_until": {
+                        "type": "string",
+                        "enum": ["foreground_boundary"],
+                    },
+                    "timeout_seconds": {"type": "number", "minimum": 0},
+                },
             },
             "author": {"type": "string", "description": "For triage, audit author recorded on planning changes."},
             "board": {

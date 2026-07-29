@@ -126,6 +126,26 @@ class TestToolProgressCallback:
             step_cb(2, [{"name": "terminal", "result": "ok-2"}])
             assert "terminal" not in tool_call_ids
 
+    def test_loop_wait_heartbeat_updates_active_tool_call(self, mock_conn, event_loop_fixture):
+        tool_call_ids = {}
+        tool_call_meta = {}
+        cb = make_tool_progress_cb(
+            mock_conn,
+            "session-1",
+            event_loop_fixture,
+            tool_call_ids,
+            tool_call_meta,
+        )
+
+        with patch("acp_adapter.events._send_update") as send:
+            cb("tool.started", "delegate_task", "Delegating", {})
+            send.reset_mock()
+            cb("tool.heartbeat", "delegate_task", "Waiting for Loop workflow", {})
+
+        send.assert_called_once()
+        update = send.call_args.args[-1]
+        assert update.status == "in_progress"
+
 
 # ---------------------------------------------------------------------------
 # Thinking callback

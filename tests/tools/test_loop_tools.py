@@ -85,7 +85,13 @@ def test_loop_graph_tool_is_core_minimal_workflow_scoped_and_gated(
         if item["function"].get("name") == "loop_graph"
     )
     properties = loop_schema["parameters"]["properties"]
-    assert set(properties["action"]["enum"]) == {"read", "patch", "triage", "close"}
+    assert set(properties["action"]["enum"]) == {
+        "read",
+        "patch",
+        "resume",
+        "triage",
+        "close",
+    }
     assert "workflow_id" in properties
     assert "task_id" in properties
     assert "root_task_id" not in properties
@@ -650,6 +656,413 @@ def test_loop_create_sync_timeout_and_completion_wait(loop_env):
     assert completed["status"] == "done"
     assert completed["foreground_reentry"] == "completed_in_tool_result"
     assert completed["summary"] == "completed during sync wait"
+
+
+def test_workflow_boundary_snapshot_reports_human_blocker(loop_env):
+    from hermes_cli import kanban_db as kb
+    from tools import loop_tools
+
+    conn = kb.connect()
+    try:
+        workflow_id = _new_workflow(kb, conn)
+        task_id = kb.create_task(
+            conn,
+            title="Need approval",
+            assignee="worker-a",
+            tenant=loop_env,
+            workflow_id=workflow_id,
+        )
+        kb.block_task(conn, task_id, reason="Approve the production rollout?")
+
+        boundary = loop_tools._workflow_boundary_snapshot(conn, workflow_id)
+    finally:
+        conn.close()
+
+    assert boundary["boundary"] == "blocked"
+    assert boundary["workflow_id"] == workflow_id
+    assert boundary["blocking_items"] == [
+        {
+            "event_kind": "blocked",
+            "task_id": task_id,
+            "title": "Need approval",
+            "reason": "Approve the production rollout?",
+        }
+    ]
+    assert boundary["automatic_completion_delivery"] is False
+
+
+def test_workflow_boundary_snapshot_reports_real_block_recurrence(loop_env):
+    from hermes_cli import kanban_db as kb
+    from tools import loop_tools
+
+    conn = kb.connect()
+    try:
+        workflow_id = _new_workflow(kb, conn)
+        task_id = kb.create_task(
+            conn,
+            title="Repeatedly needs approval",
+            assignee="worker-a",
+            tenant=loop_env,
+            workflow_id=workflow_id,
+        )
+        assert kb.block_task(
+            conn,
+            task_id,
+            reason="Approve the production rollout?",
+            kind="needs_input",
+        )
+        assert kb.unblock_task(conn, task_id)
+        assert kb.block_task(
+            conn,
+            task_id,
+            reason="Approval is still required",
+            kind="needs_input",
+        )
+        assert kb.get_task(conn, task_id).status == "triage"
+
+        boundary = loop_tools._workflow_boundary_snapshot(conn, workflow_id)
+    finally:
+        conn.close()
+
+    assert boundary["boundary"] == "blocked"
+    assert boundary["blocking_items"] == [
+        {
+            "event_kind": "block_loop_detected",
+            "task_id": task_id,
+            "title": "Repeatedly needs approval",
+            "reason": "Approval is still required",
+        }
+    ]
+
+
+def test_loop_graph_resume_answers_recurrence_boundary_and_completes_without_gateway(
+    loop_env, monkeypatch
+):
+    from hermes_cli import kanban_db as kb
+    from tools import loop_tools
+
+    conn = kb.connect()
+    try:
+        workflow_id = _new_workflow(kb, conn)
+        task_id = kb.create_task(
+            conn,
+            title="Repeatedly needs approval",
+            assignee="worker-a",
+            tenant=loop_env,
+            workflow_id=workflow_id,
+        )
+        assert kb.block_task(
+            conn,
+            task_id,
+            reason="Approve the production rollout?",
+            kind="needs_input",
+        )
+        assert kb.unblock_task(conn, task_id)
+        assert kb.block_task(
+            conn,
+            task_id,
+            reason="Approval is still required",
+            kind="needs_input",
+        )
+        boundary = loop_tools._workflow_boundary_snapshot(conn, workflow_id)
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        "hermes_cli.profiles.profile_exists", lambda name: name == "worker-a"
+    )
+
+    def complete_spawned_task(task, _workspace, *, board=None):
+        worker_conn = kb.connect(board=board)
+        try:
+            assert kb.complete_task(
+                worker_conn,
+                task.id,
+                result="completed after recurrence answer",
+                summary="completed after recurrence answer",
+            )
+        finally:
+            worker_conn.close()
+        return 4242
+
+    monkeypatch.setattr(kb, "_default_spawn", complete_spawned_task)
+    resumed = _call_graph(
+        {
+            **boundary["resumable"],
+            "mutation_id": "answer-recurrence-and-finish",
+            "answers": [
+                {
+                    "task_id": boundary["blocking_items"][0]["task_id"],
+                    "note": "Approved after recurrence review.",
+                }
+            ],
+            "execution": {"mode": "sync", "timeout_seconds": 1},
+        }
+    )
+
+    assert resumed["ok"] is True, resumed
+    assert resumed["resumed_task_ids"] == [task_id]
+    assert resumed["dispatch"]["spawned"] == [task_id]
+    assert resumed["boundary"] == "completed"
+
+
+def test_workflow_boundary_snapshot_reports_scheduled_work_as_quiescent(loop_env):
+    from hermes_cli import kanban_db as kb
+    from tools import loop_tools
+
+    conn = kb.connect()
+    try:
+        workflow_id = _new_workflow(kb, conn)
+        task_id = kb.create_task(
+            conn,
+            title="Scheduled follow-up",
+            assignee="worker-a",
+            tenant=loop_env,
+            workflow_id=workflow_id,
+        )
+        assert kb.schedule_task(conn, task_id, reason="wait until later")
+
+        boundary = loop_tools._workflow_boundary_snapshot(conn, workflow_id)
+    finally:
+        conn.close()
+
+    assert boundary["boundary"] == "quiescent"
+    assert boundary["workflow_id"] == workflow_id
+
+
+def test_workflow_boundary_snapshot_reports_dependency_waiting_work_as_quiescent(
+    loop_env,
+):
+    from hermes_cli import kanban_db as kb
+    from tools import loop_tools
+
+    conn = kb.connect()
+    try:
+        workflow_id = _new_workflow(kb, conn)
+        parent_id = kb.create_task(
+            conn,
+            title="Unfinished parent",
+            assignee="worker-a",
+            tenant=loop_env,
+            workflow_id=workflow_id,
+        )
+        child_id = kb.create_task(
+            conn,
+            title="Dependency-waiting child",
+            assignee="worker-a",
+            tenant=loop_env,
+            workflow_id=workflow_id,
+        )
+        kb.link_tasks(conn, parent_id, child_id)
+        assert kb.schedule_task(conn, parent_id, reason="wait until later")
+        assert kb.get_task(conn, child_id).status == "todo"
+
+        boundary = loop_tools._workflow_boundary_snapshot(conn, workflow_id)
+    finally:
+        conn.close()
+
+    assert boundary["boundary"] == "quiescent"
+    assert boundary["workflow_id"] == workflow_id
+
+
+def test_wait_for_workflow_boundary_reports_budget_exhaustion(loop_env):
+    from hermes_cli import kanban_db as kb
+    from tools import loop_tools
+
+    conn = kb.connect()
+    try:
+        workflow_id = _new_workflow(kb, conn)
+        kb.create_task(
+            conn,
+            title="Still running",
+            assignee="worker-a",
+            tenant=loop_env,
+            workflow_id=workflow_id,
+        )
+        boundary = loop_tools._wait_for_workflow_boundary(
+            kb,
+            conn,
+            workflow_id,
+            {"mode": "sync", "wait_until": "foreground_boundary", "timeout_seconds": 0},
+        )
+    finally:
+        conn.close()
+
+    assert boundary["boundary"] == "budget_exhausted"
+    assert boundary["workflow_id"] == workflow_id
+    assert boundary["automatic_completion_delivery"] is False
+
+
+def test_loop_graph_resume_is_idempotent_and_unblocks_named_task(loop_env):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import loop_graph
+
+    conn = kb.connect()
+    try:
+        workflow_id = _new_workflow(kb, conn)
+        task_id = kb.create_task(
+            conn,
+            title="Await approval",
+            assignee="worker-a",
+            tenant=loop_env,
+            workflow_id=workflow_id,
+        )
+        kb.block_task(conn, task_id, reason="Approve? ")
+        revision = loop_graph.graph_revision(conn, workflow_id)
+        conn.execute(
+            "INSERT INTO loop_mutations (workflow_id, mutation_id, result_json, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (workflow_id, "approve-once", '{"ok": true, "op": "patch"}', 1),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    args = {
+        "action": "resume",
+        "workflow_id": workflow_id,
+        "expected_revision": revision,
+        "mutation_id": "approve-once",
+        "answers": [{"task_id": task_id, "note": "Approved."}],
+        "execution": {"mode": "sync", "timeout_seconds": 0},
+    }
+    resumed = _call_graph(args)
+    duplicate = _call_graph(args)
+
+    assert resumed["ok"] is True, resumed
+    assert resumed["resumed_task_ids"] == [task_id]
+    assert resumed["boundary"] == "budget_exhausted"
+    assert duplicate["duplicate"] is True
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, task_id).status == "ready"
+        comments = kb.list_comments(conn, task_id)
+    finally:
+        conn.close()
+    assert [comment.body for comment in comments].count("Approved.") == 1
+
+
+def test_loop_graph_resume_dispatches_and_completes_without_gateway(
+    loop_env, monkeypatch
+):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import loop_graph
+
+    conn = kb.connect()
+    try:
+        workflow_id = _new_workflow(kb, conn)
+        task_id = kb.create_task(
+            conn,
+            title="Resume and finish",
+            assignee="worker-a",
+            tenant=loop_env,
+            workflow_id=workflow_id,
+        )
+        assert kb.block_task(conn, task_id, reason="Approve?")
+        revision = loop_graph.graph_revision(conn, workflow_id)
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        "hermes_cli.profiles.profile_exists", lambda name: name == "worker-a"
+    )
+
+    def complete_spawned_task(task, _workspace, *, board=None):
+        worker_conn = kb.connect(board=board)
+        try:
+            assert kb.complete_task(
+                worker_conn,
+                task.id,
+                result="completed after resume",
+                summary="completed after resume",
+            )
+        finally:
+            worker_conn.close()
+        return 4242
+
+    monkeypatch.setattr(kb, "_default_spawn", complete_spawned_task)
+
+    resumed = _call_graph(
+        {
+            "action": "resume",
+            "workflow_id": workflow_id,
+            "expected_revision": revision,
+            "mutation_id": "approve-and-finish",
+            "answers": [{"task_id": task_id, "note": "Approved."}],
+            "execution": {"mode": "sync", "timeout_seconds": 1},
+        }
+    )
+
+    assert resumed["ok"] is True, resumed
+    assert resumed["resumed_task_ids"] == [task_id]
+    assert resumed["candidate_task_ids"] == [task_id]
+    assert resumed["dispatch"]["spawned"] == [task_id]
+    assert resumed["boundary"] == "completed"
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, task_id).status == "done"
+    finally:
+        conn.close()
+
+
+def test_loop_graph_resume_heartbeats_use_loop_graph_tool_call(loop_env, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import loop_graph
+    from gateway.session_context import set_session_vars
+    from tools import loop_tools
+
+    conn = kb.connect()
+    try:
+        workflow_id = _new_workflow(kb, conn)
+        task_id = kb.create_task(
+            conn,
+            title="Await approval",
+            assignee="worker-a",
+            tenant=loop_env,
+            workflow_id=workflow_id,
+        )
+        kb.block_task(conn, task_id, reason="Approve?")
+        revision = loop_graph.graph_revision(conn, workflow_id)
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        loop_tools,
+        "_acp_foreground_boundary_execution",
+        lambda: {
+            "mode": "sync",
+            "wait_until": "foreground_boundary",
+            "timeout_seconds": 0.3,
+            "heartbeat_seconds": 0.01,
+        },
+    )
+
+    class Agent:
+        _interrupt_requested = False
+        events = []
+
+        @classmethod
+        def tool_progress_callback(cls, *event):
+            cls.events.append(event)
+
+    set_session_vars(source="acp")
+    resumed = json.loads(
+        loop_tools._handle_loop_graph(
+            {
+                "action": "resume",
+                "workflow_id": workflow_id,
+                "expected_revision": revision,
+                "mutation_id": "approve-with-heartbeat",
+                "answers": [{"task_id": task_id, "note": "Approved."}],
+            },
+            parent_agent=Agent(),
+        )
+    )
+
+    assert resumed["boundary"] == "budget_exhausted"
+    assert any(
+        event[:2] == ("tool.heartbeat", "loop_graph") for event in Agent.events
+    )
 
 
 def test_loop_create_graph_has_no_synthetic_root_or_closure_edge(
