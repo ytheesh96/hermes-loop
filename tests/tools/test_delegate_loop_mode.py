@@ -215,6 +215,54 @@ def test_delegate_task_loop_skeleton_batch_uses_minimal_live_graph_contract(
     assert all("assignee" not in node and "context" not in node for node in captured[0]["nodes"])
 
 
+def test_delegate_task_loop_defaults_to_foreground_boundary_in_acp(
+    loop_delegate_env, monkeypatch
+):
+    from gateway.session_context import set_session_vars
+    from tools import delegate_tool, loop_tools
+
+    captured = {}
+
+    def fake_create_graph(args, **_kwargs):
+        return json.dumps(
+            {
+                "ok": True,
+                "workflow_id": "wf_sync",
+                "items": [{"task_id": "t_sync", "status": "triage"}],
+                "edges": [],
+                "subscribed": True,
+            }
+        )
+
+    def fake_wait(_kb, _conn, workflow_id, execution, **_kwargs):
+        captured.update(execution)
+        return {
+            "ok": True,
+            "workflow_id": workflow_id,
+            "boundary": "completed",
+            "graph_revision": 3,
+            "nodes": [],
+            "automatic_completion_delivery": False,
+        }
+
+    monkeypatch.setattr(loop_tools, "_handle_loop_create_graph", fake_create_graph)
+    monkeypatch.setattr(loop_tools, "_wait_for_workflow_boundary", fake_wait)
+    set_session_vars(source="acp", session_key="acp-session")
+
+    out = json.loads(
+        delegate_tool.delegate_task(
+            goal="Complete this workflow",
+            mode="loop",
+            parent_agent=DummyParent(),
+        )
+    )
+
+    assert captured["mode"] == "sync"
+    assert captured["wait_until"] == "foreground_boundary"
+    assert out["boundary"] == "completed"
+    assert out["workflow_id"] == "wf_sync"
+
+
 def test_delegate_task_cached_root_resolves_to_task_workflow(loop_delegate_env):
     from hermes_cli import kanban_db as kb
     from tools import delegate_tool

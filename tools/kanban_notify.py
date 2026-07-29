@@ -78,6 +78,13 @@ def maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
     ungrouped tasks retain the direct-task compatibility subscription.
     """
     try:
+        from gateway.session_context import get_session_env
+
+        if get_session_env("HERMES_SESSION_SOURCE", "") == "acp":
+            return False
+    except Exception:
+        pass
+    try:
         cfg = load_config()
         if not cfg_get(cfg, "kanban", "auto_subscribe_on_create", default=True):
             return False

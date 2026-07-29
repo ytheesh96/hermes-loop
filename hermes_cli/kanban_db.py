@@ -8740,6 +8740,70 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         return True
 
 
+def answer_and_unblock_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    author: str,
+    note: str,
+) -> bool:
+    """Record an answer and resume one human-blocked task in an existing transaction."""
+
+    if not note or not note.strip() or not author or not author.strip():
+        raise ValueError("author and note are required")
+    row = conn.execute(
+        "SELECT status, current_run_id FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    status = str(row["status"])
+    if status == "triage":
+        latest_blocker = conn.execute(
+            "SELECT kind FROM task_events WHERE task_id = ? "
+            "AND kind IN ('blocked', 'block_loop_detected', 'gave_up') "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if latest_blocker is None or str(latest_blocker["kind"]) != "block_loop_detected":
+            return False
+    elif status != "blocked":
+        return False
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, ?, ?, ?)",
+        (task_id, author.strip(), note.strip(), now),
+    )
+    _append_event(conn, task_id, "commented", {"author": author, "len": len(note)})
+    if row["current_run_id"]:
+        conn.execute(
+            "UPDATE task_runs SET status = 'reclaimed', outcome = 'reclaimed', "
+            "summary = COALESCE(summary, 'invariant recovery on unblock'), ended_at = ?, "
+            "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND ended_at IS NULL",
+            (now, int(row["current_run_id"])),
+        )
+    undone_parents = conn.execute(
+        "SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+        "WHERE l.child_id = ? AND p.status != 'done' LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    new_status = "todo" if undone_parents else "ready"
+    cur = conn.execute(
+        "UPDATE tasks SET status = ?, current_run_id = NULL, consecutive_failures = 0, "
+        "last_failure_error = NULL WHERE id = ? AND status = ?",
+        (new_status, task_id, status),
+    )
+    if cur.rowcount != 1:
+        return False
+    _append_event(
+        conn,
+        task_id,
+        "unblocked",
+        {"status": new_status} if new_status != "ready" else None,
+    )
+    return True
+
+
 def _task_specification_fingerprint(
     conn: sqlite3.Connection,
     task_id: str,

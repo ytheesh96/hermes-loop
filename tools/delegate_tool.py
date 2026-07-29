@@ -2897,6 +2897,7 @@ def _loop_skeleton_delegation_result(
     workspace_path,
     workflow_id=None,
     root_task_id=None,
+    parent_agent=None,
 ) -> str:
     """Submit a brief Loop graph for atomic, just-in-time specification."""
     from tools import loop_tools
@@ -3001,6 +3002,25 @@ def _loop_skeleton_delegation_result(
         item = dict(items[0])
         item["loop_status"] = item.pop("status", None)
         payload.update(item)
+    if get_session_env("HERMES_SESSION_SOURCE", "") == "acp":
+        from hermes_cli import kanban_db as kb
+
+        execution = loop_tools._acp_foreground_boundary_execution()
+        conn = kb.connect(board=board)
+        try:
+            boundary = loop_tools._wait_for_workflow_boundary(
+                kb,
+                conn,
+                str(created.get("workflow_id") or ""),
+                execution,
+                progress_callback=getattr(parent_agent, "tool_progress_callback", None),
+                cancelled=lambda: bool(
+                    getattr(parent_agent, "_interrupt_requested", False)
+                ),
+            )
+        finally:
+            conn.close()
+        payload.update(boundary)
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -3173,6 +3193,7 @@ def delegate_task(
             workspace_path=workspace_path,
             workflow_id=resolved_workflow_id,
             root_task_id=legacy_root_task_id,
+            parent_agent=parent_agent,
         )
 
     # Resolve delegation credentials (provider:model pair).

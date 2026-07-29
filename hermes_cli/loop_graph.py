@@ -1299,6 +1299,106 @@ def apply_patch(
         return _canonical_response(result, workflow_id)
 
 
+def resume_workflow(
+    conn: sqlite3.Connection,
+    workflow_id: str,
+    *,
+    expected_revision: int,
+    mutation_id: str,
+    answers: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Atomically record human answers and unblock named workflow tasks."""
+
+    ensure_schema(conn)
+    workflow_id = _resolve_workflow_identity(workflow_id)
+    mutation_id = str(mutation_id or "").strip()
+    if not mutation_id:
+        raise LoopError("validation_failed", "mutation_id is required")
+    stored_mutation_id = f"resume:{mutation_id}"
+    if not isinstance(answers, list) or not answers:
+        raise LoopError("validation_failed", "answers must be a non-empty list")
+
+    duplicate = conn.execute(
+        "SELECT result_json FROM loop_mutations WHERE workflow_id = ? AND mutation_id = ?",
+        (workflow_id, stored_mutation_id),
+    ).fetchone()
+    if duplicate:
+        result = json.loads(duplicate["result_json"])
+        result["duplicate"] = True
+        return _canonical_response(result, workflow_id)
+    current = graph_revision(conn, workflow_id)
+    if int(expected_revision) != current:
+        raise LoopError(
+            "stale_revision",
+            f"expected revision {expected_revision}, current revision is {current}",
+            current_revision=current,
+        )
+
+    resumed: list[str] = []
+    with kb.write_txn(conn):
+        duplicate = conn.execute(
+            "SELECT result_json FROM loop_mutations WHERE workflow_id = ? AND mutation_id = ?",
+            (workflow_id, stored_mutation_id),
+        ).fetchone()
+        if duplicate:
+            result = json.loads(duplicate["result_json"])
+            result["duplicate"] = True
+            return _canonical_response(result, workflow_id)
+        locked_current = graph_revision(conn, workflow_id)
+        if int(expected_revision) != locked_current:
+            raise LoopError(
+                "stale_revision",
+                f"expected revision {expected_revision}, current revision is {locked_current}",
+                current_revision=locked_current,
+            )
+        for answer in answers:
+            if not isinstance(answer, dict):
+                raise LoopError("validation_failed", "each answer must be an object")
+            task_id = str(answer.get("task_id") or "").strip()
+            note = str(answer.get("note") or "").strip()
+            if not task_id or not note:
+                raise LoopError(
+                    "validation_failed", "each answer requires task_id and note"
+                )
+            task = kb.get_task(conn, task_id)
+            if task is None or kb.workflow_id_for_task(conn, task_id) != workflow_id:
+                raise LoopError(
+                    "validation_failed",
+                    f"task {task_id} is not a member of workflow {workflow_id}",
+                )
+            if task.status not in {"blocked", "triage"}:
+                raise LoopError(
+                    "validation_failed", f"task {task_id} is not at a resumable blocker"
+                )
+            if not kb.answer_and_unblock_in_txn(
+                conn,
+                task_id,
+                author="foreground",
+                note=note,
+            ):
+                raise LoopError("conflict", f"task {task_id} could not be resumed")
+            resumed.append(task_id)
+
+        result = {
+            "ok": True,
+            "workflow_id": workflow_id,
+            "resumed_task_ids": resumed,
+            "graph_revision": graph_revision(conn, workflow_id),
+            "duplicate": False,
+        }
+        conn.execute(
+            "INSERT INTO loop_mutations (workflow_id, mutation_id, result_json, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                workflow_id,
+                stored_mutation_id,
+                json.dumps(result, ensure_ascii=False),
+                int(time.time()),
+            ),
+        )
+    return _canonical_response(result, workflow_id)
+
+
 def error_response(
     exc: LoopError,
     conn: Optional[sqlite3.Connection] = None,
