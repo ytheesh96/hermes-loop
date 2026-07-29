@@ -35,6 +35,24 @@ function leadingGlyph(item: ComposerStatusItem, s: Translations['statusStack']):
     )
   }
 
+  if (item.type === 'goal') {
+    if (item.goalStatus === 'paused') {
+      return <Codicon className="text-muted-foreground/60" name="debug-pause" size="0.8rem" />
+    }
+
+    if (item.goalStatus === 'done') {
+      return <Codicon className="text-emerald-500/80" name="pass-filled" size="0.8rem" />
+    }
+
+    return (
+      <GlyphSpinner
+        ariaLabel={s.running}
+        className="text-[0.85rem] leading-none text-emerald-500/80"
+        spinner="braille"
+      />
+    )
+  }
+
   if (item.todoStatus === 'pending') {
     return (
       <span
@@ -150,6 +168,11 @@ export const StatusItemRow = memo(function StatusItemRow({ item, onDismiss, onOp
         {(item.type === 'todo' || item.type === 'subagent' || item.type === 'kanban-agent') && item.currentTool && (
           <span className="max-w-[10rem] shrink-0 truncate text-[0.62rem] leading-4 text-muted-foreground/70">
             {toolLabel(item.currentTool)}
+          </span>
+        )}
+        {item.type === 'goal' && item.currentTool && (
+          <span className="shrink-0 truncate text-[0.62rem] leading-4 text-muted-foreground/70">
+            {item.currentTool}
           </span>
         )}
         {failed && typeof item.exitCode === 'number' && item.exitCode !== 0 && (

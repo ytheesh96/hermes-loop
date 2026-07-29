@@ -450,6 +450,45 @@ def test_ready_workflow_claim_defers_and_coalesces_completions_until_settled(
         assert settled_sub["pending_claim_token"] is None
 
 
+def test_workflow_delivery_metadata_refresh_preserves_cursor(
+    workflow_db: Path,
+) -> None:
+    route = _workflow_route()
+    with _connect(workflow_db) as conn:
+        workflow_id = kb.create_workflow(
+            conn,
+            workflow_id="wf_delivery_metadata",
+        )
+        kb.add_workflow_notify_sub(
+            conn,
+            workflow_id=workflow_id,
+            start_cursor=17,
+            delivery_metadata={
+                "thread_id": "thread-1",
+                "telegram_reply_to_message_id": "message-old",
+            },
+            **route,
+        )
+        kb.add_workflow_notify_sub(
+            conn,
+            workflow_id=workflow_id,
+            start_cursor=0,
+            delivery_metadata={
+                "thread_id": "thread-1",
+                "telegram_reply_to_message_id": "message-new",
+            },
+            **route,
+        )
+
+        [subscription] = kb.list_workflow_notify_subs(conn, workflow_id)
+        assert subscription["last_event_id"] == 17
+        assert subscription["last_notified_event_id"] == 17
+        assert subscription["delivery_metadata"] == {
+            "telegram_reply_to_message_id": "message-new",
+            "thread_id": "thread-1",
+        }
+
+
 def test_ready_workflow_claim_wakes_when_only_scheduled_work_remains(
     workflow_db: Path,
 ) -> None:
@@ -813,6 +852,10 @@ def test_cutover_replaces_drained_legacy_route_without_replay_or_loss(
             kb.add_notify_sub(
                 conn,
                 task_id=task_id,
+                delivery_metadata={
+                    "thread_id": route["thread_id"],
+                    "telegram_reply_to_message_id": "message-before-cutover",
+                },
                 **route,
             )
         delivered_ids = [
@@ -841,6 +884,10 @@ def test_cutover_replaces_drained_legacy_route_without_replay_or_loss(
         workflow_sub = kb.list_workflow_notify_subs(conn, workflow_id)[0]
         assert workflow_sub["last_event_id"] == high_water
         assert workflow_sub["last_notified_event_id"] == high_water
+        assert workflow_sub["delivery_metadata"] == {
+            "telegram_reply_to_message_id": "message-before-cutover",
+            "thread_id": route["thread_id"],
+        }
         assert kb.claim_unseen_events_for_workflow_sub(
             conn,
             workflow_id=workflow_id,
@@ -881,6 +928,7 @@ def test_cutover_refuses_live_legacy_claim(
             task_id=task_id,
             **route,
         )
+        initial_cursor = kb.list_notify_subs(conn, task_id)[0]["last_event_id"]
         event_id = _append_boundary(conn, task_id)
         old_cursor, cursor, events, token = kb.claim_unseen_events_for_sub(
             conn,
@@ -910,7 +958,7 @@ def test_cutover_refuses_live_legacy_claim(
             claimed_cursor=cursor,
             claim_token=token,
         )
-        assert old_cursor == 0
+        assert old_cursor == initial_cursor
         assert kb.cutover_legacy_workflow_route(
             conn,
             workflow_id=workflow_id,

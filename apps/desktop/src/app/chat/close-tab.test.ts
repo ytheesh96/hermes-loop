@@ -1,88 +1,84 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   activePaneId: null as null | string,
-  closeActiveRightRailTab: vi.fn(() => true),
-  closeSessionTile: vi.fn(),
   closeActiveTerminal: vi.fn(),
+  closeFocusedSessionTab: vi.fn(() => false),
   closeTreePane: vi.fn(),
-  closeWorkspaceTab: vi.fn(() => false),
-  filePreviewTabs: [] as unknown[],
-  focusSelector: '',
-  nextSessionTileForWorkspace: vi.fn(() => null as null | string),
-  previewTarget: null as null | { url: string }
+  focusSelector: ''
 }))
 
 vi.mock('@/app/right-sidebar/terminal/terminals', () => ({
   closeActiveTerminal: mocks.closeActiveTerminal
 }))
 
-vi.mock('@/components/pane-shell/tree/store', () => ({
+vi.mock('@/components/pane-shell/tree/store', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   activeTreePaneId: () => mocks.activePaneId,
-  closeTreePane: mocks.closeTreePane,
-  closeWorkspaceTab: mocks.closeWorkspaceTab
+  closeFocusedSessionTab: mocks.closeFocusedSessionTab,
+  closeTreePane: mocks.closeTreePane
 }))
 
 vi.mock('@/lib/keybinds/combo', () => ({
   isFocusWithin: (selector: string) => selector === mocks.focusSelector
 }))
 
-vi.mock('@/store/preview', () => ({
-  $filePreviewTabs: { get: () => mocks.filePreviewTabs },
-  $previewTarget: { get: () => mocks.previewTarget },
-  closeActiveRightRailTab: mocks.closeActiveRightRailTab
+vi.mock('@/store/session-states', () => ({
+  closeSessionTile: vi.fn(),
+  nextSessionTileForWorkspace: vi.fn(() => null)
 }))
 
-vi.mock('@/store/session-states', () => ({
-  closeSessionTile: mocks.closeSessionTile,
-  nextSessionTileForWorkspace: mocks.nextSessionTileForWorkspace
-}))
+import { $rightRailActiveTabId } from '@/store/layout'
+import { $previewTabs, closeRightRail, openPreview, type PreviewTarget } from '@/store/preview'
 
 import { closeActiveTab } from './close-tab'
 
-beforeEach(() => {
-  mocks.activePaneId = null
-  mocks.closeActiveRightRailTab.mockClear()
-  mocks.closeActiveRightRailTab.mockReturnValue(true)
-  mocks.closeSessionTile.mockClear()
-  mocks.closeActiveTerminal.mockClear()
-  mocks.closeTreePane.mockClear()
-  mocks.closeWorkspaceTab.mockClear()
-  mocks.closeWorkspaceTab.mockReturnValue(false)
-  mocks.filePreviewTabs = []
-  mocks.focusSelector = ''
-  mocks.nextSessionTileForWorkspace.mockClear()
-  mocks.nextSessionTileForWorkspace.mockReturnValue(null)
-  mocks.previewTarget = null
-})
+function fileTarget(path: string): PreviewTarget {
+  return {
+    kind: 'file',
+    label: path,
+    path,
+    previewKind: 'text',
+    source: path,
+    url: `file://${path}`
+  }
+}
 
 describe('closeActiveTab', () => {
+  beforeEach(() => {
+    vi.stubGlobal('document', { activeElement: null })
+    closeRightRail()
+    window.localStorage.clear()
+    mocks.activePaneId = null
+    mocks.closeActiveTerminal.mockClear()
+    mocks.closeFocusedSessionTab.mockClear()
+    mocks.closeFocusedSessionTab.mockReturnValue(false)
+    mocks.closeTreePane.mockClear()
+    mocks.focusSelector = ''
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    closeRightRail()
+    window.localStorage.clear()
+  })
+
   it('closes the exact native workflow pane before an unrelated open preview', () => {
     mocks.activePaneId = 'loop-workflow:session%3Aone:wf-a'
-    mocks.previewTarget = { url: 'http://127.0.0.1:3000' }
+    openPreview({ kind: 'url', label: 'Preview', source: 'http://127.0.0.1:3000', url: 'http://127.0.0.1:3000' })
 
     expect(closeActiveTab()).toBe(true)
     expect(mocks.closeTreePane).toHaveBeenCalledWith('loop-workflow:session%3Aone:wf-a')
-    expect(mocks.closeActiveRightRailTab).not.toHaveBeenCalled()
-    expect(mocks.closeWorkspaceTab).not.toHaveBeenCalled()
+    expect($previewTabs.get()).toHaveLength(1)
   })
 
   it('falls through to a live preview when the active zone is not a workflow pane', () => {
     mocks.activePaneId = 'workspace'
-    mocks.previewTarget = { url: 'http://127.0.0.1:3000' }
+    openPreview({ kind: 'url', label: 'Preview', source: 'http://127.0.0.1:3000', url: 'http://127.0.0.1:3000' })
 
     expect(closeActiveTab()).toBe(true)
     expect(mocks.closeTreePane).not.toHaveBeenCalled()
-    expect(mocks.closeActiveRightRailTab).toHaveBeenCalledTimes(1)
-  })
-
-  it('closes a visible file tab when the active selection is a ghost preview', () => {
-    mocks.activePaneId = 'workspace'
-    mocks.filePreviewTabs = [{}]
-
-    expect(closeActiveTab()).toBe(true)
-    expect(mocks.closeActiveRightRailTab).toHaveBeenCalledTimes(1)
-    expect(mocks.closeWorkspaceTab).not.toHaveBeenCalled()
+    expect($previewTabs.get()).toHaveLength(0)
   })
 
   it('keeps a focused terminal ahead of the active workflow zone', () => {
@@ -92,5 +88,26 @@ describe('closeActiveTab', () => {
     expect(closeActiveTab()).toBe(true)
     expect(mocks.closeActiveTerminal).toHaveBeenCalledTimes(1)
     expect(mocks.closeTreePane).not.toHaveBeenCalled()
+  })
+
+  it('closes the active file preview tab (⌘W happy path)', () => {
+    openPreview(fileTarget('/work/notes.md'), 'manual')
+
+    expect($previewTabs.get()).toHaveLength(1)
+    expect($rightRailActiveTabId.get()).toBe('file:file:///work/notes.md')
+
+    expect(closeActiveTab()).toBe(true)
+    expect($previewTabs.get()).toHaveLength(0)
+  })
+
+  it('closes the visible tab when the active selection points at a tab that is gone', () => {
+    // The rail falls back to tabs[0] until React syncs the selection, so ⌘W has
+    // to act on what is actually on screen rather than no-op'ing.
+    openPreview(fileTarget('/work/notes.md'), 'manual')
+    $rightRailActiveTabId.set('file:file:///work/stale.md')
+
+    expect($previewTabs.get()).toHaveLength(1)
+    expect(closeActiveTab()).toBe(true)
+    expect($previewTabs.get()).toHaveLength(0)
   })
 })

@@ -1471,14 +1471,18 @@ def _handle_create(args: dict, **kw) -> str:
         or get_logical_session_id(None)
     )
     priority = args.get("priority")
-    # Resolve workspace. If the caller passed one explicitly, honor it.
-    # Otherwise committed follow-up/review work inherits the first parent
-    # task's workspace below, so the foreground keeps the workflow in one
-    # project without copying paths out of a worker comment.
+    # Resolve workspace. Workspace sharing is always explicit: omitted fields
+    # mean a fresh scratch workspace, even for a follow-up with parents. Reusing
+    # a parent's literal path would let the child mutate review evidence or race
+    # the parent's checkout (#67567).
+    #
+    # Project identity is safe to inherit: create_task turns a project-linked
+    # scratch request into a fresh per-task worktree.
     workspace_kind = args.get("workspace_kind")
     workspace_path = args.get("workspace_path")
     project_id = args.get("project") or args.get("project_id")
-    _inherit_workspace = workspace_kind is None and workspace_path is None
+    project_source_task_id = None
+    _inherit_project = workspace_kind is None and workspace_path is None
     if workspace_kind is None:
         workspace_kind = "scratch"
     triage, bool_error = _parse_bool_arg(args, "triage")
@@ -1601,16 +1605,11 @@ def _handle_create(args: dict, **kw) -> str:
                     f"kanban_create: unknown workflow {workflow_id}"
                 )
 
-            if _inherit_workspace and parent_tasks:
+            if _inherit_project and parent_tasks:
                 workspace_parent = parent_tasks[0]
-                if workspace_parent.workspace_kind:
-                    workspace_kind = workspace_parent.workspace_kind
-                    workspace_path = workspace_parent.workspace_path
                 if project_id is None and workspace_parent.project_id:
                     project_id = workspace_parent.project_id
-            elif _inherit_workspace and workflow is not None:
-                workspace_kind = workflow.workspace_kind
-                workspace_path = workflow.workspace_path
+                    project_source_task_id = workspace_parent.id
 
             if not session_id and parent_tasks:
                 session_id = parent_tasks[0].session_id
@@ -1650,6 +1649,7 @@ def _handle_create(args: dict, **kw) -> str:
                     workspace_kind=str(workspace_kind),
                     workspace_path=workspace_path,
                     project_id=project_id,
+                    project_source_task_id=project_source_task_id,
                     triage=triage,
                     idempotency_key=idempotency_key,
                     max_runtime_seconds=(
@@ -1739,10 +1739,10 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
 
     Routing paths:
 
-    - **Gateway** (telegram/discord/slack/etc): ``HERMES_SESSION_PLATFORM``
-      and ``HERMES_SESSION_CHAT_ID`` are set in ContextVars by the
-      messaging gateway before agent dispatch. The notification poller
-      already keys off these, so we just register a row.
+    - **Gateway** (telegram/discord/slack/etc): ``HERMES_SESSION_PLATFORM``,
+      ``HERMES_SESSION_CHAT_ID``, and ``HERMES_SESSION_CHAT_TYPE`` are set in
+      ContextVars by the messaging gateway before agent dispatch. The
+      notification poller already keys off these, so we just register a row.
 
     - **TUI/Desktop**: the parent process exports ``HERMES_SESSION_KEY``.
       We subscribe with ``platform="tui"`` and ``chat_id=<key>``; the TUI

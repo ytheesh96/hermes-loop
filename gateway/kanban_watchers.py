@@ -284,11 +284,27 @@ def _direct_boundary_message(
             f"✔ {board_tag}{source_tag}Kanban {source_id} done"
             f" — {source_title}{handoff}"
         )
-    if kind in {"blocked", "block_loop_detected"}:
+    if kind == "blocked":
         reason = ""
         if event.payload and event.payload.get("reason"):
             reason = f": {str(event.payload['reason'])[:160]}"
         return f"⏸ {board_tag}{tag}Kanban {sub['task_id']} blocked{reason}"
+    if kind == "block_loop_detected":
+        # A task re-blocked for the same cause past the recurrence limit and
+        # was routed to `triage` for a human decision. This is the ONE
+        # transition that exists to force human attention, so it must not
+        # read as an ordinary block — ping loudly.
+        reason = ""
+        recurrences = None
+        if event.payload:
+            if event.payload.get("reason"):
+                reason = f": {str(event.payload['reason'])[:160]}"
+            recurrences = event.payload.get("recurrences")
+        rc = f" (blocked {recurrences}x for the same cause)" if recurrences else ""
+        return (
+            f"🛑 {board_tag}{tag}Kanban {sub['task_id']} routed to TRIAGE"
+            f" — needs a human decision{rc}{reason}"
+        )
     if kind == "loop_descendant_blocked":
         payload = event.payload or {}
         source_id = payload.get("source_task_id") or sub["task_id"]
@@ -792,6 +808,7 @@ class GatewayKanbanWatchersMixin:
                     thread_id=legacy_sub.get("thread_id"),
                     user_id=legacy_sub.get("user_id"),
                     notifier_profile=legacy_sub.get("notifier_profile"),
+                    delivery_metadata=legacy_sub.get("delivery_metadata"),
                 )
             except Exception:
                 logger.debug(
@@ -906,119 +923,131 @@ class GatewayKanbanWatchersMixin:
                 ).append(candidate)
 
         for sub in subs:
-            owner_profile = sub.get("notifier_profile") or None
-            if owner_profile and owner_profile != notifier_profile:
-                owner_adapters = getattr(
-                    self,
-                    "_profile_adapters",
-                    {},
-                ).get(owner_profile)
-                if not owner_adapters:
+            try:
+                owner_profile = sub.get("notifier_profile") or None
+                if owner_profile and owner_profile != notifier_profile:
+                    owner_adapters = getattr(
+                        self,
+                        "_profile_adapters",
+                        {},
+                    ).get(owner_profile)
+                    if not owner_adapters:
+                        logger.debug(
+                            "kanban notifier: subscription for %s owned by profile "
+                            "%s; current profile %s has no adapter for it, skipping",
+                            sub.get("task_id"),
+                            owner_profile,
+                            notifier_profile,
+                        )
+                        continue
+                platform = (sub.get("platform") or "").lower()
+                if platform not in active_platforms:
                     logger.debug(
-                        "kanban notifier: subscription for %s owned by profile "
-                        "%s; current profile %s has no adapter for it, skipping",
+                        "kanban notifier: subscription for %s on %s skipped; "
+                        "adapter not connected",
                         sub.get("task_id"),
-                        owner_profile,
-                        notifier_profile,
+                        platform or "<missing>",
                     )
                     continue
-            platform = (sub.get("platform") or "").lower()
-            if platform not in active_platforms:
-                logger.debug(
-                    "kanban notifier: subscription for %s on %s skipped; "
-                    "adapter not connected",
-                    sub.get("task_id"),
-                    platform or "<missing>",
-                )
-                continue
-            old_cursor, cursor, events, claim_token = (
-                kanban_db.claim_unseen_events_for_sub(
-                    conn,
-                    task_id=sub["task_id"],
-                    platform=sub["platform"],
-                    chat_id=sub["chat_id"],
-                    thread_id=sub.get("thread_id") or "",
-                    kinds=terminal_kinds,
-                    limit=20,
-                )
-            )
-            if not events:
-                # Repair the ACK→unsubscribe crash window through the DB's
-                # lease-aware compare-and-swap.
-                task = kanban_db.get_task(conn, sub["task_id"])
-                root_task_id = kanban_db.loop_root_for_task(
-                    conn,
-                    sub["task_id"],
-                )
-                keep_workflow_subscription = (
-                    str(sub.get("scope") or "task") == "descendants"
-                    and str(root_task_id or "") == str(sub["task_id"])
-                    and task is not None
-                    and task.status != "archived"
-                )
-                if (
-                    task
-                    and task.status in {"done", "archived"}
-                    and not keep_workflow_subscription
-                ):
-                    kanban_db.remove_notify_sub_if_idle(
+                old_cursor, cursor, events, claim_token = (
+                    kanban_db.claim_unseen_events_for_sub(
                         conn,
                         task_id=sub["task_id"],
                         platform=sub["platform"],
                         chat_id=sub["chat_id"],
                         thread_id=sub.get("thread_id") or "",
+                        kinds=terminal_kinds,
+                        limit=20,
                     )
-                continue
+                )
+                if not events:
+                    # Repair the ACK→unsubscribe crash window through the DB's
+                    # lease-aware compare-and-swap.
+                    task = kanban_db.get_task(conn, sub["task_id"])
+                    root_task_id = kanban_db.loop_root_for_task(
+                        conn,
+                        sub["task_id"],
+                    )
+                    keep_workflow_subscription = (
+                        str(sub.get("scope") or "task") == "descendants"
+                        and str(root_task_id or "") == str(sub["task_id"])
+                        and task is not None
+                        and task.status != "archived"
+                    )
+                    if (
+                        task
+                        and task.status in {"done", "archived"}
+                        and not keep_workflow_subscription
+                    ):
+                        kanban_db.remove_notify_sub_if_idle(
+                            conn,
+                            task_id=sub["task_id"],
+                            platform=sub["platform"],
+                            chat_id=sub["chat_id"],
+                            thread_id=sub.get("thread_id") or "",
+                        )
+                    continue
 
-            task = kanban_db.get_task(conn, sub["task_id"])
-            root_task_id = kanban_db.loop_root_for_task(
-                conn,
-                sub["task_id"],
-            )
-            matching_root_route = bool(
-                root_task_id
-                and root_task_id != sub["task_id"]
-                and any(
-                    _same_notification_route(sub, root_sub)
-                    for root_sub in descendant_routes_by_root.get(
-                        root_task_id,
-                        [],
+                task = kanban_db.get_task(conn, sub["task_id"])
+                root_task_id = kanban_db.loop_root_for_task(
+                    conn,
+                    sub["task_id"],
+                )
+                matching_root_route = bool(
+                    root_task_id
+                    and root_task_id != sub["task_id"]
+                    and any(
+                        _same_notification_route(sub, root_sub)
+                        for root_sub in descendant_routes_by_root.get(
+                            root_task_id,
+                            [],
+                        )
                     )
                 )
-            )
-            root_route_owned_event_ids = (
-                kanban_db.loop_root_mirrored_source_event_ids(
-                    conn,
-                    root_task_id,
-                    [event.id for event in events],
+                root_route_owned_event_ids = (
+                    kanban_db.loop_root_mirrored_source_event_ids(
+                        conn,
+                        root_task_id,
+                        [event.id for event in events],
+                    )
+                    if matching_root_route
+                    else set()
                 )
-                if matching_root_route
-                else set()
-            )
-            logger.debug(
-                "kanban notifier: claimed %d event(s) for %s on board %s "
-                "cursor %s→%s",
-                len(events),
-                sub["task_id"],
-                slug,
-                old_cursor,
-                cursor,
-            )
-            deliveries.append(
-                {
-                    "sub": sub,
-                    "old_cursor": old_cursor,
-                    "cursor": cursor,
-                    "claim_token": claim_token,
-                    "events": events,
-                    "task": task,
-                    "board": slug,
-                    "root_task_id": root_task_id,
-                    "root_route_owned_event_ids": (
-                        root_route_owned_event_ids
-                    ),
-                }
-            )
+                logger.debug(
+                    "kanban notifier: claimed %d event(s) for %s on board %s "
+                    "cursor %s→%s",
+                    len(events),
+                    sub["task_id"],
+                    slug,
+                    old_cursor,
+                    cursor,
+                )
+                deliveries.append(
+                    {
+                        "sub": sub,
+                        "old_cursor": old_cursor,
+                        "cursor": cursor,
+                        "claim_token": claim_token,
+                        "events": events,
+                        "task": task,
+                        "board": slug,
+                        "root_task_id": root_task_id,
+                        "root_route_owned_event_ids": (
+                            root_route_owned_event_ids
+                        ),
+                    }
+                )
+
+            except Exception as sub_exc:
+                # Isolate per-subscription failures so one bad
+                # subscription cannot block delivery for all other
+                # subscriptions in this tick.
+                logger.warning(
+                    "kanban notifier: subscription for %s on board %s failed: %s",
+                    sub.get("task_id"),
+                    slug,
+                    sub_exc,
+                )
 
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver terminal events to users.
@@ -1097,7 +1126,13 @@ class GatewayKanbanWatchersMixin:
         # means the chat is dead (deleted, bot kicked, etc.) — after N
         # consecutive send failures the sub is dropped so we don't spin
         # against a dead chat every 5 seconds forever.
-        MAX_SEND_FAILURES = 3
+        # Raised from 3 to 12 (~60s at the 5s tick cadence): now that a
+        # reported SendResult(success=False) also lands here (see the
+        # delivery loop below), a transient Telegram/API outage of a few
+        # ticks must NOT permanently unsubscribe a live review-gate channel.
+        # A genuinely dead chat still drops, just ~60s later — a fine trade
+        # for an unattended gate where a false drop means silent work pileup.
+        MAX_SEND_FAILURES = 12
         sub_fail_counts: dict[tuple, int] = getattr(
             self, "_kanban_sub_fail_counts", {}
         )
@@ -1120,6 +1155,24 @@ class GatewayKanbanWatchersMixin:
                         getattr(platform, "value", str(platform)).lower()
                         for platform in self.adapters.keys()
                     }
+                    # Widen to every platform any secondary profile has live,
+                    # not just the default profile's. This is only a coarse
+                    # pre-filter to skip claiming events for subs nobody can
+                    # possibly deliver — the precise per-profile check (via
+                    # gateway/authz_mixin.py::_authorization_adapter, which
+                    # forbids default-profile fallback) still runs at delivery
+                    # time below, rewinding the claim if it resolves to None.
+                    # Without this, a subscription owned by a secondary
+                    # profile on a platform the DEFAULT profile never
+                    # connected (e.g. beta owns discord, default doesn't) was
+                    # dropped here before ever being claimed — no rewind
+                    # applies to an unclaimed event, so it silently never
+                    # retries.
+                    for _profile_adapter_map in getattr(self, "_profile_adapters", {}).values():
+                        active_platforms.update(
+                            getattr(platform, "value", str(platform)).lower()
+                            for platform in _profile_adapter_map.keys()
+                        )
                     if not active_platforms:
                         logger.debug("kanban notifier: no connected adapters; skipping tick")
                         board_states.clear()
@@ -1202,6 +1255,25 @@ class GatewayKanbanWatchersMixin:
                         )
                         if unchanged:
                             continue
+                        # Skip the writable open when neither task nor workflow
+                        # routes exist. `count_notify_subs()` probes both tables
+                        # read-only, so workflow-only boards remain deliverable.
+                        # Probe failures fall back to the writable path: a
+                        # transient read/open error must not suppress delivery.
+                        try:
+                            if _kb.count_notify_subs(board=slug) == 0:
+                                logger.debug(
+                                    "kanban notifier: board %s has no subscriptions; skipping open",
+                                    slug,
+                                )
+                                continue
+                        except Exception as exc:
+                            logger.debug(
+                                "kanban notifier: read-only subscription probe failed "
+                                "for board %s (%s); falling back to writable open",
+                                slug,
+                                exc,
+                            )
                         conn = None
                         try:
                             conn = _kb.connect(board=slug)
@@ -1419,8 +1491,13 @@ class GatewayKanbanWatchersMixin:
                                 sub["task_id"],
                             )
                             continue
-                        metadata: dict[str, Any] = {}
-                        if sub.get("thread_id"):
+                        delivery_metadata = sub.get("delivery_metadata")
+                        metadata: dict[str, Any] = (
+                            dict(delivery_metadata)
+                            if isinstance(delivery_metadata, dict)
+                            else {}
+                        )
+                        if sub.get("thread_id") and not metadata.get("thread_id"):
                             metadata["thread_id"] = sub["thread_id"]
                         try:
                             send_result = await adapter.send(
@@ -1718,9 +1795,20 @@ class GatewayKanbanWatchersMixin:
             if push_capable:
                 from gateway.session import SessionSource
 
-                chat_type = str(
-                    sub.get("chat_type")
-                    or ("thread" if sub.get("thread_id") else "group")
+                # build_session_key() keys DMs on a wholly different shape
+                # from group/thread, so a wrong chat_type mis-routes the
+                # creator into a fresh session (#56580). Legacy rows written
+                # before the column existed may still carry chat_type in
+                # delivery_metadata (#60600) — try that before defaulting.
+                chat_type = str(sub.get("chat_type") or "").strip()
+                if not chat_type:
+                    legacy_metadata = sub.get("delivery_metadata")
+                    if isinstance(legacy_metadata, dict):
+                        chat_type = str(
+                            legacy_metadata.get("chat_type") or ""
+                        ).strip()
+                chat_type = chat_type or (
+                    "thread" if sub.get("thread_id") else "group"
                 )
                 source = SessionSource(
                     platform=platform,

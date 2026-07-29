@@ -7,6 +7,7 @@ import { $selectedStoredSessionId } from './session'
 import {
   $sessionTiles,
   closeSessionTile,
+  focusedSessionNeedsRoute,
   openSessionTab,
   openSessionTile,
   orderTilesByTree,
@@ -181,5 +182,25 @@ describe('Loop worker session tabs', () => {
 
     expect(invalidateRuntime).toHaveBeenCalledWith('worker-session-9')
     expect($sessionTiles.get()[0]?.runtimeId).toBeUndefined()
+  })
+})
+
+describe('focusedSessionNeedsRoute', () => {
+  it('routes when the session is not on screen', () => {
+    expect(focusedSessionNeedsRoute(null, false)).toBe(true)
+    expect(focusedSessionNeedsRoute(null, true)).toBe(true)
+  })
+
+  it('routes for the ACTIVE main session while a full page covers the workspace', () => {
+    expect(focusedSessionNeedsRoute('main', true)).toBe(true)
+  })
+
+  it('skips the route when the main session is already the visible chat', () => {
+    expect(focusedSessionNeedsRoute('main', false)).toBe(false)
+  })
+
+  it('never routes for a tile — its pane shows the chat on any route', () => {
+    expect(focusedSessionNeedsRoute('tile', true)).toBe(false)
+    expect(focusedSessionNeedsRoute('tile', false)).toBe(false)
   })
 })

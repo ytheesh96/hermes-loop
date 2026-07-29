@@ -14,6 +14,14 @@ import pytest
 from hermes_cli import kanban_db as kb
 
 
+class _FakeCursor:
+    def __init__(self, row):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
 class _FakeConn:
     """Records execute() calls and replays a scripted result per SQL statement.
 
@@ -33,6 +41,8 @@ class _FakeConn:
             outcome = outcomes.pop(0)
             if isinstance(outcome, Exception):
                 raise outcome
+        if sql.strip().upper().startswith("PRAGMA JOURNAL_MODE"):
+            return _FakeCursor(("wal",))
         return None
 
     def count(self, prefix):

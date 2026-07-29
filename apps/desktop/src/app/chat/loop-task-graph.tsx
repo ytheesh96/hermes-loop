@@ -1312,6 +1312,7 @@ export function LoopTaskGraph({
     setPositionOverrides(new Map(positions.map(position => [position.taskId, { x: position.x, y: position.y }])))
   }, [positions])
 
+  // eslint-disable-next-line no-restricted-syntax -- Refs coordinate imperative graph state across scope changes.
   useEffect(() => {
     const nextScope = graphScopeKey
 
@@ -1371,6 +1372,7 @@ export function LoopTaskGraph({
 
   const graphFrameKey = `${graphScopeKey}:${positions === undefined ? 'loading' : 'ready'}`
 
+  // eslint-disable-next-line no-restricted-syntax -- Ref suppresses duplicate automatic framing, not a nanostore atom.
   useEffect(() => {
     if (!fullPanel) {
       return

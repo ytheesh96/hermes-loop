@@ -502,6 +502,7 @@ def test_workflow_id_is_bound_for_exact_agent_turn_and_then_cleared(
             _prompt,
             conversation_history=None,
             stream_callback=None,
+            **_kwargs,
         ):
             observed.append(get_current_workflow_id())
             return {"final_response": "", "messages": []}

@@ -127,6 +127,7 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
 
   const graph = activeGraph ?? lastRenderedGraphRef.current
 
+  // eslint-disable-next-line no-restricted-syntax -- Refs retain prior rendered graph state for transition detection.
   useEffect(() => {
     if (!activeGraph) {
       return

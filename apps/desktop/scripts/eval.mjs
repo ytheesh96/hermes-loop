@@ -1,4 +1,10 @@
 // Simple eval helper — runs an expression and returns the result.value.
+//
+//   node scripts/eval.mjs "document.title"
+//   HERMES_DESKTOP_CDP_PORT=9333 node scripts/eval.mjs "document.title"
+//
+// Needs a renderer with a debugging port: launch `hgui` / `npm run dev` with
+// HERMES_DESKTOP_CDP_PORT set (see electron/dev-cdp.ts).
 import { connectRenderer } from './cdp.mjs'
 
 const { client: cdp } = await connectRenderer({ urlPattern: /5174/ })

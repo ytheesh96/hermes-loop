@@ -376,7 +376,17 @@ def _run_case(case: Case, timeout: int) -> dict[str, Any]:
             "HERMES_EVAL_TRACE": str(trace_path),
         })
         try:
-            completed = subprocess.run(command, cwd=sandbox, env=env, text=True, capture_output=True, timeout=timeout, check=False)
+            completed = subprocess.run(
+                command,
+                cwd=sandbox,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
             fresh = True
         except subprocess.TimeoutExpired as exc:
             completed = subprocess.CompletedProcess(command, 124, _text(exc.stdout), _text(exc.stderr) or "timeout")

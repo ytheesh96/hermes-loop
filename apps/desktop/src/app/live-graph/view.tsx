@@ -2743,6 +2743,7 @@ export function LiveGraphCanvas({
 
   const denseGraph = visible.nodes.length >= DENSE_GRAPH_NODE_THRESHOLD
 
+  // eslint-disable-next-line no-restricted-syntax -- Ref tracks imperative level-of-detail state for the renderer.
   useEffect(() => {
     if (!denseGraph) {
       return
@@ -2796,6 +2797,7 @@ export function LiveGraphCanvas({
     [settledTopology]
   )
 
+  // eslint-disable-next-line no-restricted-syntax -- Refs own the imperative force-simulation lifecycle.
   useEffect(() => {
     const simNodes: SimNode[] = settledTopology.map(position => ({
       id: position.id,
@@ -3173,6 +3175,7 @@ export function LiveGraphCanvas({
     }
   }, [denseGraph, layoutMetrics, layoutSettings, layoutTopology, physicsKey, settledTopology])
 
+  // eslint-disable-next-line no-restricted-syntax -- Ref reads the active imperative simulation instance.
   useEffect(() => {
     const simulation = simulationRef.current
 
@@ -3684,6 +3687,7 @@ export function LiveGraphCanvas({
   fitGraphRef.current = fitGraph
 
   const hasAutoFitRef = useRef(false)
+  // eslint-disable-next-line no-restricted-syntax -- Ref guards the one-shot initial fit operation.
   useEffect(() => {
     if (!autoFit || hasAutoFitRef.current) {
       return
@@ -3697,6 +3701,7 @@ export function LiveGraphCanvas({
     fitGraph(false)
   }, [autoFit, fitGraph, viewport])
 
+  // eslint-disable-next-line no-restricted-syntax -- Ref detects inspector transitions for viewport updates.
   useEffect(() => {
     const previousInspectorPanelKey = previousInspectorPanelKeyRef.current
     previousInspectorPanelKeyRef.current = inspectorPanelKey
@@ -3720,6 +3725,7 @@ export function LiveGraphCanvas({
     })
   }, [inspectorPanelKey, viewport])
 
+  // eslint-disable-next-line no-restricted-syntax -- Ref detects task-filter transitions for viewport updates.
   useEffect(() => {
     const previousTaskFilter = previousTaskFilterRef.current
     previousTaskFilterRef.current = effectiveTaskFilter
@@ -3834,6 +3840,7 @@ export function LiveGraphCanvas({
     [allNodesById, denseGraph, localizedStatus, reducedMotion, surfaceActive, t.liveGraph]
   )
 
+  // eslint-disable-next-line no-restricted-syntax -- Refs coordinate the imperative pulse animation queue.
   useEffect(() => {
     if (processedPulseBatchRef.current === pulses) {
       return
@@ -3871,6 +3878,7 @@ export function LiveGraphCanvas({
     }
   }, [pulses, pumpPulseQueue])
 
+  // eslint-disable-next-line no-restricted-syntax -- Refs retain imperative animation pause/resume state.
   useEffect(() => {
     if (!surfaceActive) {
       pausedAtRef.current = performance.now()
@@ -3899,6 +3907,7 @@ export function LiveGraphCanvas({
     pumpPulseQueue(resumedAt)
   }, [pumpPulseQueue, surfaceActive])
 
+  // eslint-disable-next-line no-restricted-syntax -- Refs own requestAnimationFrame state for pulse rendering.
   useEffect(() => {
     if (!surfaceActive || activePulses.length === 0 || reducedMotion) {
       return
@@ -3953,6 +3962,7 @@ export function LiveGraphCanvas({
     }
   }, [activePulses.length, localizedStatus, pumpPulseQueue, reducedMotion, surfaceActive, t.liveGraph])
 
+  // eslint-disable-next-line no-restricted-syntax -- Refs coordinate the imperative reveal animation lifecycle.
   useEffect(() => {
     if (!reveal) {
       return

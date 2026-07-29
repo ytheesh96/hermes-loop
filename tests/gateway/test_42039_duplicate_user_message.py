@@ -228,7 +228,55 @@ async def test_not_new_messages_skip_db_when_agent_has_session_db(
     assert _skip_flags(runner.session_store.append_to_transcript.call_args_list)[-2:] == [True, True]
 
 
-# ── Test 4: normal path skips when current turn rows are already in DB ─
+# ── Post-stream MEDIA delivery keeps prior-turn deduplication ──────────
+
+
+@pytest.mark.asyncio
+async def test_streamed_response_receives_prior_turn_media_paths(
+    monkeypatch, tmp_path
+):
+    """An ordinary streamed reply completes the post-stream delivery branch.
+
+    The history-derived dedup set is part of that branch's contract, rather
+    than an optional best-effort hint: passing an undefined local crashes the
+    entire reply, while passing an empty set reintroduces duplicate MEDIA
+    attachments on later streamed responses.
+    """
+    runner = _bootstrap(monkeypatch, tmp_path)
+    prior_path = "/tmp/already-delivered.png"
+    runner.session_store.load_transcript.return_value = [
+        {"role": "assistant", "content": f"MEDIA:{prior_path}"},
+    ]
+    runner.adapters = {Platform.TELEGRAM: MagicMock()}
+    runner._deliver_media_from_response = AsyncMock()
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "the streamed reply completed normally",
+            "messages": [
+                {"role": "assistant", "content": f"MEDIA:{prior_path}"},
+                {"role": "user", "content": "what is my status?"},
+                {"role": "assistant", "content": "the streamed reply completed normally"},
+            ],
+            "tools": [],
+            "history_offset": 1,
+            "last_prompt_tokens": 0,
+            "already_sent": True,
+            "failed": False,
+        }
+    )
+
+    response = await runner._handle_message_with_agent(
+        _event(), _source(), "agent:main:telegram:group:-1001:12345", 1
+    )
+
+    assert response is None
+    runner._deliver_media_from_response.assert_awaited_once()
+    assert runner._deliver_media_from_response.await_args.kwargs[
+        "history_media_paths"
+    ] == {prior_path}
+
+
+# ── Test 4: normal path (new_messages found) uses skip_db=True ────────
 
 
 @pytest.mark.asyncio
@@ -320,3 +368,43 @@ async def test_repeated_user_text_before_turn_does_not_skip_current_write(
     )
 
     assert _skip_flags(runner.session_store.append_to_transcript.call_args_list)[-2:] == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_nonempty_rate_limit_error_is_not_persisted_as_assistant_message(
+    monkeypatch, tmp_path
+):
+    runner = _bootstrap(monkeypatch, tmp_path)
+
+    error_response = "API call failed after 3 retries: 429 Too Many Requests"
+    runner._run_agent = AsyncMock(
+        return_value={
+            "failed": True,
+            "failure_reason": "rate_limit",
+            "completed": False,
+            "final_response": error_response,
+            "error": "429 Too Many Requests",
+            "messages": [
+                {"role": "user", "content": "hello world"},
+            ],
+            "history_offset": 0,
+            "last_prompt_tokens": 0,
+        }
+    )
+
+    await runner._handle_message_with_agent(
+        _event(), _source(), "agent:main:telegram:group:-1001:12345", 1
+    )
+
+    persisted_entries = [
+        call.args[1]
+        for call in runner.session_store.append_to_transcript.call_args_list
+        if len(call.args) >= 2 and isinstance(call.args[1], dict)
+    ]
+
+    assert any(entry.get("role") == "user" for entry in persisted_entries)
+    assert not any(
+        entry.get("role") == "assistant"
+        and error_response in str(entry.get("content", ""))
+        for entry in persisted_entries
+    )

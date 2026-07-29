@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -1453,8 +1454,8 @@ def test_foreground_create_preserves_workflow_identity(foreground_env):
         assert child.created_by == "test-worker"
         assert child.session_id == "foreground-session"
         assert child.tenant == "foreground-tenant"
-        assert child.workspace_kind == "dir"
-        assert child.workspace_path == "/tmp/loop-project"
+        assert child.workspace_kind == "scratch"
+        assert child.workspace_path is None
         assert child.workflow_id == workflow_id
         assert kb.parent_ids(conn, child.id) == [foreground_env]
     finally:
@@ -1749,8 +1750,8 @@ def test_foreground_create_uses_ambient_workflow_without_model_argument(
         assert child.workflow_id == workflow_id
         assert child.session_id == "origin-session"
         assert child.tenant == "origin-tenant"
-        assert child.workspace_kind == "dir"
-        assert child.workspace_path == "/tmp/origin-workspace"
+        assert child.workspace_kind == "scratch"
+        assert child.workspace_path is None
     finally:
         conn.close()
 
@@ -1881,8 +1882,8 @@ def test_title_only_foreground_create_enters_auto_decomposer(
     assert task.needs_specification is True
 
 
-def test_foreground_create_inherits_parent_dir_workspace(monkeypatch, foreground_env):
-    """A foreground follow-up inherits its parent task's project workspace."""
+def test_foreground_create_isolates_parent_dir_workspace(monkeypatch, foreground_env):
+    """Omitted workspace fields never share a parent's literal directory."""
     from tools import kanban_tools as kt
     from hermes_cli import kanban_db as kb
 
@@ -1905,8 +1906,8 @@ def test_foreground_create_inherits_parent_dir_workspace(monkeypatch, foreground
     conn = kb.connect()
     try:
         child = kb.get_task(conn, d["task_id"])
-        assert child.workspace_kind == "dir"
-        assert child.workspace_path == proj
+        assert child.workspace_kind == "scratch"
+        assert child.workspace_path is None
     finally:
         conn.close()
 
@@ -1937,6 +1938,210 @@ def test_create_explicit_workspace_beats_inheritance(monkeypatch, foreground_env
         assert child.workspace_kind == "scratch"
     finally:
         conn.close()
+
+
+def test_create_explicit_dir_workspace_shares_parent_path(
+    monkeypatch,
+    foreground_env,
+):
+    """Literal directory sharing remains available when explicitly requested."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    project_path = "/home/teknium/shared-project"
+    with kb.connect() as conn:
+        parent_id = kb.create_task(
+            conn,
+            title="dir worker",
+            assignee="test-worker",
+            workspace_kind="dir",
+            workspace_path=project_path,
+        )
+
+    result = json.loads(
+        kt._handle_create(
+            {
+                "title": "intentional shared child",
+                "assignee": "peer",
+                "parents": [parent_id],
+                "workspace_kind": "dir",
+                "workspace_path": project_path,
+            }
+        )
+    )
+    assert result["ok"] is True
+    with kb.connect() as conn:
+        child = kb.get_task(conn, result["task_id"])
+    assert child is not None
+    assert child.workspace_kind == "dir"
+    assert child.workspace_path == project_path
+
+
+def test_create_nested_default_scratch_children_are_isolated(
+    monkeypatch,
+    foreground_env,
+):
+    """Every omitted scratch workspace resolves to a task-specific path."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    parent_id = foreground_env
+    child_result = json.loads(
+        kt._handle_create(
+            {
+                "title": "isolated child",
+                "assignee": "peer",
+                "parents": [parent_id],
+            }
+        )
+    )
+    grandchild_result = json.loads(
+        kt._handle_create(
+            {
+                "title": "isolated grandchild",
+                "assignee": "reviewer",
+                "parents": [child_result["task_id"]],
+            }
+        )
+    )
+    assert child_result["ok"] is True
+    assert grandchild_result["ok"] is True
+
+    with kb.connect() as conn:
+        parent = kb.get_task(conn, parent_id)
+        child = kb.get_task(conn, child_result["task_id"])
+        grandchild = kb.get_task(conn, grandchild_result["task_id"])
+        assert parent is not None
+        assert child is not None
+        assert grandchild is not None
+        assert child.workspace_kind == "scratch"
+        assert child.workspace_path is None
+        assert grandchild.workspace_kind == "scratch"
+        assert grandchild.workspace_path is None
+        workspaces = {
+            kb.resolve_workspace(parent),
+            kb.resolve_workspace(child),
+            kb.resolve_workspace(grandchild),
+        }
+    assert len(workspaces) == 3
+
+
+def test_create_default_child_inherits_project_into_fresh_worktree(
+    monkeypatch,
+    foreground_env,
+    tmp_path,
+):
+    """Project identity propagates without reusing the parent's checkout."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import projects_db as pdb
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pdb.connect_closing() as project_conn:
+        project_id = pdb.create_project(
+            project_conn,
+            name="Isolated Project",
+            folders=[str(repo)],
+        )
+
+    with kb.connect() as conn:
+        parent_id = kb.create_task(
+            conn,
+            title="project parent",
+            assignee="test-worker",
+            project_id=project_id,
+        )
+        parent = kb.get_task(conn, parent_id)
+    assert parent is not None
+
+    result = json.loads(
+        kt._handle_create(
+            {
+                "title": "project child",
+                "assignee": "reviewer",
+                "parents": [parent_id],
+            }
+        )
+    )
+    assert result["ok"] is True
+    with kb.connect() as conn:
+        child = kb.get_task(conn, result["task_id"])
+    assert child is not None
+    assert child.project_id == parent.project_id
+    assert child.workspace_kind == "worktree"
+    assert child.workspace_path == str(repo / ".worktrees" / child.id)
+    assert child.workspace_path != parent.workspace_path
+    assert child.branch_name != parent.branch_name
+
+
+def test_create_cross_profile_project_children_keep_isolated_routing(
+    monkeypatch,
+    foreground_env,
+    tmp_path,
+):
+    """The shared board routes children without copying another projects.db."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import projects_db as pdb
+    from tools import kanban_tools as kt
+
+    profile_a = tmp_path / "profiles" / "creator"
+    profile_b = tmp_path / "profiles" / "foreground"
+    profile_a.mkdir(parents=True)
+    profile_b.mkdir(parents=True)
+    repo = tmp_path / "cross-profile-repo"
+    repo.mkdir()
+
+    monkeypatch.setenv("HERMES_HOME", str(profile_a))
+    monkeypatch.setenv("HERMES_PROFILE", "creator")
+    with pdb.connect_closing() as project_conn:
+        project_id = pdb.create_project(
+            project_conn,
+            name="Cross Profile Project",
+            folders=[str(repo)],
+        )
+    with kb.connect() as conn:
+        parent_id = kb.create_task(
+            conn,
+            title="cross-profile parent",
+            assignee="worker",
+            project_id=project_id,
+        )
+        parent = kb.get_task(conn, parent_id)
+    assert parent is not None
+
+    monkeypatch.setenv("HERMES_HOME", str(profile_b))
+    monkeypatch.setenv("HERMES_PROFILE", "foreground")
+    assert not (profile_b / "projects.db").exists()
+
+    def create_child(index: int) -> dict:
+        return json.loads(
+            kt._handle_create(
+                {
+                    "title": f"parallel child {index}",
+                    "assignee": "peer",
+                    "parents": [parent_id],
+                }
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        children = list(pool.map(create_child, range(2)))
+
+    assert all(result["ok"] is True for result in children)
+    child_ids = [result["task_id"] for result in children]
+    with kb.connect() as conn:
+        child_tasks = [kb.get_task(conn, task_id) for task_id in child_ids]
+    for task in child_tasks:
+        assert task is not None
+        assert task.project_id == project_id
+        assert task.workspace_kind == "worktree"
+        assert task.workspace_path == str(repo / ".worktrees" / task.id)
+        assert task.workspace_path != parent.workspace_path
+        assert task.branch_name is not None
+        assert task.branch_name.startswith(f"cross-profile-project/{task.id}")
+    assert len({task.workspace_path for task in child_tasks}) == 2
+    assert len({task.branch_name for task in child_tasks}) == 2
 
 
 def test_create_no_parent_stays_scratch(monkeypatch, foreground_env):
@@ -3128,6 +3333,8 @@ def _sub_index(subs):
                 "user_id": getattr(s, "user_id", None),
                 "workflow_id": getattr(s, "workflow_id", None),
                 "scope": getattr(s, "scope", None),
+                "delivery_metadata": getattr(s, "delivery_metadata", None),
+                "notifier_profile": getattr(s, "notifier_profile", None),
             })
     return out
 
@@ -3139,8 +3346,10 @@ def test_create_subscribes_gateway_session(monkeypatch, foreground_env):
     from tools import kanban_tools as kt
     monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
     monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "chat-42")
-    monkeypatch.setenv("HERMES_SESSION_THREAD_ID", "thread-7")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_TYPE", "dm")
+    monkeypatch.setenv("HERMES_SESSION_THREAD_ID", "20197")
     monkeypatch.setenv("HERMES_SESSION_USER_ID", "user-9")
+    monkeypatch.setenv("HERMES_SESSION_MESSAGE_ID", "msg-11")
 
     out = kt._handle_create({
         "title": "auto-sub gateway",
@@ -3156,10 +3365,44 @@ def test_create_subscribes_gateway_session(monkeypatch, foreground_env):
     s = subs[0]
     assert s["platform"] == "telegram"
     assert s["chat_id"] == "chat-42"
-    assert s["thread_id"] == "thread-7"
+    assert s["thread_id"] == "20197"
     assert s["user_id"] == "user-9"
     assert s["workflow_id"] == d["workflow_id"]
     assert "scope" not in s
+    assert s["delivery_metadata"] == {
+        "chat_type": "dm",
+        "direct_messages_topic_id": "20197",
+        "telegram_dm_topic_reply_fallback": True,
+        "telegram_reply_to_message_id": "msg-11",
+        "thread_id": "20197",
+    }
+
+
+def test_create_subscribes_gateway_session_with_active_profile_when_env_missing(
+    monkeypatch,
+    foreground_env,
+):
+    """Gateway auto-subscribe rows must be owned by the active profile even
+    when session/env profile markers are missing. Otherwise every Telegram
+    gateway with the same chat_id can deliver another bot's Kanban event."""
+    from tools import kanban_tools as kt
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "chat-42")
+    monkeypatch.delenv("HERMES_SESSION_PROFILE", raising=False)
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    monkeypatch.setattr("hermes_cli.profiles.get_active_profile_name", lambda: "spanorama")
+
+    out = kt._handle_create({
+        "title": "auto-sub active profile",
+        "assignee": "peer",
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+    assert d["subscribed"] is True, d
+
+    subs = _sub_index(_list_subs_for_task(d["task_id"]))
+    assert len(subs) == 1
+    assert subs[0]["notifier_profile"] == "spanorama"
 
 
 def test_create_subscribes_tui_session_via_session_key(monkeypatch, foreground_env):

@@ -45,6 +45,7 @@ def _init_git_repo(repo: Path) -> None:
 # Schema / init
 # ---------------------------------------------------------------------------
 
+
 def test_init_db_is_idempotent(kanban_home):
     # Second call should not error or drop data.
     with kb.connect() as conn:
@@ -385,6 +386,7 @@ def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
 # Task creation + status inference
 # ---------------------------------------------------------------------------
 
+
 def test_create_task_no_parents_is_ready(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="ship it", assignee="alice")
@@ -692,6 +694,7 @@ def test_create_loop_skeleton_graph_scopes_sanitized_attachment_to_named_board(
     assert attachment.filename == "SPEC.md"
     assert Path(attachment.stored_path).parent == expected_dir
     assert expected_dir.is_relative_to(kb.attachments_root(board=board))
+
 
 def test_decompose_triage_task_uses_board_scoped_attachment_root(
     kanban_home,
@@ -1247,6 +1250,8 @@ def test_create_loop_skeleton_graph_rejects_blocks_across_workflows_atomically(
 
 
 @pytest.mark.parametrize("target_status", ["running", "done"])
+
+
 def test_create_loop_skeleton_graph_rejects_unsafe_blocks_target_atomically(
     kanban_home,
     target_status,
@@ -1500,6 +1505,8 @@ def test_workflow_graph_adds_later_fragment_without_synthetic_closure(kanban_hom
         ),
     ],
 )
+
+
 def test_create_loop_skeleton_graph_rolls_back_invalid_graph(
     kanban_home, nodes, match
 ):
@@ -1641,6 +1648,8 @@ def test_open_workflow_accepts_follow_up_fragment_until_explicitly_closed(kanban
 
 
 @pytest.mark.parametrize("node_status", ["running", "done"])
+
+
 def test_reused_alias_parent_change_rejected_even_after_dispatch(
     kanban_home,
     node_status,
@@ -1699,6 +1708,8 @@ def test_reused_alias_parent_change_rejected_even_after_dispatch(
 
 
 @pytest.mark.parametrize("workflow_status", ["closed", "archived"])
+
+
 def test_loop_fragment_rejected_for_closed_or_archived_workflow(
     kanban_home,
     workflow_status,
@@ -1824,6 +1835,7 @@ def test_branch_name_requires_worktree_workspace(kanban_home):
 # ---------------------------------------------------------------------------
 # Links + dependency resolution
 # ---------------------------------------------------------------------------
+
 
 def test_link_demotes_ready_child_to_todo_when_parent_not_done(kanban_home):
     with kb.connect() as conn:
@@ -2087,6 +2099,7 @@ def test_recompute_ready_fan_in_waits_for_all_parents(kanban_home):
 # ---------------------------------------------------------------------------
 # Atomic claim (CAS)
 # ---------------------------------------------------------------------------
+
 
 def test_claim_once_wins_second_loses(kanban_home):
     with kb.connect() as conn:
@@ -2880,6 +2893,7 @@ def test_concurrent_claims_only_one_wins(kanban_home):
 # Complete / block / unblock / archive / assign
 # ---------------------------------------------------------------------------
 
+
 def test_complete_records_result(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x")
@@ -3066,6 +3080,7 @@ def test_recompute_ready_per_task_max_retries_overrides_dispatcher(kanban_home):
 # ---------------------------------------------------------------------------
 # Parent-completion invariant at the claim gate (RCA t_a6acd07d)
 # ---------------------------------------------------------------------------
+
 
 def test_claim_rejects_when_parents_not_done(kanban_home):
     """claim_task must refuse ready->running if any parent isn't 'done'.
@@ -3307,6 +3322,7 @@ def test_list_tasks_order_by(kanban_home):
         except ValueError as e:
             assert "order_by must be one of" in str(e)
 
+
 def test_delete_task_removes_task_and_cascades(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="to-delete", assignee="alice")
@@ -3339,6 +3355,7 @@ def test_delete_task_cascades_links(kanban_home):
 # ---------------------------------------------------------------------------
 # Comments / events / worker context
 # ---------------------------------------------------------------------------
+
 
 def test_comments_recorded_in_order(kanban_home):
     with kb.connect() as conn:
@@ -3385,6 +3402,7 @@ def test_worker_context_includes_parent_results_and_comments(kanban_home):
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
+
 
 def test_dispatch_dry_run_does_not_claim(kanban_home, all_assignees_spawnable):
     with kb.connect() as conn:
@@ -4209,6 +4227,7 @@ def test_dispatch_reclaims_stale_before_spawning(kanban_home):
 # Respawn guard (check_respawn_guard + dispatch_once integration)
 # ---------------------------------------------------------------------------
 
+
 def test_respawn_guard_none_on_fresh_task(kanban_home):
     """A fresh task with no failures or runs is not guarded."""
     with kb.connect() as conn:
@@ -4502,6 +4521,7 @@ def test_dispatch_respawn_guard_emits_event_for_skipped_task(
 # Workspace resolution
 # ---------------------------------------------------------------------------
 
+
 def test_scratch_workspace_created_under_hermes_home(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x")
@@ -4750,6 +4770,7 @@ def test_dispatch_worktree_task_rerun_reuses_existing_linked_worktree_and_branch
 # Scratch cleanup containment (#28818)
 # ---------------------------------------------------------------------------
 
+
 def test_cleanup_workspace_removes_managed_scratch_dir(kanban_home):
     """A scratch workspace under the kanban workspaces root is removed."""
     with kb.connect() as conn:
@@ -4997,6 +5018,7 @@ def test_cleanup_workspace_honors_workspaces_root_env_override(tmp_path, monkeyp
 # Deferred scratch cleanup for parent/child handoff (#33774)
 # ---------------------------------------------------------------------------
 
+
 def test_cleanup_workspace_deferred_while_child_active(kanban_home):
     """A scratch parent's workspace survives completion while a child is still active.
 
@@ -5137,6 +5159,7 @@ def test_is_managed_scratch_path_rejects_kanban_metadata_subtrees(kanban_home):
 # Tenancy
 # ---------------------------------------------------------------------------
 
+
 def test_tenant_column_filters_listings(kanban_home):
     with kb.connect() as conn:
         kb.create_task(conn, title="a1", tenant="biz-a")
@@ -5201,6 +5224,7 @@ def test_tenant_propagates_to_events(kanban_home):
 # ---------------------------------------------------------------------------
 # Originating session id (ACP propagation)
 # ---------------------------------------------------------------------------
+
 
 def test_create_task_stamps_session_id(kanban_home):
     with kb.connect() as conn:
@@ -5496,16 +5520,22 @@ class TestSharedBoardPaths:
         assert kb.kanban_db_path() == default_home / "kanban.db"
         assert kb.workspaces_root() == default_home / "kanban" / "workspaces"
 
-    def test_dispatcher_spawn_injects_kanban_db_and_workspaces_root(
+    def test_dispatcher_spawn_injects_kanban_paths_without_stale_session(
         self, tmp_path, monkeypatch
     ):
-        # The dispatcher's `_default_spawn` must inject HERMES_KANBAN_DB
-        # and HERMES_KANBAN_WORKSPACES_ROOT into the worker env so the
-        # worker converges on the dispatcher's paths even when the
-        # `-p <profile>` flag rewrites HERMES_HOME.
+        # The dispatcher must pin board paths while stripping any unrelated
+        # HERMES_SESSION_* identity inherited from the long-lived gateway.
         default_home = tmp_path / ".hermes"
         default_home.mkdir()
         self._set_home(monkeypatch, tmp_path, default_home)
+
+        from gateway import session_context as sc
+
+        # A dispatcher can launch before the gateway binds its first session.
+        monkeypatch.setattr(sc, "_session_context_engaged", False)
+        sc.reset_session_vars()
+        for key in sc._VAR_MAP:
+            monkeypatch.setenv(key, "stale-routing-value")
 
         captured = {}
 
@@ -5552,11 +5582,14 @@ class TestSharedBoardPaths:
         assert "HERMES_KANBAN_REVIEW_SUBJECT_ASSIGNEE" not in env
         assert "HERMES_FOREGROUND_PARENT_SESSION_ID" not in env
         assert "HERMES_FOREGROUND_FORK_SESSION_ID" not in env
+        for key in sc._VAR_MAP:
+            assert key not in env
 
 
 # ---------------------------------------------------------------------------
 # latest_summary / latest_summaries — surface task_runs.summary handoffs
 # ---------------------------------------------------------------------------
+
 
 def test_latest_summary_returns_none_when_no_runs(kanban_home):
     """A freshly-created task has no runs and therefore no summary."""
@@ -5636,6 +5669,7 @@ def test_latest_summaries_batch_omits_tasks_without_summary(kanban_home):
 # NFS / network-filesystem fallback (see hermes_state.apply_wal_with_fallback)
 # ---------------------------------------------------------------------------
 
+
 def test_connect_falls_back_to_delete_on_locking_protocol(tmp_path, monkeypatch, caplog):
     """kanban_db.connect() must handle ``locking protocol`` on NFS/SMB.
 
@@ -5656,6 +5690,17 @@ def test_connect_falls_back_to_delete_on_locking_protocol(tmp_path, monkeypatch,
     import sqlite3 as _sqlite3
     from unittest.mock import patch as _patch
 
+    import hermes_state as _hs
+
+    # The fallback warning is deduped process-globally ("once per process per
+    # database" — _log_wal_fallback_once / _log_wal_reset_bug_once). Any earlier
+    # test in this file that opened a kanban.db already consumed the one-shot
+    # for that label, so without clearing it this test sees zero warnings and
+    # fails only when run as part of the file (it passes in isolation). Clear
+    # both dedup sets so the warning is emitted for this connect().
+    _hs._wal_fallback_warned_paths.clear()
+    _hs._wal_reset_bug_warned_paths.clear()
+
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -5673,6 +5718,9 @@ def test_connect_falls_back_to_delete_on_locking_protocol(tmp_path, monkeypatch,
             return super().execute(sql, *args, **kwargs)
 
     def wal_blocking_connect(*args, **kwargs):
+        # connect_tracked passes a tracking-augmented factory; drop it and
+        # substitute the double, which connect_tracked will re-augment.
+        kwargs.pop("factory", None)
         return real_connect(
             *args, factory=_WalBlockingConnection, **kwargs
         )
@@ -5754,6 +5802,7 @@ def test_archive_task_triggers_recompute_ready_for_dependents(kanban_home):
 # ---------------------------------------------------------------------------
 # _add_column_if_missing / _migrate_add_optional_columns idempotency (#21708)
 # ---------------------------------------------------------------------------
+
 
 def test_add_column_if_missing_is_idempotent_on_race(kanban_home):
     """``_add_column_if_missing`` must swallow 'duplicate column name' errors.
@@ -6379,6 +6428,8 @@ def test_dispatch_reviewer_qa_review_keeps_sdlc_review_path(
 
 
 @pytest.mark.parametrize("review_kind", ["blocker_triage", "foreground_judgment"])
+
+
 def test_dispatch_orchestrator_review_kind_does_not_force_sdlc_review(
     kanban_home, all_assignees_spawnable, review_kind,
 ):
@@ -6511,6 +6562,7 @@ def test_dispatch_review_does_not_claim_ready_tasks(
 
 # Stale detection — detect_stale_running
 # ---------------------------------------------------------------------------
+
 
 def test_detect_stale_returns_running_task_with_no_heartbeat(kanban_home, monkeypatch):
     """A task running > timeout with zero heartbeats gets reclaimed as stale."""
@@ -6964,6 +7016,7 @@ def test_init_db_allows_missing_then_healthy(tmp_path):
 # First-use tip for scratch workspaces
 # ---------------------------------------------------------------------------
 
+
 def test_maybe_emit_scratch_tip_fires_once_per_install(kanban_home, caplog):
     """First scratch workspace materialization warns + emits an event.
 
@@ -7113,7 +7166,6 @@ def test_connect_pragmas_applied_on_reconnect(tmp_path):
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2
 
 
-
 def test_pragmas_not_accidentally_disabled_by_migrate_path(tmp_path):
     """Migration path must not reset connection pragmas."""
     db_path = tmp_path / "legacy.db"
@@ -7185,6 +7237,8 @@ def test_write_txn_preserves_original_exception_when_rollback_fails(kanban_home)
         f"write_txn surfaced the rollback failure instead of the original "
         f"OperationalError; got {msg!r}"
     )
+
+
 def test_write_txn_does_not_raw_open_live_database(tmp_path, monkeypatch):
     """Routine writes leave SQLite as the only owner of DB file handles."""
     from hermes_cli.kanban_db import connect, write_txn
@@ -7220,6 +7274,42 @@ def test_connect_sets_wal_autocheckpoint_100(tmp_path):
     val = conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
     assert val == 100
     conn.close()
+
+
+def test_write_txn_check_reads_correct_header_fields(tmp_path):
+    """A genuinely truncated DB is never reported as passing the invariant.
+
+    The check no longer opens the database file to read header bytes (that
+    open/close would cancel this process's POSIX advisory locks — the
+    corruption route in sqlite.org/howtocorrupt.html §2.2). It asks SQLite for
+    ``page_count`` instead. On a truncated file SQLite refuses that pragma, so
+    the helper reports "not healthy" rather than a page-count mismatch; either
+    way the file must never come back clean.
+    """
+    import struct
+    from hermes_cli.kanban_db import connect
+    from hermes_cli.sqlite_safe_read import file_length_matches_header
+
+    db = tmp_path / "synthetic.db"
+    conn = connect(db_path=db)
+    conn.execute("PRAGMA journal_mode=DELETE")
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    conn.close()
+
+    with open(db, "rb") as f:
+        data = bytearray(f.read())
+    real_page_count = struct.unpack(">I", data[28:32])[0]
+    if real_page_count < 2:
+        pytest.skip("DB too small for synthetic truncation test")
+    truncated = bytes(data[: (real_page_count - 1) * page_size])
+    with open(db, "wb") as f:
+        f.write(truncated)
+
+    raw_conn = sqlite3.connect(str(db), isolation_level=None)
+    try:
+        assert file_length_matches_header(raw_conn) is not True
+    finally:
+        raw_conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -7463,3 +7553,96 @@ def test_dependency_wait_without_parent_is_not_repromoted(kanban_home):
         assert kb.complete_task(conn, parent)
         assert kb.get_task(conn, child).status == "ready"
     conn.close()  # explicit close to avoid leaking THIS test
+
+
+def test_write_txn_raises_on_truncated_file(tmp_path):
+    """A mocked smaller file size triggers the torn-extend check.
+
+    The check now reads the header side via ``PRAGMA page_count`` over the
+    existing connection instead of ``open()``-ing the database file (an
+    open/close would cancel this process's POSIX locks). The on-disk side is
+    still ``stat()``, so that is what this test fakes. The invariant only
+    applies under a rollback journal — in WAL a committed page may still be
+    in the -wal file, so the main file legitimately lags.
+    """
+    from unittest.mock import patch
+
+    from hermes_cli.kanban_db import connect, write_txn
+    db = tmp_path / "test.db"
+    conn = connect(db_path=db)
+    conn.execute("PRAGMA journal_mode=DELETE")
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    original_getsize = os.path.getsize
+
+    def fake_getsize(path):
+        # Return a size that implies at least 1 fewer page than header claims
+        real_size = original_getsize(path)
+        return max(0, real_size - page_size)
+
+    with pytest.raises(sqlite3.DatabaseError, match="torn-extend|page count mismatch"):
+        with patch(
+            "hermes_cli.sqlite_safe_read.os.path.getsize", side_effect=fake_getsize
+        ):
+            with write_txn(conn) as c:
+                c.execute(
+                    "INSERT INTO tasks "
+                    "(id, title, assignee, status, priority, created_at) "
+                    "VALUES ('t_trunc', 'task', 'tester', 'todo', 0, 1234567890)"
+                )
+    conn.close()
+
+
+def test_write_txn_healthy_commit_no_exception(tmp_path):
+    """A normal commit satisfies the post-COMMIT file-length invariant."""
+    from hermes_cli.kanban_db import connect, write_txn
+
+    db = tmp_path / "healthy.db"
+    conn = connect(db_path=db)
+    try:
+        with write_txn(conn) as current:
+            current.execute(
+                "INSERT INTO tasks "
+                "(id, title, assignee, status, priority, created_at) "
+                "VALUES ('t_healthy', 'healthy', 'tester', 'todo', 0, 1234567890)"
+            )
+        row = conn.execute(
+            "SELECT title FROM tasks WHERE id = 't_healthy'"
+        ).fetchone()
+        assert row["title"] == "healthy"
+    finally:
+        conn.close()
+
+
+def test_write_txn_post_commit_check_fires_every_call(tmp_path):
+    """Every successful write transaction runs the invariant check once."""
+    from unittest.mock import patch
+
+    import hermes_cli.kanban_db as kanban_db_module
+
+    db = tmp_path / "every-commit.db"
+    conn = kanban_db_module.connect(db_path=db)
+    call_count = 0
+    real_check = kanban_db_module._check_file_length_invariant
+
+    def counting_check(current):
+        nonlocal call_count
+        call_count += 1
+        real_check(current)
+
+    try:
+        with patch.object(
+            kanban_db_module,
+            "_check_file_length_invariant",
+            counting_check,
+        ):
+            for index in range(3):
+                with kanban_db_module.write_txn(conn) as current:
+                    current.execute(
+                        "INSERT INTO tasks "
+                        "(id, title, assignee, status, priority, created_at) "
+                        "VALUES (?, ?, 'tester', 'todo', 0, 1234567890)",
+                        (f"t_fire{index:02d}", f"task {index}"),
+                    )
+        assert call_count == 3
+    finally:
+        conn.close()

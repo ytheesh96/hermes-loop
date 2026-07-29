@@ -457,6 +457,7 @@ export function useLoopPanelController({
     selectedLoopTaskId
   ])
 
+  // eslint-disable-next-line no-restricted-syntax -- Ref clears a pending navigation request when scope changes.
   useEffect(() => {
     setSelectedLoopTaskId(null)
     setFocusedLoopTaskId(null)
@@ -468,6 +469,7 @@ export function useLoopPanelController({
     pendingSelectedLoopTaskIdRef.current = null
   }, [updateOpenLoopWorkflows, workflowPaneScopeKey])
 
+  // eslint-disable-next-line no-restricted-syntax -- Ref carries a one-shot pending navigation request.
   useEffect(() => {
     const taskId = pendingSelectedLoopTaskIdRef.current
 
@@ -489,6 +491,7 @@ export function useLoopPanelController({
     setLoopPanelHidden(false)
   }, [loopPanelState, rememberLoopWorkflow, requestLoopFocus])
 
+  // eslint-disable-next-line no-restricted-syntax -- Ref prevents repeating a one-shot automatic open request.
   useEffect(() => {
     const autoOpen = loopPanelAutoOpenParams()
 

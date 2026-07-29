@@ -141,8 +141,7 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
       onSelect: () => {
         triggerHaptic('tap')
         togglePanesFlipped()
-      },
-      title: t.titlebar.swapSidebarSidesTitle
+      }
     },
     ...leftTools
   ]

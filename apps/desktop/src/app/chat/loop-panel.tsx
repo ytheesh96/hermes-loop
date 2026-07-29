@@ -2069,6 +2069,7 @@ export function LoopPanel({
     setActiveArtifactTabId(null)
   }, [stateWorkflowKey])
 
+  // eslint-disable-next-line no-restricted-syntax -- Ref tracks focus-request transitions, not a nanostore atom.
   useEffect(() => {
     const nextSelectedTaskId = selectedTaskId || null
     const focusRequestChanged = focusRequestKey !== lastFocusRequestKeyRef.current

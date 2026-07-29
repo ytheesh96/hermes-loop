@@ -138,6 +138,7 @@ def _make_legacy_db(path: Path) -> None:
         DROP TABLE task_comments;
         DROP TABLE task_runs;
         DROP TABLE kanban_notify_subs;
+        DROP TABLE workflow_notify_subs;
         CREATE TABLE task_comments (id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
             author TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL);
         CREATE TABLE task_events (id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
@@ -148,6 +149,18 @@ def _make_legacy_db(path: Path) -> None:
             chat_id TEXT NOT NULL, thread_id TEXT NOT NULL DEFAULT '', user_id TEXT,
             created_at INTEGER NOT NULL, last_event_id TEXT,
             PRIMARY KEY (task_id, platform, chat_id, thread_id));
+        CREATE TABLE workflow_notify_subs (
+            workflow_id TEXT NOT NULL, platform TEXT NOT NULL,
+            chat_id TEXT NOT NULL, chat_type TEXT NOT NULL DEFAULT '',
+            thread_id TEXT NOT NULL DEFAULT '', user_id TEXT,
+            notifier_profile TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL, last_event_id INTEGER NOT NULL DEFAULT 0,
+            last_notified_event_id INTEGER NOT NULL DEFAULT 0,
+            pending_claim_token TEXT, pending_event_id INTEGER,
+            pending_expires_at INTEGER,
+            PRIMARY KEY (
+                workflow_id, notifier_profile, platform, chat_id, thread_id
+            ));
         """
     )
     conn.execute("INSERT INTO tasks (id, title, status, created_at) VALUES ('task-1', 'T', 'done', 1000)")
@@ -158,6 +171,11 @@ def _make_legacy_db(path: Path) -> None:
     conn.execute(
         "INSERT INTO kanban_notify_subs (task_id, platform, chat_id, created_at, last_event_id) "
         "VALUES ('task-1', 'telegram', '123', 1000, 'e-1')"
+    )
+    conn.execute(
+        "INSERT INTO workflow_notify_subs "
+        "(workflow_id, platform, chat_id, created_at) "
+        "VALUES ('wf-legacy', 'telegram', '123', 1000)"
     )
     conn.commit()
     conn.close()
@@ -233,6 +251,17 @@ def test_legacy_text_pk_tables_rebuilt_to_integer_autoincrement(tmp_path, monkey
 
         lei = {r["name"]: r for r in conn.execute("PRAGMA table_info(kanban_notify_subs)")}
         assert lei["last_event_id"]["type"].upper() == "INTEGER"
+        assert "delivery_metadata" in lei
+        workflow_columns = {
+            r["name"]: r
+            for r in conn.execute("PRAGMA table_info(workflow_notify_subs)")
+        }
+        assert workflow_columns["delivery_metadata"]["type"].upper() == "TEXT"
+        assert workflow_columns["delivery_metadata"]["notnull"] == 0
+        assert workflow_columns["delivery_metadata"]["dflt_value"] is None
+        assert conn.execute(
+            "SELECT delivery_metadata FROM workflow_notify_subs"
+        ).fetchone()["delivery_metadata"] is None
 
         # Data preserved across the rebuild.
         assert len(conn.execute("SELECT * FROM task_events").fetchall()) == 2
@@ -265,6 +294,31 @@ def test_rebuilt_schema_matches_fresh_db(tmp_path, monkeypatch):
     with kb.connect(legacy_path) as migrated, kb.connect(fresh_path) as fresh:
         for table in ("task_events", "task_comments", "task_runs", "kanban_notify_subs"):
             assert _table_struct(migrated, table) == _table_struct(fresh, table)
+        for conn in (migrated, fresh):
+            columns = {
+                row["name"]: row
+                for row in conn.execute(
+                    "PRAGMA table_info(kanban_notify_subs)"
+                )
+            }
+            assert columns["chat_type"]["type"].upper() == "TEXT"
+            assert columns["chat_type"]["notnull"] == 1
+            assert columns["chat_type"]["dflt_value"] == "''"
+            assert columns["scope"]["type"].upper() == "TEXT"
+            assert columns["scope"]["notnull"] == 1
+            assert columns["scope"]["dflt_value"] == "'task'"
+            assert columns["delivery_metadata"]["type"].upper() == "TEXT"
+            assert columns["delivery_metadata"]["notnull"] == 0
+            assert columns["delivery_metadata"]["dflt_value"] is None
+            workflow_columns = {
+                row["name"]: row
+                for row in conn.execute(
+                    "PRAGMA table_info(workflow_notify_subs)"
+                )
+            }
+            assert workflow_columns["delivery_metadata"]["type"].upper() == "TEXT"
+            assert workflow_columns["delivery_metadata"]["notnull"] == 0
+            assert workflow_columns["delivery_metadata"]["dflt_value"] is None
 
 
 def test_migration_is_idempotent(tmp_path, monkeypatch):

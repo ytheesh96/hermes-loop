@@ -192,6 +192,8 @@ function renderControllerHarness({
       busyRef,
       copy: {} as never,
       createBackendSessionForSend: async () => 'session-1',
+      getRoutedStoredSessionId: () => selectedStoredSessionIdRef.current,
+      getRuntimeIdForStoredSession: () => activeSessionIdRef.current,
       handleSkinCommand: () => '',
       handoffSession: async () => ({ ok: true }),
       onOpenLoop: controller.onOpen,

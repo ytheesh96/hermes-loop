@@ -157,7 +157,7 @@ def looks_like_provider(path: Path, markers: tuple[str, ...]) -> bool:
     if not init_file.exists():
         return False
     try:
-        source = init_file.read_text(errors="replace")[:8192]
+        source = init_file.read_text(encoding="utf-8", errors="replace")[:8192]
     except Exception:
         return False
     return any(marker in source for marker in markers)

@@ -20,6 +20,7 @@ import { stableArray } from '@/lib/stable-array'
 import type { TodoItem, TodoStatus } from '@/lib/todos'
 
 import { $gateway } from './gateway'
+import { $goalsBySession, type GoalStatus } from './goals'
 import { $loopagentsBySession, type LoopagentActivity } from './loopagents'
 import { dispatchNativeNotification } from './native-notifications'
 import { notifyError } from './notifications'
@@ -29,7 +30,7 @@ import { $todosBySession } from './todos'
 
 /** Composer status stack feed — merged todos, Kanban, subagents, background per session. */
 export type StatusItemState = 'done' | 'failed' | 'running'
-export type StatusItemType = 'background' | 'kanban-agent' | 'subagent' | 'todo'
+export type StatusItemType = 'background' | 'goal' | 'kanban-agent' | 'subagent' | 'todo'
 
 export interface ComposerStatusItem {
   /** Structured activity retained for the Spawn tree; never raw worker logs. */
@@ -38,6 +39,8 @@ export interface ComposerStatusItem {
   exitCode?: number
   /** subagent/Loop task: secondary status label shown on the right. */
   currentTool?: string
+  /** goal: active | paused | waiting | done. */
+  goalStatus?: GoalStatus
   id: string
   /** background process: captured stdout/stderr tail for the inline viewer. */
   output?: string
@@ -871,10 +874,73 @@ export function reconcileKanbanSessionSourcesForComposer({
   reconcileKanbanSessionSources(displaySessionId, sources)
 }
 
+const goalToItem = (goal: { detail?: string; status: GoalStatus; title: string }): ComposerStatusItem => ({
+  currentTool: goal.detail,
+  goalStatus: goal.status,
+  id: 'goal:standing',
+  state: goal.status === 'active' || goal.status === 'waiting' ? 'running' : 'done',
+  title: goal.title,
+  type: 'goal'
+})
+
 // The single thing the stack reads: a typed, merged item list per session.
+//
+// Identity contract: this computed's inputs churn constantly during a turn (a
+// subagent tick, a 5s background poll, a todo update — in ANY session), but
+// the merged output for most sessions is unchanged. Rebuilding fresh arrays
+// and item objects every time handed every mounted composer stack a new
+// reference per recompute — cross-session churn × open tiles. Stabilize both
+// levels: an unchanged session keeps its previous array (and item objects),
+// and a fully-unchanged map keeps its previous reference so `computed` skips
+// the notify entirely ("preserve reference identity on no-ops").
+const sameStatusItem = (a: ComposerStatusItem, b: ComposerStatusItem) =>
+  a.id === b.id &&
+  a.type === b.type &&
+  a.state === b.state &&
+  a.title === b.title &&
+  a.output === b.output &&
+  a.exitCode === b.exitCode &&
+  a.currentTool === b.currentTool &&
+  a.goalStatus === b.goalStatus &&
+  a.activity === b.activity &&
+  a.kanbanBoard === b.kanbanBoard &&
+  a.kanbanTaskId === b.kanbanTaskId &&
+  a.kanbanWorkflowId === b.kanbanWorkflowId &&
+  a.profile === b.profile &&
+  a.runId === b.runId &&
+  a.startedAt === b.startedAt &&
+  a.statusIndicator === b.statusIndicator &&
+  a.taskProgress?.blocked === b.taskProgress?.blocked &&
+  a.taskProgress?.completed === b.taskProgress?.completed &&
+  a.taskProgress?.pending === b.taskProgress?.pending &&
+  a.taskProgress?.total === b.taskProgress?.total &&
+  a.toolCount === b.toolCount &&
+  a.todoStatus === b.todoStatus &&
+  a.sessionId === b.sessionId &&
+  a.updatedAt === b.updatedAt
+
+const stabilizeItems = (prev: ComposerStatusItem[] | undefined, next: ComposerStatusItem[]): ComposerStatusItem[] => {
+  if (!prev) {
+    return next
+  }
+
+  const merged = next.map((item, i) => (prev[i] && sameStatusItem(prev[i], item) ? prev[i] : item))
+
+  return merged.length === prev.length && merged.every((item, i) => item === prev[i]) ? prev : merged
+}
+
+let prevStatusItems: Record<string, ComposerStatusItem[]> = {}
+
 export const $statusItemsBySession = computed(
-  [$subagentsBySession, $backgroundStatusBySession, $todosBySession, $kanbanStatusBySession, $loopagentsBySession],
-  (subs, background, todos, kanban, loopagents) => {
+  [
+    $goalsBySession,
+    $subagentsBySession,
+    $backgroundStatusBySession,
+    $todosBySession,
+    $kanbanStatusBySession,
+    $loopagentsBySession
+  ],
+  (goals, subs, background, todos, kanban, loopagents) => {
     const out: Record<string, ComposerStatusItem[]> = {}
 
     const push = (sid: string, items: ComposerStatusItem[]) => {
@@ -885,6 +951,10 @@ export const $statusItemsBySession = computed(
 
     for (const [sid, list] of Object.entries(todos)) {
       push(sid, list.map(todoToItem))
+    }
+
+    for (const [sid, goal] of Object.entries(goals)) {
+      push(sid, [goalToItem(goal)])
     }
 
     for (const sid of new Set([...Object.keys(kanban), ...Object.keys(loopagents)])) {
@@ -956,13 +1026,20 @@ export const $statusItemsBySession = computed(
       push(sid, list)
     }
 
-    return out
+    let unchanged = Object.keys(prevStatusItems).length === Object.keys(out).length
+
+    for (const sid of Object.keys(out)) {
+      out[sid] = stabilizeItems(prevStatusItems[sid], out[sid]!)
+      unchanged &&= out[sid] === prevStatusItems[sid]
+    }
+
+    return (prevStatusItems = unchanged ? prevStatusItems : out)
   }
 )
 
 // Fixed render order for the groups in the stack (top → bottom, above queue).
 export type StatusGroupType = Exclude<StatusItemType, 'kanban-agent'>
-const TYPE_ORDER: readonly StatusGroupType[] = ['todo', 'subagent', 'background']
+const TYPE_ORDER: readonly StatusGroupType[] = ['goal', 'todo', 'subagent', 'background']
 
 const composerGroupType = (item: ComposerStatusItem): StatusGroupType =>
   item.type === 'kanban-agent' ? 'subagent' : item.type

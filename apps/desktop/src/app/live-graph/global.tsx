@@ -316,6 +316,7 @@ function GlobalLiveGraphProfileView({ profile }: { profile: string }) {
     [activeGraph]
   )
 
+  // eslint-disable-next-line no-restricted-syntax -- Refs retain prior rendered graph state for transition detection.
   useEffect(() => {
     if (!activeGraph) {
       return

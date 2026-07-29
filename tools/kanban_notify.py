@@ -117,6 +117,27 @@ def maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
             "user_id": get_session_env("HERMES_SESSION_USER_ID", "") or None,
             "notifier_profile": _active_profile_name(),
         }
+        # Telegram treats a DM "topic" reply as a distinct route; without these
+        # hints the notifier answers into the wrong thread. Persist the same
+        # delivery shape on direct-task and workflow subscriptions.
+        chat_type = route["chat_type"]
+        thread_id = route["thread_id"]
+        message_id = get_session_env("HERMES_SESSION_MESSAGE_ID", "") or ""
+        delivery_metadata: dict[str, Any] = {}
+        if thread_id:
+            delivery_metadata["thread_id"] = thread_id
+        if chat_type:
+            delivery_metadata["chat_type"] = chat_type
+        if (
+            platform.lower() == "telegram"
+            and thread_id
+            and (chat_type or "").lower() in {"dm", "direct", "private"}
+        ):
+            delivery_metadata["telegram_dm_topic_reply_fallback"] = True
+            if str(thread_id) not in {"", "1"}:
+                delivery_metadata["direct_messages_topic_id"] = str(thread_id)
+            if message_id:
+                delivery_metadata["telegram_reply_to_message_id"] = str(message_id)
         if task.workflow_id:
             # New workflows have no legacy rows, so this creates a cursor at
             # zero. Legacy workflows cut over only after the exact old route is
@@ -124,6 +145,7 @@ def maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
             kb.cutover_legacy_workflow_route(
                 conn,
                 workflow_id=task.workflow_id,
+                delivery_metadata=delivery_metadata or None,
                 **route,
             )
         else:
@@ -131,6 +153,7 @@ def maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
                 conn,
                 task_id=task_id,
                 scope="task",
+                delivery_metadata=delivery_metadata or None,
                 **route,
             )
         return True

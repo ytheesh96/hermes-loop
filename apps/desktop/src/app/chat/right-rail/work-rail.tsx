@@ -85,6 +85,7 @@ export function ChatWorkRail({
     }
   }, [activeTabId, tabs])
 
+  // eslint-disable-next-line no-restricted-syntax -- Refs detect imperative tab-open transitions, not atom updates.
   useEffect(() => {
     const key = loop.tabKey || ''
     const focusRequestKey = loop.focusRequestKey
@@ -99,6 +100,7 @@ export function ChatWorkRail({
     lastLoopFocusRequestKeyRef.current = focusRequestKey
   }, [loop.focusRequestKey, loop.tabKey, loopOpen])
 
+  // eslint-disable-next-line no-restricted-syntax -- Refs detect imperative preview-open transitions, not atom updates.
   useEffect(() => {
     const openedNow = previewOpen && !previewWasOpenRef.current
     const changedTarget = previewOpen && previewKey && previewKey !== lastPreviewKeyRef.current

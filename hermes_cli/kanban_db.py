@@ -87,7 +87,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from toolsets import get_toolset_names
@@ -232,7 +232,7 @@ def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None
     it through.
     """
     try:
-        from hermes_cli.plugins import invoke_hook
+        from hermes_cli.lifecycle import invoke_hook
         from hermes_cli.profiles import get_active_profile_name
         try:
             profile_name = get_active_profile_name()
@@ -1480,6 +1480,7 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     user_id       TEXT,
     notifier_profile TEXT,
     scope         TEXT NOT NULL DEFAULT 'task',
+    delivery_metadata TEXT,
     created_at    INTEGER NOT NULL,
     last_event_id INTEGER NOT NULL DEFAULT 0,
     last_notified_event_id INTEGER NOT NULL DEFAULT 0,
@@ -1500,6 +1501,7 @@ CREATE TABLE IF NOT EXISTS workflow_notify_subs (
     thread_id         TEXT NOT NULL DEFAULT '',
     user_id           TEXT,
     notifier_profile  TEXT NOT NULL DEFAULT '',
+    delivery_metadata TEXT,
     created_at        INTEGER NOT NULL,
     last_event_id     INTEGER NOT NULL DEFAULT 0,
     last_notified_event_id INTEGER NOT NULL DEFAULT 0,
@@ -1623,10 +1625,20 @@ def invalidate_db_caches(db_path: Path) -> None:
 
 
 def _sqlite_connect(path: Path) -> sqlite3.Connection:
-    """Open a Kanban SQLite connection with consistent lock waiting."""
+    """Open a Kanban SQLite connection with consistent lock waiting.
+
+    Uses ``connect_tracked`` so the live-connection registry knows this file
+    is open: while it is, byte-level probes of the same file are refused,
+    because an ``open()``/``close()`` would cancel this process's POSIX
+    advisory locks on the database (see ``hermes_cli.sqlite_safe_read``).
+    The registration is released automatically when the connection closes.
+    """
+    from hermes_cli.sqlite_safe_read import connect_tracked
+
     busy_timeout_ms = _resolve_busy_timeout_ms()
-    conn = sqlite3.connect(
-        str(path),
+    conn = connect_tracked(
+        path,
+        connect_fn=sqlite3.connect,
         isolation_level=None,
         timeout=busy_timeout_ms / 1000.0,
     )
@@ -1885,10 +1897,14 @@ def _validate_sqlite_header(path: Path) -> None:
         return
     if stat.st_size == 0:
         return
-    try:
-        with path.open("rb") as handle:
-            head = handle.read(64)
-    except OSError:
+    # Byte-level probe, so it must run BEFORE any connection to this path
+    # exists (connect() calls it under the init lock, ahead of _sqlite_connect).
+    # read_header_bytes_preopen refuses once a connection is live, because the
+    # close() would cancel this process's POSIX locks on the file.
+    from hermes_cli.sqlite_safe_read import read_header_bytes_preopen
+
+    head = read_header_bytes_preopen(path, length=64)
+    if head is None:
         return
     if head.startswith(_SQLITE_HEADER):
         return
@@ -1993,6 +2009,25 @@ def _backup_corrupt_db(path: Path) -> Optional[Path]:
     resolved = path.resolve()
     parent = resolved.parent
     base_name = resolved.name  # basename only
+    # This reads the whole DB file to fingerprint it. That is a close()-on-a-
+    # database-file hazard (it cancels this process's POSIX advisory locks --
+    # see hermes_cli.sqlite_safe_read), so it must only run once the board has
+    # been taken out of service. Every caller reaches here on the corrupt/
+    # quarantine path after closing its probe connection, but another
+    # SessionDB/kanban connection elsewhere in the process would still be at
+    # risk -- so REFUSE rather than warn-and-proceed. Losing a forensic copy
+    # is strictly better than corrupting the live database we are trying to
+    # rescue.
+    from hermes_cli.sqlite_safe_read import has_live_connection
+
+    if has_live_connection(resolved):
+        _log.error(
+            "refusing to quarantine %s: a connection to it is still open in "
+            "this process, and fingerprinting the file would cancel that "
+            "connection's POSIX locks. Close all connections first.",
+            resolved,
+        )
+        return None
     digest = hashlib.sha256()
     try:
         with resolved.open("rb") as handle:
@@ -2415,11 +2450,19 @@ def connect(
         # opens the database header after the first thread has established a
         # live SQLite connection. On POSIX, closing any ordinary file descriptor
         # for an inode can cancel that process's advisory locks for the inode,
-        # including locks SQLite owns through a different descriptor.
+        # including locks SQLite owns through a different descriptor. This must
+        # stay ahead of the preflight below for the same reason — the preflight
+        # opens the file itself.
         resolved = str(path.resolve())
         if resolved in _INITIALIZED_PATHS:
             return _open_configured_connection(path)
 
+        # Read-only file/sidecar preflight (port of kilocode#12508) —
+        # repair-or-refuse before the header/integrity probes so a stray
+        # read-only kanban.db fails with an actionable message instead of
+        # "attempt to write a readonly database" mid-init.
+        from hermes_state import preflight_db_writability
+        preflight_db_writability(path, db_label=f"kanban.db ({path.name})")
         # Cheap byte-level check first — catches the #29507 TLS-overwrite shape
         # and other invalid-header cases without opening a sqlite connection.
         _validate_sqlite_header(path)
@@ -2978,6 +3021,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 "chat_type",
                 "chat_type TEXT NOT NULL DEFAULT ''",
             )
+        if "delivery_metadata" not in notify_cols:
+            _add_column_if_missing(
+                conn,
+                "kanban_notify_subs",
+                "delivery_metadata",
+                "delivery_metadata TEXT",
+            )
         if "scope" not in notify_cols:
             # Existing subscriptions keep their historical direct-task
             # behavior. New auto-subscriptions opt into descendant delivery
@@ -3015,6 +3065,23 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 "kanban_notify_subs",
                 "pending_expires_at",
                 "pending_expires_at INTEGER",
+            )
+
+    workflow_notify_table_exists = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='workflow_notify_subs'"
+    ).fetchone() is not None
+    if workflow_notify_table_exists:
+        workflow_notify_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(workflow_notify_subs)")
+        }
+        if "delivery_metadata" not in workflow_notify_cols:
+            _add_column_if_missing(
+                conn,
+                "workflow_notify_subs",
+                "delivery_metadata",
+                "delivery_metadata TEXT",
             )
 
     _retire_legacy_loop_handoffs(conn)
@@ -3144,6 +3211,7 @@ _REBUILD_SPECS = {
         " chat_type TEXT NOT NULL DEFAULT '',"
         " thread_id TEXT NOT NULL DEFAULT '', user_id TEXT,"
         " notifier_profile TEXT, scope TEXT NOT NULL DEFAULT 'task',"
+        " delivery_metadata TEXT,"
         " created_at INTEGER NOT NULL,"
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
         " last_notified_event_id INTEGER NOT NULL DEFAULT 0,"
@@ -3230,6 +3298,43 @@ def _rebuild_drifted_tables(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _check_file_length_invariant(conn: sqlite3.Connection) -> None:
+    """Compare SQLite's own page accounting against the file size on disk.
+
+    Raises sqlite3.DatabaseError if the file is shorter than the header claims
+    (torn-extend corruption).
+
+    Both sides are read WITHOUT opening the database file. The header side
+    comes from ``PRAGMA page_count`` over the existing connection; the on-disk
+    side from ``stat()``. An earlier version read the header field with a bare
+    ``open(path,"rb")`` -- but ``close()`` cancels every POSIX advisory lock
+    this process holds on the file, so that probe silently dropped the locks
+    of concurrent writers (and of a running VACUUM) and let other processes
+    write into a database a writer still believed it owned. That is the
+    documented corruption route in sqlite.org/howtocorrupt.html section 2.2.
+    """
+    from hermes_cli.sqlite_safe_read import file_length_matches_header
+
+    # In WAL mode a just-committed page can still live in the -wal file, so
+    # the main file legitimately lags its page count. Only enforce the
+    # invariant under a rollback journal, where every committed page must
+    # already be in the main file.
+    try:
+        row = conn.execute("PRAGMA journal_mode").fetchone()
+        journal_mode = str(row[0]).lower() if row and row[0] is not None else ""
+    except sqlite3.Error:
+        return
+    if journal_mode == "wal":
+        return
+
+    ok = file_length_matches_header(conn)
+    if ok is False:
+        raise sqlite3.DatabaseError(
+            "torn-extend detected: the database file is shorter than its "
+            "header page count claims"
+        )
+
+
 # SQLite's own busy_timeout uses a near-deterministic backoff, so concurrent
 # writers re-collide in lockstep under a stampede. A jittered retry on the
 # transaction boundary breaks that convoy. Mirrors state.db's _execute_write:
@@ -3290,9 +3395,6 @@ def write_txn(conn: sqlite3.Connection):
     else:
         try:
             _execute_boundary_with_retry(conn, "COMMIT")
-            # Keep any future integrity checks inside SQLite. On POSIX, closing
-            # a separate raw descriptor for this inode cancels the process's
-            # SQLite advisory locks and can split the active WAL generation.
         except Exception:
             # COMMIT exhausted retries with the txn still open; roll back so the
             # connection isn't poisoned for the next BEGIN IMMEDIATE.
@@ -3301,6 +3403,10 @@ def write_txn(conn: sqlite3.Connection):
             except sqlite3.OperationalError:
                 pass
             raise
+        # Post-commit file-length check: header page_count must match actual
+        # file pages. A discrepancy means a torn-extend, but COMMIT already
+        # succeeded, so this check must not enter the rollback path above.
+        _check_file_length_invariant(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -4132,6 +4238,7 @@ def create_task(
                         "provider_override": provider_override,
                     },
                 )
+                _inherit_notify_subs(conn, task_id, parents, created_at=now)
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
@@ -5021,6 +5128,48 @@ def create_loop_skeleton_graph(
     }
 
 
+def _inherit_notify_subs(
+    conn: sqlite3.Connection,
+    child_id: str,
+    parents: Iterable[str],
+    *,
+    created_at: Optional[int] = None,
+) -> None:
+    """Copy gateway notification subscriptions from parent tasks to a child.
+
+    The inherited subscription starts caught up to the child's current event
+    cursor. This makes manual `link_tasks(parent, existing_child)` safe: the
+    parent chat receives future child terminal events without replaying the
+    child's pre-link history.
+    """
+    parent_ids = tuple(dict.fromkeys(p for p in parents if p))
+    if not parent_ids:
+        return
+    row = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS cursor FROM task_events WHERE task_id = ?",
+        (child_id,),
+    ).fetchone()
+    cursor = int(row["cursor"] if row is not None else 0)
+    placeholders = ",".join("?" * len(parent_ids))
+    conn.execute(
+        f"""
+        INSERT OR IGNORE INTO kanban_notify_subs
+            (task_id, platform, chat_id, chat_type, thread_id, user_id,
+             notifier_profile, delivery_metadata, created_at, last_event_id)
+        SELECT ?, platform, chat_id, chat_type, thread_id, user_id,
+               notifier_profile, delivery_metadata, ?, ?
+          FROM kanban_notify_subs
+         WHERE task_id IN ({placeholders})
+        """,
+        (
+            child_id,
+            int(created_at if created_at is not None else time.time()),
+            cursor,
+            *parent_ids,
+        ),
+    )
+
+
 def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return Task.from_row(row) if row else None
@@ -5479,6 +5628,7 @@ def link_tasks(
             conn, child_id, "linked",
             {"parent": parent_id, "child": child_id},
         )
+        _inherit_notify_subs(conn, child_id, (parent_id,))
 
 
 def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
@@ -7995,7 +8145,7 @@ def _cleanup_worker_tmux(conn: sqlite3.Connection, task_id: str) -> None:
         # Check if session exists and pane is dead before killing
         out = subprocess.run(
             ["tmux", "list-panes", "-t", session, "-F", "#{pane_dead}"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5,
         )
         if out.stdout.strip() == "1":
             subprocess.run(
@@ -9175,6 +9325,7 @@ def decompose_triage_task(
                         "from_decompose_of": task_id,
                     },
                 )
+            _inherit_notify_subs(conn, new_id, (task_id,), created_at=now)
             child_ids.append(new_id)
 
         # Link children to their sibling parents (within the decomposed graph).
@@ -9602,7 +9753,7 @@ def _git_toplevel(path: Path) -> Optional[Path]:
         result = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
             capture_output=True,
-            text=True,
+            text=True, encoding='utf-8', errors='replace',
             timeout=30,
             check=False,
         )
@@ -9624,7 +9775,7 @@ def _git_branch_exists(repo_root: Path, branch_name: str) -> bool:
         result = subprocess.run(
             ["git", "-C", str(repo_root), "show-ref", "--verify", f"refs/heads/{branch_name}"],
             capture_output=True,
-            text=True,
+            text=True, encoding='utf-8', errors='replace',
             timeout=30,
             check=False,
         )
@@ -9638,7 +9789,7 @@ def _git_common_dir(path: Path) -> Optional[Path]:
         result = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"],
             capture_output=True,
-            text=True,
+            text=True, encoding='utf-8', errors='replace',
             timeout=30,
             check=False,
         )
@@ -9657,7 +9808,7 @@ def _git_dir(path: Path) -> Optional[Path]:
         result = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-dir"],
             capture_output=True,
-            text=True,
+            text=True, encoding='utf-8', errors='replace',
             timeout=30,
             check=False,
         )
@@ -9676,7 +9827,7 @@ def _git_current_branch(path: Path) -> Optional[str]:
         result = subprocess.run(
             ["git", "-C", str(path), "branch", "--show-current"],
             capture_output=True,
-            text=True,
+            text=True, encoding='utf-8', errors='replace',
             timeout=30,
             check=False,
         )
@@ -9733,7 +9884,7 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> Non
     result = subprocess.run(
         cmd,
         capture_output=True,
-        text=True,
+        text=True, encoding='utf-8', errors='replace',
         timeout=60,
         check=False,
     )
@@ -10256,7 +10407,7 @@ def _pid_alive(pid: Optional[int]) -> bool:
                 ["ps", "-o", "stat=", "-p", str(int(pid))],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 timeout=1,
                 check=False,
             )
@@ -12620,6 +12771,12 @@ def _default_spawn(
 
     prompt = f"work kanban task {task.id}"
     env = dict(os.environ)
+    # The dispatcher is detached from every conversation. Its worker must never
+    # inherit routing mirrored by a previous gateway turn, even before the first
+    # session binds ContextVars in this process.
+    from gateway.session_context import _VAR_MAP
+    for key in _VAR_MAP:
+        env.pop(key, None)
 
     # Inject HERMES_HOME so the worker reads the profile-scoped config.yaml
     # (fallback_providers, toolsets, agent settings, etc.) instead of the root
@@ -13322,15 +13479,17 @@ def _insert_or_refresh_workflow_notify_sub(
     user_id: Optional[str],
     cursor: int,
     notified_cursor: Optional[int] = None,
+    delivery_metadata: Optional[Mapping[str, Any]] = None,
 ) -> None:
     now = int(time.time())
+    metadata_json = _encode_notify_delivery_metadata(delivery_metadata)
     conn.execute(
         """
         INSERT OR IGNORE INTO workflow_notify_subs (
             workflow_id, notifier_profile, platform, chat_id, chat_type,
-            thread_id, user_id, created_at, last_event_id,
+            thread_id, user_id, delivery_metadata, created_at, last_event_id,
             last_notified_event_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             workflow_id,
@@ -13340,6 +13499,7 @@ def _insert_or_refresh_workflow_notify_sub(
             str(chat_type or ""),
             thread_id,
             str(user_id).strip() if user_id else None,
+            metadata_json,
             now,
             int(cursor),
             int(cursor if notified_cursor is None else notified_cursor),
@@ -13354,6 +13514,22 @@ def _insert_or_refresh_workflow_notify_sub(
             "AND (chat_type IS NULL OR chat_type = '')",
             (
                 str(chat_type),
+                workflow_id,
+                notifier_profile,
+                platform,
+                chat_id,
+                thread_id,
+            ),
+        )
+    if metadata_json:
+        # Route refreshes may update a platform-specific reply anchor, but
+        # INSERT OR IGNORE above keeps the leased delivery cursors untouched.
+        conn.execute(
+            "UPDATE workflow_notify_subs SET delivery_metadata = ? "
+            "WHERE workflow_id = ? AND notifier_profile = ? "
+            "AND platform = ? AND chat_id = ? AND thread_id = ?",
+            (
+                metadata_json,
                 workflow_id,
                 notifier_profile,
                 platform,
@@ -13389,6 +13565,7 @@ def add_workflow_notify_sub(
     user_id: Optional[str] = None,
     notifier_profile: Optional[str] = None,
     start_cursor: int = 0,
+    delivery_metadata: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Subscribe one exact foreground route to ordinary workflow boundaries."""
 
@@ -13428,6 +13605,7 @@ def add_workflow_notify_sub(
             thread_id=route[4],
             user_id=user_id,
             cursor=max(0, int(start_cursor)),
+            delivery_metadata=delivery_metadata,
         )
 
 
@@ -13446,7 +13624,14 @@ def list_workflow_notify_subs(
             "ORDER BY notifier_profile, platform, chat_id, thread_id",
             (str(workflow_id or "").strip(),),
         ).fetchall()
-    return [dict(row) for row in rows]
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["delivery_metadata"] = _decode_notify_delivery_metadata(
+            item.get("delivery_metadata")
+        )
+        result.append(item)
+    return result
 
 
 def _workflow_events_after_cursor(
@@ -13887,6 +14072,7 @@ def cutover_legacy_workflow_route(
     thread_id: Optional[str] = None,
     user_id: Optional[str] = None,
     notifier_profile: Optional[str] = None,
+    delivery_metadata: Optional[Mapping[str, Any]] = None,
 ) -> bool:
     """Atomically replace one fully-drained legacy route with a workflow route.
 
@@ -13929,18 +14115,18 @@ def cutover_legacy_workflow_route(
             (route[0], route[0], route[2], route[3], route[4], route[1]),
         ).fetchall()
         if not legacy_rows:
-            if existing is None:
-                _insert_or_refresh_workflow_notify_sub(
-                    conn,
-                    workflow_id=route[0],
-                    notifier_profile=route[1],
-                    platform=route[2],
-                    chat_id=route[3],
-                    chat_type=chat_type,
-                    thread_id=route[4],
-                    user_id=user_id,
-                    cursor=0,
-                )
+            _insert_or_refresh_workflow_notify_sub(
+                conn,
+                workflow_id=route[0],
+                notifier_profile=route[1],
+                platform=route[2],
+                chat_id=route[3],
+                chat_type=chat_type,
+                thread_id=route[4],
+                user_id=user_id,
+                cursor=0,
+                delivery_metadata=delivery_metadata,
+            )
             return True
 
         high_water_row = conn.execute(
@@ -13987,20 +14173,23 @@ def cutover_legacy_workflow_route(
             if int(legacy["last_event_id"] or 0) < required:
                 return False
 
-        if existing is None:
-            first = legacy_rows[0]
-            _insert_or_refresh_workflow_notify_sub(
-                conn,
-                workflow_id=route[0],
-                notifier_profile=route[1],
-                platform=route[2],
-                chat_id=route[3],
-                chat_type=chat_type or first["chat_type"],
-                thread_id=route[4],
-                user_id=user_id or first["user_id"],
-                cursor=high_water,
-                notified_cursor=high_water,
-            )
+        first = legacy_rows[0]
+        copied_metadata = delivery_metadata or _decode_notify_delivery_metadata(
+            first["delivery_metadata"]
+        )
+        _insert_or_refresh_workflow_notify_sub(
+            conn,
+            workflow_id=route[0],
+            notifier_profile=route[1],
+            platform=route[2],
+            chat_id=route[3],
+            chat_type=chat_type or first["chat_type"],
+            thread_id=route[4],
+            user_id=user_id or first["user_id"],
+            cursor=high_water,
+            notified_cursor=high_water,
+            delivery_metadata=copied_metadata,
+        )
         for legacy in legacy_rows:
             conn.execute(
                 "DELETE FROM kanban_notify_subs WHERE task_id = ? "
@@ -14015,6 +14204,41 @@ def cutover_legacy_workflow_route(
     return True
 
 
+def _encode_notify_delivery_metadata(
+    metadata: Optional[Mapping[str, Any]],
+) -> Optional[str]:
+    """Serialize platform send metadata stored on notification subscriptions."""
+    if not isinstance(metadata, Mapping):
+        return None
+    clean: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            clean[str(key)] = value
+    if not clean:
+        return None
+    return json.dumps(clean, sort_keys=True, separators=(",", ":"))
+
+
+def _decode_notify_delivery_metadata(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(str(raw))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(key): value
+        for key, value in data.items()
+        if isinstance(value, (str, int, float, bool))
+    }
+
+
 def add_notify_sub(
     conn: sqlite3.Connection,
     *,
@@ -14026,26 +14250,41 @@ def add_notify_sub(
     user_id: Optional[str] = None,
     notifier_profile: Optional[str] = None,
     scope: str = "task",
+    delivery_metadata: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Register a gateway source for task-boundary notifications.
+
+    Idempotent on (task, platform, chat, thread).
 
     ``scope="task"`` preserves the direct-task subscription contract.
     ``scope="descendants"`` also delivers mirrored boundary events from Loop
     descendants through this single root row. Re-registering an existing
     route with descendant scope upgrades it; an ordinary direct subscribe
     never downgrades a descendant subscription.
+
+    New subscriptions start "caught up": ``last_event_id`` snaps to the
+    task's current ``MAX(task_events.id)`` at creation instead of the
+    schema default 0. A cursor of 0 on an already-active task made the
+    gateway notifier replay every historical terminal event on its next
+    tick — and with many stale subs, a single boot-time burst of 100+
+    messages (issue #29905). Subscribers only want events that occur
+    AFTER they subscribe; the gateway/tool auto-subscribe paths run at
+    task creation, where the snapshot is 0 anyway.
     """
     scope = str(scope or "task").strip().lower()
     if scope not in {"task", "descendants"}:
         raise ValueError("notification scope must be 'task' or 'descendants'")
     now = int(time.time())
+    metadata_json = _encode_notify_delivery_metadata(delivery_metadata)
     with write_txn(conn):
         conn.execute(
             """
             INSERT OR IGNORE INTO kanban_notify_subs
                 (task_id, platform, chat_id, chat_type, thread_id, user_id,
-                 notifier_profile, scope, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 notifier_profile, scope, delivery_metadata, created_at,
+                 last_event_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ?), 0))
             """,
             (
                 task_id,
@@ -14056,7 +14295,9 @@ def add_notify_sub(
                 user_id,
                 notifier_profile,
                 scope,
+                metadata_json,
                 now,
+                task_id,
             ),
         )
         if scope == "descendants":
@@ -14092,6 +14333,18 @@ def add_notify_sub(
                 """,
                 (notifier_profile, task_id, platform, chat_id, thread_id or ""),
             )
+        if metadata_json:
+            # A duplicate subscribe from the same chat/thread should refresh
+            # the routing anchor. Telegram DM-topic notifications need the
+            # latest reply anchor to stay inside the visible topic lane.
+            conn.execute(
+                """
+                UPDATE kanban_notify_subs
+                   SET delivery_metadata = ?
+                 WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
+                """,
+                (metadata_json, task_id, platform, chat_id, thread_id or ""),
+            )
 
 
 def list_notify_subs(
@@ -14103,7 +14356,54 @@ def list_notify_subs(
         ).fetchall()
     else:
         rows = conn.execute("SELECT * FROM kanban_notify_subs").fetchall()
-    return [dict(r) for r in rows]
+    out: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        if "delivery_metadata" in item:
+            item["delivery_metadata"] = _decode_notify_delivery_metadata(
+                item.get("delivery_metadata")
+            )
+        out.append(item)
+    return out
+
+
+def count_notify_subs(
+    db_path: Optional[Path] = None,
+    *,
+    board: Optional[str] = None,
+) -> int:
+    """Count task and workflow notification routes read-only.
+
+    Cheap probe for the gateway notifier's zero-subscription early exit:
+    unlike :func:`connect`, this never creates the DB file, never runs
+    schema init/migration, and never opens the database writable (no
+    write locks, no checkpoints — though a read-only open of a WAL
+    database may still create the ``-shm``/``-wal`` sidecars, it cannot
+    write table content). Rows in a not-yet-checkpointed WAL are
+    visible, so a freshly added subscription is never missed. A missing
+    DB, or a legacy DB that predates either subscriptions table, counts its
+    missing table as zero. Path resolution matches :func:`connect` (explicit
+    ``db_path``, else ``board`` via :func:`kanban_db_path`). Raises
+    :class:`sqlite3.Error` when the DB exists but cannot be read
+    (locked, corrupt); callers choose their own fallback.
+    """
+    path = db_path if db_path is not None else kanban_db_path(board=board)
+    if not path.exists():
+        return 0
+    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        total = 0
+        for table in ("kanban_notify_subs", "workflow_notify_subs"):
+            try:
+                row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc).lower():
+                    continue
+                raise
+            total += int(row[0]) if row else 0
+        return total
+    finally:
+        conn.close()
 
 
 def remove_notify_sub(

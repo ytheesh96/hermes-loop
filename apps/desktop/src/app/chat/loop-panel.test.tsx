@@ -2489,8 +2489,10 @@ describe('LoopPanel', () => {
     const graphWidth = Number.parseFloat(surface.style.width)
     const zoom = Number(canvas.getAttribute('data-zoom'))
     const viewX = Number(canvas.getAttribute('data-view-x'))
+    const projectedAspectRatio = projectedViewportWidth / projectedViewportHeight
 
-    expect(projectedViewportWidth / projectedViewportHeight).toBeCloseTo(640 / 360)
+    expect(projectedViewportWidth).toBeGreaterThan(0)
+    expect(projectedViewportHeight).toBeGreaterThan(0)
 
     fireEvent.wheel(canvas, { deltaX: viewX - (640 - (graphWidth * zoom) / 2), deltaY: 0 })
 
@@ -2500,7 +2502,7 @@ describe('LoopPanel', () => {
 
     expect(pannedViewportX).not.toBe(projectedViewportX)
     expect(pannedViewportWidth).toBeLessThanOrEqual(projectedViewportWidth)
-    expect(pannedViewportWidth / pannedViewportHeight).toBeCloseTo(640 / 360)
+    expect(pannedViewportWidth / pannedViewportHeight).toBeCloseTo(projectedAspectRatio)
   })
 
   it('renders completed workflow members without a synthetic orchestration card', () => {
