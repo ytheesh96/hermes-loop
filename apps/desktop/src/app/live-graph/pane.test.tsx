@@ -131,6 +131,7 @@ describe('native Graph View panes', () => {
 
     render(<QueryClientProvider client={queryClient}>{contribution.render?.()}</QueryClientProvider>)
     await waitFor(() => expect(mocks.view).toHaveBeenCalled())
+    expect(mocks.view.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({ initialTaskFeedOpen: true }))
     expect(mocks.getComments).not.toHaveBeenCalled()
 
     const initialView = mocks.view.mock.calls.at(-1)?.[0] as {
@@ -275,31 +276,57 @@ describe('native Graph View panes', () => {
     )
   })
 
-  it('registers and reveals one keep-alive native tab beside its source session', async () => {
+  it('registers and reveals one keep-alive native pane beside its visible source session', async () => {
     const { model, registry, store, tree } = await setup()
 
     let paneId = ''
     act(() => {
       paneId = store.openLiveGraphPane(session({ _lineage_root_id: 'root-one' }), {
+        dock: 'right',
         sourcePaneId: 'workspace'
       })
     })
 
     const contribution = registry.getArea('panes').find(candidate => candidate.id === paneId)
     const group = model.findGroupOfPane(tree.$layoutTree.get()!, paneId)
+    const workspaceGroup = model.findGroupOfPane(tree.$layoutTree.get()!, 'workspace')
 
     expect(contribution?.data).toEqual(
       expect.objectContaining({
-        dock: { before: undefined, pane: 'workspace', pos: 'center' },
+        dock: { before: undefined, pane: 'workspace', pos: 'right' },
         keepAliveWhenInactive: true,
         placement: 'main'
       })
     )
     expect(group?.active).toBe(paneId)
+    expect(group?.id).not.toBe(workspaceGroup?.id)
 
     act(() => {
       store.openLiveGraphPane(session({ _lineage_root_id: 'root-one', title: 'Updated title' }))
     })
+    expect(registry.getArea('panes').filter(candidate => candidate.id === paneId)).toHaveLength(1)
+  }, 15_000)
+
+  it('moves a legacy auto-placed center pane beside chat but preserves a user placement', async () => {
+    const { model, registry, store, tree } = await setup()
+    const storedSession = session({ _lineage_root_id: 'root-one' })
+    const paneId = store.openLiveGraphPane(storedSession)
+
+    expect(model.findGroupOfPane(tree.$layoutTree.get()!, paneId)?.id).toBe(
+      model.findGroupOfPane(tree.$layoutTree.get()!, 'workspace')?.id
+    )
+
+    store.openLiveGraphPane(storedSession, { dock: 'right', sourcePaneId: 'workspace' })
+    expect(model.findGroupOfPane(tree.$layoutTree.get()!, paneId)?.id).not.toBe(
+      model.findGroupOfPane(tree.$layoutTree.get()!, 'workspace')?.id
+    )
+
+    const workspaceGroup = model.findGroupOfPane(tree.$layoutTree.get()!, 'workspace')!
+    tree.moveTreePane(paneId, { groupId: workspaceGroup.id, pos: 'center' })
+    expect(model.findGroupOfPane(tree.$layoutTree.get()!, paneId)?.id).toBe(workspaceGroup.id)
+
+    store.openLiveGraphPane(storedSession, { dock: 'right', sourcePaneId: 'workspace' })
+    expect(model.findGroupOfPane(tree.$layoutTree.get()!, paneId)?.id).toBe(workspaceGroup.id)
     expect(registry.getArea('panes').filter(candidate => candidate.id === paneId)).toHaveLength(1)
   }, 15_000)
 
@@ -332,6 +359,12 @@ describe('native Graph View panes', () => {
     expect(model.allPaneIds(tree.$layoutTree.get()!)).not.toContain(paneId)
     expect(model.findGroupOfPane(tree.$layoutTree.get()!, 'workspace')?.active).toBe('workspace')
     expect(tree.$treeTabFocusRequest.get()?.paneId).toBe('workspace')
+
+    const reopenedPaneId = store.openLiveGraphPane(session(), { dock: 'right', sourcePaneId: 'workspace' })
+    expect(reopenedPaneId).toBe(paneId)
+    expect(model.findGroupOfPane(tree.$layoutTree.get()!, reopenedPaneId)?.id).not.toBe(
+      model.findGroupOfPane(tree.$layoutTree.get()!, 'workspace')?.id
+    )
   })
 
   it('feeds activity across lineage keys without collapsing identical Loop ids from different boards', async () => {

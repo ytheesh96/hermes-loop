@@ -55,11 +55,13 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.unstubAllGlobals()
   vi.useRealTimers()
 })
 
 describe('TaskFeedLauncherRow', () => {
-  it('summarizes scoped graph tasks and opens the requested dock', async () => {
+  it('opens beside chat on wide windows and keeps Shift-click as the center-tab gesture', async () => {
+    vi.stubGlobal('innerWidth', 1280)
     mocks.getLoopSessionSources.mockResolvedValue([
       source(['scheduled', 'running', 'succeeded', 'review_required'])
     ])
@@ -74,8 +76,18 @@ describe('TaskFeedLauncherRow', () => {
     fireEvent.click(launcher)
     fireEvent.click(launcher, { shiftKey: true })
 
-    expect(onOpen).toHaveBeenNthCalledWith(1, 'session-1', 'center')
-    expect(onOpen).toHaveBeenNthCalledWith(2, 'session-1', 'right')
+    expect(onOpen).toHaveBeenNthCalledWith(1, 'session-1', 'right')
+    expect(onOpen).toHaveBeenNthCalledWith(2, 'session-1', 'center')
+  })
+
+  it('falls back to a center tab on narrow windows', async () => {
+    vi.stubGlobal('innerWidth', 1024)
+    mocks.getLoopSessionSources.mockResolvedValue([source(['running'])])
+    const { onOpen } = renderRow()
+
+    fireEvent.click(await screen.findByRole('button', { name: /Task feed 1 pending task/ }))
+
+    expect(onOpen).toHaveBeenCalledWith('session-1', 'center')
   })
 
   it('does not query or render for a disabled session tile', async () => {

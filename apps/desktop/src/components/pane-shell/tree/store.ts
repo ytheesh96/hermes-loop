@@ -1186,7 +1186,8 @@ function commit(next: LayoutNode | null) {
 // ---------------------------------------------------------------------------
 // USER-PLACED panes — "their spot wins". A pane the user has explicitly
 // dragged (zone move / span / zone-menu split) keeps that placement; auto-
-// docking (dockPaneBeside) only steers panes the user hasn't touched.
+// docking (dockPaneBeside / stackPaneWith) only steers panes the user hasn't
+// touched.
 // Presets and resets hand placement back to the app.
 // ---------------------------------------------------------------------------
 
@@ -1255,6 +1256,31 @@ export function dockPaneBeside(paneId: string, anchorPaneId: string) {
   const next = findGroupOfPane(tree, paneId)
     ? movePaneOp(tree, paneId, { groupId: anchor.id, pos })
     : insertAtGroup(tree, anchor.id, paneId, pos)
+
+  if (next && next !== tree) {
+    commit(next)
+  }
+}
+
+/** Stack `paneId` in the same tab group as `anchorPaneId` unless the user has
+ * explicitly placed it elsewhere. Idempotent and intended for app-owned
+ * center/tab placement corrections. */
+export function stackPaneWith(paneId: string, anchorPaneId: string) {
+  const tree = $layoutTree.get()
+
+  if (!tree || $userPlacedPanes.get().has(paneId)) {
+    return
+  }
+
+  const anchor = findGroupOfPane(tree, anchorPaneId)
+
+  if (!anchor || $hiddenTreePanes.get().has(anchorPaneId)) {
+    return
+  }
+
+  const next = findGroupOfPane(tree, paneId)
+    ? movePaneOp(tree, paneId, { groupId: anchor.id, pos: 'center' })
+    : insertAtGroup(tree, anchor.id, paneId, 'center')
 
   if (next && next !== tree) {
     commit(next)

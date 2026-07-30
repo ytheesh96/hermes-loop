@@ -268,10 +268,8 @@ test.describe('scoped task Messages across profile backends', () => {
 
     const graphTab = page.getByRole('tab', { name: /Graph View · Cross profile proof/ })
     await graphTab.click()
-    const taskFeedButton = page.getByRole('button', { name: /task feed/i }).first()
-    await taskFeedButton.waitFor({ state: 'visible', timeout: 30_000 })
-    await taskFeedButton.click()
     const feed = page.getByTestId('live-graph-task-feed')
+    await feed.waitFor({ state: 'visible', timeout: 30_000 })
     await feed.getByRole('button', { name: 'Messages' }).click()
     await expect(feed.getByText('SOURCE_ONLY_COMMENT')).toBeVisible({ timeout: 30_000 })
     await expect(feed.getByText('ACTIVE_DECOY_COMMENT')).toHaveCount(0)

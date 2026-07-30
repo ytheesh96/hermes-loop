@@ -173,6 +173,7 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
               : null
       }
       graph={graph}
+      initialTaskFeedOpen
       loading={sourceQuery.isLoading}
       messageThread={{
         error:

@@ -1,6 +1,11 @@
 import { atom } from 'nanostores'
 
-import { prepareTreePaneRemovalFocus, revealTreePane } from '@/components/pane-shell/tree/store'
+import {
+  dockPaneBeside,
+  prepareTreePaneRemovalFocus,
+  revealTreePane,
+  stackPaneWith
+} from '@/components/pane-shell/tree/store'
 import { sessionTitle } from '@/lib/chat-runtime'
 import { readJson, writeJson } from '@/lib/storage'
 import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
@@ -217,7 +222,7 @@ export function openLiveGraphPane(session: SessionInfo, options: OpenLiveGraphPa
 
   const descriptor: LiveGraphPaneDescriptor = {
     cwd: session.cwd?.trim() || '',
-    dock: existing?.dock ?? cleanDock(options.dock),
+    dock: options.dock === undefined ? (existing?.dock ?? 'center') : cleanDock(options.dock),
     key: liveGraphPaneKey(profile, sessionRootId),
     profile,
     sessionRootId,
@@ -237,6 +242,14 @@ export function openLiveGraphPane(session: SessionInfo, options: OpenLiveGraphPa
     // The pane mirror and registry adoption are synchronous with the atom set,
     // so the exact native tab exists before this fronts it.
     revealTreePane(paneId)
+
+    if (options.dock !== undefined) {
+      if (descriptor.dock === 'right') {
+        dockPaneBeside(paneId, descriptor.sourcePaneId)
+      } else {
+        stackPaneWith(paneId, descriptor.sourcePaneId)
+      }
+    }
   }
 
   return paneId

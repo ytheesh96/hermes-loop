@@ -20,6 +20,12 @@ interface TaskFeedLauncherRowProps {
   sourceSessionId: null | string
 }
 
+const TASK_FEED_SPLIT_MIN_WIDTH = 1024
+
+function requestedDock(shiftKey: boolean): 'center' | 'right' {
+  return shiftKey || window.innerWidth <= TASK_FEED_SPLIT_MIN_WIDTH ? 'center' : 'right'
+}
+
 function sourceRefetchInterval(sources?: readonly TenantLoopSource[]): number {
   return sources?.some(source => loopSessionSourceRefetchInterval(source) === LOOP_SOURCE_ACTIVE_REFETCH_INTERVAL_MS)
     ? LOOP_SOURCE_ACTIVE_REFETCH_INTERVAL_MS
@@ -63,7 +69,7 @@ export const TaskFeedLauncherRow = memo(function TaskFeedLauncherRow({
     <StatusRow
       className="task-feed-launcher-row min-h-7 rounded-t-[inherit] rounded-b-none border-b border-(--ui-stroke-tertiary) px-3.5 py-1.5 hover:bg-transparent"
       leading={<Codicon className="text-(--ui-blue)" name="inbox" size="0.8rem" />}
-      onActivate={event => onOpen(sourceSessionId, event.shiftKey ? 'right' : 'center')}
+      onActivate={event => onOpen(sourceSessionId, requestedDock(event.shiftKey))}
       trailing={
         <span
           aria-label={progressLabel}

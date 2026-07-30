@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { revealTreePane } from '@/components/pane-shell/tree/store'
+import { dockPaneBeside, revealTreePane, stackPaneWith } from '@/components/pane-shell/tree/store'
 import type { SessionInfo } from '@/types/hermes'
 
 const STORAGE_KEY = 'hermes.desktop.liveGraphPanes.v1'
 
 vi.mock('@/components/pane-shell/tree/store', () => ({
+  dockPaneBeside: vi.fn(),
   prepareTreePaneRemovalFocus: vi.fn(),
-  revealTreePane: vi.fn()
+  revealTreePane: vi.fn(),
+  stackPaneWith: vi.fn()
 }))
 
 function session(overrides: Partial<SessionInfo> = {}): SessionInfo {
@@ -61,8 +63,11 @@ describe('Graph View pane store', () => {
     })
 
     const sourceIdentity = store.liveGraphSessionSourceIdentity(storedSession, $activeGatewayProfile.get())
-    const paneId = store.openLiveGraphPane(storedSession)
-    store.openLiveGraphPane({ ...storedSession, title: 'Renamed graph' })
+    const paneId = store.openLiveGraphPane(storedSession, { dock: 'right', sourcePaneId: 'workspace' })
+    store.openLiveGraphPane(
+      { ...storedSession, title: 'Renamed graph' },
+      { dock: 'right', sourcePaneId: 'workspace' }
+    )
     const persisted = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || '{}')
 
     expect(paneId).toBe('live-graph:active-profile:root-id')
@@ -78,10 +83,35 @@ describe('Graph View pane store', () => {
     ])
     expect(revealTreePane).toHaveBeenNthCalledWith(1, paneId)
     expect(revealTreePane).toHaveBeenNthCalledWith(2, paneId)
+    expect(dockPaneBeside).toHaveBeenNthCalledWith(1, paneId, 'workspace')
+    expect(dockPaneBeside).toHaveBeenNthCalledWith(2, paneId, 'workspace')
     expect(persisted['active-profile']).toEqual([
       expect.objectContaining({ sourceProfile: 'session-profile', sourceSessionId: 'runtime-tip' })
     ])
     expect(persisted).not.toHaveProperty('session-profile')
+  })
+
+  it('persists an explicit dock correction for a legacy center descriptor', async () => {
+    const store = await import('./live-graph-panes')
+    const storedSession = session({ _lineage_root_id: 'root-id' })
+    const paneId = store.openLiveGraphPane(storedSession)
+
+    store.openLiveGraphPane(storedSession, { dock: 'right', sourcePaneId: 'workspace' })
+
+    expect(store.$liveGraphPanes.get()[0]).toEqual(expect.objectContaining({ dock: 'right' }))
+    expect(dockPaneBeside).toHaveBeenCalledWith(paneId, 'workspace')
+  })
+
+  it('applies an explicit center correction to an existing right-docked pane', async () => {
+    const store = await import('./live-graph-panes')
+    const storedSession = session({ _lineage_root_id: 'root-id' })
+    const paneId = store.openLiveGraphPane(storedSession, { dock: 'right', sourcePaneId: 'workspace' })
+
+    store.openLiveGraphPane(storedSession, { dock: 'center', sourcePaneId: 'workspace' })
+
+    expect(store.$liveGraphPanes.get()).toHaveLength(1)
+    expect(store.$liveGraphPanes.get()[0]).toEqual(expect.objectContaining({ dock: 'center' }))
+    expect(stackPaneWith).toHaveBeenCalledWith(paneId, 'workspace')
   })
 
   it('sanitizes persisted descriptors and drops malformed entries', async () => {
