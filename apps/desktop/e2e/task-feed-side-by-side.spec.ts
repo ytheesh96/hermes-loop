@@ -120,7 +120,7 @@ test.describe('task feed composer side-by-side placement', () => {
     fixture = null
   })
 
-  test('keeps chat visible, deduplicates re-clicks, and uses the narrow tab fallback', async ({ page: _ }, testInfo) => {
+  test('keeps chat visible, deduplicates re-clicks, and uses the narrow tab fallback', async ({}, testInfo) => {
     const { page } = fixture!
     await page.setViewportSize({ width: 1440, height: 900 })
     await send(page, PROMPT)
