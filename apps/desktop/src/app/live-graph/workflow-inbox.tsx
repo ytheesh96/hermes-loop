@@ -146,7 +146,7 @@ function TaskStatus({ status }: { status: string }) {
       data-live-graph-task-status={normalized}
     >
       <Codicon className="shrink-0" name={presentation.icon} style={{ color: presentation.color }} />
-      <span className="truncate">{label}</span>
+      <span className="break-words [overflow-wrap:anywhere]">{label}</span>
     </span>
   )
 }
@@ -177,7 +177,7 @@ function TaskCard({ nowMs, onHoverChange, onSelect, reducedMotion, task }: TaskC
     >
       <button
         aria-label={`${t.liveGraph.viewTask}: ${task.label}`}
-        className="flex h-[8.5rem] w-full min-w-0 cursor-default flex-col border-0 bg-transparent px-3 py-2.5 text-left text-inherit outline-none"
+        className="flex min-h-[8.5rem] w-full min-w-0 cursor-default flex-col border-0 bg-transparent px-3 py-2.5 text-left text-inherit outline-none"
         onBlur={() => onHoverChange?.(false)}
         onClick={onSelect}
         onFocus={() => onHoverChange?.(true)}
@@ -188,18 +188,18 @@ function TaskCard({ nowMs, onHoverChange, onSelect, reducedMotion, task }: TaskC
         <span className="flex min-w-0 items-center justify-between gap-2">
           <span className="flex min-w-0 items-center gap-1.5 text-[0.625rem] font-medium text-(--ui-text-secondary)">
             <Codicon className="shrink-0 text-(--ui-text-tertiary)" name="account" />
-            <span className="truncate">{assignee}</span>
+            <span className="break-words [overflow-wrap:anywhere]">{assignee}</span>
           </span>
           <TaskStatus status={task.status || 'unknown'} />
         </span>
         <span
-          className="mt-1.5 min-w-0 line-clamp-2 text-xs leading-4 font-semibold text-(--ui-text-primary)"
+          className="mt-1.5 min-w-0 break-words text-xs leading-4 font-semibold text-(--ui-text-primary) [overflow-wrap:anywhere]"
           data-live-graph-task-card-title
         >
           {task.label}
         </span>
         <span
-          className="mt-1 h-8 min-w-0 line-clamp-2 text-[0.6875rem] leading-4 text-(--ui-text-secondary)"
+          className="mt-1 min-w-0 whitespace-pre-wrap break-words text-[0.6875rem] leading-4 text-(--ui-text-secondary) [overflow-wrap:anywhere]"
           data-live-graph-task-card-description
         >
           {supportingText || '\u00a0'}
@@ -211,7 +211,7 @@ function TaskCard({ nowMs, onHoverChange, onSelect, reducedMotion, task }: TaskC
           {currentTool ? (
             <>
               <Codicon className="shrink-0" name="tools" />
-              <span className="min-w-0 truncate" data-live-graph-task-tool-call>
+              <span className="min-w-0 break-words [overflow-wrap:anywhere]" data-live-graph-task-tool-call>
                 {currentTool}
               </span>
             </>
@@ -255,7 +255,7 @@ function CompletedTaskRow({ nowMs, onHoverChange, onSelect, reducedMotion, task 
     >
       <button
         aria-label={`${t.liveGraph.viewTask}: ${task.label}`}
-        className="flex h-8 w-full min-w-0 cursor-default items-center gap-2 border-0 bg-transparent px-2 text-left text-inherit outline-none"
+        className="flex min-h-8 w-full min-w-0 cursor-default flex-wrap items-center gap-2 border-0 bg-transparent px-2 py-1 text-left text-inherit outline-none"
         onBlur={() => onHoverChange?.(false)}
         onClick={onSelect}
         onFocus={() => onHoverChange?.(true)}
@@ -264,7 +264,9 @@ function CompletedTaskRow({ nowMs, onHoverChange, onSelect, reducedMotion, task 
         type="button"
       >
         <Codicon className="shrink-0 text-(--ui-text-tertiary)" name="checklist" />
-        <span className="min-w-0 flex-1 truncate text-[0.6875rem] text-(--ui-text-secondary)">{task.label}</span>
+        <span className="min-w-0 flex-1 break-words text-[0.6875rem] text-(--ui-text-secondary) [overflow-wrap:anywhere]">
+          {task.label}
+        </span>
         {timing ? (
           <time
             className="shrink-0 text-[0.625rem] text-(--ui-text-quaternary)"
@@ -345,7 +347,7 @@ export const LiveGraphWorkflowInbox = memo(function LiveGraphWorkflowInbox({
         data-testid="live-graph-workflow-inbox"
         role="region"
       >
-        <div aria-label={inboxLabel} className="flex min-w-0 flex-nowrap items-center gap-1" role="group">
+        <div aria-label={inboxLabel} className="flex min-w-0 flex-wrap items-center gap-1" role="group">
           <Button
             aria-pressed={filter === 'all'}
             className="h-6 px-1.5 text-[0.625rem]"

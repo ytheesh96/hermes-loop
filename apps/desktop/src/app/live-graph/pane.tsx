@@ -21,6 +21,7 @@ import { $subagentsBySession } from '@/store/subagents'
 
 import { normalizeSessionMessages } from './messages'
 import { buildSessionLiveGraph, detectLiveGraphPulses, type LiveGraphPulse, type LiveGraphSnapshot } from './model'
+import { ScopedTaskFeedPaneView } from './scoped-task-feed'
 import { LiveGraphPaneView, type LiveGraphSidebarView } from './view'
 
 const ACTIVE_REFETCH_MS = 2_000
@@ -160,6 +161,40 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
     lastRenderedPulsesRef.current = pulses
   }, [activeGraph, pulses])
 
+  const messageThread = {
+    error:
+      commentsQuery.error instanceof Error
+        ? commentsQuery.error.message
+        : commentsQuery.error
+          ? String(commentsQuery.error)
+          : null,
+    loading: commentsQuery.isLoading,
+    messages,
+    onRetry: () => void commentsQuery.refetch(),
+    sourceProfile: descriptor.sourceProfile
+  }
+
+  if (descriptor.mode === 'feed') {
+    return (
+      <ScopedTaskFeedPaneView
+        error={
+          sourceQuery.data === undefined
+            ? sourceQuery.error instanceof Error
+              ? sourceQuery.error.message
+              : sourceQuery.error
+                ? String(sourceQuery.error)
+                : null
+            : null
+        }
+        graph={graph ?? { edges: [], nodes: [] }}
+        loading={sourceQuery.isLoading}
+        messageThread={messageThread}
+        onViewChange={setSidebarView}
+        sourceProfile={descriptor.sourceProfile}
+      />
+    )
+  }
+
   return (
     <LiveGraphPaneView
       descriptor={descriptor}
@@ -175,17 +210,7 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
       graph={graph}
       initialTaskFeedOpen
       loading={sourceQuery.isLoading}
-      messageThread={{
-        error:
-          commentsQuery.error instanceof Error
-            ? commentsQuery.error.message
-            : commentsQuery.error
-              ? String(commentsQuery.error)
-              : null,
-        loading: commentsQuery.isLoading,
-        messages,
-        onRetry: () => void commentsQuery.refetch()
-      }}
+      messageThread={messageThread}
       onMessageViewChange={setSidebarView}
       pulses={pulses}
     />
@@ -220,7 +245,7 @@ export const watchLiveGraphPanes = paneMirror<LiveGraphPaneDescriptor>({
   title: key => {
     const descriptor = descriptorForKey(key)
 
-    const title = translateNow('liveGraph.title')
+    const title = translateNow(descriptor?.mode === 'feed' ? 'liveGraph.taskFeed' : 'liveGraph.title')
 
     return descriptor ? `${title} · ${descriptor.title}` : title
   }

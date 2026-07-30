@@ -2,7 +2,6 @@ import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-import { expect, test, type ElectronApplication, type Page } from './test'
 import {
   buildAppEnv,
   createSandbox,
@@ -12,7 +11,8 @@ import {
   writeEnvFile,
   writeMockProviderConfig,
 } from './fixtures'
-import { startMockServer, type MockServer } from './mock-server'
+import { type MockServer, startMockServer } from './mock-server'
+import { type ElectronApplication, expect, type Page, test } from './test'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..', '..')
 const ACTIVE_PROFILE = 'review-active-e2e'
@@ -202,6 +202,7 @@ test.describe('scoped task Messages across profile backends', () => {
               {
                 cwd: '',
                 dock: 'center',
+                mode: 'feed',
                 sessionRootId: sourceSession,
                 sourcePaneId: 'workspace',
                 sourceProfile,
@@ -266,9 +267,9 @@ test.describe('scoped task Messages across profile backends', () => {
       scope.__failScopedMessages = false
     })
 
-    const graphTab = page.getByRole('tab', { name: /Graph View · Cross profile proof/ })
-    await graphTab.click()
-    const feed = page.getByTestId('live-graph-task-feed')
+    const feedTab = page.getByRole('tab', { name: /Task feed · Cross profile proof/ })
+    await feedTab.click()
+    const feed = page.getByTestId('scoped-task-feed-pane')
     await feed.waitFor({ state: 'visible', timeout: 30_000 })
     await feed.getByRole('button', { name: 'Messages' }).click()
     await expect(feed.getByText('SOURCE_ONLY_COMMENT')).toBeVisible({ timeout: 30_000 })

@@ -13,6 +13,7 @@ import type { LiveGraphSnapshot, SessionLiveGraphInput } from './model'
 const mocks = vi.hoisted(() => ({
   buildGraph: vi.fn<(input: SessionLiveGraphInput) => LiveGraphSnapshot>(() => ({ edges: [], nodes: [] })),
   detectPulses: vi.fn(() => []),
+  feedView: vi.fn(),
   getComments: vi.fn<() => Promise<LoopSessionCommentsSource[]>>(async () => []),
   getSources: vi.fn<() => Promise<TenantLoopSource[]>>(async () => [{ board: 'default', tasks: [] }]),
   view: vi.fn()
@@ -35,6 +36,14 @@ vi.mock('./view', () => ({
     mocks.view(props)
 
     return <div data-testid="live-graph-view" />
+  }
+}))
+
+vi.mock('./scoped-task-feed', () => ({
+  ScopedTaskFeedPaneView: (props: Record<string, unknown>) => {
+    mocks.feedView(props)
+
+    return <div data-testid="scoped-task-feed-view" />
   }
 }))
 
@@ -62,6 +71,7 @@ beforeEach(() => {
   vi.resetModules()
   mocks.buildGraph.mockClear()
   mocks.detectPulses.mockClear()
+  mocks.feedView.mockClear()
   mocks.getComments.mockClear()
   mocks.getSources.mockClear()
   mocks.view.mockClear()
@@ -93,6 +103,36 @@ async function setup() {
 }
 
 describe('native Graph View panes', () => {
+  it('renders feed mode without mounting the graph view', async () => {
+    const { registry, store } = await setup()
+    const paneId = store.openScopedTaskFeedPane(session())
+    const contribution = registry.getArea('panes').find(candidate => candidate.id === paneId)!
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    const { findByTestId } = render(
+      <QueryClientProvider client={queryClient}>{contribution.render?.()}</QueryClientProvider>
+    )
+
+    expect(await findByTestId('scoped-task-feed-view')).toBeTruthy()
+    expect(mocks.feedView).toHaveBeenCalledWith(expect.objectContaining({ sourceProfile: 'default' }))
+    expect(mocks.view).not.toHaveBeenCalled()
+    expect(mocks.getComments).not.toHaveBeenCalled()
+
+    const feed = mocks.feedView.mock.calls.at(-1)?.[0] as {
+      onViewChange: (view: 'messages' | 'tasks') => void
+    }
+
+    act(() => feed.onViewChange('messages'))
+    await waitFor(() => expect(mocks.getComments).toHaveBeenCalledWith('session-one', 'default', ['default']))
+
+    act(() => feed.onViewChange('tasks'))
+    const stoppedCount = mocks.getComments.mock.calls.length
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['loop-session-comments'] })
+    })
+    expect(mocks.getComments).toHaveBeenCalledTimes(stoppedCount)
+  })
+
   it('polls comments only for the active Messages view through the stored source profile', async () => {
     mocks.getSources.mockResolvedValue([
       { board: 'alpha', session_id: 'runtime-tip', tasks: [{ id: 'task-1', status: 'running', title: 'Task one' }] }

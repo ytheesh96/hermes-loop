@@ -132,15 +132,17 @@ test.describe('task feed composer side-by-side placement', () => {
     await launcher.waitFor({ state: 'visible', timeout: 15_000 })
     await launcher.click()
 
-    const graphTab = page.getByRole('tab', { name: new RegExp(`Graph View.*${MOCK_REPLY}`) })
-    await expect(graphTab).toHaveCount(1)
-    const feed = page.getByTestId('live-graph-task-feed')
+    const feedTab = page.getByRole('tab', { name: new RegExp(`Task feed.*${MOCK_REPLY}`) })
+    await expect(feedTab).toHaveCount(1)
+    const feed = page.getByTestId('scoped-task-feed-pane')
     await expect(feed).toBeVisible()
+    await expect(page.getByTestId('live-graph-canvas')).toHaveCount(0)
+    await expect(page.getByTestId('live-graph-task-feed')).toHaveCount(0)
     await expect(feed.getByRole('button', { name: 'Tasks' })).toHaveAttribute('aria-pressed', 'true')
     await expect(page.locator(SURFACE).last()).toBeVisible()
 
-    const graphPaneId = await graphTab.getAttribute('data-pane-id')
-    const paneId = graphPaneId || `live-graph:default:${sessionId}`
+    const feedPaneId = await feedTab.getAttribute('data-pane-id')
+    const paneId = feedPaneId || `live-graph:feed:default:${sessionId}`
     const wideGroups = await paneGroupIds(page, ['workspace', paneId])
     expect(wideGroups.workspace).not.toBe(wideGroups[paneId])
 
@@ -152,50 +154,52 @@ test.describe('task feed composer side-by-side placement', () => {
     const restoredWideGroups = await paneGroupIds(page, ['workspace', paneId])
     expect(restoredWideGroups.workspace).not.toBe(restoredWideGroups[paneId])
 
-    await feed.getByRole('button', { name: 'Messages' }).click()
+    await feed.getByRole('button', { exact: true, name: 'Messages' }).click()
     await expect(feed.getByText('SIDE_BY_SIDE_COMMENT')).toBeVisible({ timeout: 30_000 })
     await launcher.click()
-    await expect(page.getByRole('tab', { name: /Graph View/ })).toHaveCount(1)
-    await expect(feed.getByRole('button', { name: 'Messages' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.getByRole('tab', { name: /Task feed/ })).toHaveCount(1)
+    await expect(feed.getByRole('button', { exact: true, name: 'Messages' })).toHaveAttribute('aria-pressed', 'true')
 
     const wideScreenshot = testInfo.outputPath('task-feed-chat-side-by-side.png')
     await page.screenshot({ path: wideScreenshot, fullPage: true })
     await testInfo.attach('task-feed-chat-side-by-side', { path: wideScreenshot, contentType: 'image/png' })
 
-    await graphTab.dragTo(page.locator(SURFACE).last())
+    await feedTab.dragTo(page.locator(SURFACE).last())
     const manuallyStackedGroups = await paneGroupIds(page, ['workspace', paneId])
     expect(manuallyStackedGroups.workspace).toBe(manuallyStackedGroups[paneId])
     await showSessionFromSidebar(page)
     await launcher.click()
     const preservedManualGroups = await paneGroupIds(page, ['workspace', paneId])
     expect(preservedManualGroups).toEqual(manuallyStackedGroups)
-    await expect(page.getByRole('tab', { name: /Graph View/ })).toHaveCount(1)
+    await expect(page.getByRole('tab', { name: /Task feed/ })).toHaveCount(1)
 
     await showSessionFromSidebar(page)
     await launcher.click({ modifiers: ['Shift'] })
     const preservedManualCenterGroups = await paneGroupIds(page, ['workspace', paneId])
     expect(preservedManualCenterGroups).toEqual(manuallyStackedGroups)
-    await expect(page.getByRole('tab', { name: /Graph View/ })).toHaveCount(1)
+    await expect(page.getByRole('tab', { name: /Task feed/ })).toHaveCount(1)
 
     await page.keyboard.press('Meta+W')
-    await expect(page.getByRole('tab', { name: /Graph View/ })).toHaveCount(0)
+    await expect(page.getByRole('tab', { name: /Task feed/ })).toHaveCount(0)
     await expect(page.locator(SURFACE).last()).toBeVisible()
 
     await launcher.click()
-    await expect(page.getByRole('tab', { name: /Graph View/ })).toHaveCount(1)
-    await expect(page.getByTestId('live-graph-task-feed').getByRole('button', { name: 'Tasks' })).toHaveAttribute(
+    await expect(page.getByRole('tab', { name: /Task feed/ })).toHaveCount(1)
+    await expect(
+      page.getByTestId('scoped-task-feed-pane').getByRole('button', { exact: true, name: 'Tasks' })
+    ).toHaveAttribute(
       'aria-pressed',
       'true',
     )
 
-    await page.getByRole('button', { name: /Close Graph View/ }).click()
+    await page.getByRole('button', { name: /Close Task feed/ }).click()
     await page.setViewportSize({ width: 1024, height: 900 })
     await launcher.click()
     const narrowGroups = await paneGroupIds(page, ['workspace', paneId])
     expect(narrowGroups.workspace).toBe(narrowGroups[paneId])
     await expect(page.locator('[data-composer-target]')).toHaveCount(1)
     await expect(page.locator(SURFACE)).toHaveCount(0)
-    await expect(page.getByTestId('live-graph-task-feed')).toBeVisible()
+    await expect(page.getByTestId('scoped-task-feed-pane')).toBeVisible()
 
     const narrowScreenshot = testInfo.outputPath('task-feed-narrow-tab-fallback.png')
     await page.screenshot({ path: narrowScreenshot, fullPage: true })
