@@ -38,6 +38,52 @@ beforeEach(() => {
 })
 
 describe('Graph View pane store', () => {
+  it('migrates legacy descriptors to graph mode', async () => {
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        default: [
+          {
+            sessionRootId: 'root-id',
+            sourceSessionId: 'runtime-tip',
+            title: 'Legacy graph'
+          }
+        ]
+      })
+    )
+
+    const store = await import('./live-graph-panes')
+
+    expect(store.$liveGraphPanes.get()).toEqual([
+      expect.objectContaining({ key: 'default:root-id', mode: 'graph' })
+    ])
+  })
+
+  it('keeps one graph and one independently deduped feed for the same logical session', async () => {
+    const store = await import('./live-graph-panes')
+    const storedSession = session({ _lineage_root_id: 'root-id', id: 'runtime-tip' })
+
+    const graphPaneId = store.openLiveGraphPane(storedSession)
+
+    const feedPaneId = store.openScopedTaskFeedPane(storedSession, {
+      dock: 'right',
+      sourcePaneId: 'workspace'
+    })
+
+    const reopenedFeedPaneId = store.openScopedTaskFeedPane(
+      { ...storedSession, title: 'Renamed feed' },
+      { dock: 'right', sourcePaneId: 'workspace' }
+    )
+
+    expect(graphPaneId).toBe('live-graph:default:root-id')
+    expect(feedPaneId).toBe('live-graph:feed:default:root-id')
+    expect(reopenedFeedPaneId).toBe(feedPaneId)
+    expect(store.$liveGraphPanes.get()).toEqual([
+      expect.objectContaining({ key: 'default:root-id', mode: 'graph' }),
+      expect.objectContaining({ key: 'feed:default:root-id', mode: 'feed', title: 'Renamed feed' })
+    ])
+  })
+
   it('derives the pane source identity from the stored session owner and runtime tip', async () => {
     const store = await import('./live-graph-panes')
 
@@ -141,6 +187,7 @@ describe('Graph View pane store', () => {
         cwd: '',
         dock: 'center',
         key: 'default:root-id',
+        mode: 'graph',
         profile: 'default',
         sessionRootId: 'root-id',
         sourcePaneId: 'workspace',

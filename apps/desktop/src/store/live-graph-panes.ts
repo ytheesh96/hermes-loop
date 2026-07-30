@@ -15,11 +15,14 @@ import type { SessionInfo } from '@/types/hermes'
 
 export const LIVE_GRAPH_PANE_PREFIX = 'live-graph'
 
+export type LiveGraphPaneMode = 'feed' | 'graph'
+
 const STORAGE_KEY = 'hermes.desktop.liveGraphPanes.v1'
 
 export interface LiveGraphPaneDescriptor {
   /** Stable pane-mirror key: encoded profile + logical session root. */
   key: string
+  mode: LiveGraphPaneMode
   /** Active workspace/profile that owns and reveals this native pane. */
   profile: string
   sessionRootId: string
@@ -58,9 +61,16 @@ function cleanSourcePaneId(value: unknown): string {
 }
 
 const cleanDock = (value: unknown): 'center' | 'right' => (value === 'right' ? 'right' : 'center')
+const cleanMode = (value: unknown): LiveGraphPaneMode => (value === 'feed' ? 'feed' : 'graph')
 
-export function liveGraphPaneKey(profile: string, sessionRootId: string): string {
-  return `${encodeURIComponent(normalizeProfileKey(profile))}:${encodeURIComponent(sessionRootId.trim())}`
+export function liveGraphPaneKey(
+  profile: string,
+  sessionRootId: string,
+  mode: LiveGraphPaneMode = 'graph'
+): string {
+  const sessionKey = `${encodeURIComponent(normalizeProfileKey(profile))}:${encodeURIComponent(sessionRootId.trim())}`
+
+  return mode === 'feed' ? `feed:${sessionKey}` : sessionKey
 }
 
 export function liveGraphPaneIdForDescriptor(descriptor: LiveGraphPaneDescriptor): string {
@@ -81,11 +91,13 @@ function decodeStoredPane(value: unknown, profile: string): LiveGraphPaneDescrip
 
   const sourceSessionId = cleanString(raw.sourceSessionId) || sessionRootId
   const sourceProfile = normalizeProfileKey(cleanString(raw.sourceProfile) || profile)
+  const mode = cleanMode(raw.mode)
 
   return {
     cwd: cleanString(raw.cwd),
     dock: cleanDock(raw.dock),
-    key: liveGraphPaneKey(profile, sessionRootId),
+    key: liveGraphPaneKey(profile, sessionRootId, mode),
+    mode,
     profile,
     sessionRootId,
     sourcePaneId: cleanSourcePaneId(raw.sourcePaneId),
@@ -109,18 +121,18 @@ function loadPanesByProfile(): Record<string, LiveGraphPaneDescriptor[]> {
     }
 
     const profile = normalizeProfileKey(rawProfile)
-    const byRoot = new Map<string, LiveGraphPaneDescriptor>()
+    const byIdentity = new Map<string, LiveGraphPaneDescriptor>()
 
     for (const item of value) {
       const pane = decodeStoredPane(item, profile)
 
       if (pane) {
-        byRoot.set(pane.sessionRootId, pane)
+        byIdentity.set(`${pane.mode}\u0000${pane.sessionRootId}`, pane)
       }
     }
 
-    if (byRoot.size > 0) {
-      result[profile] = [...byRoot.values()]
+    if (byIdentity.size > 0) {
+      result[profile] = [...byIdentity.values()]
     }
   }
 
@@ -138,6 +150,7 @@ function storedPane(descriptor: LiveGraphPaneDescriptor): StoredLiveGraphPane {
   return {
     cwd: descriptor.cwd,
     dock: descriptor.dock,
+    mode: descriptor.mode,
     sessionRootId: descriptor.sessionRootId,
     sourcePaneId: descriptor.sourcePaneId,
     sourceProfile: descriptor.sourceProfile,
@@ -184,12 +197,14 @@ function sameLogicalSession(
   descriptor: LiveGraphPaneDescriptor,
   session: SessionInfo,
   rootId: string,
-  sourceProfile: string
+  sourceProfile: string,
+  mode: LiveGraphPaneMode
 ): boolean {
   const identities = new Set([rootId, session.id, ...(session._lineage_ids ?? [])])
 
   return (
     descriptor.sourceProfile === sourceProfile &&
+    descriptor.mode === mode &&
     (identities.has(descriptor.sessionRootId) || identities.has(descriptor.sourceSessionId))
   )
 }
@@ -204,8 +219,11 @@ export function liveGraphSessionSourceIdentity(
   }
 }
 
-/** Open or front exactly one native graph pane for a logical session. */
-export function openLiveGraphPane(session: SessionInfo, options: OpenLiveGraphPaneOptions = {}): string {
+function openSessionPane(
+  session: SessionInfo,
+  mode: LiveGraphPaneMode,
+  options: OpenLiveGraphPaneOptions = {}
+): string {
   const sourceIdentity = liveGraphSessionSourceIdentity(session)
   const profile = normalizeProfileKey(options.profile ?? activeProfile())
   const sessionRootId = sessionPinId(session).trim()
@@ -217,20 +235,23 @@ export function openLiveGraphPane(session: SessionInfo, options: OpenLiveGraphPa
   const current = panesByProfile[profile] ?? []
 
   const existing = current.find(pane =>
-    sameLogicalSession(pane, session, sessionRootId, sourceIdentity.sourceProfile)
+    sameLogicalSession(pane, session, sessionRootId, sourceIdentity.sourceProfile, mode)
   )
+
+  const key = liveGraphPaneKey(profile, sessionRootId, mode)
 
   const descriptor: LiveGraphPaneDescriptor = {
     cwd: session.cwd?.trim() || '',
     dock: options.dock === undefined ? (existing?.dock ?? 'center') : cleanDock(options.dock),
-    key: liveGraphPaneKey(profile, sessionRootId),
+    key,
+    mode,
     profile,
     sessionRootId,
     sourcePaneId: existing?.sourcePaneId ?? cleanSourcePaneId(options.sourcePaneId),
     sourceProfile: sourceIdentity.sourceProfile,
     sourceSessionId: sourceIdentity.sourceSessionId || sessionRootId,
     title: sessionTitle(session),
-    ...(existing && existing.key !== liveGraphPaneKey(profile, sessionRootId) ? { replacesKey: existing.key } : {})
+    ...(existing && existing.key !== key ? { replacesKey: existing.key } : {})
   }
 
   const next = existing ? current.map(pane => (pane === existing ? descriptor : pane)) : [...current, descriptor]
@@ -253,6 +274,16 @@ export function openLiveGraphPane(session: SessionInfo, options: OpenLiveGraphPa
   }
 
   return paneId
+}
+
+/** Open or front exactly one native graph pane for a logical session. */
+export function openLiveGraphPane(session: SessionInfo, options: OpenLiveGraphPaneOptions = {}): string {
+  return openSessionPane(session, 'graph', options)
+}
+
+/** Open or front exactly one full-body task feed pane for a logical session. */
+export function openScopedTaskFeedPane(session: SessionInfo, options: OpenLiveGraphPaneOptions = {}): string {
+  return openSessionPane(session, 'feed', options)
 }
 
 /** Close one graph tab and return focus to the chat pane it came from. */

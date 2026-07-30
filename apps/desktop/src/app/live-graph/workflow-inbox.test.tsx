@@ -134,17 +134,17 @@ describe('LiveGraphWorkflowInbox', () => {
 
     expect(
       [...container.querySelectorAll('[data-live-graph-task-card] > button:first-child')].every(element =>
-        element.className.includes('h-[8.5rem]')
+        element.className.includes('min-h-[8.5rem]')
       )
     ).toBe(true)
     expect(
       [...container.querySelectorAll('[data-live-graph-task-card-description]')].every(
-        element => element.className.includes('h-8') && element.className.includes('line-clamp-2')
+        element => !element.className.includes('line-clamp') && element.className.includes('break-words')
       )
     ).toBe(true)
     expect(
       [...container.querySelectorAll('[data-live-graph-task-card-title]')].every(
-        element => !element.className.includes('h-8') && element.className.includes('line-clamp-2')
+        element => !element.className.includes('line-clamp') && element.className.includes('break-words')
       )
     ).toBe(true)
     expect(

@@ -32,7 +32,7 @@ import { latestSessionTodos } from '@/lib/todos'
 import { $billingSettingsRequest } from '@/store/billing-block'
 import { setCronFocusJobId } from '@/store/cron'
 import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
-import { openLiveGraphPane } from '@/store/live-graph-panes'
+import { openScopedTaskFeedPane } from '@/store/live-graph-panes'
 import { $previewTarget } from '@/store/preview'
 import { $activeGatewayProfile, $freshSessionRequest, $profileScope, refreshActiveProfile } from '@/store/profile'
 import { $startWorkSessionRequest, followActiveSessionCwd } from '@/store/projects'
@@ -553,7 +553,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     const session = $sessions.get().find(candidate => sessionMatchesStoredId(candidate, sessionId))
 
     if (session) {
-      openLiveGraphPane(session, { dock, sourcePaneId: 'workspace' })
+      openScopedTaskFeedPane(session, { dock, sourcePaneId: 'workspace' })
     }
   }, [])
 
