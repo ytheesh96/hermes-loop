@@ -2,6 +2,7 @@ import { JsonRpcGatewayClient } from '@hermes/shared'
 
 import type {
   KanbanBoardsResponse,
+  LoopSessionCommentsSource,
   LoopTaskComment,
   LoopTaskDetail,
   LoopWorkerActivity,
@@ -766,6 +767,30 @@ export async function getLoopSessionSources(sessionId: string, profile?: string 
   }
 
   return matched
+}
+
+export async function getLoopSessionComments(
+  sessionId: string,
+  profile: string,
+  boards: readonly string[]
+): Promise<LoopSessionCommentsSource[]> {
+  const normalizedBoards = Array.from(new Set(boards.map(board => board.trim()).filter(Boolean)))
+  const results: LoopSessionCommentsSource[] = []
+
+  // Match session-source's serialized, all-or-nothing board hydration. A
+  // rejected refresh lets React Query preserve the previous complete thread.
+  for (const board of normalizedBoards) {
+    const query = new URLSearchParams({ session_id: sessionId, board })
+
+    const source = await window.hermesDesktop.api<LoopSessionCommentsSource>({
+      profile,
+      path: `/api/plugins/kanban/session-comments?${query.toString()}`
+    })
+
+    results.push({ ...source, board })
+  }
+
+  return results
 }
 
 function kanbanBoardQuery(board?: null | string): string {

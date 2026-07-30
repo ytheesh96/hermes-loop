@@ -1494,6 +1494,66 @@ def get_session_source(
             conn.close()
 
 
+@router.get("/session-comments")
+def get_session_comments(
+    session_id: Optional[str] = Query(
+        None,
+        description="Current Loop session id; defaults to HERMES_SESSION_ID when omitted",
+    ),
+    tenant: Optional[str] = Query(None),
+    include_archived: bool = Query(False),
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    """Return canonical comments for tasks in one session-scoped board projection."""
+    selected_board = _resolve_board(board)
+    lineage_session_ids = _session_compression_lineage(session_id)
+    if not lineage_session_ids:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    explicit_tenant = (tenant or "").strip() or None
+    conn = _conn(board=selected_board)
+    try:
+        rows, _, _ = _query_session_source_rows(
+            conn,
+            lineage_session_ids,
+            explicit_tenant=explicit_tenant,
+            include_archived=include_archived,
+            referenced_task_ids=_loop_tool_task_ids_for_sessions(lineage_session_ids),
+        )
+        task_ids = [str(row["id"]) for row in rows]
+        comments: list[dict[str, Any]] = []
+        if task_ids:
+            comment_rows = conn.execute(
+                f"""
+                SELECT
+                    c.id,
+                    c.task_id,
+                    c.author,
+                    c.body,
+                    c.created_at,
+                    t.title AS task_title,
+                    t.status AS task_status,
+                    t.workflow_id
+                FROM task_comments c
+                JOIN tasks t ON t.id = c.task_id
+                WHERE c.task_id IN ({','.join('?' for _ in task_ids)})
+                ORDER BY c.created_at ASC, c.task_id ASC, c.id ASC
+                """,
+                tuple(task_ids),
+            ).fetchall()
+            comments = [dict(row) for row in comment_rows]
+
+        return {
+            "board": selected_board,
+            "session_id": (session_id or os.environ.get("HERMES_SESSION_ID") or "").strip(),
+            "lineage_session_ids": lineage_session_ids,
+            "latest_comment_id": max((int(comment["id"]) for comment in comments), default=0),
+            "comments": comments,
+        }
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # GET /workflow-overview
 # ---------------------------------------------------------------------------

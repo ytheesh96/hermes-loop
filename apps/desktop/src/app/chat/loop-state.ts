@@ -237,6 +237,20 @@ export interface LoopTaskComment {
   task_id?: string
 }
 
+export interface LoopSessionComment extends LoopTaskComment {
+  task_status?: null | string
+  task_title?: null | string
+  workflow_id?: null | string
+}
+
+export interface LoopSessionCommentsSource {
+  board: string
+  comments: LoopSessionComment[]
+  latest_comment_id?: number
+  lineage_session_ids?: string[]
+  session_id?: string
+}
+
 export interface LoopTaskRun extends LoopLatestRun {
   ended_at?: null | number
   outcome?: null | string

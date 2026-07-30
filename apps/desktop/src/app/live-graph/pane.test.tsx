@@ -3,7 +3,7 @@ import { act, cleanup, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TaskFeedLauncherRow } from '@/app/chat/composer/status-stack/task-feed-launcher-row'
-import type { TenantLoopSource } from '@/app/chat/loop-state'
+import type { LoopSessionCommentsSource, TenantLoopSource } from '@/app/chat/loop-state'
 import type * as HermesExports from '@/hermes'
 import { I18nProvider } from '@/i18n'
 import type { SessionInfo } from '@/types/hermes'
@@ -13,12 +13,14 @@ import type { LiveGraphSnapshot, SessionLiveGraphInput } from './model'
 const mocks = vi.hoisted(() => ({
   buildGraph: vi.fn<(input: SessionLiveGraphInput) => LiveGraphSnapshot>(() => ({ edges: [], nodes: [] })),
   detectPulses: vi.fn(() => []),
+  getComments: vi.fn<() => Promise<LoopSessionCommentsSource[]>>(async () => []),
   getSources: vi.fn<() => Promise<TenantLoopSource[]>>(async () => [{ board: 'default', tasks: [] }]),
   view: vi.fn()
 }))
 
 vi.mock('@/hermes', async importOriginal => ({
   ...(await importOriginal<typeof HermesExports>()),
+  getLoopSessionComments: mocks.getComments,
   getLoopSessionSources: mocks.getSources
 }))
 
@@ -60,6 +62,7 @@ beforeEach(() => {
   vi.resetModules()
   mocks.buildGraph.mockClear()
   mocks.detectPulses.mockClear()
+  mocks.getComments.mockClear()
   mocks.getSources.mockClear()
   mocks.view.mockClear()
 })
@@ -90,6 +93,68 @@ async function setup() {
 }
 
 describe('native Graph View panes', () => {
+  it('polls comments only for the active Messages view through the stored source profile', async () => {
+    mocks.getSources.mockResolvedValue([
+      { board: 'alpha', session_id: 'runtime-tip', tasks: [{ id: 'task-1', status: 'running', title: 'Task one' }] }
+    ])
+    mocks.buildGraph.mockReturnValue({
+      edges: [],
+      nodes: [{ board: 'alpha', entityId: 'task-1', id: 'task:alpha:task-1', kind: 'task', label: 'Task one' }]
+    })
+    mocks.getComments.mockResolvedValue([
+      {
+        board: 'alpha',
+        comments: [
+          {
+            author: 'Builder',
+            body: 'Live update',
+            created_at: 10,
+            id: 1,
+            task_id: 'task-1',
+            task_status: 'running',
+            task_title: 'Task one'
+          }
+        ]
+      }
+    ])
+
+    const { $activeGatewayProfile } = await import('@/store/profile')
+    $activeGatewayProfile.set('active-profile')
+    const { registry, store } = await setup()
+
+    const paneId = store.openLiveGraphPane(
+      session({ _lineage_root_id: 'root-id', id: 'runtime-tip', profile: 'session-profile' })
+    )
+
+    const contribution = registry.getArea('panes').find(candidate => candidate.id === paneId)!
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    render(<QueryClientProvider client={queryClient}>{contribution.render?.()}</QueryClientProvider>)
+    await waitFor(() => expect(mocks.view).toHaveBeenCalled())
+    expect(mocks.getComments).not.toHaveBeenCalled()
+
+    const initialView = mocks.view.mock.calls.at(-1)?.[0] as {
+      onMessageViewChange: (view: 'messages' | 'tasks') => void
+    }
+
+    act(() => initialView.onMessageViewChange('messages'))
+
+    await waitFor(() =>
+      expect(mocks.getComments).toHaveBeenCalledWith('runtime-tip', 'session-profile', ['alpha'])
+    )
+    expect(queryClient.getQueryData(['loop-session-comments', 'session-profile', 'runtime-tip'])).toEqual(
+      mocks.getComments.mock.results.at(-1)?.value ? await mocks.getComments.mock.results.at(-1)?.value : []
+    )
+    await waitFor(() => {
+      const messagesView = mocks.view.mock.calls.at(-1)?.[0] as {
+        messageThread?: { messages?: Array<{ body: string }> }
+      }
+
+      expect(messagesView.messageThread?.messages).toEqual([expect.objectContaining({ body: 'Live update' })])
+    })
+    expect(queryClient.getQueryData(['loop-session-comments', 'active-profile', 'runtime-tip'])).toBeUndefined()
+  })
+
   it('mounts a cross-profile pane and shares its source identity and task count with the composer row', async () => {
     const sources: TenantLoopSource[] = [
       {

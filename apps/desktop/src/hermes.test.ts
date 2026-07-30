@@ -18,6 +18,7 @@ import {
   getKanbanCapabilities,
   getLoopAssignees,
   getLoopCanvasPositions,
+  getLoopSessionComments,
   getLoopSessionSource,
   getLoopSessionSources,
   getLoopTaskDetail,
@@ -375,6 +376,45 @@ describe('Hermes REST helpers', () => {
       path: '/api/plugins/kanban/session-source?session_id=session-1&board=developer',
       profile: 'peacock'
     })
+  })
+
+  it('loads session comments atomically from graph source boards through the source profile', async () => {
+    api.mockImplementation(({ path }: { path: string }) => {
+      if (path.endsWith('board=alpha')) {
+        return Promise.resolve({ board: 'alpha', comments: [{ body: 'Alpha', id: 1, task_id: 'a' }] })
+      }
+
+      if (path.endsWith('board=beta')) {
+        return Promise.resolve({ board: 'wrong', comments: [{ body: 'Beta', id: 1, task_id: 'b' }] })
+      }
+
+      return Promise.reject(new Error(`Unexpected request: ${path}`))
+    })
+
+    await expect(getLoopSessionComments('session-1', 'session-profile', ['alpha', 'beta'])).resolves.toEqual([
+      { board: 'alpha', comments: [{ body: 'Alpha', id: 1, task_id: 'a' }] },
+      { board: 'beta', comments: [{ body: 'Beta', id: 1, task_id: 'b' }] }
+    ])
+    expect(api.mock.calls.map(call => call[0])).toEqual([
+      {
+        path: '/api/plugins/kanban/session-comments?session_id=session-1&board=alpha',
+        profile: 'session-profile'
+      },
+      {
+        path: '/api/plugins/kanban/session-comments?session_id=session-1&board=beta',
+        profile: 'session-profile'
+      }
+    ])
+
+    api.mockImplementation(({ path }: { path: string }) =>
+      path.endsWith('board=beta')
+        ? Promise.reject(new Error('beta unavailable'))
+        : Promise.resolve({ board: 'alpha', comments: [] })
+    )
+
+    await expect(getLoopSessionComments('session-1', 'session-profile', ['alpha', 'beta'])).rejects.toThrow(
+      'beta unavailable'
+    )
   })
 
   it('rejects an all-board Loop snapshot when any board is unreadable', async () => {

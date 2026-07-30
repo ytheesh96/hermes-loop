@@ -1,11 +1,11 @@
 import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { paneMirror } from '@/app/chat/pane-mirror'
 import { findGroupOfPane } from '@/components/pane-shell/tree/model'
 import { $layoutTree } from '@/components/pane-shell/tree/store'
-import { getLoopSessionSources } from '@/hermes'
+import { getLoopSessionComments, getLoopSessionSources } from '@/hermes'
 import { translateNow } from '@/i18n'
 import {
   $liveGraphPanes,
@@ -19,8 +19,9 @@ import { $projects, $projectTree, projectIdForCwd } from '@/store/projects'
 import { $sessions, sessionMatchesStoredId } from '@/store/session'
 import { $subagentsBySession } from '@/store/subagents'
 
+import { normalizeSessionMessages } from './messages'
 import { buildSessionLiveGraph, detectLiveGraphPulses, type LiveGraphPulse, type LiveGraphSnapshot } from './model'
-import { LiveGraphPaneView } from './view'
+import { LiveGraphPaneView, type LiveGraphSidebarView } from './view'
 
 const ACTIVE_REFETCH_MS = 2_000
 
@@ -50,6 +51,7 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
   useStore($projectTree)
   const sessions = useStore($sessions)
   const subagentsBySession = useStore($subagentsBySession)
+  const [sidebarView, setSidebarView] = useState<LiveGraphSidebarView>('tasks')
   const paneId = liveGraphPaneIdForDescriptor(descriptor)
   const group = layoutTree ? findGroupOfPane(layoutTree, paneId) : null
   const active = group?.active === paneId
@@ -116,6 +118,26 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
     ]
   )
 
+  const sourceBoards = useMemo(
+    () => Array.from(new Set((sourceQuery.data ?? []).map(source => source.board?.trim() || 'default'))),
+    [sourceQuery.data]
+  )
+
+  const commentsQuery = useQuery({
+    queryKey: ['loop-session-comments', descriptor.sourceProfile, descriptor.sourceSessionId],
+    queryFn: () => getLoopSessionComments(descriptor.sourceSessionId, descriptor.sourceProfile, sourceBoards),
+    enabled: active && sidebarView === 'messages' && sourceQuery.data !== undefined,
+    placeholderData: previous => previous,
+    refetchInterval: active && sidebarView === 'messages' ? ACTIVE_REFETCH_MS : false,
+    refetchOnWindowFocus: true,
+    staleTime: ACTIVE_REFETCH_MS
+  })
+
+  const messages = useMemo(
+    () => normalizeSessionMessages(descriptor.sourceProfile, commentsQuery.data ?? [], activeGraph?.nodes ?? []),
+    [activeGraph?.nodes, commentsQuery.data, descriptor.sourceProfile]
+  )
+
   const previousGraphRef = useRef<LiveGraphSnapshot | null>(null)
   const lastRenderedGraphRef = useRef<LiveGraphSnapshot | null>(null)
   const lastRenderedPulsesRef = useRef<readonly LiveGraphPulse[]>([])
@@ -152,6 +174,18 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
       }
       graph={graph}
       loading={sourceQuery.isLoading}
+      messageThread={{
+        error:
+          commentsQuery.error instanceof Error
+            ? commentsQuery.error.message
+            : commentsQuery.error
+              ? String(commentsQuery.error)
+              : null,
+        loading: commentsQuery.isLoading,
+        messages,
+        onRetry: () => void commentsQuery.refetch()
+      }}
+      onMessageViewChange={setSidebarView}
       pulses={pulses}
     />
   )

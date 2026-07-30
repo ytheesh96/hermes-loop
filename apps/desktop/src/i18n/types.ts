@@ -1034,6 +1034,12 @@ export interface Translations {
     showLess: string
     taskInbox: string
     taskFeed: string
+    tasksTab: string
+    messagesTab: string
+    messagesLoading: string
+    messagesEmpty: string
+    messagesLoadFailed: string
+    messagesStale: string
     workflowInbox: string
     workflowFeed: string
     allTasks: string

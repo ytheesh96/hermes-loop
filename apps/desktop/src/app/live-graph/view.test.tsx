@@ -2901,6 +2901,48 @@ describe('LiveGraphCanvas', () => {
     })
   })
 
+  it('switches the scoped sidebar to read-only messages and opens provenance on task comments', async () => {
+    const onMessageViewChange = vi.fn()
+
+    render(
+      <LiveGraphCanvas
+        graph={sixKindGraph}
+        initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }}
+        initialTaskFeedOpen
+        messageThread={{
+          messages: [
+            {
+              author: 'Builder',
+              board: 'default',
+              body: 'Ready for review.',
+              createdAt: 1_700_000_000,
+              id: 'profile\u0000default\u00001',
+              status: 'running',
+              taskId: 'running',
+              taskTitle: 'Running task',
+              workflowId: 'types'
+            }
+          ],
+          onRetry: vi.fn()
+        }}
+        onMessageViewChange={onMessageViewChange}
+      />
+    )
+
+    const feed = await screen.findByTestId('live-graph-task-feed')
+    fireEvent.click(within(feed).getByRole('button', { name: 'Messages' }))
+
+    expect(onMessageViewChange).toHaveBeenCalledWith('messages')
+    expect(within(feed).getByText('Ready for review.')).toBeTruthy()
+    expect(within(feed).queryByRole('textbox')).toBeNull()
+
+    fireEvent.click(within(feed).getByRole('button', { name: 'View task: Running task' }))
+
+    const inspector = await screen.findByTestId('live-graph-selection-inspector')
+    expect(within(inspector).getByRole('button', { name: 'Comments' }).getAttribute('aria-pressed')).toBe('true')
+    expect(onMessageViewChange).toHaveBeenLastCalledWith('tasks')
+  })
+
   it('opens a session-scoped task feed from an initial Graph View selection', async () => {
     const sessionNodeId = 'session:types'
 

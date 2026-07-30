@@ -1940,6 +1940,146 @@ def test_session_source_returns_non_archived_tenant_tasks_across_compression_lin
     assert child_payload["session_id"] == "tip-session"
 
 
+def test_session_comments_projects_only_non_archived_lineage_task_comments(client, kanban_home):
+    from hermes_state import SessionDB
+
+    session_db = SessionDB()
+    try:
+        session_db.create_session("comments-root", "cli")
+        session_db.end_session("comments-root", "compression")
+        session_db.create_session("comments-tip", "cli", parent_session_id="comments-root")
+    finally:
+        session_db.close()
+
+    conn = kb.connect()
+    try:
+        root = kb.create_task(
+            conn,
+            title="Root review",
+            tenant="comments-tenant",
+            session_id="comments-root",
+        )
+        child = kb.create_task(
+            conn,
+            title="Tip implementation",
+            tenant="comments-tenant",
+            session_id="comments-tip",
+            parents=[root],
+        )
+        archived = kb.create_task(
+            conn,
+            title="Archived task",
+            tenant="comments-tenant",
+            session_id="comments-tip",
+        )
+        unrelated = kb.create_task(
+            conn,
+            title="Other session",
+            tenant="comments-tenant",
+            session_id="other-session",
+        )
+        root_comment = kb.add_comment(conn, root, "reviewer-qa", "Root is ready")
+        child_comment = kb.add_comment(conn, child, "builder", "Child is green")
+        archived_comment = kb.add_comment(conn, archived, "builder", "Do not expose")
+        kb.add_comment(conn, unrelated, "builder", "Wrong session")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'archived' WHERE id = ?", (archived,))
+            conn.execute("UPDATE task_comments SET created_at = 100 WHERE id = ?", (child_comment,))
+            conn.execute("UPDATE task_comments SET created_at = 200 WHERE id = ?", (root_comment,))
+    finally:
+        conn.close()
+
+    response = client.get(
+        "/api/plugins/kanban/session-comments",
+        params={
+            "session_id": "comments-tip",
+            "tenant": "comments-tenant",
+            "board": "default",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["board"] == "default"
+    assert payload["session_id"] == "comments-tip"
+    assert payload["lineage_session_ids"] == ["comments-root", "comments-tip"]
+    assert payload["latest_comment_id"] == max(root_comment, child_comment)
+    assert payload["comments"] == [
+        {
+            "id": child_comment,
+            "task_id": child,
+            "author": "builder",
+            "body": "Child is green",
+            "created_at": 100,
+            "task_title": "Tip implementation",
+            "task_status": "todo",
+            "workflow_id": None,
+        },
+        {
+            "id": root_comment,
+            "task_id": root,
+            "author": "reviewer-qa",
+            "body": "Root is ready",
+            "created_at": 200,
+            "task_title": "Root review",
+            "task_status": "ready",
+            "workflow_id": None,
+        },
+    ]
+    assert archived_comment not in {comment["id"] for comment in payload["comments"]}
+
+
+def test_session_comments_is_board_scoped_and_returns_an_empty_projection(client):
+    default_conn = kb.connect()
+    try:
+        default_task = kb.create_task(
+            default_conn,
+            title="Default board task",
+            session_id="board-session",
+        )
+        kb.add_comment(default_conn, default_task, "default-author", "Default comment")
+    finally:
+        default_conn.close()
+
+    kb.create_board("other-board")
+    other_conn = kb.connect(board="other-board")
+    try:
+        other_task = kb.create_task(
+            other_conn,
+            title="Other board task",
+            session_id="board-session",
+        )
+        other_comment = kb.add_comment(other_conn, other_task, "other-author", "Other comment")
+    finally:
+        other_conn.close()
+
+    other_response = client.get(
+        "/api/plugins/kanban/session-comments",
+        params={"session_id": "board-session", "board": "other-board"},
+    )
+    empty_response = client.get(
+        "/api/plugins/kanban/session-comments",
+        params={"session_id": "missing-session", "board": "other-board"},
+    )
+
+    assert other_response.status_code == 200, other_response.text
+    assert other_response.json()["comments"] == [
+        {
+            "id": other_comment,
+            "task_id": other_task,
+            "author": "other-author",
+            "body": "Other comment",
+            "created_at": other_response.json()["comments"][0]["created_at"],
+            "task_title": "Other board task",
+            "task_status": "ready",
+            "workflow_id": None,
+        }
+    ]
+    assert empty_response.status_code == 200, empty_response.text
+    assert empty_response.json()["latest_comment_id"] == 0
+    assert empty_response.json()["comments"] == []
+
+
 def test_session_source_includes_loop_tool_referenced_worker_rows(client, kanban_home):
     """Composer Loop rows should recover durable rows referenced by the chat.
 

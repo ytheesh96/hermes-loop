@@ -24,11 +24,12 @@ export interface LiveGraphTaskTarget {
   workflowId?: string
 }
 
-type LiveGraphTaskInspectorFilter = 'activity' | 'comments' | 'details'
+export type LiveGraphTaskInspectorFilter = 'activity' | 'comments' | 'details'
 
 interface LiveGraphTaskInspectorContentProps {
   detail?: LoopTaskDetail | null
   detailError?: string
+  initialFilter?: LiveGraphTaskInspectorFilter
   loading?: boolean
   node: LiveGraphNode
   onAddComment?: (body: string) => Promise<void>
@@ -218,6 +219,7 @@ function TaskCommentComposer({
 function LiveGraphTaskInspectorContent({
   detail,
   detailError,
+  initialFilter = 'activity',
   loading = false,
   node,
   onAddComment,
@@ -229,7 +231,7 @@ function LiveGraphTaskInspectorContent({
   workerSessionId
 }: LiveGraphTaskInspectorContentProps) {
   const { t } = useI18n()
-  const [filter, setFilter] = useState<LiveGraphTaskInspectorFilter>('activity')
+  const [filter, setFilter] = useState<LiveGraphTaskInspectorFilter>(initialFilter)
   const task = detail?.task
   const comments = detail?.comments ?? []
   const runs = detail?.runs ?? []
