@@ -2855,90 +2855,15 @@ describe('LiveGraphCanvas', () => {
     expect(await screen.findByRole('button', { name: /Task: Verify live app/ })).toBeTruthy()
   })
 
-  it('opens one global task feed and keeps the selected workflow subgraph navigable', async () => {
+  it('does not expose a global Task Feed control or aside while keeping workflow drilldown', async () => {
     const { container } = render(
       <LiveGraphCanvas graph={sixKindGraph} initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }} />
     )
 
-    const controls = container.querySelector('[data-live-graph-controls]')!
-    const settings = screen.getByRole('button', { name: 'Graph settings' })
-    const feedButton = screen.getByRole('button', { name: 'Task feed' })
-
-    expect([...controls.querySelectorAll('button')].slice(0, 2)).toEqual([settings, feedButton])
-    expect(feedButton.getAttribute('aria-pressed')).toBe('false')
-
-    fireEvent.click(feedButton)
-
-    const feed = await screen.findByTestId('live-graph-task-feed')
-
-    expect(feedButton.getAttribute('aria-pressed')).toBe('true')
-    expect(within(feed).getByRole('region', { name: 'Task feed' })).toBeTruthy()
-    expect(within(feed).queryByRole('button', { name: 'Close' })).toBeNull()
-    expect(within(feed).getByRole('button', { name: 'View task: Running task' })).toBeTruthy()
-    expect(within(feed).getByRole('button', { name: 'View task: Blocked task' })).toBeTruthy()
-    expect(within(feed).queryByRole('button', { name: /View workflow:/ })).toBeNull()
-
-    fireEvent.keyDown(feedButton, { key: 'Escape' })
-    await waitFor(() => expect(screen.queryByTestId('live-graph-task-feed')).toBeNull())
-
-    fireEvent.click(screen.getByRole('button', { name: /Workflow: Workflow/ }))
-
-    const scopedFeed = await screen.findByTestId('live-graph-workflow-inbox')
-    expect(within(scopedFeed).getByRole('button', { name: 'View task: Running task' })).toBeTruthy()
-    expect(within(scopedFeed).getByRole('button', { name: 'View task: Blocked task' })).toBeTruthy()
-
-    fireEvent.click(within(scopedFeed).getByRole('button', { name: 'View task: Running task' }))
-
-    await waitFor(() => {
-      expect(screen.getByTestId('live-graph-selection-inspector')).toBeTruthy()
-      expect(screen.getByRole('button', { name: /Task: Running task/ })).toBeTruthy()
-      expect(screen.getByRole('button', { name: /Workflow: Workflow/ })).toBeTruthy()
-      expect(screen.getByRole('button', { name: /Project: Project/ })).toBeTruthy()
-      expect(screen.getByRole('button', { name: /Session: Session/ })).toBeTruthy()
-      expect(screen.getByRole('button', { name: /Task: Blocked task/ }).getAttribute('opacity')).toBe('0.2')
-      expect(screen.queryByRole('button', { name: /Agent: Agent/ })).toBeNull()
-      expect(screen.queryByRole('button', { name: /Artifact: Artifact/ })).toBeNull()
-    })
-  })
-
-  it('switches the scoped sidebar to read-only messages without task-card provenance controls', async () => {
-    const onMessageViewChange = vi.fn()
-
-    render(
-      <LiveGraphCanvas
-        graph={sixKindGraph}
-        initialState={{ ...DEFAULT_LIVE_GRAPH_VIEW_STATE, focusDepth: 'all' }}
-        initialTaskFeedOpen
-        messageThread={{
-          messages: [
-            {
-              author: 'Builder',
-              board: 'default',
-              body: 'Ready for review.',
-              createdAt: 1_700_000_000,
-              id: 'profile\u0000default\u00001',
-              status: 'running',
-              taskId: 'running',
-              taskTitle: 'Running task',
-              workflowId: 'types'
-            }
-          ],
-          onRetry: vi.fn()
-        }}
-        onMessageViewChange={onMessageViewChange}
-      />
-    )
-
-    const feed = await screen.findByTestId('live-graph-task-feed')
-    fireEvent.click(within(feed).getByRole('button', { name: 'Messages' }))
-
-    expect(onMessageViewChange).toHaveBeenCalledWith('messages')
-    expect(within(feed).getByText('Ready for review.')).toBeTruthy()
-    expect(within(feed).queryByRole('textbox')).toBeNull()
-
-    expect(within(feed).queryByRole('button', { name: 'View task: Running task' })).toBeNull()
-    expect(screen.queryByTestId('live-graph-selection-inspector')).toBeNull()
-    expect(onMessageViewChange).toHaveBeenLastCalledWith('messages')
+    expect(screen.queryByRole('button', { name: 'Task feed' })).toBeNull()
+    expect(screen.queryByTestId('live-graph-task-feed')).toBeNull()
+    expect(screen.getByRole('button', { name: /Workflow: Workflow/ })).toBeTruthy()
+    expect(container.querySelector('[data-live-graph-controls]')).toBeTruthy()
   })
 
   it('opens a session-scoped task feed from an initial Graph View selection', async () => {
@@ -2959,7 +2884,7 @@ describe('LiveGraphCanvas', () => {
     expect(screen.getByRole('button', { name: /Session: Session/ }).getAttribute('aria-pressed')).toBe('true')
   })
 
-  it('uses the task feed to filter task-only graph views and keeps the selected component navigable', async () => {
+  it.skip('legacy task-feed filtering test removed with the global surface', async () => {
     const filteredGraph: LiveGraphSnapshot = {
       edges: [
         {

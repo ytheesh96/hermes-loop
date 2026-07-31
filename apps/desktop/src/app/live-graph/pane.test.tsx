@@ -116,21 +116,7 @@ describe('native Graph View panes', () => {
     expect(await findByTestId('scoped-task-feed-view')).toBeTruthy()
     expect(mocks.feedView).toHaveBeenCalledWith(expect.objectContaining({ sourceProfile: 'default' }))
     expect(mocks.view).not.toHaveBeenCalled()
-    expect(mocks.getThreads).not.toHaveBeenCalled()
-
-    const feed = mocks.feedView.mock.calls.at(-1)?.[0] as {
-      onViewChange: (view: 'messages' | 'tasks') => void
-    }
-
-    act(() => feed.onViewChange('messages'))
     await waitFor(() => expect(mocks.getThreads).toHaveBeenCalledWith('session-one', 'default', ['default'], {}))
-
-    act(() => feed.onViewChange('tasks'))
-    const stoppedCount = mocks.getThreads.mock.calls.length
-    await act(async () => {
-      await queryClient.invalidateQueries({ queryKey: ['loop-session-threads'] })
-    })
-    expect(mocks.getThreads).toHaveBeenCalledTimes(stoppedCount)
   })
 
   it('polls comments only for the active Messages view through the stored source profile', async () => {
@@ -185,33 +171,8 @@ describe('native Graph View panes', () => {
 
     render(<QueryClientProvider client={queryClient}>{contribution.render?.()}</QueryClientProvider>)
     await waitFor(() => expect(mocks.view).toHaveBeenCalled())
-    expect(mocks.view.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({ initialTaskFeedOpen: true }))
+    expect(mocks.view.mock.calls.at(-1)?.[0]).not.toHaveProperty('messageThread')
     expect(mocks.getThreads).not.toHaveBeenCalled()
-
-    const initialView = mocks.view.mock.calls.at(-1)?.[0] as {
-      onMessageViewChange: (view: 'messages' | 'tasks') => void
-    }
-
-    act(() => initialView.onMessageViewChange('messages'))
-
-    await waitFor(() =>
-      expect(mocks.getThreads).toHaveBeenCalledWith('runtime-tip', 'session-profile', ['alpha'], {})
-    )
-    await waitFor(() => {
-      const messagesView = mocks.view.mock.calls.at(-1)?.[0] as {
-        graph?: LiveGraphSnapshot
-        messageThread?: { messages?: Array<{ body: string }> }
-      }
-
-      expect(messagesView.graph?.nodes).toEqual([
-        expect.objectContaining({ entityId: 'task-1', kind: 'task' })
-      ])
-      expect(messagesView.messageThread?.messages).toEqual([
-        expect.objectContaining({ body: 'Original request', kind: 'root' }),
-        expect.objectContaining({ body: 'Live update', kind: 'reply' })
-      ])
-    })
-    expect(mocks.getThreads).not.toHaveBeenCalledWith('runtime-tip', 'active-profile', ['alpha'], expect.anything())
   })
 
   it('mounts a cross-profile pane and shares its source identity and task count with the composer row', async () => {
@@ -263,19 +224,25 @@ describe('native Graph View panes', () => {
     )
 
     expect(descriptor).toEqual(
-      expect.objectContaining({ profile: 'active-profile', sourceProfile: 'session-profile', sourceSessionId: 'runtime-tip' })
+      expect.objectContaining({
+        profile: 'active-profile',
+        sourceProfile: 'session-profile',
+        sourceSessionId: 'runtime-tip'
+      })
     )
-    expect(await findByRole('button', { name: /Task feed 1 pending task, 1 completed task, 1 blocked task/ })).toBeTruthy()
+    expect(
+      await findByRole('button', { name: /Messages 1 pending task, 1 completed task, 1 blocked task/ })
+    ).toBeTruthy()
     await waitFor(() => expect(mocks.getSources).toHaveBeenCalledWith('runtime-tip', 'session-profile'))
     expect(queryClient.getQueryData(['loop-session-source', 'session-profile', 'runtime-tip'])).toEqual(sources)
     expect(queryClient.getQueryData(['loop-session-source', 'active-profile', 'runtime-tip'])).toBeUndefined()
-    expect(mocks.buildGraph).toHaveBeenLastCalledWith(
-      expect.objectContaining({ profile: 'session-profile', sources })
-    )
+    expect(mocks.buildGraph).toHaveBeenLastCalledWith(expect.objectContaining({ profile: 'session-profile', sources }))
 
-    const mountedGraph = (mocks.view.mock.calls.at(-1)?.[0] as {
-      graph?: { nodes: Array<{ kind: string }> }
-    }).graph
+    const mountedGraph = (
+      mocks.view.mock.calls.at(-1)?.[0] as {
+        graph?: { nodes: Array<{ kind: string }> }
+      }
+    ).graph
 
     expect(mountedGraph?.nodes.filter(node => node.kind === 'task')).toHaveLength(3)
   })

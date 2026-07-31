@@ -34,13 +34,7 @@ function renderRow(
     <QueryClientProvider client={queryClient}>
       <I18nProvider configClient={null}>
         <Profiler id="task-feed-launcher" onRender={onRender}>
-          <TaskFeedLauncherRow
-            enabled
-            onOpen={onOpen}
-            profile="peacock"
-            sourceSessionId="session-1"
-            {...props}
-          />
+          <TaskFeedLauncherRow enabled onOpen={onOpen} profile="peacock" sourceSessionId="session-1" {...props} />
         </Profiler>
       </I18nProvider>
     </QueryClientProvider>
@@ -62,13 +56,11 @@ afterEach(() => {
 describe('TaskFeedLauncherRow', () => {
   it('opens beside chat on wide windows and keeps Shift-click as the center-tab gesture', async () => {
     vi.stubGlobal('innerWidth', 1280)
-    mocks.getLoopSessionSources.mockResolvedValue([
-      source(['scheduled', 'running', 'succeeded', 'review_required'])
-    ])
+    mocks.getLoopSessionSources.mockResolvedValue([source(['scheduled', 'running', 'succeeded', 'review_required'])])
     const { onOpen } = renderRow()
 
     const launcher = await screen.findByRole('button', {
-      name: /Task feed 2 pending tasks, 1 completed task, 1 blocked task/
+      name: /Messages 2 pending tasks, 1 completed task, 1 blocked task/
     })
 
     expect(launcher.className).toContain('task-feed-launcher-row')
@@ -85,7 +77,7 @@ describe('TaskFeedLauncherRow', () => {
     mocks.getLoopSessionSources.mockResolvedValue([source(['running'])])
     const { onOpen } = renderRow()
 
-    fireEvent.click(await screen.findByRole('button', { name: /Task feed 1 pending task/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Messages 1 pending task/ }))
 
     expect(onOpen).toHaveBeenCalledWith('session-1', 'center')
   })
@@ -98,7 +90,7 @@ describe('TaskFeedLauncherRow', () => {
 
     await act(async () => undefined)
     expect(mocks.getLoopSessionSources).not.toHaveBeenCalled()
-    expect(screen.queryByRole('button', { name: /Task feed/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Messages/ })).toBeNull()
   })
 
   it('stays hidden when the scoped graph has no tasks', async () => {
@@ -106,7 +98,7 @@ describe('TaskFeedLauncherRow', () => {
     renderRow()
 
     await waitFor(() => expect(mocks.getLoopSessionSources).toHaveBeenCalledOnce())
-    expect(screen.queryByRole('button', { name: /Task feed/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Messages/ })).toBeNull()
   })
 
   it('updates from query invalidation without the graph pane being open', async () => {
@@ -115,13 +107,13 @@ describe('TaskFeedLauncherRow', () => {
       .mockResolvedValueOnce([source(['completed', 'blocked'])])
     const { queryClient } = renderRow()
 
-    expect(await screen.findByRole('button', { name: /Task feed 1 pending task/ })).toBeTruthy()
+    expect(await screen.findByRole('button', { name: /Messages 1 pending task/ })).toBeTruthy()
 
     await act(async () => {
       await queryClient.invalidateQueries({ queryKey: ['loop-session-source'] })
     })
 
-    expect(await screen.findByRole('button', { name: /Task feed 1 completed task, 1 blocked task/ })).toBeTruthy()
+    expect(await screen.findByRole('button', { name: /Messages 1 completed task, 1 blocked task/ })).toBeTruthy()
   })
 
   it('polls active tasks at 2 seconds and idle tasks at 10 seconds', async () => {

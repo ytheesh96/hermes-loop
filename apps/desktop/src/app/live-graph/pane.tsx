@@ -22,7 +22,7 @@ import { $subagentsBySession } from '@/store/subagents'
 import { mergeSessionThreadSources, normalizeSessionThreads } from './messages'
 import { buildSessionLiveGraph, detectLiveGraphPulses, type LiveGraphPulse, type LiveGraphSnapshot } from './model'
 import { ScopedTaskFeedPaneView } from './scoped-task-feed'
-import { LiveGraphPaneView, type LiveGraphSidebarView } from './view'
+import { LiveGraphPaneView } from './view'
 
 const ACTIVE_REFETCH_MS = 2_000
 
@@ -52,7 +52,8 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
   useStore($projectTree)
   const sessions = useStore($sessions)
   const subagentsBySession = useStore($subagentsBySession)
-  const [sidebarView, setSidebarView] = useState<LiveGraphSidebarView>('tasks')
+  const [messagesVisible, setMessagesVisible] = useState(true)
+
   const paneId = liveGraphPaneIdForDescriptor(descriptor)
   const group = layoutTree ? findGroupOfPane(layoutTree, paneId) : null
   const active = group?.active === paneId
@@ -147,8 +148,8 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
       threadSourcesRef.current = mergeSessionThreadSources(threadSourcesRef.current, delta)
       return threadSourcesRef.current
     },
-    enabled: active && sidebarView === 'messages' && sourceQuery.data !== undefined,
-    refetchInterval: active && sidebarView === 'messages' ? ACTIVE_REFETCH_MS : false,
+    enabled: descriptor.mode === 'feed' && active && messagesVisible && sourceQuery.data !== undefined,
+    refetchInterval: descriptor.mode === 'feed' && active && messagesVisible ? ACTIVE_REFETCH_MS : false,
     refetchOnWindowFocus: true,
     staleTime: ACTIVE_REFETCH_MS
   })
@@ -208,7 +209,7 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
         graph={graph ?? { edges: [], nodes: [] }}
         loading={sourceQuery.isLoading}
         messageThread={messageThread}
-        onViewChange={setSidebarView}
+        onMessagesVisibleChange={visible => setMessagesVisible(visible)}
         sourceProfile={descriptor.sourceProfile}
       />
     )
@@ -227,10 +228,7 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
               : null
       }
       graph={graph}
-      initialTaskFeedOpen
       loading={sourceQuery.isLoading}
-      messageThread={messageThread}
-      onMessageViewChange={setSidebarView}
       pulses={pulses}
     />
   )
@@ -264,7 +262,7 @@ export const watchLiveGraphPanes = paneMirror<LiveGraphPaneDescriptor>({
   title: key => {
     const descriptor = descriptorForKey(key)
 
-    const title = translateNow(descriptor?.mode === 'feed' ? 'liveGraph.taskFeed' : 'liveGraph.title')
+    const title = translateNow(descriptor?.mode === 'feed' ? 'liveGraph.messagesTab' : 'liveGraph.title')
 
     return descriptor ? `${title} · ${descriptor.title}` : title
   }

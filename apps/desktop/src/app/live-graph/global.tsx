@@ -30,7 +30,7 @@ export function globalLiveGraphSelectionId(
   profile: string,
   target: LiveGraphNavigationTarget | null
 ): string | null {
-  if (!target || target.kind === 'feed') {
+  if (!target) {
     return null
   }
 
@@ -333,8 +333,6 @@ function GlobalLiveGraphProfileView({ profile }: { profile: string }) {
   const initialSelectedNodeId =
     graph && currentOverview ? globalLiveGraphSelectionId(graph, currentOverview, profile, navigationTarget) : null
 
-  const initialTaskFeedOpen = navigationTarget?.kind === 'feed' || Boolean(navigationTarget && !initialSelectedNodeId)
-
   const error =
     currentOverview === null && overview.error
       ? overview.error instanceof Error
@@ -349,7 +347,6 @@ function GlobalLiveGraphProfileView({ profile }: { profile: string }) {
       error={error}
       graph={graph}
       initialSelectedNodeId={initialSelectedNodeId}
-      initialTaskFeedOpen={initialTaskFeedOpen}
       loading={currentOverview === null && overview.isLoading}
       onOpenSession={sessionId => navigate(sessionRoute(sessionId))}
       pulses={pulses}

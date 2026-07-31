@@ -44,30 +44,27 @@ const graph: LiveGraphSnapshot = {
 }
 
 describe('ScopedTaskFeedPaneView', () => {
-  it('uses the full pane for Tasks and Messages without mounting graph chrome', () => {
-    const onViewChange = vi.fn()
+  it('opens Messages immediately without mounting task-feed chrome', () => {
+    const onMessagesVisibleChange = vi.fn()
 
     render(
       <ScopedTaskFeedPaneView
         graph={graph}
         messageThread={{ loading: false, messages: [], onRetry: vi.fn() }}
-        onViewChange={onViewChange}
+        onMessagesVisibleChange={onMessagesVisibleChange}
         sourceProfile="session-profile"
       />
     )
 
-    expect(screen.getByRole('button', { name: 'Tasks' })).toBeTruthy()
-    expect(screen.getByText(/A very long task title that must remain fully readable/)).toBeTruthy()
+    expect(screen.getByTestId('live-graph-message-thread')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Tasks' })).toBeNull()
+    expect(screen.queryByTestId('live-graph-workflow-inbox')).toBeNull()
     expect(screen.queryByTestId('live-graph-canvas')).toBeNull()
-    expect(screen.queryByTestId('live-graph-task-feed')).toBeNull()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Messages' }))
-    expect(onViewChange).toHaveBeenCalledWith('messages')
-    expect(screen.getByText('No task comments yet.')).toBeTruthy()
+    expect(onMessagesVisibleChange).toHaveBeenCalledWith(true)
   })
 
-  it('opens a non-first thread task on Activity and Back preserves expansion and scroll', () => {
-    const onViewChange = vi.fn()
+  it('opens a thread task on Activity and resumes Messages after Back', () => {
+    const onMessagesVisibleChange = vi.fn()
 
     render(
       <ScopedTaskFeedPaneView
@@ -101,12 +98,11 @@ describe('ScopedTaskFeedPaneView', () => {
           ],
           onRetry: vi.fn()
         }}
-        onViewChange={onViewChange}
+        onMessagesVisibleChange={onMessagesVisibleChange}
         sourceProfile="session-profile"
       />
     )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Messages' }))
     const firstThread = screen.getByRole('button', { name: 'Messages: Task one' })
     const secondThread = screen.getByRole('button', { name: 'Messages: Task two' })
     fireEvent.click(firstThread)
@@ -114,23 +110,12 @@ describe('ScopedTaskFeedPaneView', () => {
     expect(firstThread.getAttribute('aria-expanded')).toBe('false')
     expect(secondThread.getAttribute('aria-expanded')).toBe('true')
 
-    const scroller = screen.getByTestId('live-graph-message-thread')
-    Object.defineProperties(scroller, {
-      clientHeight: { configurable: true, value: 100 },
-      scrollHeight: { configurable: true, value: 1_000 }
-    })
-    scroller.scrollTop = 240
-    fireEvent.scroll(scroller)
-
     fireEvent.click(screen.getByRole('button', { name: /View activity: Review second request/i }))
     expect(screen.getByTestId('live-graph-selection-inspector')).toBeTruthy()
     expect(screen.getByTestId('scoped-task-inspector').getAttribute('data-filter')).toBe('activity')
 
     fireEvent.click(screen.getByRole('button', { name: 'Back' }))
-    expect(screen.getByRole('button', { name: 'Messages: Task one' }).getAttribute('aria-expanded')).toBe('false')
     expect(screen.getByRole('button', { name: 'Messages: Task two' }).getAttribute('aria-expanded')).toBe('true')
-    expect(screen.getByTestId('live-graph-message-thread').scrollTop).toBe(240)
-    expect(screen.getByRole('button', { name: 'Messages' }).getAttribute('aria-pressed')).toBe('true')
-    expect(onViewChange.mock.calls.map(([view]) => view)).toEqual(['messages', 'tasks', 'messages'])
+    expect(onMessagesVisibleChange.mock.calls.map(([visible]) => visible)).toEqual([true, false, true])
   })
 })

@@ -68,7 +68,7 @@ export const TaskFeedLauncherRow = memo(function TaskFeedLauncherRow({
   return (
     <StatusRow
       className="task-feed-launcher-row min-h-7 rounded-t-[inherit] rounded-b-none border-b border-(--ui-stroke-tertiary) px-3.5 py-1.5 hover:bg-transparent"
-      leading={<Codicon className="text-(--ui-blue)" name="inbox" size="0.8rem" />}
+      leading={<Codicon className="text-(--ui-blue)" name="comment-discussion" size="0.8rem" />}
       onActivate={event => onOpen(sourceSessionId, requestedDock(event.shiftKey))}
       trailing={
         <span
@@ -111,7 +111,7 @@ export const TaskFeedLauncherRow = memo(function TaskFeedLauncherRow({
       trailingVisible
     >
       <span className="min-w-0 truncate text-xs font-normal text-muted-foreground/92 transition-colors group-hover/status-row:text-foreground/90">
-        {t.liveGraph.taskFeed}
+        {t.liveGraph.messagesTab}
       </span>
     </StatusRow>
   )

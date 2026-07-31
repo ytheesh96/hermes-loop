@@ -42,7 +42,6 @@ import { useI18n } from '@/i18n'
 import { readJson, writeJson } from '@/lib/storage'
 
 import { attachLiveGraphNodeToComposer } from './context'
-import { LiveGraphMessageThread, type LiveGraphMessageThreadProps } from './message-thread'
 import {
   LIVE_GRAPH_SETTLED_STATUSES,
   LIVE_GRAPH_WAITING_STATUSES,
@@ -52,16 +51,10 @@ import {
   type LiveGraphSnapshot,
   normalizeLiveGraphStatus
 } from './model'
-import {
-  LiveGraphTaskInspector,
-  type LiveGraphTaskInspectorFilter,
-  type LiveGraphTaskTarget
-} from './task-inspector'
+import { LiveGraphTaskInspector, type LiveGraphTaskInspectorFilter, type LiveGraphTaskTarget } from './task-inspector'
 import { liveGraphTaskCategory, type LiveGraphTaskFilter, LiveGraphWorkflowInbox } from './workflow-inbox'
 
 export type { LiveGraphTaskTarget } from './task-inspector'
-
-export type LiveGraphSidebarView = 'messages' | 'tasks'
 
 export const LIVE_GRAPH_KINDS = ['session', 'project', 'workflow', 'task'] as const
 export type LiveGraphKind = LiveGraphNode['kind']
@@ -2385,10 +2378,7 @@ export interface LiveGraphCanvasProps {
   graph: LiveGraphSnapshot
   initialSelectedNodeId?: null | string
   initialState?: LiveGraphViewState
-  initialTaskFeedOpen?: boolean
-  messageThread?: Omit<LiveGraphMessageThreadProps, 'onSelectTask'>
   onAttachNode?: (node: LiveGraphNode) => void
-  onMessageViewChange?: (view: LiveGraphSidebarView) => void
   onOpenSession?: (sessionId: string) => void
   onOpenTask?: (target: LiveGraphTaskTarget) => void
   onStateChange?: (state: LiveGraphViewState) => void
@@ -2404,10 +2394,7 @@ export function LiveGraphCanvas({
   graph,
   initialSelectedNodeId = null,
   initialState = DEFAULT_LIVE_GRAPH_VIEW_STATE,
-  initialTaskFeedOpen = false,
-  messageThread,
   onAttachNode,
-  onMessageViewChange,
   onOpenSession,
   onOpenTask,
   onStateChange,
@@ -2486,11 +2473,8 @@ export function LiveGraphCanvas({
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [feedHoveredTaskId, setFeedHoveredTaskId] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [workflowFeedOpen, setWorkflowFeedOpen] = useState(initialTaskFeedOpen)
-  const [sidebarView, setSidebarView] = useState<LiveGraphSidebarView>('tasks')
 
-  const [taskInspectorInitialFilter, setTaskInspectorInitialFilter] =
-    useState<LiveGraphTaskInspectorFilter>('activity')
+  const [taskInspectorInitialFilter, setTaskInspectorInitialFilter] = useState<LiveGraphTaskInspectorFilter>('activity')
 
   const [clock, setClock] = useState(0)
   const [activePulses, setActivePulses] = useState<ActivePulse[]>([])
@@ -2506,34 +2490,8 @@ export function LiveGraphCanvas({
   useEffect(() => {
     if (!surfaceActive) {
       setSettingsOpen(false)
-      setWorkflowFeedOpen(false)
     }
   }, [surfaceActive])
-
-  useEffect(() => {
-    if (!surfaceActive || !workflowFeedOpen) {
-      return
-    }
-
-    const closeWorkflowFeed = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setWorkflowFeedOpen(false)
-      }
-    }
-
-    document.addEventListener('keydown', closeWorkflowFeed)
-
-    return () => document.removeEventListener('keydown', closeWorkflowFeed)
-  }, [surfaceActive, workflowFeedOpen])
-
-  useEffect(() => {
-    if (workflowFeedOpen || sidebarView === 'tasks') {
-      return
-    }
-
-    setSidebarView('tasks')
-    onMessageViewChange?.('tasks')
-  }, [onMessageViewChange, sidebarView, workflowFeedOpen])
 
   const commitState = useCallback(
     (updater: LiveGraphViewState | ((current: LiveGraphViewState) => LiveGraphViewState), persist = true) => {
@@ -2550,15 +2508,11 @@ export function LiveGraphCanvas({
     [onStateChange]
   )
 
-  const openNodeSelection = useCallback(
-    (nodeId: string, initialFilter: LiveGraphTaskInspectorFilter = 'activity') => {
-      setWorkflowFeedOpen(false)
-      setSelectedWorkflowTaskFilter('all')
-      setTaskInspectorInitialFilter(initialFilter)
-      setSelectedId(nodeId)
-    },
-    []
-  )
+  const openNodeSelection = useCallback((nodeId: string, initialFilter: LiveGraphTaskInspectorFilter = 'activity') => {
+    setSelectedWorkflowTaskFilter('all')
+    setTaskInspectorInitialFilter(initialFilter)
+    setSelectedId(nodeId)
+  }, [])
 
   const applyDenseCamera = useCallback(
     (camera: Camera, persist: boolean) => {
@@ -2696,7 +2650,6 @@ export function LiveGraphCanvas({
   }, [])
 
   const enabledKinds = useMemo(() => new Set(viewState.enabledKinds), [viewState.enabledKinds])
-  const feedLabel = t.liveGraph.taskFeed
   const graphNodes = snapshotNodes(graph)
   const graphEdges = snapshotEdges(graph)
   const allNodesById = useMemo(() => new Map(graphNodes.map(node => [liveGraphNodeId(node), node])), [graphNodes])
@@ -2714,11 +2667,6 @@ export function LiveGraphCanvas({
   const taskFeedItems = useMemo(
     () => liveGraphTasksForNode(graphNodes, graphEdges, selectedHubNode ? liveGraphNodeId(selectedHubNode) : null),
     [graphEdges, graphNodes, selectedHubNode]
-  )
-
-  const messageTaskItems = useMemo(
-    () => graphNodes.filter(node => liveGraphNodeKind(node) === 'task'),
-    [graphNodes]
   )
 
   const effectiveTaskFilter = selectedHubNode ? selectedWorkflowTaskFilter : viewState.workflowFilter
@@ -3598,32 +3546,6 @@ export function LiveGraphCanvas({
     [commitState, openNodeSelection]
   )
 
-  const selectMessageTask = useCallback(
-    (target: LiveGraphTaskTarget, filter: LiveGraphTaskInspectorFilter) => {
-      const board = target.board?.trim().toLowerCase() || 'default'
-
-      const node = graphNodes.find(
-        candidate =>
-          liveGraphNodeKind(candidate) === 'task' &&
-          String(candidate.entityId || '') === target.taskId &&
-          (candidate.board?.trim().toLowerCase() || 'default') === board
-      )
-
-      if (!node) {
-        return
-      }
-
-      commitState(current => ({
-        ...current,
-        enabledKinds: current.enabledKinds.includes('task') ? current.enabledKinds : [...current.enabledKinds, 'task'],
-        search: '',
-        workflowFilter: 'all'
-      }))
-      openNodeSelection(liveGraphNodeId(node), filter)
-    },
-    [commitState, graphNodes, openNodeSelection]
-  )
-
   const labelsOnHoverOnly = selectedTaskNode !== null
 
   const hideHoverLabel = useCallback(() => {
@@ -3741,7 +3663,7 @@ export function LiveGraphCanvas({
   )
 
   const fitGraphRef = useRef(fitGraph)
-  const inspectorPanelKey = workflowFeedOpen ? 'workflow-feed' : selectedId
+  const inspectorPanelKey = selectedId
   const previousInspectorPanelKeyRef = useRef<string | null | undefined>(undefined)
   const previousTaskFilterRef = useRef(effectiveTaskFilter)
   fitGraphRef.current = fitGraph
@@ -4561,10 +4483,6 @@ export function LiveGraphCanvas({
             <Popover
               onOpenChange={open => {
                 setSettingsOpen(open)
-
-                if (open) {
-                  setWorkflowFeedOpen(false)
-                }
               }}
               open={settingsOpen}
             >
@@ -4823,25 +4741,6 @@ export function LiveGraphCanvas({
                 </details>
               </PopoverContent>
             </Popover>
-            <Tip label={feedLabel}>
-              <Button
-                aria-label={feedLabel}
-                aria-pressed={workflowFeedOpen}
-                className="border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated)/90 backdrop-blur-sm"
-                onClick={() => {
-                  if (!workflowFeedOpen) {
-                    setSettingsOpen(false)
-                    setSelectedId(null)
-                  }
-
-                  setWorkflowFeedOpen(!workflowFeedOpen)
-                }}
-                size="icon-sm"
-                variant={workflowFeedOpen ? 'secondary' : 'ghost'}
-              >
-                <Codicon name="inbox" />
-              </Button>
-            </Tip>
           </div>
 
           {visible.nodes.length === 0 ? (
@@ -4871,7 +4770,6 @@ export function LiveGraphCanvas({
                   return
                 }
 
-                setWorkflowFeedOpen(false)
                 setSelectedId(null)
               }}
               onLostPointerCapture={finishPointer}
@@ -5378,48 +5276,7 @@ export function LiveGraphCanvas({
           )}
         </div>
 
-        {workflowFeedOpen ? (
-          <aside
-            aria-label={feedLabel}
-            className="relative z-20 h-full min-w-[16rem] w-[clamp(16rem,46%,22rem)] shrink-0 overflow-x-hidden overflow-y-auto border-l border-(--stroke-nous) bg-(--ui-bg-elevated) [overflow-wrap:anywhere]"
-            data-testid="live-graph-task-feed"
-          >
-            <div className="sticky top-0 z-10 border-b border-(--ui-stroke-tertiary) bg-(--ui-bg-elevated) px-3 py-2">
-              <SegmentedControl
-                className="w-full"
-                onChange={nextView => {
-                  setSidebarView(nextView)
-                  onMessageViewChange?.(nextView)
-                }}
-                options={[
-                  { id: 'tasks', label: t.liveGraph.tasksTab },
-                  { id: 'messages', label: t.liveGraph.messagesTab }
-                ]}
-                value={sidebarView}
-              />
-            </div>
-            {sidebarView === 'tasks' ? (
-              <LiveGraphWorkflowInbox
-                filter={viewState.workflowFilter}
-                label={feedLabel}
-                onFilterChange={workflowFilter => {
-                  hoverFeedTask(null)
-                  commitState(current => ({ ...current, workflowFilter }))
-                }}
-                onSelectTask={selectWorkflowTask}
-                onTaskHover={hoverFeedTask}
-                tasks={taskFeedItems}
-                workflowScope={snapshotRootId(graph) || 'global'}
-              />
-            ) : (
-              <LiveGraphMessageThread
-                {...(messageThread ?? { messages: [], onRetry: () => undefined })}
-                onSelectTask={selectMessageTask}
-                tasks={messageTaskItems}
-              />
-            )}
-          </aside>
-        ) : selectedNode ? (
+        {selectedNode ? (
           <aside
             aria-label={t.liveGraph.inspector}
             className={
@@ -5466,7 +5323,7 @@ export function LiveGraphCanvas({
               <LiveGraphWorkflowInbox
                 filter={selectedWorkflowTaskFilter}
                 key={liveGraphNodeId(selectedHubNode)}
-                label={t.liveGraph.taskFeed}
+                label={t.liveGraph.taskInbox}
                 onFilterChange={filter => {
                   hoverFeedTask(null)
                   setSelectedWorkflowTaskFilter(filter)
@@ -5524,11 +5381,8 @@ export interface LiveGraphPaneViewProps {
   error?: unknown
   graph?: LiveGraphSnapshot | null
   initialSelectedNodeId?: null | string
-  initialTaskFeedOpen?: boolean
   loading?: boolean
-  messageThread?: Omit<LiveGraphMessageThreadProps, 'onSelectTask'>
   onAttachNode?: (node: LiveGraphNode) => void
-  onMessageViewChange?: (view: LiveGraphSidebarView) => void
   onOpenSession?: (sessionId: string) => void
   onOpenTask?: (target: LiveGraphTaskTarget) => void
   pulses?: readonly LiveGraphPulse[]
@@ -5548,11 +5402,8 @@ export function LiveGraphPaneView({
   error,
   graph,
   initialSelectedNodeId = null,
-  initialTaskFeedOpen = false,
   loading = false,
-  messageThread,
   onAttachNode,
-  onMessageViewChange,
   onOpenSession,
   onOpenTask,
   pulses = EMPTY_PULSES,
@@ -5616,17 +5467,14 @@ export function LiveGraphPaneView({
   return (
     <div className="flex size-full min-h-0 flex-col bg-(--ui-surface-background)">
       <LiveGraphCanvas
-        autoFit={!persistedState || Boolean(initialSelectedNodeId) || initialTaskFeedOpen}
+        autoFit={!persistedState || Boolean(initialSelectedNodeId)}
         emptyDesc={global ? t.liveGraph.globalEmptyDesc : t.liveGraph.emptyDesc}
         emptyTitle={global ? t.liveGraph.globalEmptyTitle : t.liveGraph.emptyTitle}
         graph={graph}
         initialSelectedNodeId={initialSelectedNodeId}
         initialState={initialState}
-        initialTaskFeedOpen={initialTaskFeedOpen}
-        key={`${storageKey}:${initialSelectedNodeId || (initialTaskFeedOpen ? 'feed' : 'default')}`}
-        messageThread={messageThread}
+        key={`${storageKey}:${initialSelectedNodeId || 'default'}`}
         onAttachNode={attachNode}
-        onMessageViewChange={onMessageViewChange}
         onOpenSession={onOpenSession}
         onOpenTask={onOpenTask}
         onStateChange={state => writeJson(storageKey, state)}

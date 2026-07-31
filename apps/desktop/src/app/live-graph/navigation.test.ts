@@ -18,5 +18,6 @@ describe('live graph route navigation', () => {
     expect(readLiveGraphNavigationTarget(null)).toBeNull()
     expect(readLiveGraphNavigationTarget({ liveGraphTarget: { entityId: '', kind: 'task' } })).toBeNull()
     expect(readLiveGraphNavigationTarget({ liveGraphTarget: { entityId: 'x', kind: 'workflow' } })).toBeNull()
+    expect(readLiveGraphNavigationTarget({ liveGraphTarget: { kind: 'feed' } })).toBeNull()
   })
 })

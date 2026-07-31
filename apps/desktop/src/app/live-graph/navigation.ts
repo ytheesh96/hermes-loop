@@ -1,5 +1,4 @@
 export type LiveGraphNavigationTarget =
-  | { kind: 'feed' }
   | { board?: string; entityId: string; kind: 'task' }
   | { entityId: string; kind: 'session' }
 
@@ -20,10 +19,6 @@ export function readLiveGraphNavigationTarget(state: unknown): LiveGraphNavigati
 
   if (!target || typeof target !== 'object') {
     return null
-  }
-
-  if (target.kind === 'feed') {
-    return { kind: 'feed' }
   }
 
   if ((target.kind === 'session' || target.kind === 'task') && target.entityId.trim()) {

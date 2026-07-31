@@ -543,7 +543,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const openTaskFeed = useCallback(
     (sessionId = taskFeedSessionId) => {
       navigate(LIVE_GRAPH_ROUTE, {
-        state: liveGraphNavigationState(sessionId ? { entityId: sessionId, kind: 'session' } : { kind: 'feed' })
+        ...(sessionId ? { state: liveGraphNavigationState({ entityId: sessionId, kind: 'session' }) } : {})
       })
     },
     [navigate, taskFeedSessionId]
