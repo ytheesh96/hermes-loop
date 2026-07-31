@@ -124,7 +124,7 @@ source_description = (
     "IMMUTABLE_SOURCE_DESCRIPTION\n\n"
     "[HTTPS review](https://example.com/review)\n\n"
     f"Raw file: '{raw_fixture}'\n\n"
-    f"Missing file: {missing_fixture}\n\n"
+    f"Missing file: '{missing_fixture}'\n\n"
     f"[Preview: report.pdf](#preview/{quote(str(artifact), safe='')})"
 )
 for profile, session_id in (("review-source-e2e", "source-session"), ("review-active-e2e", "active-decoy-session")):
