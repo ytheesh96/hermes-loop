@@ -3,6 +3,7 @@ import { JsonRpcGatewayClient } from '@hermes/shared'
 import type {
   KanbanBoardsResponse,
   LoopSessionCommentsSource,
+  LoopSessionThreadsSource,
   LoopTaskComment,
   LoopTaskDetail,
   LoopWorkerActivity,
@@ -787,6 +788,31 @@ export async function getLoopSessionComments(
       path: `/api/plugins/kanban/session-comments?${query.toString()}`
     })
 
+    results.push({ ...source, board })
+  }
+
+  return results
+}
+
+export async function getLoopSessionThreads(
+  sessionId: string,
+  profile: string,
+  boards: readonly string[],
+  afterReplyIds: Readonly<Record<string, number>> = {}
+): Promise<LoopSessionThreadsSource[]> {
+  const normalizedBoards = Array.from(new Set(boards.map(board => board.trim()).filter(Boolean)))
+  const results: LoopSessionThreadsSource[] = []
+
+  for (const board of normalizedBoards) {
+    const query = new URLSearchParams({
+      session_id: sessionId,
+      board,
+      after_reply_id: String(afterReplyIds[board] || 0)
+    })
+    const source = await window.hermesDesktop.api<LoopSessionThreadsSource>({
+      profile,
+      path: `/api/plugins/kanban/session-threads?${query.toString()}`
+    })
     results.push({ ...source, board })
   }
 

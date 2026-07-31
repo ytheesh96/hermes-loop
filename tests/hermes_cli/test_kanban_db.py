@@ -610,6 +610,92 @@ def test_create_loop_skeleton_graph_is_atomic_and_dependency_ordered(kanban_home
     assert {task.id for task in tasks} == {research.id, build.id}
 
 
+def test_create_loop_skeleton_graph_snapshots_immutable_message_roots(kanban_home):
+    with kb.connect() as conn:
+        result = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[
+                {"client_id": "root", "title": "Submitted title", "context": "Node detail"},
+                {"client_id": "followup", "title": "Follow-up", "depends_on": ["root"]},
+            ],
+            shared_context="Submission context",
+            session_id="message-session",
+            tenant="message-tenant",
+            idempotency_scope="message-fragment",
+        )
+        root_id = result["items"][0]["task_id"]
+        followup_id = result["items"][1]["task_id"]
+        root = conn.execute(
+            "SELECT * FROM task_threads WHERE root_task_id = ?",
+            (root_id,),
+        ).fetchone()
+        memberships = conn.execute(
+            "SELECT id, thread_root_task_id FROM tasks ORDER BY created_at, id"
+        ).fetchall()
+        conn.execute("UPDATE tasks SET title = 'Specified title', body = 'Specified body' WHERE id = ?", (root_id,))
+        unchanged = conn.execute(
+            "SELECT title, description FROM task_threads WHERE root_task_id = ?",
+            (root_id,),
+        ).fetchone()
+
+    assert dict(root) == {
+        "root_task_id": root_id,
+        "workflow_id": result["workflow_id"],
+        "origin_session_id": "message-session",
+        "tenant": "message-tenant",
+        "title": "Submitted title",
+        "description": "Submission context\n\nNode detail",
+        "created_at": root["created_at"],
+    }
+    assert {row["id"]: row["thread_root_task_id"] for row in memberships} == {
+        root_id: root_id,
+        followup_id: followup_id,
+    }
+    assert dict(unchanged) == {
+        "title": "Submitted title",
+        "description": "Submission context\n\nNode detail",
+    }
+
+
+def test_decompose_triage_task_inherits_message_root_and_names_children(kanban_home):
+    with kb.connect() as conn:
+        graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "shell", "title": "Submitted shell"}],
+            session_id="thread-session",
+        )
+        shell = graph["items"][0]["task_id"]
+        children = kb.decompose_triage_task(
+            conn,
+            shell,
+            root_assignee=None,
+            children=[
+                {"title": "Implement", "body": "build"},
+                {"title": "Verify", "body": "test", "parents": [0]},
+            ],
+            author="decomposer",
+        )
+        assert children is not None
+        memberships = conn.execute(
+            "SELECT id, thread_root_task_id FROM tasks WHERE id IN (?, ?)",
+            tuple(children),
+        ).fetchall()
+        comment = conn.execute(
+            "SELECT body FROM task_comments WHERE task_id = ? ORDER BY id LIMIT 1",
+            (shell,),
+        ).fetchone()
+        root_snapshot = conn.execute(
+            "SELECT description FROM task_threads WHERE root_task_id = ?",
+            (shell,),
+        ).fetchone()
+
+    assert {row["thread_root_task_id"] for row in memberships} == {shell}
+    assert root_snapshot["description"] == "Submitted shell"
+    assert comment["body"].startswith(
+        f"Decomposed into Implement ({children[0]}), Verify ({children[1]})"
+    )
+
+
 def test_create_loop_skeleton_graph_replay_is_idempotent(kanban_home):
     nodes = [
         {"client_id": "a", "title": "A"},

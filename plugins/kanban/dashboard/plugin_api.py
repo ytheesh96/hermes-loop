@@ -1494,6 +1494,169 @@ def get_session_source(
             conn.close()
 
 
+@router.get("/session-threads")
+def get_session_threads(
+    session_id: Optional[str] = Query(
+        None,
+        description="Current Loop session id; defaults to HERMES_SESSION_ID when omitted",
+    ),
+    tenant: Optional[str] = Query(None),
+    include_archived: bool = Query(False),
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+    after_reply_id: int = Query(0, ge=0),
+):
+    """Return immutable task-thread roots and chronologically ordered reply deltas."""
+    selected_board = _resolve_board(board)
+    lineage_session_ids = _session_compression_lineage(session_id)
+    if not lineage_session_ids:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    explicit_tenant = (tenant or "").strip() or None
+    conn = _conn(board=selected_board)
+    try:
+        placeholders = ",".join("?" for _ in lineage_session_ids)
+        root_where = [f"th.origin_session_id IN ({placeholders})"]
+        root_params: list[Any] = list(lineage_session_ids)
+        if explicit_tenant:
+            root_where.append("th.tenant = ?")
+            root_params.append(explicit_tenant)
+        if not include_archived:
+            root_where.append("t.status != 'archived'")
+
+        canonical_roots = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT th.*, 0 AS legacy_root
+                FROM task_threads th
+                JOIN tasks t ON t.id = th.root_task_id
+                WHERE {' AND '.join(root_where)}
+                """,
+                tuple(root_params),
+            ).fetchall()
+        ]
+
+        # Compatibility roots are inferred independently so old and new roots
+        # can coexist in one compression lineage. Current text is explicitly
+        # labelled legacy rather than presented as an immutable historical copy.
+        source_rows, _, _ = _query_session_source_rows(
+            conn,
+            lineage_session_ids,
+            explicit_tenant=explicit_tenant,
+            include_archived=include_archived,
+            referenced_task_ids=_loop_tool_task_ids_for_sessions(lineage_session_ids),
+        )
+        source_ids = [str(row["id"]) for row in source_rows]
+        legacy_skeletons: set[str] = set()
+        legacy_parent: dict[str, str] = {}
+        if source_ids:
+            event_rows = conn.execute(
+                f"""
+                SELECT task_id, payload
+                FROM task_events
+                WHERE kind = 'created'
+                  AND task_id IN ({','.join('?' for _ in source_ids)})
+                """,
+                tuple(source_ids),
+            ).fetchall()
+            for event_row in event_rows:
+                try:
+                    payload = json.loads(event_row["payload"] or "{}")
+                except (TypeError, ValueError):
+                    payload = {}
+                task_id = str(event_row["task_id"])
+                if payload.get("from_decompose_of"):
+                    legacy_parent[task_id] = str(payload["from_decompose_of"])
+                elif payload.get("needs_specification") is True:
+                    legacy_skeletons.add(task_id)
+
+        canonical_root_ids = {str(row["root_task_id"]) for row in canonical_roots}
+        legacy_roots = [
+            {
+                "root_task_id": str(row["id"]),
+                "workflow_id": str(row["workflow_id"] or row["id"]),
+                "origin_session_id": str(row["session_id"] or lineage_session_ids[0]),
+                "tenant": row["tenant"],
+                "title": str(row["title"] or row["id"]),
+                "description": str(row["body"] or ""),
+                "created_at": int(row["created_at"]),
+                "legacy_root": 1,
+            }
+            for row in source_rows
+            if str(row["id"]) in legacy_skeletons
+            and str(row["id"]) not in canonical_root_ids
+            and not row["thread_root_task_id"]
+        ]
+        legacy_root_ids = {str(row["root_task_id"]) for row in legacy_roots}
+        legacy_task_root: dict[str, str] = {}
+        for task_id in source_ids:
+            cursor = task_id
+            seen: set[str] = set()
+            while cursor in legacy_parent and cursor not in seen:
+                seen.add(cursor)
+                cursor = legacy_parent[cursor]
+            if cursor in legacy_root_ids:
+                legacy_task_root[task_id] = cursor
+
+        roots = sorted(
+            [*canonical_roots, *legacy_roots],
+            key=lambda row: (int(row["created_at"]), str(row["root_task_id"])),
+        )
+        all_replies: list[dict[str, Any]] = []
+        if canonical_root_ids:
+            rows = conn.execute(
+                f"""
+                SELECT c.id, c.task_id, c.author, c.body, c.created_at,
+                       t.thread_root_task_id AS root_task_id,
+                       t.title AS task_title, t.status AS task_status, t.workflow_id
+                FROM task_comments c
+                JOIN tasks t ON t.id = c.task_id
+                WHERE t.thread_root_task_id IN ({','.join('?' for _ in canonical_root_ids)})
+                """,
+                tuple(canonical_root_ids),
+            ).fetchall()
+            all_replies.extend(dict(row) for row in rows)
+        if legacy_task_root:
+            legacy_task_ids = list(legacy_task_root)
+            rows = conn.execute(
+                f"""
+                SELECT c.id, c.task_id, c.author, c.body, c.created_at,
+                       t.title AS task_title, t.status AS task_status, t.workflow_id
+                FROM task_comments c
+                JOIN tasks t ON t.id = c.task_id
+                WHERE c.task_id IN ({','.join('?' for _ in legacy_task_ids)})
+                """,
+                tuple(legacy_task_ids),
+            ).fetchall()
+            all_replies.extend(
+                {**dict(row), "root_task_id": legacy_task_root[str(row["task_id"])]}
+                for row in rows
+            )
+        all_replies.sort(key=lambda row: (int(row["created_at"]), int(row["id"])))
+
+        latest_reply_id = max((int(row["id"]) for row in all_replies), default=0)
+        latest_by_root: dict[str, int] = {}
+        for row in all_replies:
+            root_task_id = str(row["root_task_id"])
+            latest_by_root[root_task_id] = max(
+                latest_by_root.get(root_task_id, 0), int(row["id"])
+            )
+        for root in roots:
+            root["legacy_root"] = bool(root["legacy_root"])
+            root["latest_reply_id"] = latest_by_root.get(str(root["root_task_id"]), 0)
+
+        return {
+            "board": selected_board,
+            "session_id": (session_id or os.environ.get("HERMES_SESSION_ID") or "").strip(),
+            "lineage_session_ids": lineage_session_ids,
+            "latest_reply_id": latest_reply_id,
+            "threads": roots,
+            "replies": [row for row in all_replies if int(row["id"]) > after_reply_id],
+        }
+    finally:
+        conn.close()
+
+
 @router.get("/session-comments")
 def get_session_comments(
     session_id: Optional[str] = Query(

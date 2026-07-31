@@ -251,6 +251,33 @@ export interface LoopSessionCommentsSource {
   session_id?: string
 }
 
+export interface LoopSessionThreadRoot {
+  created_at: number
+  description: string
+  latest_reply_id: number
+  legacy_root: boolean
+  origin_session_id: string
+  root_task_id: string
+  tenant?: null | string
+  title: string
+  workflow_id: string
+}
+
+export interface LoopSessionThreadReply extends LoopSessionComment {
+  id: number
+  root_task_id: string
+  task_id: string
+}
+
+export interface LoopSessionThreadsSource {
+  board: string
+  latest_reply_id: number
+  lineage_session_ids?: string[]
+  replies: LoopSessionThreadReply[]
+  session_id?: string
+  threads: LoopSessionThreadRoot[]
+}
+
 export interface LoopTaskRun extends LoopLatestRun {
   ended_at?: null | number
   outcome?: null | string

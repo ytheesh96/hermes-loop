@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { paneMirror } from '@/app/chat/pane-mirror'
 import { findGroupOfPane } from '@/components/pane-shell/tree/model'
 import { $layoutTree } from '@/components/pane-shell/tree/store'
-import { getLoopSessionComments, getLoopSessionSources } from '@/hermes'
+import { getLoopSessionSources, getLoopSessionThreads } from '@/hermes'
 import { translateNow } from '@/i18n'
 import {
   $liveGraphPanes,
@@ -19,7 +19,7 @@ import { $projects, $projectTree, projectIdForCwd } from '@/store/projects'
 import { $sessions, sessionMatchesStoredId } from '@/store/session'
 import { $subagentsBySession } from '@/store/subagents'
 
-import { normalizeSessionMessages } from './messages'
+import { mergeSessionThreadSources, normalizeSessionThreads } from './messages'
 import { buildSessionLiveGraph, detectLiveGraphPulses, type LiveGraphPulse, type LiveGraphSnapshot } from './model'
 import { ScopedTaskFeedPaneView } from './scoped-task-feed'
 import { LiveGraphPaneView, type LiveGraphSidebarView } from './view'
@@ -124,19 +124,38 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
     [sourceQuery.data]
   )
 
+  const threadIdentity = `${descriptor.sourceProfile}\u0000${descriptor.sourceSessionId}\u0000${sourceBoards.join('\u0000')}`
+  const threadIdentityRef = useRef(threadIdentity)
+  const threadSourcesRef = useRef<Awaited<ReturnType<typeof getLoopSessionThreads>>>([])
+
   const commentsQuery = useQuery({
-    queryKey: ['loop-session-comments', descriptor.sourceProfile, descriptor.sourceSessionId],
-    queryFn: () => getLoopSessionComments(descriptor.sourceSessionId, descriptor.sourceProfile, sourceBoards),
+    queryKey: ['loop-session-threads', descriptor.sourceProfile, descriptor.sourceSessionId, sourceBoards],
+    queryFn: async () => {
+      if (threadIdentityRef.current !== threadIdentity) {
+        threadIdentityRef.current = threadIdentity
+        threadSourcesRef.current = []
+      }
+      const cursors = Object.fromEntries(
+        threadSourcesRef.current.map(source => [source.board, source.latest_reply_id || 0])
+      )
+      const delta = await getLoopSessionThreads(
+        descriptor.sourceSessionId,
+        descriptor.sourceProfile,
+        sourceBoards,
+        cursors
+      )
+      threadSourcesRef.current = mergeSessionThreadSources(threadSourcesRef.current, delta)
+      return threadSourcesRef.current
+    },
     enabled: active && sidebarView === 'messages' && sourceQuery.data !== undefined,
-    placeholderData: previous => previous,
     refetchInterval: active && sidebarView === 'messages' ? ACTIVE_REFETCH_MS : false,
     refetchOnWindowFocus: true,
     staleTime: ACTIVE_REFETCH_MS
   })
 
   const messages = useMemo(
-    () => normalizeSessionMessages(descriptor.sourceProfile, commentsQuery.data ?? [], activeGraph?.nodes ?? []),
-    [activeGraph?.nodes, commentsQuery.data, descriptor.sourceProfile]
+    () => normalizeSessionThreads(descriptor.sourceProfile, commentsQuery.data ?? []),
+    [commentsQuery.data, descriptor.sourceProfile]
   )
 
   const previousGraphRef = useRef<LiveGraphSnapshot | null>(null)

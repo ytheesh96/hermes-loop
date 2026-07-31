@@ -1940,6 +1940,183 @@ def test_session_source_returns_non_archived_tenant_tasks_across_compression_lin
     assert child_payload["session_id"] == "tip-session"
 
 
+def test_session_threads_returns_immutable_roots_chronological_replies_and_deltas(client):
+    conn = kb.connect()
+    try:
+        graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "shell", "title": "Submitted root", "context": "Original description"}],
+            session_id="threads-session",
+            tenant="threads-tenant",
+        )
+        root = graph["items"][0]["task_id"]
+        other_session = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "other-session", "title": "Other session", "context": "decoy"}],
+            session_id="other-session",
+            tenant="threads-tenant",
+        )["items"][0]["task_id"]
+        other_tenant = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "other-tenant", "title": "Other tenant", "context": "decoy"}],
+            session_id="threads-session",
+            tenant="other-tenant",
+        )["items"][0]["task_id"]
+        kb.add_comment(conn, other_session, "decoy", "wrong session")
+        kb.add_comment(conn, other_tenant, "decoy", "wrong tenant")
+        children = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[{"title": "First child"}, {"title": "Second child"}],
+            author="decomposer",
+        )
+        assert children is not None
+        later_id = kb.add_comment(conn, children[0], "builder-a", "arrived first")
+        earlier_id = kb.add_comment(conn, children[1], "builder-b", "chronologically first")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET body = 'Rewritten specification' WHERE id = ?", (root,))
+            conn.execute("UPDATE task_comments SET created_at = 10 WHERE task_id = ?", (root,))
+            conn.execute("UPDATE task_comments SET created_at = 30 WHERE id = ?", (later_id,))
+            conn.execute("UPDATE task_comments SET created_at = 20 WHERE id = ?", (earlier_id,))
+    finally:
+        conn.close()
+
+    response = client.get(
+        "/api/plugins/kanban/session-threads",
+        params={"session_id": "threads-session", "tenant": "threads-tenant", "board": "default"},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["threads"] == [
+        expect_thread := {
+            "root_task_id": root,
+            "workflow_id": graph["workflow_id"],
+            "origin_session_id": "threads-session",
+            "tenant": "threads-tenant",
+            "title": "Submitted root",
+            "description": "Original description",
+            "created_at": payload["threads"][0]["created_at"],
+            "legacy_root": False,
+            "latest_reply_id": max(reply["id"] for reply in payload["replies"]),
+        }
+    ]
+    assert expect_thread["description"] != "Rewritten specification"
+    assert {reply["body"] for reply in payload["replies"]}.isdisjoint({"wrong session", "wrong tenant"})
+    assert [reply["body"] for reply in payload["replies"]][-2:] == [
+        "chronologically first",
+        "arrived first",
+    ]
+    assert {reply["root_task_id"] for reply in payload["replies"]} == {root}
+
+    cursor = payload["latest_reply_id"]
+    conn = kb.connect()
+    try:
+        newest_id = kb.add_comment(conn, children[0], "builder-a", "new delta")
+    finally:
+        conn.close()
+    delta = client.get(
+        "/api/plugins/kanban/session-threads",
+        params={"session_id": "threads-session", "board": "default", "after_reply_id": cursor},
+    )
+    assert delta.status_code == 200, delta.text
+    assert [reply["id"] for reply in delta.json()["replies"]] == [newest_id]
+    assert delta.json()["latest_reply_id"] == newest_id
+
+
+def test_session_threads_keeps_legacy_and_canonical_roots_in_one_lineage(client):
+    session_id = "mixed-thread-session"
+    with kb.connect() as conn:
+        legacy_graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "legacy", "title": "Legacy request"}],
+            session_id=session_id,
+        )
+        legacy_root = legacy_graph["items"][0]["task_id"]
+        legacy_children = kb.decompose_triage_task(
+            conn,
+            legacy_root,
+            root_assignee=None,
+            children=[{"title": "Legacy child"}],
+            author="decomposer",
+        )
+        assert legacy_children is not None
+        canonical_graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "canonical", "title": "Canonical request"}],
+            session_id=session_id,
+            idempotency_scope="canonical-fragment",
+        )
+        canonical_root = canonical_graph["items"][0]["task_id"]
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_threads WHERE root_task_id = ?", (legacy_root,))
+            conn.execute(
+                "UPDATE tasks SET thread_root_task_id = NULL WHERE id IN (?, ?)",
+                (legacy_root, legacy_children[0]),
+            )
+
+    response = client.get(
+        f"/api/plugins/kanban/session-threads?session_id={session_id}&board=default"
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert {thread["root_task_id"] for thread in data["threads"]} == {
+        legacy_root,
+        canonical_root,
+    }
+    assert {thread["root_task_id"]: thread["legacy_root"] for thread in data["threads"]} == {
+        legacy_root: True,
+        canonical_root: False,
+    }
+    assert {reply["root_task_id"] for reply in data["replies"]} == {legacy_root}
+
+
+def test_session_threads_labels_legacy_root_without_inventing_original_text(client):
+    conn = kb.connect()
+    try:
+        graph = kb.create_loop_skeleton_graph(
+            conn,
+            nodes=[{"client_id": "legacy", "title": "Legacy root", "context": "Original unavailable"}],
+            session_id="legacy-thread-session",
+        )
+        root = graph["items"][0]["task_id"]
+        children = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[{"title": "Legacy child"}],
+            author="decomposer",
+        )
+        assert children is not None
+        kb.add_comment(conn, children[0], "builder", "legacy child complete")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET body = 'Current legacy text', thread_root_task_id = NULL")
+            conn.execute("DELETE FROM task_threads")
+    finally:
+        conn.close()
+
+    response = client.get(
+        "/api/plugins/kanban/session-threads",
+        params={"session_id": "legacy-thread-session", "board": "default"},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["threads"] == [
+        {
+            "root_task_id": root,
+            "workflow_id": graph["workflow_id"],
+            "origin_session_id": "legacy-thread-session",
+            "tenant": None,
+            "title": "Legacy root",
+            "description": "Current legacy text",
+            "created_at": payload["threads"][0]["created_at"],
+            "legacy_root": True,
+            "latest_reply_id": payload["latest_reply_id"],
+        }
+    ]
+    assert [reply["body"] for reply in payload["replies"]][-1] == "legacy child complete"
+
+
 def test_session_comments_projects_only_non_archived_lineage_task_comments(client, kanban_home):
     from hermes_state import SessionDB
 

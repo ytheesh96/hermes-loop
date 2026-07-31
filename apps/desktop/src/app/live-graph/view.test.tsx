@@ -2901,7 +2901,7 @@ describe('LiveGraphCanvas', () => {
     })
   })
 
-  it('switches the scoped sidebar to read-only messages and opens provenance on task comments', async () => {
+  it('switches the scoped sidebar to read-only messages without task-card provenance controls', async () => {
     const onMessageViewChange = vi.fn()
 
     render(
@@ -2936,11 +2936,9 @@ describe('LiveGraphCanvas', () => {
     expect(within(feed).getByText('Ready for review.')).toBeTruthy()
     expect(within(feed).queryByRole('textbox')).toBeNull()
 
-    fireEvent.click(within(feed).getByRole('button', { name: 'View task: Running task' }))
-
-    const inspector = await screen.findByTestId('live-graph-selection-inspector')
-    expect(within(inspector).getByRole('button', { name: 'Comments' }).getAttribute('aria-pressed')).toBe('true')
-    expect(onMessageViewChange).toHaveBeenLastCalledWith('tasks')
+    expect(within(feed).queryByRole('button', { name: 'View task: Running task' })).toBeNull()
+    expect(screen.queryByTestId('live-graph-selection-inspector')).toBeNull()
+    expect(onMessageViewChange).toHaveBeenLastCalledWith('messages')
   })
 
   it('opens a session-scoped task feed from an initial Graph View selection', async () => {
