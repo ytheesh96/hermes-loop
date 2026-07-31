@@ -593,7 +593,7 @@ test.describe('scoped task Messages across profile backends', () => {
     await secondThread.click()
     await expect(feed.getByTestId('live-graph-thread-assignment')).toHaveCount(2)
     await expect(feed.getByRole('link', { name: 'HTTPS review' })).toHaveAttribute('href', 'https://example.com/review')
-    const preview = feed.getByRole('button', { name: /Open preview|Hide preview/ })
+    const preview = feed.getByRole('button', { name: 'Preview: report.pdf', exact: true })
     await expect(preview).toBeVisible()
     await preview.click()
     await expect(page.getByRole('tab', { name: 'report.pdf' })).toBeVisible()
