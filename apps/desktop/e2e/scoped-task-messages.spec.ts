@@ -117,9 +117,14 @@ from hermes_state import SessionDB
 
 root = Path(os.environ["HERMES_HOME"])
 artifact = root / "report.pdf"
+raw_fixture = root / "raw preview fixture.txt"
+raw_fixture.write_text("RAW_FILEPATH_PREVIEW_MARKER\n", encoding="utf-8")
+missing_fixture = root / "missing raw preview fixture.txt"
 source_description = (
     "IMMUTABLE_SOURCE_DESCRIPTION\n\n"
     "[HTTPS review](https://example.com/review)\n\n"
+    f"Raw file: '{raw_fixture}'\n\n"
+    f"Missing file: {missing_fixture}\n\n"
     f"[Preview: report.pdf](#preview/{quote(str(artifact), safe='')})"
 )
 for profile, session_id in (("review-source-e2e", "source-session"), ("review-active-e2e", "active-decoy-session")):
@@ -537,6 +542,20 @@ test.describe('scoped task Messages across profile backends', () => {
     await expect(rootMessages).toHaveCount(1)
     await expect(replies).toHaveCount(3)
     await expect(rootMessages.first()).toContainText('IMMUTABLE_SOURCE_DESCRIPTION')
+    const rawFixture = path.join(sandbox.hermesHome, 'raw preview fixture.txt')
+    const missingFixture = path.join(sandbox.hermesHome, 'missing raw preview fixture.txt')
+    const rawPathControl = feed.locator(`[data-preview-target="${rawFixture}"]`)
+    await expect(rawPathControl).toBeVisible()
+    await expect(rawPathControl).toHaveText(rawFixture)
+    await expect(feed.getByText(missingFixture, { exact: true })).toBeVisible()
+    await rawPathControl.click()
+    await expect(page.locator('.preview-source-code')).toContainText('RAW_FILEPATH_PREVIEW_MARKER')
+    await page.getByRole('button', { name: 'Close preview pane' }).click()
+    await expect(page.getByRole('tab', { name: 'raw preview fixture.txt' })).toHaveCount(0)
+    const missingPathControl = feed.locator(`[data-preview-target="${missingFixture}"]`)
+    await missingPathControl.click()
+    await expect(page.getByText('Preview unavailable')).toBeVisible()
+    await expect(page.getByRole('tab', { name: 'missing raw preview fixture.txt' })).toHaveCount(0)
     await expect(replies.nth(0)).toContainText('Decomposed into First child')
     await expect(replies.nth(1)).toContainText('CHILD_COMPLETION_LATEST')
     await expect(replies.nth(2)).toContainText('CHILD_COMPLETION_EARLIER')

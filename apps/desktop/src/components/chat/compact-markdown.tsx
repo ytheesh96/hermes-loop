@@ -45,6 +45,10 @@ function MarkdownAnchor({ children, className, href, ...rest }: ComponentProps<'
   const previewTarget = previewTargetFromMarkdownHref(href)
 
   if (previewTarget) {
+    const visibleText = typeof children === 'string' ? children : null
+    if (visibleText === previewTarget && /^\/[^/]/.test(previewTarget)) {
+      return <PreviewAttachment inline source="explicit-link" target={previewTarget} />
+    }
     return <PreviewAttachment source="explicit-link" target={previewTarget} />
   }
 

@@ -7,6 +7,7 @@ import { Loader } from '@/components/ui/loader'
 import { useI18n } from '@/i18n'
 import { relativeTime } from '@/lib/time'
 
+import { linkifyMessageLocalPaths } from './message-local-paths'
 import { groupSessionMessageThreads, type LiveGraphMessage } from './messages'
 import type { LiveGraphNode } from './model'
 import type { LiveGraphTaskInspectorFilter, LiveGraphTaskTarget } from './task-inspector'
@@ -235,7 +236,7 @@ export function LiveGraphMessageThread({
                             )}
                           </div>
                           <div className={THREAD_BODY_CLASS} data-thread-message-body>
-                            <CompactMarkdown text={message.body} />
+                            <CompactMarkdown text={linkifyMessageLocalPaths(message.body)} />
                           </div>
                         </li>
                       )

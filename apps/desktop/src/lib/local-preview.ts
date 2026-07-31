@@ -133,15 +133,22 @@ export async function normalizeOrLocalPreviewTarget(
   rawTarget: string,
   cwd?: string | null
 ): Promise<PreviewTarget | null> {
-  try {
-    const normalized = await window.hermesDesktop?.normalizePreviewTarget?.(rawTarget, cwd || undefined)
+  const normalizePreviewTarget = window.hermesDesktop?.normalizePreviewTarget
 
-    if (normalized) {
-      return enrichPreviewTarget(normalized)
+  if (!normalizePreviewTarget) {
+    return enrichPreviewTarget(localPreviewTarget(rawTarget, cwd))
+  }
+
+  try {
+    const normalized = await normalizePreviewTarget(rawTarget, cwd || undefined)
+
+    return normalized ? enrichPreviewTarget(normalized) : null
+  } catch (error) {
+    // Older shells may not have registered this newly added handler yet.
+    // Other bridge failures must remain visible to the caller.
+    if (!(error instanceof Error) || !/No handler registered|not implemented/i.test(error.message)) {
+      throw error
     }
-  } catch {
-    // Running Electron may still have the old HTML-only preview IPC. Fall
-    // through to renderer-side local classification so text/images still open.
   }
 
   return enrichPreviewTarget(localPreviewTarget(rawTarget, cwd))
