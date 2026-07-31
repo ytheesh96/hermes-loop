@@ -136,16 +136,20 @@ function LiveGraphPane({ descriptor }: { descriptor: LiveGraphPaneDescriptor }) 
         threadIdentityRef.current = threadIdentity
         threadSourcesRef.current = []
       }
+
       const cursors = Object.fromEntries(
         threadSourcesRef.current.map(source => [source.board, source.latest_reply_id || 0])
       )
+
       const delta = await getLoopSessionThreads(
         descriptor.sourceSessionId,
         descriptor.sourceProfile,
         sourceBoards,
         cursors
       )
+
       threadSourcesRef.current = mergeSessionThreadSources(threadSourcesRef.current, delta)
+
       return threadSourcesRef.current
     },
     enabled: descriptor.mode === 'feed' && active && messagesVisible && sourceQuery.data !== undefined,

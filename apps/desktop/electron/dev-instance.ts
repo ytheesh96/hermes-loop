@@ -19,7 +19,11 @@ function nonEmpty(value: unknown): string | null {
   return text || null
 }
 
-function resolveDesktopDevInstance({ env = process.env, home = process.env.HOME || '', isPackaged = false }: DevInstanceOptions = {}): DevInstancePolicy {
+function resolveDesktopDevInstance({
+  env = process.env,
+  home = process.env.HOME || '',
+  isPackaged = false
+}: DevInstanceOptions = {}): DevInstancePolicy {
   const enabled = !isPackaged && env.HERMES_DESKTOP_DEV_INSTANCE === '1'
   const appName = nonEmpty(env.HERMES_DESKTOP_APP_NAME) || (enabled ? 'Hermes Dev' : 'Hermes')
   const explicitUserData = nonEmpty(env.HERMES_DESKTOP_USER_DATA_DIR)
@@ -33,7 +37,13 @@ function resolveDesktopDevInstance({ env = process.env, home = process.env.HOME 
   }
 }
 
-function shouldRegisterHermesProtocol({ isPackaged, devInstance }: { isPackaged: boolean; devInstance: boolean }): boolean {
+function shouldRegisterHermesProtocol({
+  isPackaged,
+  devInstance
+}: {
+  isPackaged: boolean
+  devInstance: boolean
+}): boolean {
   return isPackaged || !devInstance
 }
 

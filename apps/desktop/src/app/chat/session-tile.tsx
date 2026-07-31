@@ -454,9 +454,12 @@ export function stackSessionTilesIntoMain(): void {
  *  updates in other sessions) — for a context menu that's almost never open.
  *  Same class as the TreeGroup fix (#72245): derive narrowly, bail out unless
  *  the derived values change. */
-function useTileMenuRow(
-  storedSessionId: string
-): { pinId: string; profile?: string; readOnly: boolean; title: string } {
+function useTileMenuRow(storedSessionId: string): {
+  pinId: string
+  profile?: string
+  readOnly: boolean
+  title: string
+} {
   const cache = useRef<{
     key: string
     value: { pinId: string; profile?: string; readOnly: boolean; title: string }

@@ -37,7 +37,12 @@ import { dashboardFallbackArgs, sourceDeclaresServe } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
 import { buildDesktopBackendEnv, normalizeHermesHomeRoot } from './backend-env'
 import { isReauthRequiredError, waitForHermesReady } from './backend-health'
-import { canImportHermesCli, selectImportablePython, shouldTrustHermesOverride, verifyHermesCli } from './backend-probes'
+import {
+  canImportHermesCli,
+  selectImportablePython,
+  shouldTrustHermesOverride,
+  verifyHermesCli
+} from './backend-probes'
 import { waitForDashboardPortAnnouncement } from './backend-ready'
 import { shouldLatchBackendStartFailure, shouldLatchRemoteReauthFailure } from './backend-start-failure'
 import { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } from './bootstrap-platform'
@@ -1971,10 +1976,9 @@ function findPythonForRoot(root) {
 
   const localCandidates = relativePaths.map(relativePath => path.join(root, relativePath)).filter(fileExists)
 
-  return selectImportablePython(
-    [...localCandidates, findSystemPython(), findOnPath('python'), findOnPath('python3')],
-    { env: runtimeEnv }
-  )
+  return selectImportablePython([...localCandidates, findSystemPython(), findOnPath('python'), findOnPath('python3')], {
+    env: runtimeEnv
+  })
 }
 
 function findSystemPython() {

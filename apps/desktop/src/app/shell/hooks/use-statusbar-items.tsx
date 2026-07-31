@@ -149,6 +149,7 @@ export function useStatusbarItems({
   const projectName = projectNameForCwd(currentCwd)
   const primaryUsage = useStore($currentUsage)
   const gatewayRestarting = useStore($gatewayRestarting)
+
   // The indicator speaks the same all-session scope as the Spawn tree, and
   // includes durable Loop/Kanban workers from the composer projection. Select
   // only a primitive summary so progress churn that does not change counts
@@ -158,11 +159,13 @@ export function useStatusbarItems({
 
     return `${status.durableAgents}:${status.failed}:${status.running}`
   })
+
   const agentsStatus = useMemo(() => {
     const [durableAgents = 0, failed = 0, running = 0] = agentsStatusKey.split(':').map(Number)
 
     return { durableAgents, failed, running }
   }, [agentsStatusKey])
+
   const primarySessionStartedAt = useStore($sessionStartedAt)
   const primaryTurnStartedAt = useStore($turnStartedAt)
   const updateStatus = useStore($updateStatus)
@@ -258,6 +261,7 @@ export function useStatusbarItems({
 
     return undefined
   }, [agentsStatus.durableAgents, agentsStatus.failed, agentsStatus.running, copy])
+
   const gatewayOpen = gatewayState === 'open'
   const gatewayConnecting = gatewayState === 'connecting'
   const inferenceReady = gatewayOpen && inferenceStatus?.ready === true

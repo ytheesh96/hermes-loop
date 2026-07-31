@@ -10,15 +10,17 @@ const statusGlyph: Record<WorkMapStatus, string> = {
   in_progress: '[>]',
   completed: '[x]',
   cancelled: '[~]',
-  blocked: '[!]',
+  blocked: '[!]'
 }
 
 function labelFor(items: readonly WorkMapItem[]): string {
-  return items.find(item => item.status === 'in_progress')?.content ??
+  return (
+    items.find(item => item.status === 'in_progress')?.content ??
     items.find(item => item.status === 'blocked')?.content ??
     items.find(item => item.status === 'pending')?.content ??
     items.at(-1)?.content ??
     'Work Map'
+  )
 }
 
 const Checkmark: FC<{ item: WorkMapItem }> = ({ item }) => {
@@ -83,10 +85,7 @@ export const HoistedWorkMapPanel: FC<{ workMap: WorkMapItem[] }> = ({ workMap })
           Loop Work Map
         </span>
         <span className="block text-[0.65rem] uppercase tracking-wide text-muted-foreground">Hermes Loop</span>
-        <span
-          className="block max-w-full truncate text-[0.72rem] leading-tight text-muted-foreground"
-          title={label}
-        >
+        <span className="block max-w-full truncate text-[0.72rem] leading-tight text-muted-foreground" title={label}>
           {label}
         </span>
       </header>
@@ -102,11 +101,17 @@ export const HoistedWorkMapPanel: FC<{ workMap: WorkMapItem[] }> = ({ workMap })
             <Checkmark item={item} />
             <div className="min-w-0 flex-1">
               <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <span className="min-w-0 wrap-anywhere text-[0.8rem] leading-[1.2rem] text-foreground">{item.content}</span>
-                {item.dispatchable === false && <span className="text-[0.65rem] uppercase tracking-wide text-muted-foreground">non-dispatching</span>}
+                <span className="min-w-0 wrap-anywhere text-[0.8rem] leading-[1.2rem] text-foreground">
+                  {item.content}
+                </span>
+                {item.dispatchable === false && (
+                  <span className="text-[0.65rem] uppercase tracking-wide text-muted-foreground">non-dispatching</span>
+                )}
               </div>
               <ItemMeta item={item} />
-              {item.evidence ? <div className="mt-0.5 text-[0.72rem] text-muted-foreground">{item.evidence}</div> : null}
+              {item.evidence ? (
+                <div className="mt-0.5 text-[0.72rem] text-muted-foreground">{item.evidence}</div>
+              ) : null}
             </div>
           </li>
         ))}

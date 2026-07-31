@@ -15,7 +15,14 @@ export interface WorkMapItem {
 }
 
 const STATUSES: readonly WorkMapStatus[] = ['pending', 'in_progress', 'completed', 'cancelled', 'blocked']
-const KINDS: readonly WorkMapKind[] = ['goal', 'decision', 'session-step', 'worker-task', 'verification', 'publish-gate']
+const KINDS: readonly WorkMapKind[] = [
+  'goal',
+  'decision',
+  'session-step',
+  'worker-task',
+  'verification',
+  'publish-gate'
+]
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value && typeof value === 'object' && !Array.isArray(value))
@@ -51,7 +58,14 @@ function parseArray(value: unknown[]): WorkMapItem[] {
 
     const out: WorkMapItem = { id, content, status: item.status, kind }
 
-    for (const key of ['attention', 'evidence', 'kanban_task_id', 'parent_id', 'verification_state', 'dispatchable'] as const) {
+    for (const key of [
+      'attention',
+      'evidence',
+      'kanban_task_id',
+      'parent_id',
+      'verification_state',
+      'dispatchable'
+    ] as const) {
       const raw = item[key]
 
       if (raw === undefined || raw === null) {

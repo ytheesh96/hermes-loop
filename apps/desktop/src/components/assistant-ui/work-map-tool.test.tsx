@@ -18,9 +18,7 @@ describe('workMapFromMessageContent', () => {
         type: 'tool-call',
         toolName: 'work_map',
         result: JSON.stringify({
-          work_map: [
-            { id: 'old', content: 'Old loop', status: 'pending' }
-          ]
+          work_map: [{ id: 'old', content: 'Old loop', status: 'pending' }]
         }),
         args: {}
       },
@@ -30,7 +28,14 @@ describe('workMapFromMessageContent', () => {
         result: null,
         args: {
           work_map: [
-            { id: 'new', content: 'New loop', status: 'blocked', kind: 'verification', attention: 'needs-orchestrator', verification_state: 'needs-orchestrator' }
+            {
+              id: 'new',
+              content: 'New loop',
+              status: 'blocked',
+              kind: 'verification',
+              attention: 'needs-orchestrator',
+              verification_state: 'needs-orchestrator'
+            }
           ]
         }
       }

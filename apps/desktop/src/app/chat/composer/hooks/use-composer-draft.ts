@@ -66,10 +66,7 @@ export function useComposerDraft({
     return trimmed.length > 0 && !SLASH_COMMAND_RE.test(trimmed)
   })
 
-  const setComposerText = useCallback(
-    (value: string) => safeComposerAction(() => aui.composer().setText(value)),
-    [aui]
-  )
+  const setComposerText = useCallback((value: string) => safeComposerAction(() => aui.composer().setText(value)), [aui])
 
   const editorRef = useRef<HTMLDivElement | null>(null)
   const draftRef = useRef('')

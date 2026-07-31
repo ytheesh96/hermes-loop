@@ -415,11 +415,10 @@ export function ChatView({
   const isRoutedSessionView = Boolean(routedSessionId)
 
   const taskFeedSession =
-    sessions.find(session => sessionMatchesAnyId(session, [selectedSessionId, routedSessionId, activeSessionId])) || null
+    sessions.find(session => sessionMatchesAnyId(session, [selectedSessionId, routedSessionId, activeSessionId])) ||
+    null
 
-  const taskFeedSource = taskFeedSession
-    ? liveGraphSessionSourceIdentity(taskFeedSession, activeGatewayProfile)
-    : null
+  const taskFeedSource = taskFeedSession ? liveGraphSessionSourceIdentity(taskFeedSession, activeGatewayProfile) : null
 
   // The URL points at a session the store hasn't loaded yet (sidebar / cmd-K /
   // direct nav). Derived in render so the swap reads instantly: the same frame

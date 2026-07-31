@@ -21,7 +21,14 @@ interface StatusSectionProps {
  * (queue, subagents, background) reads as one piece. The stack supplies the
  * outer card and the dividers between groups; this owns only its own collapse.
  */
-export function StatusSection({ accessory, children, collapsedContent, defaultCollapsed = true, icon, label }: StatusSectionProps) {
+export function StatusSection({
+  accessory,
+  children,
+  collapsedContent,
+  defaultCollapsed = true,
+  icon,
+  label
+}: StatusSectionProps) {
   const [collapsed, setCollapsed] = useState(defaultCollapsed)
 
   return (
@@ -38,7 +45,11 @@ export function StatusSection({ accessory, children, collapsedContent, defaultCo
         </button>
         {accessory && <div className="flex shrink-0 items-center gap-1">{accessory}</div>}
       </div>
-      {collapsed ? collapsedContent && <div className="px-1 pb-0.5">{collapsedContent}</div> : <div className="px-1 pb-0.5">{children}</div>}
+      {collapsed ? (
+        collapsedContent && <div className="px-1 pb-0.5">{collapsedContent}</div>
+      ) : (
+        <div className="px-1 pb-0.5">{children}</div>
+      )}
     </div>
   )
 }

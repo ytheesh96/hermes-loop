@@ -54,6 +54,7 @@ export function ScopedTaskFeedPaneView({
   sourceProfile
 }: ScopedTaskFeedPaneViewProps) {
   const { t } = useI18n()
+
   const [selection, setSelection] = useState<{
     filter: LiveGraphTaskInspectorFilter
     node: LiveGraphNode
