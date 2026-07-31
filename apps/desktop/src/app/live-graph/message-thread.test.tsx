@@ -62,9 +62,7 @@ describe('LiveGraphMessageThread', () => {
       />
     )
 
-    const rows = [
-      ...screen.getAllByTestId(/live-graph-thread-(root|comment)/)
-    ].map(item => item.textContent)
+    const rows = [...screen.getAllByTestId(/live-graph-thread-(root|comment)/)].map(item => item.textContent)
 
     expect(rows).toEqual([
       expect.stringContaining('Original foreground request'),
@@ -116,12 +114,7 @@ describe('LiveGraphMessageThread', () => {
     ])
 
     render(
-      <LiveGraphMessageThread
-        messages={messages}
-        onRetry={vi.fn()}
-        onSelectTask={vi.fn()}
-        sourceProfile="profile"
-      />
+      <LiveGraphMessageThread messages={messages} onRetry={vi.fn()} onSelectTask={vi.fn()} sourceProfile="profile" />
     )
 
     expect(screen.getAllByTestId('live-graph-thread-comment').map(item => item.textContent)).toEqual([
@@ -209,9 +202,7 @@ describe('LiveGraphMessageThread', () => {
       />
     )
 
-    expect(
-      screen.getAllByTestId(/live-graph-thread-(root|comment|assignment)/).map(item => item.textContent)
-    ).toEqual([
+    expect(screen.getAllByTestId(/live-graph-thread-(root|comment|assignment)/).map(item => item.textContent)).toEqual([
       expect.stringContaining('Original foreground request'),
       expect.stringContaining('Decomposed'),
       expect.stringContaining('Assigned to Builder'),
@@ -222,6 +213,43 @@ describe('LiveGraphMessageThread', () => {
     expect(screen.getAllByTestId('live-graph-thread-assignment')).toHaveLength(1)
 
     fireEvent.click(screen.getByRole('button', { name: /View activity: Implement projection/i }))
+    expect(onSelectTask).toHaveBeenCalledWith(
+      { board: 'default', taskId: 'child-1', workflowId: 'workflow-1' },
+      'activity'
+    )
+  })
+
+  it('renders assignments with the same message grammar without task-card chrome', () => {
+    const onSelectTask = vi.fn()
+
+    render(
+      <LiveGraphMessageThread
+        messages={[root]}
+        onRetry={vi.fn()}
+        onSelectTask={onSelectTask}
+        sourceProfile="profile"
+        tasks={[task({ label: `Review ${'x'.repeat(160)}` })]}
+      />
+    )
+
+    const rootEntry = screen.getByTestId('live-graph-thread-root')
+    const assignmentEntry = screen.getByTestId('live-graph-thread-assignment')
+    const rootMeta = rootEntry.querySelector('[data-thread-message-meta]')
+    const assignmentMeta = assignmentEntry.querySelector('[data-thread-message-meta]')
+    const rootBody = rootEntry.querySelector('[data-thread-message-body]')
+    const assignmentBody = assignmentEntry.querySelector('[data-thread-message-body]')
+
+    expect(assignmentEntry.className).toBe(rootEntry.className)
+    expect(assignmentMeta?.className).toBe(rootMeta?.className)
+    expect(assignmentBody?.className).toBe(rootBody?.className)
+    expect(assignmentEntry.textContent).toMatch(/Task.*Assigned to Builder.*running.*Review x/)
+    expect(assignmentEntry.querySelector('[data-icon="tasklist"]')).toBeNull()
+    expect(assignmentEntry.className).not.toMatch(/border-l|bg-\(--ui-bg-secondary\)|shadow/)
+    expect(assignmentEntry.querySelector('button')?.className).not.toMatch(/border-l|bg-\(--ui-bg-secondary\)/)
+    expect(assignmentEntry.querySelector('button')?.className).toMatch(/grid/)
+    expect(assignmentBody?.className).toMatch(/min-w-0.*break-words.*\[overflow-wrap:anywhere\]/)
+
+    fireEvent.click(screen.getByRole('button', { name: /View activity: Review/ }))
     expect(onSelectTask).toHaveBeenCalledWith(
       { board: 'default', taskId: 'child-1', workflowId: 'workflow-1' },
       'activity'
@@ -242,9 +270,7 @@ describe('LiveGraphMessageThread', () => {
       />
     )
 
-    expect(
-      screen.getAllByTestId(/live-graph-thread-(comment|assignment)/).map(item => item.textContent)
-    ).toEqual([
+    expect(screen.getAllByTestId(/live-graph-thread-(comment|assignment)/).map(item => item.textContent)).toEqual([
       expect.stringContaining('Comment two'),
       expect.stringContaining('Comment ten'),
       expect.stringContaining('Child A'),
@@ -278,9 +304,7 @@ describe('LiveGraphMessageThread', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Messages: Second request' }))
 
-    const threads = screen.getAllByRole('listitem').filter(item =>
-      item.querySelector('[aria-label^="Messages:"]')
-    )
+    const threads = screen.getAllByRole('listitem').filter(item => item.querySelector('[aria-label^="Messages:"]'))
 
     expect(threads[0]?.textContent).toContain('First child')
     expect(threads[0]?.textContent).not.toContain('Second child')
@@ -310,9 +334,7 @@ describe('LiveGraphMessageThread', () => {
     expect(screen.getByRole('button', { name: 'Preview report.pdf' })).toBeTruthy()
     expect(screen.getByTestId('live-graph-message-thread').className).toContain('overflow-x-hidden')
     expect(screen.getByTestId('live-graph-thread-comment').className).toContain('min-w-0')
-    expect(screen.getByRole('button', { name: new RegExp(`Comments: ${longTaskId}`) }).className).toContain(
-      'break-all'
-    )
+    expect(screen.getByRole('button', { name: new RegExp(`Comments: ${longTaskId}`) }).className).toContain('break-all')
   })
 
   it('distinguishes loading, empty, initial error, and stale refresh failure', () => {
@@ -330,9 +352,7 @@ describe('LiveGraphMessageThread', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     expect(onRetry).toHaveBeenCalledTimes(1)
 
-    rerender(
-      <LiveGraphMessageThread error="offline" messages={[root]} onRetry={vi.fn()} onSelectTask={vi.fn()} />
-    )
+    rerender(<LiveGraphMessageThread error="offline" messages={[root]} onRetry={vi.fn()} onSelectTask={vi.fn()} />)
     expect(screen.getByText('Showing the last complete thread. Refresh failed.')).toBeTruthy()
     expect(screen.getByText('Original foreground request')).toBeTruthy()
   })
@@ -359,7 +379,10 @@ describe('LiveGraphMessageThread', () => {
     fireEvent.scroll(scroller)
     rerender(
       <LiveGraphMessageThread
-        messages={[...threadMessages, { ...threadMessages[2]!, body: 'new while reading', createdAt: 40, id: 'reply-3' }]}
+        messages={[
+          ...threadMessages,
+          { ...threadMessages[2]!, body: 'new while reading', createdAt: 40, id: 'reply-3' }
+        ]}
         onRetry={vi.fn()}
         onSelectTask={vi.fn()}
         sourceProfile="source-profile"

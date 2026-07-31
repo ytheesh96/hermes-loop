@@ -12,6 +12,11 @@ import type { LiveGraphNode } from './model'
 import type { LiveGraphTaskInspectorFilter, LiveGraphTaskTarget } from './task-inspector'
 
 const EMPTY_TASKS: readonly LiveGraphNode[] = []
+const THREAD_ENTRY_CLASS = 'grid min-w-0 max-w-full gap-1 overflow-hidden'
+const THREAD_META_CLASS = 'flex min-w-0 flex-wrap items-center gap-x-2 text-[0.625rem] text-(--ui-text-tertiary)'
+const THREAD_SENDER_CLASS = 'min-w-0 break-words font-semibold text-(--ui-text-secondary)'
+const THREAD_BODY_CLASS =
+  'min-w-0 max-w-full overflow-hidden break-words text-(--ui-text-primary) [overflow-wrap:anywhere]'
 
 export interface LiveGraphMessageThreadProps {
   error?: null | string
@@ -95,7 +100,10 @@ export function LiveGraphMessageThread({
       ref={scrollRef}
     >
       {error && (
-        <div className="border-b border-(--ui-stroke-tertiary) bg-(--ui-bg-warning) px-3 py-2 text-[0.6875rem] text-(--ui-text-secondary)" role="status">
+        <div
+          className="border-b border-(--ui-stroke-tertiary) bg-(--ui-bg-warning) px-3 py-2 text-[0.6875rem] text-(--ui-text-secondary)"
+          role="status"
+        >
           {t.liveGraph.messagesStale}
         </div>
       )}
@@ -158,29 +166,25 @@ export function LiveGraphMessageThread({
 
                         return (
                           <li
-                            className="min-w-0 max-w-full overflow-hidden"
+                            className={THREAD_ENTRY_CLASS}
                             data-testid="live-graph-thread-assignment"
+                            data-thread-message-entry
                             key={message.id}
                           >
                             <button
                               aria-label={`View activity: ${task.label}`}
-                              className="flex w-full min-w-0 max-w-full items-center gap-2 overflow-hidden border-0 border-l-2 border-(--ui-accent) bg-(--ui-bg-secondary) px-2 py-1.5 text-left text-inherit"
+                              className="grid w-full min-w-0 max-w-full gap-1 border-0 bg-transparent p-0 text-left text-inherit hover:bg-(--ui-bg-hover) focus-visible:outline-2 focus-visible:outline-(--ui-accent)"
                               onClick={() => onSelectTask(target, 'activity')}
                               type="button"
                             >
-                              <Codicon className="shrink-0 text-(--ui-text-tertiary)" name="tasklist" />
-                              <span className="min-w-0 flex-1">
-                                <span className="block break-words text-[0.625rem] text-(--ui-text-tertiary) [overflow-wrap:anywhere]">
-                                  Assigned to {task.assignee?.trim()}
-                                </span>
-                                <span className="block break-words text-xs font-medium text-(--ui-text-primary) [overflow-wrap:anywhere]">
-                                  {task.label}
-                                </span>
-                              </span>
-                              <span className="flex shrink-0 flex-wrap items-center justify-end gap-1.5 text-[0.625rem] text-(--ui-text-tertiary)">
-                                <span aria-hidden className="size-1.5 rounded-full bg-current" />
-                                <span>{task.status || 'unknown'}</span>
+                              <span className={THREAD_META_CLASS} data-thread-message-meta>
+                                <span className={THREAD_SENDER_CLASS}>{t.liveGraph.taskTitle}</span>
                                 <time dateTime={new Date(timestampMs).toISOString()}>{relativeTime(timestampMs)}</time>
+                                <span className="min-w-0 break-words">Assigned to {task.assignee?.trim()}</span>
+                                <span className="min-w-0 break-words">{task.status || 'unknown'}</span>
+                              </span>
+                              <span className={THREAD_BODY_CLASS} data-thread-message-body>
+                                {task.label}
                               </span>
                             </button>
                           </li>
@@ -189,23 +193,25 @@ export function LiveGraphMessageThread({
 
                       return (
                         <li
-                          className="grid min-w-0 max-w-full gap-1 overflow-hidden"
+                          className={THREAD_ENTRY_CLASS}
                           data-kind={message.kind}
                           data-task-id={message.taskId}
-                          data-testid={
-                            message.kind === 'root' ? 'live-graph-thread-root' : 'live-graph-thread-comment'
-                          }
+                          data-testid={message.kind === 'root' ? 'live-graph-thread-root' : 'live-graph-thread-comment'}
+                          data-thread-message-entry
                           key={message.id}
                         >
-                          <div className="flex min-w-0 flex-wrap items-center gap-x-2 text-[0.625rem] text-(--ui-text-tertiary)">
-                            <span className="min-w-0 break-words font-semibold text-(--ui-text-secondary)">
+                          <div className={THREAD_META_CLASS} data-thread-message-meta>
+                            <span className={THREAD_SENDER_CLASS}>
                               {message.kind === 'root'
                                 ? message.legacyRoot
                                   ? 'Legacy request snapshot'
                                   : 'Request'
                                 : message.author || t.liveGraph.unknownCommentAuthor}
                             </span>
-                            <time dateTime={new Date(timestampMs).toISOString()} title={new Date(timestampMs).toLocaleString()}>
+                            <time
+                              dateTime={new Date(timestampMs).toISOString()}
+                              title={new Date(timestampMs).toLocaleString()}
+                            >
                               {relativeTime(timestampMs)}
                             </time>
                             {message.kind === 'reply' && message.taskId !== message.rootTaskId && (
@@ -228,10 +234,9 @@ export function LiveGraphMessageThread({
                               </button>
                             )}
                           </div>
-                          <CompactMarkdown
-                            className="min-w-0 max-w-full overflow-hidden break-words text-(--ui-text-primary) [overflow-wrap:anywhere]"
-                            text={message.body}
-                          />
+                          <div className={THREAD_BODY_CLASS} data-thread-message-body>
+                            <CompactMarkdown className="text-xs" text={message.body} />
+                          </div>
                         </li>
                       )
                     })}
