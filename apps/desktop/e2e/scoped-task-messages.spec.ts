@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
@@ -20,6 +21,8 @@ const SOURCE_PROFILE = 'review-source-e2e'
 const SOURCE_SESSION = 'source-session'
 const DECOY_SESSION = 'active-decoy-session'
 const SURFACE = '[data-composer-target]:not([data-pane-hidden] [data-composer-target])'
+const PDF_FIXTURE = path.join(import.meta.dirname, 'fixtures', 'report.pdf')
+const PDF_FIXTURE_SHA256 = 'e3819e7257ec309b0887048ec39bb7c4ce3b783ce6704fa93da6ae121e230fab'
 
 async function assertNoHorizontalOverflow(
   page: Page,
@@ -114,27 +117,6 @@ from hermes_state import SessionDB
 
 root = Path(os.environ["HERMES_HOME"])
 artifact = root / "report.pdf"
-content = b"q 0 0 200 200 re S Q\n"
-pdf_objects = [
-    b"<< /Type /Catalog /Pages 2 0 R >>",
-    b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << >> >>",
-    b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"endstream",
-]
-pdf = bytearray(b"%PDF-1.4\n")
-offsets = [0]
-for number, body in enumerate(pdf_objects, 1):
-    offsets.append(len(pdf))
-    pdf.extend(f"{number} 0 obj\n".encode())
-    pdf.extend(body)
-    pdf.extend(b"\nendobj\n")
-xref_offset = len(pdf)
-pdf.extend(f"xref\n0 {len(pdf_objects) + 1}\n".encode())
-pdf.extend(b"0000000000 65535 f \n")
-for offset in offsets[1:]:
-    pdf.extend(f"{offset:010d} 00000 n \n".encode())
-pdf.extend(f"trailer\n<< /Size {len(pdf_objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode())
-artifact.write_bytes(bytes(pdf))
 source_description = (
     "IMMUTABLE_SOURCE_DESCRIPTION\n\n"
     "[HTTPS review](https://example.com/review)\n\n"
@@ -315,16 +297,13 @@ async function setupScopedFixture(): Promise<ScopedFixture> {
   writeEnvFile(sourceHome)
   writeMockProviderConfig(activeHome, mock.url)
   writeEnvFile(activeHome)
+  const pdfBytes = fs.readFileSync(PDF_FIXTURE)
+  const pdfHash = createHash('sha256').update(pdfBytes).digest('hex')
+  if (pdfHash !== PDF_FIXTURE_SHA256) {
+    throw new Error(`Committed report.pdf hash mismatch: expected ${PDF_FIXTURE_SHA256}, got ${pdfHash}`)
+  }
+  fs.writeFileSync(path.join(sandbox.hermesHome, 'report.pdf'), pdfBytes)
   const seed = seedScopedProfiles(sandbox)
-  const pdfInfo = spawnSync('/opt/homebrew/bin/pdfinfo', [path.join(sandbox.hermesHome, 'report.pdf')], {
-    encoding: 'utf8'
-  })
-  if (pdfInfo.status !== 0 || pdfInfo.stderr.trim()) {
-    throw new Error(`pdfinfo rejected seeded report.pdf:\n${pdfInfo.stderr}`)
-  }
-  if (!/^Pages:\s+1$/m.test(pdfInfo.stdout)) {
-    throw new Error(`pdfinfo did not report one page:\n${pdfInfo.stdout}`)
-  }
   fs.writeFileSync(path.join(sandbox.userDataDir, 'active-profile.json'), JSON.stringify({ profile: ACTIVE_PROFILE }))
 
   const env = buildAppEnv(sandbox, { HOME: sandbox.root })
