@@ -635,3 +635,183 @@ def test_workflow_id_is_bound_for_exact_agent_turn_and_then_cleared(
     finally:
         server._sessions.pop("sid-context", None)
         reset_session_vars_for_tests()
+
+
+def test_compression_coalescing_preserves_distinct_thread_routes(
+    monkeypatch: pytest.MonkeyPatch,
+    workflow_db,
+):
+    session_key = "workflow-thread-route-session"
+    with kb.connect() as conn:
+        workflow_id = kb.create_workflow(conn, workflow_id="wf-thread-routes")
+        task_id = kb.create_task(
+            conn,
+            title="Preserve thread routes",
+            assignee="worker",
+            workflow_id=workflow_id,
+        )
+        kb.add_workflow_notify_sub(
+            conn,
+            workflow_id=workflow_id,
+            platform="tui",
+            chat_id=session_key,
+            thread_id="thread-a",
+        )
+        kb.add_workflow_notify_sub(
+            conn,
+            workflow_id=workflow_id,
+            platform="tui",
+            chat_id=session_key,
+            thread_id="thread-b",
+        )
+        assert kb.complete_task(conn, task_id, summary="both threads")
+
+    dispatches = []
+
+    def _dispatch(_sid, session, text, **kwargs):
+        dispatches.append((text, kwargs))
+        session["running"] = False
+        kwargs["completion_callback"](True)
+        return True
+
+    monkeypatch.setattr(server, "_dispatch_notification_text", _dispatch)
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+
+    server._dispatch_tui_kanban_notifications("sid", _session(session_key))
+
+    assert len(dispatches) == 1
+    with kb.connect() as conn:
+        rows = kb.list_workflow_notify_subs(conn, "wf-thread-routes")
+        assert {row["thread_id"] for row in rows} == {"thread-a", "thread-b"}
+        assert sum(int(row["last_event_id"]) > 0 for row in rows) == 1
+
+
+def test_coalescing_rejects_distinct_route_identity(workflow_db):
+    with kb.connect() as conn:
+        workflow_id = kb.create_workflow(conn, workflow_id="wf-route-guard")
+        kb.add_workflow_notify_sub(
+            conn,
+            workflow_id=workflow_id,
+            platform="tui",
+            chat_id="chat-a",
+            thread_id="thread-a",
+        )
+        kb.add_workflow_notify_sub(
+            conn,
+            workflow_id=workflow_id,
+            platform="tui",
+            chat_id="chat-b",
+            thread_id="thread-b",
+        )
+
+        assert (
+            kb.coalesce_workflow_notify_sub_routes(
+                conn,
+                workflow_id=workflow_id,
+                canonical_notifier_profile=None,
+                canonical_platform="tui",
+                canonical_chat_id="chat-a",
+                canonical_thread_id="thread-a",
+                aliases=[(None, "tui", "chat-b", "thread-b")],
+            )
+            is None
+        )
+        rows = kb.list_workflow_notify_subs(conn, workflow_id)
+        assert {(row["chat_id"], row["thread_id"]) for row in rows} == {
+            ("chat-a", "thread-a"),
+            ("chat-b", "thread-b"),
+        }
+
+
+@pytest.mark.parametrize(
+    ("alias_profile", "alias_platform", "alias_thread"),
+    [
+        ("profile-b", "tui", "thread-a"),
+        ("profile-a", "telegram", "thread-a"),
+        ("profile-a", "tui", "thread-b"),
+    ],
+)
+def test_coalescing_rejects_profile_platform_and_thread_aliases(
+    workflow_db,
+    alias_profile,
+    alias_platform,
+    alias_thread,
+):
+    with kb.connect() as conn:
+        workflow_id = kb.create_workflow(conn)
+        kb.add_workflow_notify_sub(
+            conn,
+            workflow_id=workflow_id,
+            notifier_profile="profile-a",
+            platform="tui",
+            chat_id="chat-a",
+            thread_id="thread-a",
+        )
+        kb.add_workflow_notify_sub(
+            conn,
+            workflow_id=workflow_id,
+            notifier_profile=alias_profile,
+            platform=alias_platform,
+            chat_id="chat-b",
+            thread_id=alias_thread,
+        )
+
+        assert (
+            kb.coalesce_workflow_notify_sub_routes(
+                conn,
+                workflow_id=workflow_id,
+                canonical_notifier_profile="profile-a",
+                canonical_platform="tui",
+                canonical_chat_id="chat-a",
+                canonical_thread_id="thread-a",
+                aliases=[
+                    (
+                        alias_profile,
+                        alias_platform,
+                        "chat-b",
+                        alias_thread,
+                    )
+                ],
+            )
+            is None
+        )
+        assert len(kb.list_workflow_notify_subs(conn, workflow_id)) == 2
+
+
+def test_unrelated_tui_session_route_is_not_claimed(workflow_db, monkeypatch):
+    session_key = "workflow-matching-session"
+    unrelated_key = "workflow-unrelated-session"
+    with kb.connect() as conn:
+        workflow_id = kb.create_workflow(conn)
+        task_id = kb.create_task(
+            conn,
+            title="Only matching session",
+            assignee="worker",
+            workflow_id=workflow_id,
+        )
+        for chat_id in (session_key, unrelated_key):
+            kb.add_workflow_notify_sub(
+                conn,
+                workflow_id=workflow_id,
+                platform="tui",
+                chat_id=chat_id,
+            )
+        assert kb.complete_task(conn, task_id, summary="matching session only")
+
+    dispatches = []
+
+    def _dispatch(_sid, session, text, **kwargs):
+        dispatches.append((text, kwargs))
+        session["running"] = False
+        kwargs["completion_callback"](True)
+        return True
+
+    monkeypatch.setattr(server, "_dispatch_notification_text", _dispatch)
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+    server._dispatch_tui_kanban_notifications("sid", _session(session_key))
+
+    assert len(dispatches) == 1
+    with kb.connect() as conn:
+        rows = kb.list_workflow_notify_subs(conn, workflow_id)
+        unrelated = next(row for row in rows if row["chat_id"] == unrelated_key)
+        assert int(unrelated["last_event_id"]) == 0

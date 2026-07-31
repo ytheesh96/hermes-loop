@@ -13784,6 +13784,12 @@ def coalesce_workflow_notify_sub_routes(
                 thread_id=thread_id,
             )
         )
+    route_identity = (canonical[0], canonical[1], canonical[2], canonical[4])
+    if any(
+        (route[0], route[1], route[2], route[4]) != route_identity
+        for route in alias_routes
+    ):
+        return None
 
     now = int(time.time())
     with write_txn(conn):

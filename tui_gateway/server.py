@@ -12176,11 +12176,19 @@ def _collect_tui_workflow_notification(
             # treats their resolved tips as one logical foreground. Collapse
             # those aliases before claiming so one event cursor cannot re-enter
             # once per historical chat ID.
-            workflow_groups: dict[str, list[dict[str, Any]]] = {}
+            workflow_groups: dict[
+                tuple[str, str, str, str], list[dict[str, Any]]
+            ] = {}
             for sub in matching_subs:
-                workflow_groups.setdefault(str(sub.get("workflow_id") or ""), []).append(
-                    sub
-                )
+                workflow_groups.setdefault(
+                    (
+                        str(sub.get("workflow_id") or "").strip(),
+                        str(sub.get("notifier_profile") or "").strip(),
+                        str(sub.get("platform") or "").strip().lower(),
+                        str(sub.get("thread_id") or "").strip(),
+                    ),
+                    [],
+                ).append(sub)
             for equivalent_subs in workflow_groups.values():
                 sub = equivalent_subs[0]
                 if len(equivalent_subs) > 1:
