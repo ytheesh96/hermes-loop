@@ -48,7 +48,7 @@ const task = (overrides: Partial<LiveGraphNode> = {}): LiveGraphNode => ({
 })
 
 describe('LiveGraphMessageThread', () => {
-  it('renders a raw filepath message as one exact preview control', () => {
+  it('renders a raw filepath message as one exact plain inline preview control', () => {
     render(
       <LiveGraphMessageThread
         messages={[{ ...root, body: 'Open /tmp/report.txt' }]}
@@ -58,11 +58,12 @@ describe('LiveGraphMessageThread', () => {
       />
     )
 
-    const preview = screen.getByRole('button', { name: 'Preview /tmp/report.txt' })
+    const preview = screen.getByRole('button', { name: '/tmp/report.txt' })
     expect(preview.getAttribute('data-preview-target')).toBe('/tmp/report.txt')
     expect(preview.getAttribute('title')).toBe('/tmp/report.txt')
     expect(preview.textContent).toBe('/tmp/report.txt')
     expect(preview.parentElement?.tagName).toBe('P')
+    expect(preview.className).not.toMatch(/border-border|bg-card|bg-background|px-|py-|rounded/)
   })
 
   it('renders the request first followed by flat chronological replies without composer or task cards', () => {
@@ -348,9 +349,10 @@ describe('LiveGraphMessageThread', () => {
     )
 
     expect(screen.getByRole('link', { name: 'Review work' }).getAttribute('href')).toBe(longUrl)
-    const explicitPreview = screen.getByRole('button', { name: 'Open preview' })
+    const explicitPreview = screen.getByRole('button', { name: 'artifact' })
     expect(explicitPreview).toBeTruthy()
-    expect(explicitPreview.textContent).toBe('Open preview')
+    expect(explicitPreview.textContent).toBe('artifact')
+    expect(explicitPreview.className).not.toMatch(/border-border|bg-card|bg-background|px-|py-|rounded/)
     expect(screen.getByTestId('live-graph-message-thread').className).toContain('overflow-x-hidden')
     expect(screen.getByTestId('live-graph-thread-comment').className).toContain('min-w-0')
     expect(screen.getByRole('button', { name: new RegExp(`Comments: ${longTaskId}`) }).className).toContain('break-all')

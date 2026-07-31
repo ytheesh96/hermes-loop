@@ -46,10 +46,9 @@ function MarkdownAnchor({ children, className, href, ...rest }: ComponentProps<'
 
   if (previewTarget) {
     const visibleText = typeof children === 'string' ? children : null
-    if (visibleText === previewTarget && /^\/[^/]/.test(previewTarget)) {
-      return <PreviewAttachment inline source="explicit-link" target={previewTarget} />
-    }
-    return <PreviewAttachment source="explicit-link" target={previewTarget} />
+    return (
+      <PreviewAttachment inline label={visibleText || previewTarget} source="explicit-link" target={previewTarget} />
+    )
   }
 
   if (!href || !/^https?:\/\//i.test(href)) {

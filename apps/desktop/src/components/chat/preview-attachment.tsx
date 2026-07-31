@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from 'react'
 
 import { useSessionView } from '@/app/chat/session-view'
 import { useI18n } from '@/i18n'
-import { MonitorPlay } from '@/lib/icons'
 import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
 import { previewName } from '@/lib/preview-targets'
 import { notifyError } from '@/store/notifications'
@@ -11,10 +10,12 @@ import { $previewTabSources, closePreviewForSource, openPreview, type PreviewRec
 
 export function PreviewAttachment({
   inline = false,
+  label,
   source = 'manual',
   target
 }: {
   inline?: boolean
+  label?: string
   source?: PreviewRecordSource
   target: string
 }) {
@@ -29,6 +30,7 @@ export function PreviewAttachment({
   const requestTokenRef = useRef(0)
   const targetRef = useRef(target)
   const name = previewName(target)
+  const visibleLabel = label || target
   const isActive = openSources.includes(target)
 
   cwdRef.current = cwd
@@ -104,10 +106,10 @@ export function PreviewAttachment({
 
   const previewButton = (
     <button
-      aria-label={inline ? `Preview ${target}` : undefined}
+      aria-label={inline ? visibleLabel : undefined}
       className={
         inline
-          ? 'inline min-w-0 max-w-full overflow-wrap-anywhere rounded-md border border-border/55 bg-background/40 px-1.5 py-0.5 text-left font-mono text-[0.78rem] text-foreground/90 transition-colors hover:bg-accent/55 hover:text-foreground disabled:opacity-50'
+          ? 'inline min-w-0 max-w-full overflow-wrap-anywhere border-0 bg-transparent p-0 text-left text-primary underline decoration-primary/45 underline-offset-2 transition-colors hover:text-primary/80 disabled:opacity-50'
           : 'shrink-0 rounded-md border border-border/55 bg-background/40 px-2 py-1 text-[0.7rem] font-medium text-muted-foreground transition-colors hover:bg-accent/55 hover:text-foreground disabled:opacity-50'
       }
       data-preview-target={inline ? target : undefined}
@@ -116,7 +118,7 @@ export function PreviewAttachment({
       title={inline ? target : undefined}
       type="button"
     >
-      {inline ? target : opening ? t.preview.opening : isActive ? t.preview.hide : t.preview.openPreview}
+      {inline ? visibleLabel : opening ? t.preview.opening : isActive ? t.preview.hide : t.preview.openPreview}
     </button>
   )
 
@@ -126,9 +128,6 @@ export function PreviewAttachment({
 
   return (
     <span className="flex w-full max-w-160 items-center gap-2 rounded-lg border border-border/55 bg-card/55 px-2.5 py-1.5 text-sm">
-      <span className="grid size-6 shrink-0 place-items-center rounded-md bg-muted/55 text-muted-foreground/85">
-        <MonitorPlay className="size-3.5" />
-      </span>
       <span className="min-w-0 flex-1 truncate text-[0.78rem] font-medium text-foreground/90" title={target}>
         {name}
       </span>
