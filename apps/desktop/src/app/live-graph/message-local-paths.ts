@@ -1,9 +1,12 @@
 import { previewMarkdownHref } from '@/lib/preview-targets'
 
 const TRAILING_PUNCTUATION = /[.,;:!?]+$/
+const MARKDOWN_LABEL_CHARACTERS = /[\\`*_()[\]{}#+!|>~-]/g
+const BLOCK_HTML_TAGS =
+  /^(?:address|article|aside|blockquote|details|dialog|dd|div|dl|dt|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|summary|table|tbody|td|tfoot|th|thead|tr|ul)$/i
 
 function escapeMarkdownLabel(value: string) {
-  return value.replace(/[\\[\]()]/g, '\\$&')
+  return value.replace(MARKDOWN_LABEL_CHARACTERS, '\\$&')
 }
 
 function isPathBoundary(value: string, index: number) {
@@ -19,6 +22,23 @@ function isAbsolutePath(path: string) {
   return path.startsWith('/') && path.length > 1 && /[^/]/.test(path)
 }
 
+function containsControlCharacter(value: string) {
+  return [...value].some(character => character <= '\u001f' || character === '\u007f')
+}
+
+function findClosingQuote(text: string, start: number, quote: string) {
+  for (let index = start; index < text.length; index += 1) {
+    if (text[index] === '\\') {
+      index += 1
+      continue
+    }
+    if (text[index] === quote) {
+      return index
+    }
+  }
+  return -1
+}
+
 function scanPlainText(text: string) {
   let output = ''
   let index = 0
@@ -27,17 +47,43 @@ function scanPlainText(text: string) {
     const character = text[index]
 
     if ((character === '"' || character === "'") && text[index + 1] === '/') {
-      const end = text.indexOf(character, index + 2)
+      const end = findClosingQuote(text, index + 2, character)
       const path = end >= 0 ? text.slice(index + 1, end) : ''
 
-      if (end >= 0 && !/[\r\n\0]/.test(path) && isAbsolutePath(path)) {
+      if (end < 0) {
+        output += text.slice(index)
+        break
+      }
+
+      if (!containsControlCharacter(path) && isAbsolutePath(path)) {
         output += character + pathLink(path) + character
         index = end + 1
         continue
       }
+
+      output += text.slice(index, end + 1)
+      index = end + 1
+      continue
     }
 
     if (character === '/' && isPathBoundary(text, index)) {
+      const lineEnd = text.indexOf('\n', index)
+      const line = text.slice(index, lineEnd >= 0 ? lineEnd : text.length)
+      const linePath = line.replace(TRAILING_PUNCTUATION, '')
+
+      if (
+        /\s/.test(linePath) &&
+        isAbsolutePath(linePath) &&
+        /\/[^/\s]+(?:\s+[^\s]+)+\.[^\s./]+$/.test(linePath) &&
+        !/\s+\//.test(linePath) &&
+        !/[`'"<>[\]]/.test(linePath)
+      ) {
+        output += pathLink(linePath)
+        output += line.slice(linePath.length)
+        index += line.length
+        continue
+      }
+
       let end = index + 1
 
       while (end < text.length && !/[\s`"'<>]/.test(text[end] || '')) {
@@ -91,6 +137,8 @@ export function linkifyMessageLocalPaths(text: string): string {
         index = end
         continue
       }
+      output += text.slice(index)
+      break
     }
 
     if (text[index] === '`') {
@@ -102,10 +150,33 @@ export function linkifyMessageLocalPaths(text: string): string {
         index = end
         continue
       }
+      output += text.slice(index)
+      break
     }
 
     if (text[index] === '<') {
+      if (text.startsWith('<!--', index)) {
+        const commentEnd = text.indexOf('-->', index + 4)
+        output += commentEnd >= 0 ? text.slice(index, commentEnd + 3) : text.slice(index)
+        if (commentEnd < 0) {
+          break
+        }
+        index = commentEnd + 3
+        continue
+      }
       const end = text.indexOf('>', index + 1)
+      const tagMatch = end >= 0 ? text.slice(index + 1, end).match(/^\/?([a-z][\w-]*)\b/i) : null
+      if (tagMatch?.[1] && BLOCK_HTML_TAGS.test(tagMatch[1]) && !text.slice(index, end + 1).startsWith('</')) {
+        const closeTag = new RegExp(`</${tagMatch[1]}\\s*>`, 'i').exec(text.slice(end + 1))
+        if (closeTag) {
+          const blockEnd = end + 1 + closeTag.index + closeTag[0].length
+          output += text.slice(index, blockEnd)
+          index = blockEnd
+          continue
+        }
+        output += text.slice(index)
+        break
+      }
       if (end >= 0 && /^(?:https?:\/\/|\/|[a-z][\w-]+(?:\s|>))/i.test(text.slice(index + 1, end))) {
         output += text.slice(index, end + 1)
         index = end + 1
@@ -113,25 +184,46 @@ export function linkifyMessageLocalPaths(text: string): string {
       }
     }
 
-    if ((text[index] === '[' || (text[index] === '!' && text[index + 1] === '['))) {
+    if (text[index] === '[' || (text[index] === '!' && text[index + 1] === '[')) {
       const start = text[index] === '!' ? index + 1 : index
-      const labelEnd = text.indexOf(']', start + 1)
-      if (labelEnd >= 0 && text[labelEnd + 1] === '(') {
-        let depth = 1
-        let destinationEnd = labelEnd + 2
-        while (destinationEnd < text.length && depth > 0) {
-          if (text[destinationEnd] === '(') {
-            depth += 1
-          }
-          if (text[destinationEnd] === ')') {
-            depth -= 1
-          }
-          destinationEnd += 1
+      let labelDepth = 1
+      let labelEnd = start + 1
+      while (labelEnd < text.length && labelDepth > 0) {
+        if (text[labelEnd] === '\\') {
+          labelEnd += 2
+        } else if (text[labelEnd] === '[') {
+          labelDepth += 1
+        } else if (text[labelEnd] === ']') {
+          labelDepth -= 1
         }
-        if (depth === 0) {
-          output += text.slice(index, destinationEnd)
-          index = destinationEnd
-          continue
+        labelEnd += 1
+      }
+      if (labelDepth === 0) {
+        if (text[labelEnd] === '(') {
+          let depth = 1
+          let destinationEnd = labelEnd + 1
+          while (destinationEnd < text.length && depth > 0) {
+            if (text[destinationEnd] === '\\') {
+              destinationEnd += 2
+            } else if (text[destinationEnd] === '(') {
+              depth += 1
+            } else if (text[destinationEnd] === ')') {
+              depth -= 1
+            }
+            destinationEnd += 1
+          }
+          if (depth === 0) {
+            output += text.slice(index, destinationEnd)
+            index = destinationEnd
+            continue
+          }
+        } else if (text[labelEnd] === '[') {
+          const referenceEnd = text.indexOf(']', labelEnd + 1)
+          if (referenceEnd >= 0) {
+            output += text.slice(index, referenceEnd + 1)
+            index = referenceEnd + 1
+            continue
+          }
         }
       }
     }

@@ -34,7 +34,9 @@ describe('normalizeOrLocalPreviewTarget', () => {
   })
 
   it('surfaces other bridge failures', async () => {
-    vi.stubGlobal('window', { hermesDesktop: { normalizePreviewTarget: vi.fn().mockRejectedValue(new Error('denied')) } })
+    vi.stubGlobal('window', {
+      hermesDesktop: { normalizePreviewTarget: vi.fn().mockRejectedValue(new Error('denied')) }
+    })
 
     await expect(normalizeOrLocalPreviewTarget('/tmp/report.txt')).rejects.toThrow('denied')
   })

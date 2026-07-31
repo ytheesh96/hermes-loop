@@ -104,9 +104,11 @@ export function PreviewAttachment({
 
   return (
     <div
-      className={inline ? 'inline-flex min-w-0 max-w-full align-baseline' : 'flex w-full max-w-160 items-center gap-2 rounded-lg border border-border/55 bg-card/55 px-2.5 py-1.5 text-sm'}
-      data-preview-target={inline ? target : undefined}
-      title={inline ? target : undefined}
+      className={
+        inline
+          ? 'inline-flex min-w-0 max-w-full align-baseline'
+          : 'flex w-full max-w-160 items-center gap-2 rounded-lg border border-border/55 bg-card/55 px-2.5 py-1.5 text-sm'
+      }
     >
       {!inline && (
         <span className="grid size-6 shrink-0 place-items-center rounded-md bg-muted/55 text-muted-foreground/85">
@@ -120,10 +122,15 @@ export function PreviewAttachment({
       )}
       <button
         aria-label={inline ? `Preview ${target}` : undefined}
-        className={inline ? 'min-w-0 max-w-full overflow-wrap-anywhere rounded-md border border-border/55 bg-background/40 px-1.5 py-0.5 text-left font-mono text-[0.78rem] text-foreground/90 transition-colors hover:bg-accent/55 hover:text-foreground disabled:opacity-50' : 'shrink-0 rounded-md border border-border/55 bg-background/40 px-2 py-1 text-[0.7rem] font-medium text-muted-foreground transition-colors hover:bg-accent/55 hover:text-foreground disabled:opacity-50'}
+        className={
+          inline
+            ? 'min-w-0 max-w-full overflow-wrap-anywhere rounded-md border border-border/55 bg-background/40 px-1.5 py-0.5 text-left font-mono text-[0.78rem] text-foreground/90 transition-colors hover:bg-accent/55 hover:text-foreground disabled:opacity-50'
+            : 'shrink-0 rounded-md border border-border/55 bg-background/40 px-2 py-1 text-[0.7rem] font-medium text-muted-foreground transition-colors hover:bg-accent/55 hover:text-foreground disabled:opacity-50'
+        }
         data-preview-target={inline ? target : undefined}
         disabled={opening}
         onClick={() => void togglePreview()}
+        title={inline ? target : undefined}
         type="button"
       >
         {inline ? target : opening ? t.preview.opening : isActive ? t.preview.hide : t.preview.openPreview}

@@ -129,6 +129,15 @@ async function enrichPreviewTarget(target: PreviewTarget | null): Promise<Previe
   }
 }
 
+function isMissingPreviewHandlerError(error: unknown) {
+  return (
+    error instanceof Error &&
+    /^(?:No handler registered|No handler registered for ['"]normalizePreviewTarget['"]?|The channel closed before a response was received\.)$/i.test(
+      error.message.trim()
+    )
+  )
+}
+
 export async function normalizeOrLocalPreviewTarget(
   rawTarget: string,
   cwd?: string | null
@@ -146,7 +155,7 @@ export async function normalizeOrLocalPreviewTarget(
   } catch (error) {
     // Older shells may not have registered this newly added handler yet.
     // Other bridge failures must remain visible to the caller.
-    if (!(error instanceof Error) || !/No handler registered|not implemented/i.test(error.message)) {
+    if (!isMissingPreviewHandlerError(error)) {
       throw error
     }
   }

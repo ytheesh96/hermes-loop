@@ -10,13 +10,37 @@ describe('linkifyMessageLocalPaths', () => {
   })
 
   it('preserves protected markdown, code, URLs, and non-path text', () => {
-    const text = '`/tmp/code.txt` [label](/tmp/link.txt) https://example.test/a/b / ./relative ~/file C:\\file /'
+    const text =
+      '`/tmp/code.txt` [label](/tmp/link.txt) [label][ref] ![image](/tmp/image.png) https://example.test/a/b / ./relative ~/file C:\\file /'
     expect(linkifyMessageLocalPaths(text)).toBe(text)
   })
 
   it('preserves multi-backtick spans, indented and tilde fences, and nested links', () => {
-    const text = '`` /tmp/code.txt ``\n   ```\n/tmp/fenced.txt\n```\n~~~\n/tmp/tilde.txt\n~~~\n[label](/tmp/a_(b).txt)'
+    const text =
+      '`` /tmp/code.txt ``\n   ```\n/tmp/fenced.txt\n```\n~~~\n/tmp/tilde.txt\n~~~\n[outer [inner]](/tmp/a_(b).txt)'
     expect(linkifyMessageLocalPaths(text)).toBe(text)
+  })
+
+  it('preserves unclosed quotes, escaped quotes, fences, and HTML', () => {
+    const cases = [
+      'unclosed "/tmp/My Report.txt',
+      'escaped "/tmp/a\\"b.txt"',
+      '```\n/tmp/unclosed.txt',
+      '<!-- /tmp/comment.txt -->',
+      '<!-- /tmp/unclosed-comment.txt',
+      '<div>\n/tmp/block.txt\n</div>',
+      '<div>\n/tmp/unclosed-block.txt'
+    ]
+
+    const unchanged = cases.slice(0, 1).concat(cases.slice(2)).join('\n')
+    expect(linkifyMessageLocalPaths(unchanged)).toBe(unchanged)
+    expect(linkifyMessageLocalPaths('escaped "/tmp/a\\"b.txt"')).toContain('(#preview/%2Ftmp%2Fa%5C%22b.txt)')
+  })
+
+  it('rejects quoted control characters and escapes markdown label metacharacters', () => {
+    const control = '"/tmp/a\u0001b.txt"'
+    expect(linkifyMessageLocalPaths(control)).toBe(control)
+    expect(linkifyMessageLocalPaths('/tmp/a*b_.txt')).toBe('[/tmp/a\\*b\\_.txt](#preview/%2Ftmp%2Fa*b_.txt)')
   })
 
   it('removes sentence punctuation and unmatched closers', () => {

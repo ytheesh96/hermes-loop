@@ -6,7 +6,11 @@ import { type LiveGraphMessage, normalizeSessionThreads } from './messages'
 import type { LiveGraphNode } from './model'
 
 vi.mock('@/components/chat/preview-attachment', () => ({
-  PreviewAttachment: ({ target }: { target: string }) => <button type="button">Preview {target}</button>
+  PreviewAttachment: ({ target }: { target: string }) => (
+    <button data-preview-target={target} type="button">
+      Preview {target}
+    </button>
+  )
 }))
 
 const root: LiveGraphMessage = {
@@ -52,6 +56,21 @@ const task = (overrides: Partial<LiveGraphNode> = {}): LiveGraphNode => ({
 })
 
 describe('LiveGraphMessageThread', () => {
+  it('renders a raw filepath message as one exact preview control', () => {
+    render(
+      <LiveGraphMessageThread
+        messages={[{ ...root, body: 'Open /tmp/report.txt' }]}
+        onRetry={vi.fn()}
+        onSelectTask={vi.fn()}
+        sourceProfile="profile"
+      />
+    )
+
+    expect(screen.getByRole('button', { name: /Preview \/tmp\/report\.txt/ }).getAttribute('data-preview-target')).toBe(
+      '/tmp/report.txt'
+    )
+  })
+
   it('renders the request first followed by flat chronological replies without composer or task cards', () => {
     render(
       <LiveGraphMessageThread
