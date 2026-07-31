@@ -135,8 +135,6 @@ for offset in offsets[1:]:
     pdf.extend(f"{offset:010d} 00000 n \n".encode())
 pdf.extend(f"trailer\n<< /Size {len(pdf_objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode())
 artifact.write_bytes(bytes(pdf))
-assert pdf.startswith(b"%PDF-1.4\n") and pdf.endswith(b"%%EOF\n")
-assert pdf_objects[3].startswith(b"<< /Length " + str(len(content)).encode())
 source_description = (
     "IMMUTABLE_SOURCE_DESCRIPTION\n\n"
     "[HTTPS review](https://example.com/review)\n\n"
@@ -318,6 +316,15 @@ async function setupScopedFixture(): Promise<ScopedFixture> {
   writeMockProviderConfig(activeHome, mock.url)
   writeEnvFile(activeHome)
   const seed = seedScopedProfiles(sandbox)
+  const pdfInfo = spawnSync('/opt/homebrew/bin/pdfinfo', [path.join(sandbox.hermesHome, 'report.pdf')], {
+    encoding: 'utf8'
+  })
+  if (pdfInfo.status !== 0 || pdfInfo.stderr.trim()) {
+    throw new Error(`pdfinfo rejected seeded report.pdf:\n${pdfInfo.stderr}`)
+  }
+  if (!/^Pages:\s+1$/m.test(pdfInfo.stdout)) {
+    throw new Error(`pdfinfo did not report one page:\n${pdfInfo.stdout}`)
+  }
   fs.writeFileSync(path.join(sandbox.userDataDir, 'active-profile.json'), JSON.stringify({ profile: ACTIVE_PROFILE }))
 
   const env = buildAppEnv(sandbox, { HOME: sandbox.root })
@@ -672,12 +679,33 @@ test.describe('scoped task Messages across profile backends', () => {
     await expect(workflowNode.locator('[data-live-graph-node-selection]')).toBeVisible()
     const workflowInbox = page.getByRole('region', { name: 'Workflow task inbox' })
     await expect(workflowInbox).toBeVisible()
-    const workflowTaskCard = page.locator(
+    const workflowTaskCards = workflowInbox.locator('[data-live-graph-task-card]')
+    const expectedWorkflowTaskIds = [seed.sourceTask, ...seed.childTasks].map(
+      taskId => `task:${SOURCE_PROFILE}:default:${taskId}`
+    )
+    await expect(workflowTaskCards).toHaveCount(expectedWorkflowTaskIds.length)
+    await expect
+      .poll(async () =>
+        (
+          await workflowTaskCards.evaluateAll(cards =>
+            cards
+              .map(card => card.getAttribute('data-live-graph-task-card'))
+              .filter((value): value is string => value !== null)
+          )
+        ).sort()
+      )
+      .toEqual(expectedWorkflowTaskIds.sort())
+    await expect(workflowInbox.locator(`[data-live-graph-task-card*="${seed.secondSourceTask}"]`)).toHaveCount(0)
+    await expect(workflowInbox.locator(`[data-live-graph-task-card*="${seed.decoyTask}"]`)).toHaveCount(0)
+    const workflowTaskCard = workflowInbox.locator(
       `[data-live-graph-task-card="task:${SOURCE_PROFILE}:default:${seed.childTasks[0]}"]`
     )
     await expect(workflowTaskCard).toContainText('First child')
     await workflowTaskCard.locator('button').click()
     await expect(page.getByTestId('live-graph-task-activity')).toBeVisible()
+    const activityInspector = page.getByTestId('live-graph-selection-inspector')
+    await activityInspector.getByRole('button', { name: 'Description' }).click()
+    await expect(page.getByTestId('live-graph-task-details')).toContainText('First child')
     const selectedGraphNode = page
       .locator('[data-live-graph-node]')
       .filter({ has: page.locator('[data-live-graph-node-selection]') })

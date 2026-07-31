@@ -2,8 +2,17 @@ import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-import { type MockBackendFixture, setupMockBackend, waitForAppReady } from './fixtures'
-import { MOCK_REPLY } from './mock-server'
+import {
+  type MockBackendFixture,
+  buildAppEnv,
+  createSandbox,
+  launchDesktop,
+  waitForAppReady,
+  writeEnvFile,
+  writeMockProviderConfig
+} from './fixtures'
+import { MOCK_REPLY, startMockServer } from './mock-server'
+import { RealSessionBuilder } from './real-session-builder'
 import { expect, type Page, test } from './test'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..', '..')
@@ -16,15 +25,8 @@ async function showSessionTab(page: Page): Promise<void> {
 }
 
 async function showSessionFromSidebar(page: Page): Promise<void> {
-  await page.getByRole('button', { name: MOCK_REPLY, exact: true }).click()
+  await page.getByRole('button', { name: PROMPT, exact: true }).click()
   await expect(page.locator(SURFACE).last()).toBeVisible()
-}
-
-async function send(page: Page, text: string): Promise<void> {
-  const composer = page.locator(SURFACE).last().locator('[contenteditable="true"]').first()
-  await composer.waitFor({ state: 'visible', timeout: 15_000 })
-  await composer.fill(text)
-  await page.keyboard.press('Enter')
 }
 
 async function currentSessionId(page: Page): Promise<string> {
@@ -147,7 +149,29 @@ test.describe('Messages composer side-by-side placement', () => {
   let fixture: MockBackendFixture | null = null
 
   test.beforeEach(async () => {
-    fixture = await setupMockBackend()
+    const mock = await startMockServer()
+    const sandbox = createSandbox('side-by-side-seeded')
+    writeMockProviderConfig(sandbox.hermesHome, mock.url)
+    writeEnvFile(sandbox.hermesHome)
+    const builder = await RealSessionBuilder.start(sandbox.hermesHome)
+    try {
+      await builder.createSession({ title: PROMPT, turns: [PROMPT] })
+    } finally {
+      await builder.close()
+    }
+    const { app, page } = await launchDesktop(buildAppEnv(sandbox))
+    fixture = {
+      app,
+      page,
+      mock,
+      mockUrl: mock.url,
+      sandbox,
+      cleanup: async () => {
+        await app.close().catch(() => undefined)
+        await mock.close()
+        sandbox.cleanup()
+      }
+    }
     await waitForAppReady(fixture, 120_000)
   })
 
@@ -159,7 +183,7 @@ test.describe('Messages composer side-by-side placement', () => {
   test('keeps chat visible and deduplicates re-clicks at narrow width', async ({}, testInfo) => {
     const { page } = fixture!
     await page.setViewportSize({ width: 1440, height: 900 })
-    await send(page, PROMPT)
+    await page.getByRole('button', { name: PROMPT, exact: true }).click()
     await expect(page.locator(SURFACE).last()).toContainText(MOCK_REPLY, { timeout: 30_000 })
     const sessionId = await currentSessionId(page)
     const seed = seedTask(fixture!, sessionId)
@@ -168,7 +192,7 @@ test.describe('Messages composer side-by-side placement', () => {
     await launcher.waitFor({ state: 'visible', timeout: 15_000 })
     await launcher.click()
 
-    const feedTab = page.getByRole('tab', { name: new RegExp(`Messages.*${MOCK_REPLY}`) })
+    const feedTab = page.getByRole('tab', { name: /Messages.*E2E task feed side-by-side source session/ })
     await expect(feedTab).toHaveCount(1)
     const feed = page.getByTestId('scoped-task-feed-pane')
     await expect(feed).toBeVisible()
