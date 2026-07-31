@@ -48,7 +48,7 @@ describe('ScopedTaskFeedPaneView', () => {
     expect(screen.getByText('No task comments yet.')).toBeTruthy()
   })
 
-  it('opens the exact task inspector and returns to the preserved feed view', () => {
+  it('keeps task navigation in Tasks while Messages remains a read-only thread', () => {
     const onViewChange = vi.fn()
 
     render(
@@ -76,11 +76,10 @@ describe('ScopedTaskFeedPaneView', () => {
     )
 
     fireEvent.click(screen.getByRole('button', { name: 'Messages' }))
-    fireEvent.click(screen.getByRole('button', { name: /View task: Task one/i }))
-
-    expect(screen.getByTestId('scoped-task-inspector').textContent).toMatch(/very long task title/)
-    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
     expect(screen.getByText('First comment')).toBeTruthy()
-    expect(onViewChange.mock.calls.map(([view]) => view)).toEqual(['messages', 'tasks', 'messages'])
+    expect(screen.queryByRole('button', { name: /View task: Task one/i })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Tasks' }))
+    expect(screen.getByText(/A very long task title/)).toBeTruthy()
+    expect(onViewChange.mock.calls.map(([view]) => view)).toEqual(['messages', 'tasks'])
   })
 })

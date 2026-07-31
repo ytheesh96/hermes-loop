@@ -21,6 +21,7 @@ import {
   getLoopSessionComments,
   getLoopSessionSource,
   getLoopSessionSources,
+  getLoopSessionThreads,
   getLoopTaskDetail,
   getProfiles,
   getSessionMessages,
@@ -415,6 +416,23 @@ describe('Hermes REST helpers', () => {
     await expect(getLoopSessionComments('session-1', 'session-profile', ['alpha', 'beta'])).rejects.toThrow(
       'beta unavailable'
     )
+  })
+
+  it('loads task-thread deltas from source boards using each board cursor', async () => {
+    api.mockResolvedValue({ latest_reply_id: 8, replies: [], threads: [] })
+
+    await getLoopSessionThreads('session-1', 'session-profile', ['alpha', 'beta'], { alpha: 7 })
+
+    expect(api.mock.calls.map(call => call[0])).toEqual([
+      {
+        path: '/api/plugins/kanban/session-threads?session_id=session-1&board=alpha&after_reply_id=7',
+        profile: 'session-profile'
+      },
+      {
+        path: '/api/plugins/kanban/session-threads?session_id=session-1&board=beta&after_reply_id=0',
+        profile: 'session-profile'
+      }
+    ])
   })
 
   it('rejects an all-board Loop snapshot when any board is unreadable', async () => {

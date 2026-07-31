@@ -51,7 +51,18 @@ from hermes_cli import kanban_db
 
 conn = kanban_db.connect(board="default")
 try:
-    task_id = kanban_db.create_task(conn, title="Side-by-side source task", session_id=${JSON.stringify(sessionId)})
+    graph = kanban_db.create_loop_skeleton_graph(
+        conn,
+        nodes=[{
+            "client_id": "side-by-side-root",
+            "title": "Side-by-side source task",
+            "context": "SIDE_BY_SIDE_ROOT_DESCRIPTION",
+        }],
+        session_id=${JSON.stringify(sessionId)},
+        created_by="foreground",
+        board="default",
+    )
+    task_id = graph["items"][0]["task_id"]
     comment_id = kanban_db.add_comment(conn, task_id, "Builder", "SIDE_BY_SIDE_COMMENT")
     print(json.dumps({"taskId": task_id, "commentId": comment_id}))
 finally:

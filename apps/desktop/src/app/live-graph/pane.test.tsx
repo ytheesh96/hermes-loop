@@ -3,7 +3,7 @@ import { act, cleanup, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TaskFeedLauncherRow } from '@/app/chat/composer/status-stack/task-feed-launcher-row'
-import type { LoopSessionCommentsSource, TenantLoopSource } from '@/app/chat/loop-state'
+import type { LoopSessionThreadsSource, TenantLoopSource } from '@/app/chat/loop-state'
 import type * as HermesExports from '@/hermes'
 import { I18nProvider } from '@/i18n'
 import type { SessionInfo } from '@/types/hermes'
@@ -14,14 +14,14 @@ const mocks = vi.hoisted(() => ({
   buildGraph: vi.fn<(input: SessionLiveGraphInput) => LiveGraphSnapshot>(() => ({ edges: [], nodes: [] })),
   detectPulses: vi.fn(() => []),
   feedView: vi.fn(),
-  getComments: vi.fn<() => Promise<LoopSessionCommentsSource[]>>(async () => []),
+  getThreads: vi.fn<() => Promise<LoopSessionThreadsSource[]>>(async () => []),
   getSources: vi.fn<() => Promise<TenantLoopSource[]>>(async () => [{ board: 'default', tasks: [] }]),
   view: vi.fn()
 }))
 
 vi.mock('@/hermes', async importOriginal => ({
   ...(await importOriginal<typeof HermesExports>()),
-  getLoopSessionComments: mocks.getComments,
+  getLoopSessionThreads: mocks.getThreads,
   getLoopSessionSources: mocks.getSources
 }))
 
@@ -72,7 +72,7 @@ beforeEach(() => {
   mocks.buildGraph.mockClear()
   mocks.detectPulses.mockClear()
   mocks.feedView.mockClear()
-  mocks.getComments.mockClear()
+  mocks.getThreads.mockClear()
   mocks.getSources.mockClear()
   mocks.view.mockClear()
 })
@@ -116,21 +116,21 @@ describe('native Graph View panes', () => {
     expect(await findByTestId('scoped-task-feed-view')).toBeTruthy()
     expect(mocks.feedView).toHaveBeenCalledWith(expect.objectContaining({ sourceProfile: 'default' }))
     expect(mocks.view).not.toHaveBeenCalled()
-    expect(mocks.getComments).not.toHaveBeenCalled()
+    expect(mocks.getThreads).not.toHaveBeenCalled()
 
     const feed = mocks.feedView.mock.calls.at(-1)?.[0] as {
       onViewChange: (view: 'messages' | 'tasks') => void
     }
 
     act(() => feed.onViewChange('messages'))
-    await waitFor(() => expect(mocks.getComments).toHaveBeenCalledWith('session-one', 'default', ['default']))
+    await waitFor(() => expect(mocks.getThreads).toHaveBeenCalledWith('session-one', 'default', ['default'], {}))
 
     act(() => feed.onViewChange('tasks'))
-    const stoppedCount = mocks.getComments.mock.calls.length
+    const stoppedCount = mocks.getThreads.mock.calls.length
     await act(async () => {
-      await queryClient.invalidateQueries({ queryKey: ['loop-session-comments'] })
+      await queryClient.invalidateQueries({ queryKey: ['loop-session-threads'] })
     })
-    expect(mocks.getComments).toHaveBeenCalledTimes(stoppedCount)
+    expect(mocks.getThreads).toHaveBeenCalledTimes(stoppedCount)
   })
 
   it('polls comments only for the active Messages view through the stored source profile', async () => {
@@ -141,18 +141,32 @@ describe('native Graph View panes', () => {
       edges: [],
       nodes: [{ board: 'alpha', entityId: 'task-1', id: 'task:alpha:task-1', kind: 'task', label: 'Task one' }]
     })
-    mocks.getComments.mockResolvedValue([
+    mocks.getThreads.mockResolvedValue([
       {
         board: 'alpha',
-        comments: [
+        latest_reply_id: 1,
+        replies: [
           {
             author: 'Builder',
             body: 'Live update',
             created_at: 10,
             id: 1,
+            root_task_id: 'task-1',
             task_id: 'task-1',
             task_status: 'running',
             task_title: 'Task one'
+          }
+        ],
+        threads: [
+          {
+            created_at: 1,
+            description: 'Original request',
+            latest_reply_id: 1,
+            legacy_root: false,
+            origin_session_id: 'runtime-tip',
+            root_task_id: 'task-1',
+            title: 'Task one',
+            workflow_id: 'workflow-1'
           }
         ]
       }
@@ -172,7 +186,7 @@ describe('native Graph View panes', () => {
     render(<QueryClientProvider client={queryClient}>{contribution.render?.()}</QueryClientProvider>)
     await waitFor(() => expect(mocks.view).toHaveBeenCalled())
     expect(mocks.view.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({ initialTaskFeedOpen: true }))
-    expect(mocks.getComments).not.toHaveBeenCalled()
+    expect(mocks.getThreads).not.toHaveBeenCalled()
 
     const initialView = mocks.view.mock.calls.at(-1)?.[0] as {
       onMessageViewChange: (view: 'messages' | 'tasks') => void
@@ -181,19 +195,19 @@ describe('native Graph View panes', () => {
     act(() => initialView.onMessageViewChange('messages'))
 
     await waitFor(() =>
-      expect(mocks.getComments).toHaveBeenCalledWith('runtime-tip', 'session-profile', ['alpha'])
-    )
-    expect(queryClient.getQueryData(['loop-session-comments', 'session-profile', 'runtime-tip'])).toEqual(
-      mocks.getComments.mock.results.at(-1)?.value ? await mocks.getComments.mock.results.at(-1)?.value : []
+      expect(mocks.getThreads).toHaveBeenCalledWith('runtime-tip', 'session-profile', ['alpha'], {})
     )
     await waitFor(() => {
       const messagesView = mocks.view.mock.calls.at(-1)?.[0] as {
         messageThread?: { messages?: Array<{ body: string }> }
       }
 
-      expect(messagesView.messageThread?.messages).toEqual([expect.objectContaining({ body: 'Live update' })])
+      expect(messagesView.messageThread?.messages).toEqual([
+        expect.objectContaining({ body: 'Original request', kind: 'root' }),
+        expect.objectContaining({ body: 'Live update', kind: 'reply' })
+      ])
     })
-    expect(queryClient.getQueryData(['loop-session-comments', 'active-profile', 'runtime-tip'])).toBeUndefined()
+    expect(mocks.getThreads).not.toHaveBeenCalledWith('runtime-tip', 'active-profile', ['alpha'], expect.anything())
   })
 
   it('mounts a cross-profile pane and shares its source identity and task count with the composer row', async () => {

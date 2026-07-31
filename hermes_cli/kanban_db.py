@@ -1376,6 +1376,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- set the env var. Indexed so per-session list queries stay cheap on
     -- larger boards.
     session_id           TEXT,
+    -- Immutable message-thread membership. Foreground skeletons point to
+    -- themselves; generated descendants inherit their source shell's root.
+    thread_root_task_id  TEXT,
     -- Foreground-authored skeletons are specified by the triage decomposer
     -- before dispatch. Existing/ordinary tasks default to worker-ready.
     needs_specification  INTEGER NOT NULL DEFAULT 0,
@@ -1396,6 +1399,16 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- successful completion — NOT on unblock (resetting on unblock is exactly
     -- the amnesia that let the loop run unbounded).
     block_recurrences    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS task_threads (
+    root_task_id       TEXT PRIMARY KEY,
+    workflow_id       TEXT NOT NULL,
+    origin_session_id TEXT NOT NULL,
+    tenant            TEXT,
+    title             TEXT NOT NULL,
+    description       TEXT NOT NULL,
+    created_at        INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1518,6 +1531,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_task_threads_session  ON task_threads(origin_session_id, created_at, root_task_id);
 CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_task_cursor    ON task_events(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
@@ -2911,6 +2925,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             conn, "tasks", "session_id", "session_id TEXT"
         )
 
+    if "thread_root_task_id" not in cols:
+        # Historical tasks stay NULL. The read API may infer a marked legacy
+        # projection, but it must not persist an approximation as original text.
+        _add_column_if_missing(
+            conn, "tasks", "thread_root_task_id", "thread_root_task_id TEXT"
+        )
+
     if "needs_specification" not in cols:
         # Existing rows were already complete task specifications, so the
         # backward-compatible migration default is false.
@@ -2967,6 +2988,10 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_thread_root "
+        "ON tasks(thread_root_task_id)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_workflow ON tasks(workflow_id, id)"
@@ -4998,8 +5023,8 @@ def create_loop_skeleton_graph(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, created_by, created_at, "
                 " workspace_kind, workspace_path, tenant, idempotency_key, "
-                " session_id, workflow_id, needs_specification) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                " session_id, workflow_id, thread_root_task_id, needs_specification) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
                 (
                     task_id,
                     node["title"],
@@ -5014,6 +5039,21 @@ def create_loop_skeleton_graph(
                     item_idempotency_keys[client_id],
                     session_id,
                     workflow_id,
+                    task_id,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO task_threads "
+                "(root_task_id, workflow_id, origin_session_id, tenant, title, "
+                " description, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    task_id,
+                    workflow_id,
+                    session_id or "",
+                    tenant,
+                    node["title"],
+                    body or node["title"],
+                    now,
                 ),
             )
             _append_event(
@@ -9218,7 +9258,8 @@ def decompose_triage_task(
             return None
         root_row = conn.execute(
             "SELECT id, status, tenant, workspace_kind, workspace_path, "
-            "project_id, project_repo_path, session_id, workflow_id "
+            "project_id, project_repo_path, session_id, workflow_id, "
+            "thread_root_task_id "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -9227,6 +9268,9 @@ def decompose_triage_task(
         if root_row["status"] not in allowed_root_statuses:
             return None
         workflow_id = str(root_row["workflow_id"] or "").strip() or None
+        thread_root_task_id = (
+            str(root_row["thread_root_task_id"] or "").strip() or task_id
+        )
         if workflow_id is None:
             workflow_id = _loop_root_for_task(conn, task_id)
         child_created_by = author or "decomposer"
@@ -9332,8 +9376,9 @@ def decompose_triage_task(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
                 " workspace_path, project_id, project_repo_path, tenant, "
-                " created_at, created_by, session_id, workflow_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " created_at, created_by, session_id, workflow_id, "
+                " thread_root_task_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -9349,6 +9394,7 @@ def decompose_triage_task(
                     child_created_by,
                     child_session_id,
                     workflow_id,
+                    thread_root_task_id,
                 ),
             )
             created_payload = {
@@ -9463,7 +9509,10 @@ def decompose_triage_task(
                     author.strip(),
                     (
                         "Decomposed into "
-                        + ", ".join(child_ids)
+                        + ", ".join(
+                            f"{children[index]['title'].strip()} ({child_id})"
+                            for index, child_id in enumerate(child_ids)
+                        )
                         + (
                             (
                                 ". Aggregate shell will settle when all "
