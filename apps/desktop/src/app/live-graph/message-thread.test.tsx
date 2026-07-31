@@ -5,14 +5,6 @@ import { LiveGraphMessageThread } from './message-thread'
 import { type LiveGraphMessage, normalizeSessionThreads } from './messages'
 import type { LiveGraphNode } from './model'
 
-vi.mock('@/components/chat/preview-attachment', () => ({
-  PreviewAttachment: ({ target }: { target: string }) => (
-    <button data-preview-target={target} type="button">
-      Preview {target}
-    </button>
-  )
-}))
-
 const root: LiveGraphMessage = {
   author: '',
   board: 'default',
@@ -66,9 +58,11 @@ describe('LiveGraphMessageThread', () => {
       />
     )
 
-    expect(screen.getByRole('button', { name: /Preview \/tmp\/report\.txt/ }).getAttribute('data-preview-target')).toBe(
-      '/tmp/report.txt'
-    )
+    const preview = screen.getByRole('button', { name: 'Preview /tmp/report.txt' })
+    expect(preview.getAttribute('data-preview-target')).toBe('/tmp/report.txt')
+    expect(preview.getAttribute('title')).toBe('/tmp/report.txt')
+    expect(preview.textContent).toBe('/tmp/report.txt')
+    expect(preview.parentElement?.tagName).toBe('P')
   })
 
   it('renders the request first followed by flat chronological replies without composer or task cards', () => {
@@ -354,7 +348,9 @@ describe('LiveGraphMessageThread', () => {
     )
 
     expect(screen.getByRole('link', { name: 'Review work' }).getAttribute('href')).toBe(longUrl)
-    expect(screen.getByRole('button', { name: 'Preview report.pdf' })).toBeTruthy()
+    const explicitPreview = screen.getByRole('button', { name: 'Open preview' })
+    expect(explicitPreview).toBeTruthy()
+    expect(explicitPreview.textContent).toBe('Open preview')
     expect(screen.getByTestId('live-graph-message-thread').className).toContain('overflow-x-hidden')
     expect(screen.getByTestId('live-graph-thread-comment').className).toContain('min-w-0')
     expect(screen.getByRole('button', { name: new RegExp(`Comments: ${longTaskId}`) }).className).toContain('break-all')

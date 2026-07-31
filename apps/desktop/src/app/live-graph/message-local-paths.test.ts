@@ -37,9 +37,23 @@ describe('linkifyMessageLocalPaths', () => {
     expect(linkifyMessageLocalPaths('escaped "/tmp/a\\"b.txt"')).toContain('(#preview/%2Ftmp%2Fa%5C%22b.txt)')
   })
 
+  it('does not infer unquoted paths that contain whitespace', () => {
+    expect(linkifyMessageLocalPaths('/tmp/My Report.txt')).toBe('[/tmp/My](#preview/%2Ftmp%2FMy) Report.txt')
+    expect(linkifyMessageLocalPaths('/tmp/report.txt and notes.md')).toBe(
+      '[/tmp/report.txt](#preview/%2Ftmp%2Freport.txt) and notes.md'
+    )
+    expect(linkifyMessageLocalPaths('See /tmp/report.txt and continue.md')).toBe(
+      'See [/tmp/report.txt](#preview/%2Ftmp%2Freport.txt) and continue.md'
+    )
+  })
+
   it('rejects quoted control characters and escapes markdown label metacharacters', () => {
-    const control = '"/tmp/a\u0001b.txt"'
-    expect(linkifyMessageLocalPaths(control)).toBe(control)
+    for (let code = 0; code <= 0x1f; code += 1) {
+      const control = `"/tmp/a${String.fromCharCode(code)}b.txt"`
+      expect(linkifyMessageLocalPaths(control)).toBe(control)
+    }
+    const deleteCharacter = '"/tmp/a\u007fb.txt"'
+    expect(linkifyMessageLocalPaths(deleteCharacter)).toBe(deleteCharacter)
     expect(linkifyMessageLocalPaths('/tmp/a*b_.txt')).toBe('[/tmp/a\\*b\\_.txt](#preview/%2Ftmp%2Fa*b_.txt)')
   })
 

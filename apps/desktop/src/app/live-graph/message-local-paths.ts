@@ -67,23 +67,6 @@ function scanPlainText(text: string) {
     }
 
     if (character === '/' && isPathBoundary(text, index)) {
-      const lineEnd = text.indexOf('\n', index)
-      const line = text.slice(index, lineEnd >= 0 ? lineEnd : text.length)
-      const linePath = line.replace(TRAILING_PUNCTUATION, '')
-
-      if (
-        /\s/.test(linePath) &&
-        isAbsolutePath(linePath) &&
-        /\/[^/\s]+(?:\s+[^\s]+)+\.[^\s./]+$/.test(linePath) &&
-        !/\s+\//.test(linePath) &&
-        !/[`'"<>[\]]/.test(linePath)
-      ) {
-        output += pathLink(linePath)
-        output += line.slice(linePath.length)
-        index += line.length
-        continue
-      }
-
       let end = index + 1
 
       while (end < text.length && !/[\s`"'<>]/.test(text[end] || '')) {
