@@ -132,14 +132,7 @@ export const Thread = memo(function Thread({
         />
       )
     }),
-    [
-      hasBranchInNewChat,
-      hasCancel,
-      hasDismissError,
-      hasRestoreToMessage,
-      readOnly,
-      requestRestoreConfirm
-    ]
+    [hasBranchInNewChat, hasCancel, hasDismissError, hasRestoreToMessage, readOnly, requestRestoreConfirm]
   )
 
   const emptyPlaceholder = intro ? (

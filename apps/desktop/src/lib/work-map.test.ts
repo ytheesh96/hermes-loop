@@ -7,7 +7,15 @@ describe('parseWorkMap', () => {
     const parsed = parseWorkMap({
       work_map: JSON.stringify([
         { id: 'alpha', content: '  Draft loop  ', status: 'pending', dispatchable: 'yes' },
-        { id: 'beta', content: 'Review handoff', status: 'blocked', kind: 'publish-gate', attention: ' needs-orchestrator ', verification_state: ' pending ', dispatchable: 'false' },
+        {
+          id: 'beta',
+          content: 'Review handoff',
+          status: 'blocked',
+          kind: 'publish-gate',
+          attention: ' needs-orchestrator ',
+          verification_state: ' pending ',
+          dispatchable: 'false'
+        },
         { id: '', content: 'skip me', status: 'pending' },
         { id: 'gamma', content: 'skip me too', status: 'unknown' }
       ])

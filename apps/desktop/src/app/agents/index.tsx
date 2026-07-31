@@ -57,17 +57,9 @@ function loopagentNeedsAttention(agent: LoopagentActivity): boolean {
     return false
   }
 
-  const text = [agent.errorPreview, agent.summaryPreview, agent.sourceEvent]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase()
+  const text = [agent.errorPreview, agent.summaryPreview, agent.sourceEvent].filter(Boolean).join(' ').toLowerCase()
 
-  return (
-    status === 'blocked' ||
-    status === 'failed' ||
-    status === 'interrupted' ||
-    needsAttentionText(text)
-  )
+  return status === 'blocked' || status === 'failed' || status === 'interrupted' || needsAttentionText(text)
 }
 
 function loopagentVisibleInSpawnTree(agent: LoopagentActivity): boolean {

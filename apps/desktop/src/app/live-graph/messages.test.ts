@@ -88,6 +88,7 @@ describe('session task threads', () => {
         }
       ]
     })
+
     const delta = source({
       latest_reply_id: 10,
       replies: [
@@ -111,10 +112,8 @@ describe('session task threads', () => {
   })
 
   it('keeps board-local reply identities isolated', () => {
-    const merged = mergeSessionThreadSources(
-      [source({ board: 'alpha' })],
-      [source({ board: 'beta' })]
-    )
+    const merged = mergeSessionThreadSources([source({ board: 'alpha' })], [source({ board: 'beta' })])
+
     expect(merged.map(item => item.board)).toEqual(['alpha', 'beta'])
     expect(normalizeSessionThreads('profile-a', merged).filter(message => message.kind === 'root')).toHaveLength(2)
   })

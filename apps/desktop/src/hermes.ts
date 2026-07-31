@@ -809,10 +809,12 @@ export async function getLoopSessionThreads(
       board,
       after_reply_id: String(afterReplyIds[board] || 0)
     })
+
     const source = await window.hermesDesktop.api<LoopSessionThreadsSource>({
       profile,
       path: `/api/plugins/kanban/session-threads?${query.toString()}`
     })
+
     results.push({ ...source, board })
   }
 

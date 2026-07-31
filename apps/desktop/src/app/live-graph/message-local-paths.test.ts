@@ -12,12 +12,14 @@ describe('linkifyMessageLocalPaths', () => {
   it('preserves protected markdown, code, URLs, and non-path text', () => {
     const text =
       '`/tmp/code.txt` [label](/tmp/link.txt) [label][ref] ![image](/tmp/image.png) https://example.test/a/b / ./relative ~/file C:\\file /'
+
     expect(linkifyMessageLocalPaths(text)).toBe(text)
   })
 
   it('preserves multi-backtick spans, indented and tilde fences, and nested links', () => {
     const text =
       '`` /tmp/code.txt ``\n   ```\n/tmp/fenced.txt\n```\n~~~\n/tmp/tilde.txt\n~~~\n[outer [inner]](/tmp/a_(b).txt)'
+
     expect(linkifyMessageLocalPaths(text)).toBe(text)
   })
 
@@ -52,6 +54,7 @@ describe('linkifyMessageLocalPaths', () => {
       const control = `"/tmp/a${String.fromCharCode(code)}b.txt"`
       expect(linkifyMessageLocalPaths(control)).toBe(control)
     }
+
     const deleteCharacter = '"/tmp/a\u007fb.txt"'
     expect(linkifyMessageLocalPaths(deleteCharacter)).toBe(deleteCharacter)
     expect(linkifyMessageLocalPaths('/tmp/a*b_.txt')).toBe('[/tmp/a\\*b\\_.txt](#preview/%2Ftmp%2Fa*b_.txt)')

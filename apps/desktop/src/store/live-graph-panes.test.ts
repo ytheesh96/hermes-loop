@@ -54,9 +54,7 @@ describe('Graph View pane store', () => {
 
     const store = await import('./live-graph-panes')
 
-    expect(store.$liveGraphPanes.get()).toEqual([
-      expect.objectContaining({ key: 'default:root-id', mode: 'graph' })
-    ])
+    expect(store.$liveGraphPanes.get()).toEqual([expect.objectContaining({ key: 'default:root-id', mode: 'graph' })])
   })
 
   it('keeps one graph and one independently deduped feed for the same logical session', async () => {
@@ -110,10 +108,7 @@ describe('Graph View pane store', () => {
 
     const sourceIdentity = store.liveGraphSessionSourceIdentity(storedSession, $activeGatewayProfile.get())
     const paneId = store.openLiveGraphPane(storedSession, { dock: 'right', sourcePaneId: 'workspace' })
-    store.openLiveGraphPane(
-      { ...storedSession, title: 'Renamed graph' },
-      { dock: 'right', sourcePaneId: 'workspace' }
-    )
+    store.openLiveGraphPane({ ...storedSession, title: 'Renamed graph' }, { dock: 'right', sourcePaneId: 'workspace' })
     const persisted = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || '{}')
 
     expect(paneId).toBe('live-graph:active-profile:root-id')

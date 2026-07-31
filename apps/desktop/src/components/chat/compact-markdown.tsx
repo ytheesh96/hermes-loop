@@ -46,6 +46,7 @@ function MarkdownAnchor({ children, className, href, ...rest }: ComponentProps<'
 
   if (previewTarget) {
     const visibleText = typeof children === 'string' ? children : null
+
     return (
       <PreviewAttachment inline label={visibleText || previewTarget} source="explicit-link" target={previewTarget} />
     )

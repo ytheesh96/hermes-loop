@@ -42,8 +42,7 @@ const clean = (value: unknown): string => (typeof value === 'string' ? value.tri
 const boardName = (value: unknown): string => clean(value).toLowerCase() || 'default'
 const compareText = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0)
 
-const eventRank = (event: LiveGraphThreadEvent): number =>
-  event.kind === 'root' ? 0 : event.kind === 'reply' ? 1 : 2
+const eventRank = (event: LiveGraphThreadEvent): number => (event.kind === 'root' ? 0 : event.kind === 'reply' ? 1 : 2)
 
 const compareThreadEvents = (left: LiveGraphThreadEvent, right: LiveGraphThreadEvent): number => {
   if (left.kind === 'root' || right.kind === 'root') {
@@ -87,8 +86,7 @@ export function mergeSessionThreadSources(
       board,
       latest_reply_id: Math.max(current?.latest_reply_id || 0, delta.latest_reply_id || 0),
       replies: [...replies.values()].sort(
-        (left, right) =>
-          (left.created_at || 0) - (right.created_at || 0) || left.id - right.id
+        (left, right) => (left.created_at || 0) - (right.created_at || 0) || left.id - right.id
       ),
       threads: [...threads.values()].sort(
         (left, right) => left.created_at - right.created_at || compareText(left.root_task_id, right.root_task_id)
@@ -222,13 +220,12 @@ export function groupSessionMessageThreads(
           .map(task => [task.entityId, task] as const)
       )
 
-      const assignments: LiveGraphTaskAssignment[] = [...matchingTasks.values()]
-        .map(task => ({
-          createdAt: task.createdAt ?? root.createdAt,
-          id: `assignment\u0000${task.entityId}`,
-          kind: 'assignment' as const,
-          task
-        }))
+      const assignments: LiveGraphTaskAssignment[] = [...matchingTasks.values()].map(task => ({
+        createdAt: task.createdAt ?? root.createdAt,
+        id: `assignment\u0000${task.entityId}`,
+        kind: 'assignment' as const,
+        task
+      }))
 
       const chronological = [...grouped, ...assignments].sort(compareThreadEvents)
       const latest = chronological[chronological.length - 1]!
@@ -244,8 +241,5 @@ export function groupSessionMessageThreads(
         workflowId: root.workflowId
       }
     })
-    .sort(
-      (left, right) =>
-        left.rootCreatedAt - right.rootCreatedAt || compareText(left.rootTaskId, right.rootTaskId)
-    )
+    .sort((left, right) => left.rootCreatedAt - right.rootCreatedAt || compareText(left.rootTaskId, right.rootTaskId))
 }

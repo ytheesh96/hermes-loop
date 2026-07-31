@@ -63,11 +63,7 @@ function cleanSourcePaneId(value: unknown): string {
 const cleanDock = (value: unknown): 'center' | 'right' => (value === 'right' ? 'right' : 'center')
 const cleanMode = (value: unknown): LiveGraphPaneMode => (value === 'feed' ? 'feed' : 'graph')
 
-export function liveGraphPaneKey(
-  profile: string,
-  sessionRootId: string,
-  mode: LiveGraphPaneMode = 'graph'
-): string {
+export function liveGraphPaneKey(profile: string, sessionRootId: string, mode: LiveGraphPaneMode = 'graph'): string {
   const sessionKey = `${encodeURIComponent(normalizeProfileKey(profile))}:${encodeURIComponent(sessionRootId.trim())}`
 
   return mode === 'feed' ? `feed:${sessionKey}` : sessionKey

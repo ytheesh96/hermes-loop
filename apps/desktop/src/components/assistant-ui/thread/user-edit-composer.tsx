@@ -136,10 +136,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
     }
   }, [])
 
-  const setComposerText = useCallback(
-    (value: string) => safeComposerAction(() => aui.composer().setText(value)),
-    [aui]
-  )
+  const setComposerText = useCallback((value: string) => safeComposerAction(() => aui.composer().setText(value)), [aui])
 
   const cancelComposer = useCallback(() => safeComposerAction(() => aui.composer().cancel()), [aui])
 
