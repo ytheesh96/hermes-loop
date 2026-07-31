@@ -22,6 +22,7 @@ export interface LiveGraphNode {
   priority?: number
   revision?: number
   result?: string
+  rootTaskId?: string
   startedAt?: number
   status?: string
   summary?: string
@@ -509,6 +510,7 @@ export function buildSessionLiveGraph(input: SessionLiveGraphInput): LiveGraphSn
         ...(typeof task.priority === 'number' && Number.isFinite(task.priority) ? { priority: task.priority } : {}),
         revision,
         ...(clean(task.result) ? { result: clean(task.result) } : {}),
+        ...(clean(task.thread_root_task_id) ? { rootTaskId: clean(task.thread_root_task_id) } : {}),
         ...(typeof task.started_at === 'number' ? { startedAt: task.started_at } : {}),
         status: normalizedStatus(task.status),
         ...(clean(task.latest_summary) ? { summary: clean(task.latest_summary) } : {}),

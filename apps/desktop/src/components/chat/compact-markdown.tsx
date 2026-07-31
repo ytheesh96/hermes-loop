@@ -2,7 +2,9 @@ import type { ComponentProps, ElementType, FC } from 'react'
 import { memo } from 'react'
 import { Streamdown } from 'streamdown'
 
+import { PreviewAttachment } from '@/components/chat/preview-attachment'
 import { ExternalLink } from '@/lib/external-link'
+import { previewTargetFromMarkdownHref } from '@/lib/preview-targets'
 import { cn } from '@/lib/utils'
 
 // Compact markdown renderer for tool detail bodies. Same Streamdown pipeline
@@ -40,6 +42,12 @@ function tagged<T extends keyof typeof TAG_CLASSES>(Tag: T) {
 }
 
 function MarkdownAnchor({ children, className, href, ...rest }: ComponentProps<'a'>) {
+  const previewTarget = previewTargetFromMarkdownHref(href)
+
+  if (previewTarget) {
+    return <PreviewAttachment source="explicit-link" target={previewTarget} />
+  }
+
   if (!href || !/^https?:\/\//i.test(href)) {
     return (
       <a className={cn('link-chip', className)} href={href} {...rest}>
@@ -49,7 +57,7 @@ function MarkdownAnchor({ children, className, href, ...rest }: ComponentProps<'
   }
 
   return (
-    <ExternalLink className={className} href={href}>
+    <ExternalLink className={cn('wrap-anywhere', className)} href={href}>
       {children}
     </ExternalLink>
   )
@@ -106,7 +114,12 @@ export const CompactMarkdown = memo(function CompactMarkdown({
   text: string
 }) {
   return (
-    <div className={cn('max-w-full text-xs leading-relaxed text-muted-foreground/90 wrap-anywhere', className)}>
+    <div
+      className={cn(
+        'min-w-0 max-w-full overflow-hidden text-xs leading-relaxed text-muted-foreground/90 wrap-anywhere',
+        className
+      )}
+    >
       <Streamdown components={COMPONENTS} controls={false} mode="static" parseIncompleteMarkdown={false}>
         {text}
       </Streamdown>

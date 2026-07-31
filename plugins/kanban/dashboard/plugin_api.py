@@ -1882,6 +1882,7 @@ def get_workflow_overview(
             task_rows = conn.execute(
                 """
                 SELECT id, title, body, status, assignee, workflow_id, session_id,
+                       thread_root_task_id,
                        project_id, priority, result, current_run_id, created_at,
                        started_at, completed_at
                 FROM tasks

@@ -2716,6 +2716,11 @@ export function LiveGraphCanvas({
     [graphEdges, graphNodes, selectedHubNode]
   )
 
+  const messageTaskItems = useMemo(
+    () => graphNodes.filter(node => liveGraphNodeKind(node) === 'task'),
+    [graphNodes]
+  )
+
   const effectiveTaskFilter = selectedHubNode ? selectedWorkflowTaskFilter : viewState.workflowFilter
 
   const taskFilteredGraph = useMemo(
@@ -3594,7 +3599,7 @@ export function LiveGraphCanvas({
   )
 
   const selectMessageTask = useCallback(
-    (target: LiveGraphTaskTarget) => {
+    (target: LiveGraphTaskTarget, filter: LiveGraphTaskInspectorFilter) => {
       const board = target.board?.trim().toLowerCase() || 'default'
 
       const node = graphNodes.find(
@@ -3614,7 +3619,7 @@ export function LiveGraphCanvas({
         search: '',
         workflowFilter: 'all'
       }))
-      openNodeSelection(liveGraphNodeId(node), 'comments')
+      openNodeSelection(liveGraphNodeId(node), filter)
     },
     [commitState, graphNodes, openNodeSelection]
   )
@@ -5410,6 +5415,7 @@ export function LiveGraphCanvas({
               <LiveGraphMessageThread
                 {...(messageThread ?? { messages: [], onRetry: () => undefined })}
                 onSelectTask={selectMessageTask}
+                tasks={messageTaskItems}
               />
             )}
           </aside>

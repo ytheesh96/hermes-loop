@@ -100,48 +100,47 @@ export function ScopedTaskFeedPaneView({
     )
   }
 
-  if (selection) {
-    return (
+  return (
+    <>
+      {selection && (
+        <div
+          className="flex size-full min-h-0 min-w-0 flex-col overflow-hidden bg-(--ui-surface-background) [overflow-wrap:anywhere]"
+          data-live-graph-node-selection={selection.node.id}
+          data-testid="live-graph-selection-inspector"
+        >
+          <div className="shrink-0 border-b border-(--ui-stroke-tertiary) bg-(--ui-bg-elevated) px-3 py-2">
+            <Button
+              onClick={() => {
+                setSelection(null)
+                onViewChange?.(view)
+              }}
+              size="xs"
+              type="button"
+              variant="ghost"
+            >
+              <Codicon name="arrow-left" />
+              {t.common.back}
+            </Button>
+          </div>
+          <div
+            className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto"
+            data-testid="scoped-task-feed-inspector"
+          >
+            <LiveGraphTaskInspector
+              initialFilter={selection.filter}
+              node={selection.node}
+              profile={sourceProfile}
+              queryDetail
+              target={selection.target}
+            />
+          </div>
+        </div>
+      )}
       <div
         className="flex size-full min-h-0 min-w-0 flex-col overflow-hidden bg-(--ui-surface-background) [overflow-wrap:anywhere]"
-        data-live-graph-node-selection={selection.node.id}
-        data-testid="live-graph-selection-inspector"
+        data-testid="scoped-task-feed-pane"
+        hidden={Boolean(selection)}
       >
-        <div className="shrink-0 border-b border-(--ui-stroke-tertiary) bg-(--ui-bg-elevated) px-3 py-2">
-          <Button
-            onClick={() => {
-              setSelection(null)
-              onViewChange?.(view)
-            }}
-            size="xs"
-            type="button"
-            variant="ghost"
-          >
-            <Codicon name="arrow-left" />
-            {t.common.back}
-          </Button>
-        </div>
-        <div
-          className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto"
-          data-testid="scoped-task-feed-inspector"
-        >
-          <LiveGraphTaskInspector
-            initialFilter={selection.filter}
-            node={selection.node}
-            profile={sourceProfile}
-            queryDetail
-            target={selection.target}
-          />
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div
-      className="flex size-full min-h-0 min-w-0 flex-col overflow-hidden bg-(--ui-surface-background) [overflow-wrap:anywhere]"
-      data-testid="scoped-task-feed-pane"
-    >
       <div className="sticky top-0 z-10 shrink-0 border-b border-(--ui-stroke-tertiary) bg-(--ui-bg-elevated) px-3 py-2">
         <SegmentedControl
           className="w-full"
@@ -183,16 +182,18 @@ export function ScopedTaskFeedPaneView({
         ) : (
           <LiveGraphMessageThread
             {...messageThread}
-            onSelectTask={target => {
+            onSelectTask={(target, filter) => {
               const node = tasks.find(candidate => sameTask(candidate, target))
 
               if (node) {
-                selectTask(node, 'comments')
+                selectTask(node, filter)
               }
             }}
+            tasks={tasks}
           />
         )}
       </div>
-    </div>
+      </div>
+    </>
   )
 }

@@ -98,6 +98,7 @@ describe('buildSessionLiveGraph', () => {
               result: 'Focused tests passed.',
               started_at: 202,
               status: 'done',
+              thread_root_task_id: 'request-root',
               title: 'Show task details'
             }
           ])
@@ -114,6 +115,7 @@ describe('buildSessionLiveGraph', () => {
       entityId: 'task-1',
       priority: 2,
       result: 'Focused tests passed.',
+      rootTaskId: 'request-root',
       startedAt: 202,
       summary: 'Inspector wiring is complete.',
       workflowId: 'workflow-1'

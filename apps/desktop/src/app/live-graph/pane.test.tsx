@@ -199,9 +199,13 @@ describe('native Graph View panes', () => {
     )
     await waitFor(() => {
       const messagesView = mocks.view.mock.calls.at(-1)?.[0] as {
+        graph?: LiveGraphSnapshot
         messageThread?: { messages?: Array<{ body: string }> }
       }
 
+      expect(messagesView.graph?.nodes).toEqual([
+        expect.objectContaining({ entityId: 'task-1', kind: 'task' })
+      ])
       expect(messagesView.messageThread?.messages).toEqual([
         expect.objectContaining({ body: 'Original request', kind: 'root' }),
         expect.objectContaining({ body: 'Live update', kind: 'reply' })

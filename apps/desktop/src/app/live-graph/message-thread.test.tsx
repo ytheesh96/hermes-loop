@@ -3,6 +3,11 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { LiveGraphMessageThread } from './message-thread'
 import { type LiveGraphMessage, normalizeSessionThreads } from './messages'
+import type { LiveGraphNode } from './model'
+
+vi.mock('@/components/chat/preview-attachment', () => ({
+  PreviewAttachment: ({ target }: { target: string }) => <button type="button">Preview {target}</button>
+}))
 
 const root: LiveGraphMessage = {
   author: '',
@@ -26,10 +31,24 @@ const reply = (id: number, body: string, createdAt: number, taskId = 'task-1'): 
   id: `profile\u0000default\u0000reply\u0000${id}`,
   kind: 'reply',
   legacyRoot: false,
+  replyId: id,
   rootTaskId: 'task-1',
   taskId,
   taskTitle: 'Build projection',
   workflowId: 'workflow-1'
+})
+
+const task = (overrides: Partial<LiveGraphNode> = {}): LiveGraphNode => ({
+  assignee: 'Builder',
+  board: 'default',
+  createdAt: 25,
+  entityId: 'child-1',
+  id: 'task:default:child-1',
+  kind: 'task',
+  label: 'Implement projection',
+  status: 'running',
+  workflowId: 'workflow-1',
+  ...overrides
 })
 
 describe('LiveGraphMessageThread', () => {
@@ -46,6 +65,7 @@ describe('LiveGraphMessageThread', () => {
     const rows = [
       ...screen.getAllByTestId(/live-graph-thread-(root|comment)/)
     ].map(item => item.textContent)
+
     expect(rows).toEqual([
       expect.stringContaining('Original foreground request'),
       expect.stringContaining('Decomposed'),
@@ -112,6 +132,7 @@ describe('LiveGraphMessageThread', () => {
 
   it('keeps threads in immutable root creation order when later replies arrive', () => {
     const firstRoot = { ...root, taskTitle: 'First request' }
+
     const secondRoot: LiveGraphMessage = {
       ...root,
       body: 'Second foreground request',
@@ -121,6 +142,7 @@ describe('LiveGraphMessageThread', () => {
       taskId: 'task-2',
       taskTitle: 'Second request'
     }
+
     const lateSecondReply: LiveGraphMessage = {
       ...reply(20, 'Late activity', 100, 'task-2'),
       rootTaskId: 'task-2',
@@ -151,6 +173,7 @@ describe('LiveGraphMessageThread', () => {
         sourceProfile="profile"
       />
     )
+
     const threadButton = screen.getByRole('button', { name: /Messages: Build projection/i })
     fireEvent.click(threadButton)
     expect(threadButton.getAttribute('aria-expanded')).toBe('false')
@@ -168,10 +191,135 @@ describe('LiveGraphMessageThread', () => {
     )
   })
 
+  it('inserts assigned tasks chronologically, omits unassigned and root tasks, and opens Activity', () => {
+    const onSelectTask = vi.fn()
+
+    render(
+      <LiveGraphMessageThread
+        messages={[root, reply(10, 'Decomposed', 20), reply(11, 'Child complete', 30, 'child-1')]}
+        onRetry={vi.fn()}
+        onSelectTask={onSelectTask}
+        sourceProfile="profile"
+        tasks={[
+          task(),
+          task(),
+          task({ assignee: '  ', entityId: 'unassigned', id: 'task:default:unassigned' }),
+          task({ entityId: 'task-1', id: 'task:default:task-1', label: 'Root duplicate' })
+        ]}
+      />
+    )
+
+    expect(
+      screen.getAllByTestId(/live-graph-thread-(root|comment|assignment)/).map(item => item.textContent)
+    ).toEqual([
+      expect.stringContaining('Original foreground request'),
+      expect.stringContaining('Decomposed'),
+      expect.stringContaining('Assigned to Builder'),
+      expect.stringContaining('Child complete')
+    ])
+    expect(screen.queryByText('Root duplicate')).toBeNull()
+    expect(screen.queryByText('unassigned')).toBeNull()
+    expect(screen.getAllByTestId('live-graph-thread-assignment')).toHaveLength(1)
+
+    fireEvent.click(screen.getByRole('button', { name: /View activity: Implement projection/i }))
+    expect(onSelectTask).toHaveBeenCalledWith(
+      { board: 'default', taskId: 'child-1', workflowId: 'workflow-1' },
+      'activity'
+    )
+  })
+
+  it('orders same-time replies numerically before deterministic assignment task ids', () => {
+    render(
+      <LiveGraphMessageThread
+        messages={[root, reply(10, 'Comment ten', 20), reply(2, 'Comment two', 20)]}
+        onRetry={vi.fn()}
+        onSelectTask={vi.fn()}
+        sourceProfile="profile"
+        tasks={[
+          task({ createdAt: 20, entityId: 'child-b', id: 'task:default:child-b', label: 'Child B' }),
+          task({ createdAt: 20, entityId: 'child-a', id: 'task:default:child-a', label: 'Child A' })
+        ]}
+      />
+    )
+
+    expect(
+      screen.getAllByTestId(/live-graph-thread-(comment|assignment)/).map(item => item.textContent)
+    ).toEqual([
+      expect.stringContaining('Comment two'),
+      expect.stringContaining('Comment ten'),
+      expect.stringContaining('Child A'),
+      expect.stringContaining('Child B')
+    ])
+  })
+
+  it('places assignments only in their canonical root thread within a shared workflow', () => {
+    const secondRoot: LiveGraphMessage = {
+      ...root,
+      body: 'Second foreground request',
+      createdAt: 11,
+      id: 'profile\u0000default\u0000root\u0000task-2',
+      rootTaskId: 'task-2',
+      taskId: 'task-2',
+      taskTitle: 'Second request'
+    }
+
+    render(
+      <LiveGraphMessageThread
+        messages={[root, secondRoot]}
+        onRetry={vi.fn()}
+        onSelectTask={vi.fn()}
+        sourceProfile="profile"
+        tasks={[
+          task({ entityId: 'child-1', label: 'First child', rootTaskId: 'task-1' }),
+          task({ entityId: 'child-2', label: 'Second child', rootTaskId: 'task-2' })
+        ]}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Messages: Second request' }))
+
+    const threads = screen.getAllByRole('listitem').filter(item =>
+      item.querySelector('[aria-label^="Messages:"]')
+    )
+
+    expect(threads[0]?.textContent).toContain('First child')
+    expect(threads[0]?.textContent).not.toContain('Second child')
+    expect(threads[1]?.textContent).toContain('Second child')
+    expect(threads[1]?.textContent).not.toContain('First child')
+    expect(screen.getAllByTestId('live-graph-thread-assignment')).toHaveLength(2)
+  })
+
+  it('renders clickable markdown and keeps long content inside min-width-zero rows', () => {
+    const longUrl = `https://example.com/${'a'.repeat(160)}`
+    const longTaskId = `task-${'b'.repeat(160)}`
+
+    render(
+      <LiveGraphMessageThread
+        messages={[
+          { ...root, body: `[Review work](${longUrl}) and [artifact](#preview/report.pdf)` },
+          reply(10, 'Task metadata', 20, longTaskId)
+        ]}
+        onRetry={vi.fn()}
+        onSelectTask={vi.fn()}
+        sourceProfile="profile"
+        tasks={[]}
+      />
+    )
+
+    expect(screen.getByRole('link', { name: 'Review work' }).getAttribute('href')).toBe(longUrl)
+    expect(screen.getByRole('button', { name: 'Preview report.pdf' })).toBeTruthy()
+    expect(screen.getByTestId('live-graph-message-thread').className).toContain('overflow-x-hidden')
+    expect(screen.getByTestId('live-graph-thread-comment').className).toContain('min-w-0')
+    expect(screen.getByRole('button', { name: new RegExp(`Comments: ${longTaskId}`) }).className).toContain(
+      'break-all'
+    )
+  })
+
   it('distinguishes loading, empty, initial error, and stale refresh failure', () => {
     const { rerender } = render(
       <LiveGraphMessageThread loading messages={[]} onRetry={vi.fn()} onSelectTask={vi.fn()} />
     )
+
     expect(screen.getByRole('status', { name: 'Loading messages…' })).toBeTruthy()
 
     rerender(<LiveGraphMessageThread messages={[]} onRetry={vi.fn()} onSelectTask={vi.fn()} />)
@@ -191,6 +339,7 @@ describe('LiveGraphMessageThread', () => {
 
   it('pins appends only while the reader is already at the bottom', () => {
     const threadMessages = [root, reply(10, 'Decomposed', 20), reply(11, 'Done', 30)]
+
     const { rerender } = render(
       <LiveGraphMessageThread
         messages={threadMessages}
@@ -199,6 +348,7 @@ describe('LiveGraphMessageThread', () => {
         sourceProfile="source-profile"
       />
     )
+
     const scroller = screen.getByTestId('live-graph-message-thread')
     Object.defineProperties(scroller, {
       clientHeight: { configurable: true, value: 100 },

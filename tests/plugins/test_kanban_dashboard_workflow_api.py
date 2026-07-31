@@ -209,6 +209,13 @@ def test_workflow_overview_batches_sessions_and_keeps_unattached_workflows(
         child["task"]["id"],
         second["task"]["id"],
     }
+    assert {
+        task["id"]: task["thread_root_task_id"] for task in board["tasks"]
+    } == {
+        first["task"]["id"]: first["task"]["id"],
+        child["task"]["id"]: child["task"]["id"],
+        second["task"]["id"]: second["task"]["id"],
+    }
     assert board["links"] == [
         {"parent_id": first["task"]["id"], "child_id": child["task"]["id"]}
     ]

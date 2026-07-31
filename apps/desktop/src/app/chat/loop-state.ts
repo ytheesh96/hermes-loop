@@ -188,6 +188,7 @@ export interface TenantLoopTask {
   status: string
   suggested_owner?: null | string
   tenant?: null | string
+  thread_root_task_id?: null | string
   title: string
   warnings?: unknown
   workflow_id?: null | string

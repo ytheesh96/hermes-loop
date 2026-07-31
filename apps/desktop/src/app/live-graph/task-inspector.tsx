@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useRef, useState } from 'react'
 
 import { PRIMARY_ICON_BTN } from '@/app/chat/composer/controls'
 import type { LoopLatestRun, LoopTaskDetail, LoopTaskRun } from '@/app/chat/loop-state'
+import { CompactMarkdown } from '@/components/chat/compact-markdown'
 import { composerFill, composerSurfaceGlass } from '@/components/chat/composer-dock'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -340,9 +341,10 @@ function LiveGraphTaskInspectorContent({
                             </span>
                             {timestamp && <time className="ml-auto shrink-0">{timestamp}</time>}
                           </div>
-                          <p className="m-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-[0.6875rem] leading-4 text-(--ui-text-secondary)">
-                            {comment.body || ''}
-                          </p>
+                          <CompactMarkdown
+                            className="min-w-0 max-w-full overflow-hidden break-words text-[0.6875rem] leading-4 text-(--ui-text-secondary) [overflow-wrap:anywhere]"
+                            text={comment.body || ''}
+                          />
                         </div>
                       </article>
                     )
