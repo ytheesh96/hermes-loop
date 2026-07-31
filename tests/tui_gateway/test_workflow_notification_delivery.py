@@ -380,6 +380,85 @@ def test_workflow_batch_emits_one_structured_foreground_resume_boundary(
         assert sub["pending_claim_token"] is None
 
 
+def test_compression_alias_subscriptions_deliver_closed_workflow_boundary_once(
+    monkeypatch: pytest.MonkeyPatch,
+    workflow_db,
+):
+    old_session_key = "workflow-session-before-compression"
+    session_key = "workflow-session-after-compression"
+    session_db = server._get_db()
+    session_db.create_session(old_session_key, source="tui")
+    session_db.end_session(old_session_key, "compression")
+    session_db.create_session(
+        session_key,
+        source="tui",
+        parent_session_id=old_session_key,
+    )
+    assert session_db.resolve_resume_session_id(old_session_key) == session_key
+
+    with kb.connect() as conn:
+        workflow_id = kb.create_workflow(conn, workflow_id="wf-compression-alias")
+        already_acked_task = kb.create_task(
+            conn,
+            title="Previously delivered boundary",
+            assignee="worker",
+            workflow_id=workflow_id,
+        )
+        task_id = kb.create_task(
+            conn,
+            title="Complete once across compression aliases",
+            assignee="worker",
+            workflow_id=workflow_id,
+        )
+        assert kb.complete_task(
+            conn,
+            already_acked_task,
+            summary="delivered before compression",
+        )
+        acked_cursor = int(
+            conn.execute(
+                "SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind = ?",
+                (already_acked_task, "completed"),
+            ).fetchone()[0]
+        )
+        kb.add_workflow_notify_sub(
+            conn,
+            workflow_id=workflow_id,
+            platform="tui",
+            chat_id=old_session_key,
+            start_cursor=acked_cursor,
+        )
+        kb.add_workflow_notify_sub(
+            conn,
+            workflow_id=workflow_id,
+            platform="tui",
+            chat_id=session_key,
+        )
+        assert kb.complete_task(conn, task_id, summary="one logical boundary")
+        kb.close_workflow(conn, workflow_id)
+
+    dispatches = []
+
+    def _dispatch(_sid, session, text, **kwargs):
+        dispatches.append((text, kwargs))
+        session["running"] = False
+        kwargs["completion_callback"](True)
+        return True
+
+    monkeypatch.setattr(server, "_dispatch_notification_text", _dispatch)
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+    session = _session(session_key)
+
+    server._dispatch_tui_kanban_notifications("sid", session)
+    server._dispatch_tui_kanban_notifications("sid", session)
+
+    assert len(dispatches) == 1
+    assert task_id in dispatches[0][0]
+    assert already_acked_task not in dispatches[0][0]
+    with kb.connect() as conn:
+        assert kb.list_workflow_notify_subs(conn, workflow_id) == []
+
+
 def test_visible_checkpoint_survives_failed_turn_without_ack(
     monkeypatch: pytest.MonkeyPatch,
     workflow_db,

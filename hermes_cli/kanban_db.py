@@ -13747,6 +13747,117 @@ def list_workflow_notify_subs(
     return result
 
 
+def coalesce_workflow_notify_sub_routes(
+    conn: sqlite3.Connection,
+    *,
+    workflow_id: str,
+    canonical_notifier_profile: Optional[str],
+    canonical_platform: str,
+    canonical_chat_id: str,
+    canonical_thread_id: Optional[str],
+    aliases: Iterable[tuple[Optional[str], str, str, Optional[str]]],
+) -> Optional[dict[str, Any]]:
+    """Merge equivalent foreground routes without replaying their event cursors.
+
+    TUI compression aliases are distinct persisted ``chat_id`` values but one
+    logical consumer.  The caller resolves that lineage equivalence; this
+    transaction preserves the furthest ACK/visible checkpoints on one route
+    and removes the idle aliases.  A live lease makes the merge unsafe, so the
+    caller must retry after that in-flight delivery settles.
+    """
+
+    canonical = _workflow_sub_route(
+        workflow_id=workflow_id,
+        notifier_profile=canonical_notifier_profile,
+        platform=canonical_platform,
+        chat_id=canonical_chat_id,
+        thread_id=canonical_thread_id,
+    )
+    alias_routes = {canonical}
+    for notifier_profile, platform, chat_id, thread_id in aliases:
+        alias_routes.add(
+            _workflow_sub_route(
+                workflow_id=workflow_id,
+                notifier_profile=notifier_profile,
+                platform=platform,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+        )
+
+    now = int(time.time())
+    with write_txn(conn):
+        rows = [
+            row
+            for row in conn.execute(
+                "SELECT * FROM workflow_notify_subs WHERE workflow_id = ?",
+                (canonical[0],),
+            ).fetchall()
+            if (
+                str(row["workflow_id"]),
+                str(row["notifier_profile"] or ""),
+                str(row["platform"]),
+                str(row["chat_id"]),
+                str(row["thread_id"] or ""),
+            )
+            in alias_routes
+        ]
+        row_routes = {
+            (
+                str(row["workflow_id"]),
+                str(row["notifier_profile"] or ""),
+                str(row["platform"]),
+                str(row["chat_id"]),
+                str(row["thread_id"] or ""),
+            )
+            for row in rows
+        }
+        if canonical not in row_routes:
+            return None
+        if any(
+            row["pending_claim_token"]
+            and int(row["pending_expires_at"] or 0) > now
+            for row in rows
+        ):
+            return None
+        if len(rows) <= 1:
+            return dict(rows[0])
+
+        ack_cursor = max(int(row["last_event_id"] or 0) for row in rows)
+        visible_cursor = max(
+            int(row["last_notified_event_id"] or 0) for row in rows
+        )
+        conn.execute(
+            """
+            UPDATE workflow_notify_subs
+               SET last_event_id = ?, last_notified_event_id = ?,
+                   pending_claim_token = NULL, pending_event_id = NULL,
+                   pending_expires_at = NULL
+             WHERE workflow_id = ? AND notifier_profile = ? AND platform = ?
+               AND chat_id = ? AND thread_id = ?
+            """,
+            (ack_cursor, visible_cursor, *canonical),
+        )
+        for route in row_routes - {canonical}:
+            conn.execute(
+                """
+                DELETE FROM workflow_notify_subs
+                 WHERE workflow_id = ? AND notifier_profile = ? AND platform = ?
+                   AND chat_id = ? AND thread_id = ?
+                """,
+                route,
+            )
+        merged = conn.execute(
+            """
+            SELECT * FROM workflow_notify_subs
+             WHERE workflow_id = ? AND notifier_profile = ? AND platform = ?
+               AND chat_id = ? AND thread_id = ?
+            """,
+            canonical,
+        ).fetchone()
+        return dict(merged) if merged is not None else None
+
+
 def _workflow_events_after_cursor(
     conn: sqlite3.Connection,
     *,

@@ -12163,16 +12163,47 @@ def _collect_tui_workflow_notification(
                     continue
                 matching_subs.append(sub)
             matching_subs.sort(
-                key=lambda sub: (
-                    str(sub.get("chat_id") or "") == session_key,
-                    str(sub.get("chat_id") or "") == session_tip,
-                    int(sub.get("created_at") or 0),
-                    str(sub.get("workflow_id") or ""),
+                key=lambda item: (
+                    str(item.get("notifier_profile") or "").strip() == profile,
+                    str(item.get("chat_id") or "") == session_key,
+                    str(item.get("chat_id") or "") == session_tip,
+                    int(item.get("created_at") or 0),
+                    str(item.get("workflow_id") or ""),
                 ),
                 reverse=True,
             )
-
+            # Compression rotates TUI chat IDs, while the matcher intentionally
+            # treats their resolved tips as one logical foreground. Collapse
+            # those aliases before claiming so one event cursor cannot re-enter
+            # once per historical chat ID.
+            workflow_groups: dict[str, list[dict[str, Any]]] = {}
             for sub in matching_subs:
+                workflow_groups.setdefault(str(sub.get("workflow_id") or ""), []).append(
+                    sub
+                )
+            for equivalent_subs in workflow_groups.values():
+                sub = equivalent_subs[0]
+                if len(equivalent_subs) > 1:
+                    merged_sub = kb.coalesce_workflow_notify_sub_routes(
+                        conn,
+                        workflow_id=sub["workflow_id"],
+                        canonical_notifier_profile=sub.get("notifier_profile"),
+                        canonical_platform=sub["platform"],
+                        canonical_chat_id=sub["chat_id"],
+                        canonical_thread_id=sub.get("thread_id") or "",
+                        aliases=[
+                            (
+                                alias.get("notifier_profile"),
+                                alias["platform"],
+                                alias["chat_id"],
+                                alias.get("thread_id") or "",
+                            )
+                            for alias in equivalent_subs
+                        ],
+                    )
+                    if merged_sub is None:
+                        continue
+                    sub = merged_sub
                 workflow_id = str(sub.get("workflow_id") or "")
                 if not workflow_id:
                     continue
