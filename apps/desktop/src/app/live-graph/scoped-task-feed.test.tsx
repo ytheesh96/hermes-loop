@@ -110,12 +110,21 @@ describe('ScopedTaskFeedPaneView', () => {
     expect(firstThread.getAttribute('aria-expanded')).toBe('false')
     expect(secondThread.getAttribute('aria-expanded')).toBe('true')
 
+    const messageThread = screen.getByTestId('live-graph-message-thread')
+    Object.defineProperties(messageThread, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 1_000 }
+    })
+    messageThread.scrollTop = 137
+    fireEvent.scroll(messageThread)
+
     fireEvent.click(screen.getByRole('button', { name: /View activity: Review second request/i }))
     expect(screen.getByTestId('live-graph-selection-inspector')).toBeTruthy()
     expect(screen.getByTestId('scoped-task-inspector').getAttribute('data-filter')).toBe('activity')
 
     fireEvent.click(screen.getByRole('button', { name: 'Back' }))
     expect(screen.getByRole('button', { name: 'Messages: Task two' }).getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByTestId('live-graph-message-thread').scrollTop).toBe(137)
     expect(onMessagesVisibleChange.mock.calls.map(([visible]) => visible)).toEqual([true, false, true])
   })
 })

@@ -117,6 +117,24 @@ describe('native Graph View panes', () => {
     expect(mocks.feedView).toHaveBeenCalledWith(expect.objectContaining({ sourceProfile: 'default' }))
     expect(mocks.view).not.toHaveBeenCalled()
     await waitFor(() => expect(mocks.getThreads).toHaveBeenCalledWith('session-one', 'default', ['default'], {}))
+
+    const onMessagesVisibleChange = mocks.feedView.mock.calls.at(-1)?.[0].onMessagesVisibleChange as (
+      visible: boolean
+    ) => void
+
+    mocks.getThreads.mockClear()
+
+    act(() => onMessagesVisibleChange(false))
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['loop-session-threads'] })
+    })
+    expect(mocks.getThreads).not.toHaveBeenCalled()
+
+    act(() => onMessagesVisibleChange(true))
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['loop-session-threads'] })
+    })
+    await waitFor(() => expect(mocks.getThreads).toHaveBeenCalledWith('session-one', 'default', ['default'], {}))
   })
 
   it('polls comments only for the active Messages view through the stored source profile', async () => {
