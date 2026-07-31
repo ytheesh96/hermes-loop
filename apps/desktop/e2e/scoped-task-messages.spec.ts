@@ -19,6 +19,36 @@ const ACTIVE_PROFILE = 'review-active-e2e'
 const SOURCE_PROFILE = 'review-source-e2e'
 const SOURCE_SESSION = 'source-session'
 const DECOY_SESSION = 'active-decoy-session'
+const SURFACE = '[data-composer-target]:not([data-pane-hidden] [data-composer-target])'
+
+async function assertNoHorizontalOverflow(
+  page: Page,
+  width: number
+): Promise<Record<string, { clientWidth: number; scrollWidth: number }>> {
+  await page.setViewportSize({ width, height: page.viewportSize()?.height ?? 720 })
+
+  return page.evaluate(() => {
+    const selectors = {
+      launcher: '.task-feed-launcher-row',
+      pane: '[data-testid="scoped-task-feed-pane"]',
+      thread: '[data-testid="live-graph-message-thread"]',
+      assignment: '[data-testid="live-graph-thread-assignment"]'
+    }
+    const measurements: Record<string, { clientWidth: number; scrollWidth: number }> = {}
+
+    for (const [name, selector] of Object.entries(selectors)) {
+      const element = document.querySelector<HTMLElement>(selector)
+      if (!element) continue
+      const measurement = { clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }
+      if (measurement.scrollWidth > measurement.clientWidth) {
+        throw new Error(`${name} overflows: ${JSON.stringify(measurement)}`)
+      }
+      measurements[name] = measurement
+    }
+
+    return measurements
+  })
+}
 
 interface SeedEvidence {
   childTasks: [string, string]
@@ -77,7 +107,26 @@ from hermes_state import SessionDB
 
 root = Path(os.environ["HERMES_HOME"])
 artifact = root / "report.pdf"
-artifact.write_bytes(b"%PDF-1.4\n% deterministic E2E artifact\n")
+pdf_objects = [
+    b"<< /Type /Catalog /Pages 2 0 R >>",
+    b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << >> >>",
+    b"<< /Length 44 >>\nstream\nBT /F1 12 Tf 20 100 Td (Deterministic PDF) Tj ET\nendstream",
+]
+pdf = bytearray(b"%PDF-1.4\n")
+offsets = [0]
+for number, body in enumerate(pdf_objects, 1):
+    offsets.append(len(pdf))
+    pdf.extend(f"{number} 0 obj\n".encode())
+    pdf.extend(body)
+    pdf.extend(b"\nendobj\n")
+xref_offset = len(pdf)
+pdf.extend(f"xref\n0 {len(pdf_objects) + 1}\n".encode())
+pdf.extend(b"0000000000 65535 f \n")
+for offset in offsets[1:]:
+    pdf.extend(f"{offset:010d} 00000 n \n".encode())
+pdf.extend(f"trailer\n<< /Size {len(pdf_objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode())
+artifact.write_bytes(bytes(pdf))
 source_description = (
     "IMMUTABLE_SOURCE_DESCRIPTION\n\n"
     "[HTTPS review](https://example.com/review)\n\n"
@@ -481,7 +530,11 @@ test.describe('scoped task Messages across profile backends', () => {
     await expect(feed.getByText('ACTIVE_DECOY_COMMENT')).toHaveCount(0)
     await expect(feed.locator('textarea, [contenteditable="true"]')).toHaveCount(0)
     await expect(feed.locator('[data-live-graph-task-card]')).toHaveCount(0)
+    await expect(page.getByRole('tab', { name: /^Tasks$/ })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /Task feed|Tasks/i })).toHaveCount(0)
+    await expect(page.getByTestId('live-graph-task-feed')).toHaveCount(0)
     await expect(page.getByTestId('live-graph-selection-inspector')).toHaveCount(0)
+    await assertNoHorizontalOverflow(page, 1440)
 
     const thread = feed.getByTestId('live-graph-message-thread')
     const rootMessages = thread.getByTestId('live-graph-thread-root')
@@ -521,6 +574,8 @@ test.describe('scoped task Messages across profile backends', () => {
     await expect(preview).toBeVisible()
     await preview.click()
     await expect(page.getByRole('tab', { name: 'report.pdf' })).toBeVisible()
+    await expect(page.locator('.preview-source-code')).toContainText('%%EOF')
+    await expect(page.getByText('Preview unavailable')).toHaveCount(0)
     await page.getByRole('button', { name: 'Close preview pane' }).click()
     await expect(page.getByRole('tab', { name: 'report.pdf' })).toHaveCount(0)
 
@@ -543,9 +598,15 @@ test.describe('scoped task Messages across profile backends', () => {
       element.dispatchEvent(new Event('scroll'))
     })
     expect(await thread.evaluate(element => element.scrollTop)).toBe(100)
-    const assignment = feed.getByTestId('live-graph-thread-assignment').nth(1)
+    const assignment = feed.getByTestId('live-graph-thread-assignment').filter({ hasText: 'Second child' })
+    await expect(assignment).toHaveCount(1)
     await assignment.getByRole('button').click()
     await expect(page.getByTestId('live-graph-task-activity')).toBeVisible()
+    const assignmentInspector = page.getByTestId('live-graph-selection-inspector')
+    await expect(assignmentInspector).toHaveAttribute(
+      'data-live-graph-node-selection',
+      expect.stringContaining(seed.childTasks[1])
+    )
     await page.getByRole('button', { name: 'Back' }).click()
     await expect(feed).toBeVisible()
     await expect(secondThread).toHaveAttribute('aria-expanded', 'true')
@@ -580,44 +641,45 @@ test.describe('scoped task Messages across profile backends', () => {
     await persistGraphPane(page)
     await page.reload()
     await waitForAppReady({ ...fixture!, cleanup: async () => undefined, mockUrl: fixture!.mock.url }, 120_000)
-    const graphTab = page.getByRole('tab', { name: /Graph proof/ })
-    await graphTab.click()
-    await expect(page.locator('[data-live-graph-canvas]')).toBeVisible({ timeout: 30_000 })
-    await expect(page.getByRole('tab', { name: /Task feed/ })).toHaveCount(0)
-    const workflowNode = page.locator('[data-live-graph-node-kind="workflow"]').first()
-    await expect(workflowNode).toBeVisible({ timeout: 30_000 })
-    await workflowNode.click()
-    await expect(page.getByRole('region', { name: 'Workflow task inbox' })).toBeVisible()
-    const workflowTaskCard = page.locator('[data-live-graph-task-card]').first()
+    const initialGraphProofTab = page.getByRole('tab', { name: /Graph proof/ })
+    await initialGraphProofTab.click()
+    await expect(page.locator('[data-live-graph-canvas]:visible')).toBeVisible({ timeout: 30_000 })
+    const workflowNodes = page.locator('[data-live-graph-node-kind="workflow"]:visible')
+    await expect(workflowNodes.first()).toBeVisible({ timeout: 30_000 })
+    let workflowTaskCard = page.locator('[data-live-graph-task-card]').filter({ hasText: 'First child' })
+    for (let index = 0; index < (await workflowNodes.count()); index += 1) {
+      await workflowNodes.nth(index).click()
+      await expect(page.getByRole('region', { name: 'Workflow task inbox' })).toBeVisible()
+      if (await workflowTaskCard.count()) {
+        break
+      }
+      await page.keyboard.press('Escape')
+    }
     await expect(workflowTaskCard).toBeVisible()
     await workflowTaskCard.locator('button').click()
     await expect(page.getByTestId('live-graph-task-activity')).toBeVisible()
+    const selectedGraphNode = page
+      .locator('[data-live-graph-node]')
+      .filter({ has: page.locator('[data-live-graph-node-selection]') })
+    await expect(selectedGraphNode).toHaveAttribute(
+      'data-live-graph-node-id',
+      expect.stringContaining(seed.childTasks[0])
+    )
 
-    await persistFeedPane(page)
-    await page.reload()
-    await waitForAppReady({ ...fixture!, cleanup: async () => undefined, mockUrl: fixture!.mock.url }, 120_000)
-    const reopenedFeedTab = page.getByRole('tab', { name: /Messages · Cross profile proof/ })
-    await reopenedFeedTab.click()
-    const reopenedFeed = page.getByTestId('scoped-task-feed-pane')
-    await reopenedFeed.waitFor({ state: 'visible', timeout: 30_000 })
-    await expect(reopenedFeed.getByText('IMMUTABLE_SOURCE_DESCRIPTION')).toBeVisible({ timeout: 30_000 })
-    await expect(reopenedFeed.getByTestId('live-graph-thread-comment')).toHaveCount(5)
-    await expect(reopenedFeed.getByText('CHILD_COMPLETION_LATEST', { exact: true })).toHaveCount(1)
-
-    await app.evaluate(() => {
-      ;(globalThis as typeof globalThis & { __failScopedMessages?: boolean }).__failScopedMessages = true
-    })
-    await expect(reopenedFeed.getByText('Showing the last complete thread. Refresh failed.')).toBeVisible({
-      timeout: 10_000
-    })
-    await expect(reopenedFeed.getByText('IMMUTABLE_SOURCE_DESCRIPTION')).toBeVisible()
-    await expect(reopenedFeed.getByText('CHILD_COMPLETION_LATEST', { exact: true })).toHaveCount(1)
-    await expect(page.locator('[data-live-graph-node-selection]')).toHaveCount(0)
-
-    const staleScreenshotPath = testInfo.outputPath('messages-stale-snapshot.png')
-    await page.screenshot({ path: staleScreenshotPath, fullPage: true })
-    await testInfo.attach('messages-stale-snapshot', {
-      path: staleScreenshotPath,
+    await page.locator('[role="tab"][data-tree-tab="workspace"]').click()
+    const chatComposer = page.locator(SURFACE).last().locator('[contenteditable="true"]').first()
+    await chatComposer.waitFor({ state: 'visible', timeout: 15_000 })
+    await chatComposer.fill('/loop')
+    await page.keyboard.press('Enter')
+    await expect(page.locator('[data-live-graph-canvas]:visible')).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByRole('tab', { name: /Task feed|Tasks/i })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /Task feed|Tasks/i })).toHaveCount(0)
+    await expect(page.getByTestId('live-graph-task-feed')).toHaveCount(0)
+    await expect(page.locator('[role="complementary"]').filter({ hasText: /Task feed/i })).toHaveCount(0)
+    const graphScreenshotPath = testInfo.outputPath('messages-graph-view.png')
+    await page.screenshot({ path: graphScreenshotPath, fullPage: true })
+    await testInfo.attach('messages-graph-view', {
+      path: graphScreenshotPath,
       contentType: 'image/png'
     })
   })

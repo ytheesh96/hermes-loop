@@ -44,6 +44,31 @@ async function currentSessionId(page: Page): Promise<string> {
   })
 }
 
+async function assertNoHorizontalOverflow(
+  page: Page
+): Promise<Record<string, { clientWidth: number; scrollWidth: number }>> {
+  return page.evaluate(() => {
+    const selectors = {
+      launcher: '.task-feed-launcher-row',
+      pane: '[data-testid="scoped-task-feed-pane"]',
+      thread: '[data-testid="live-graph-message-thread"]'
+    }
+    const measurements: Record<string, { clientWidth: number; scrollWidth: number }> = {}
+
+    for (const [name, selector] of Object.entries(selectors)) {
+      const element = document.querySelector<HTMLElement>(selector)
+      if (!element) continue
+      const measurement = { clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }
+      if (measurement.scrollWidth > measurement.clientWidth) {
+        throw new Error(`${name} overflows: ${JSON.stringify(measurement)}`)
+      }
+      measurements[name] = measurement
+    }
+
+    return measurements
+  })
+}
+
 function seedTask(fixture: MockBackendFixture, sessionId: string): { commentId: number; taskId: string } {
   const script = String.raw`
 import json
@@ -150,6 +175,7 @@ test.describe('Messages composer side-by-side placement', () => {
     await expect(page.getByTestId('live-graph-canvas')).toHaveCount(0)
     await expect(page.getByTestId('live-graph-task-feed')).toHaveCount(0)
     await expect(page.locator(SURFACE).last()).toBeVisible()
+    const wideMeasurements = await assertNoHorizontalOverflow(page)
 
     const feedPaneId = await feedTab.getAttribute('data-pane-id')
     const paneId = feedPaneId || `live-graph:feed:default:${sessionId}`
@@ -193,13 +219,14 @@ test.describe('Messages composer side-by-side placement', () => {
     await launcher.click()
     await expect(page.getByRole('tab', { name: /Messages/ })).toHaveCount(1)
     await page.keyboard.press('Meta+W')
-    await page.setViewportSize({ width: 1024, height: 900 })
+    await page.setViewportSize({ width: 640, height: 900 })
     await launcher.click()
     const narrowGroups = await paneGroupIds(page, ['workspace', paneId])
     expect(narrowGroups.workspace).not.toBe(narrowGroups[paneId])
     await expect(page.locator('[data-composer-target]')).toHaveCount(1)
     await expect(page.locator(SURFACE).last()).toBeVisible()
     await expect(page.getByTestId('scoped-task-feed-pane')).toBeVisible()
+    const narrowMeasurements = await assertNoHorizontalOverflow(page)
 
     const narrowScreenshot = testInfo.outputPath('task-feed-narrow-tab-fallback.png')
     await page.screenshot({ path: narrowScreenshot, fullPage: true })
@@ -221,7 +248,9 @@ test.describe('Messages composer side-by-side placement', () => {
           manuallyStackedGroups,
           preservedManualGroups,
           preservedManualCenterGroups,
-          narrowGroups
+          narrowGroups,
+          wideMeasurements,
+          narrowMeasurements
         },
         null,
         2
