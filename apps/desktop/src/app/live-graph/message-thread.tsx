@@ -16,7 +16,7 @@ const THREAD_ENTRY_CLASS = 'grid min-w-0 max-w-full gap-1 overflow-hidden'
 const THREAD_META_CLASS = 'flex min-w-0 flex-wrap items-center gap-x-2 text-[0.625rem] text-(--ui-text-tertiary)'
 const THREAD_SENDER_CLASS = 'min-w-0 break-words font-semibold text-(--ui-text-secondary)'
 const THREAD_BODY_CLASS =
-  'min-w-0 max-w-full overflow-hidden break-words text-(--ui-text-primary) [overflow-wrap:anywhere]'
+  'min-w-0 max-w-full overflow-hidden break-words text-xs leading-relaxed text-(--ui-text-primary) [overflow-wrap:anywhere]'
 
 export interface LiveGraphMessageThreadProps {
   error?: null | string
@@ -235,7 +235,7 @@ export function LiveGraphMessageThread({
                             )}
                           </div>
                           <div className={THREAD_BODY_CLASS} data-thread-message-body>
-                            <CompactMarkdown className="text-xs" text={message.body} />
+                            <CompactMarkdown text={message.body} />
                           </div>
                         </li>
                       )

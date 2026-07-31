@@ -248,6 +248,10 @@ describe('LiveGraphMessageThread', () => {
     expect(assignmentEntry.querySelector('button')?.className).not.toMatch(/border-l|bg-\(--ui-bg-secondary\)/)
     expect(assignmentEntry.querySelector('button')?.className).toMatch(/grid/)
     expect(assignmentBody?.className).toMatch(/min-w-0.*break-words.*\[overflow-wrap:anywhere\]/)
+    expect(assignmentBody?.className).toMatch(/text-xs/)
+    expect(assignmentBody?.className).toMatch(/leading-relaxed/)
+    expect(rootBody?.className).toMatch(/text-xs/)
+    expect(rootBody?.className).toMatch(/leading-relaxed/)
 
     fireEvent.click(screen.getByRole('button', { name: /View activity: Review/ }))
     expect(onSelectTask).toHaveBeenCalledWith(
