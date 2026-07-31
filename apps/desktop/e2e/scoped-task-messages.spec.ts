@@ -27,27 +27,33 @@ async function assertNoHorizontalOverflow(
 ): Promise<Record<string, { clientWidth: number; scrollWidth: number }>> {
   await page.setViewportSize({ width, height: page.viewportSize()?.height ?? 720 })
 
-  return page.evaluate(() => {
-    const selectors = {
-      launcher: '.task-feed-launcher-row',
-      pane: '[data-testid="scoped-task-feed-pane"]',
-      thread: '[data-testid="live-graph-message-thread"]',
-      assignment: '[data-testid="live-graph-thread-assignment"]'
-    }
-    const measurements: Record<string, { clientWidth: number; scrollWidth: number }> = {}
-
-    for (const [name, selector] of Object.entries(selectors)) {
-      const element = document.querySelector<HTMLElement>(selector)
-      if (!element) continue
-      const measurement = { clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }
-      if (measurement.scrollWidth > measurement.clientWidth) {
-        throw new Error(`${name} overflows: ${JSON.stringify(measurement)}`)
+  return page.evaluate(
+    ({ width }) => {
+      const selectors = {
+        launcher: '.task-feed-launcher-row',
+        pane: '[data-testid="scoped-task-feed-pane"]',
+        thread: '[data-testid="live-graph-message-thread"]',
+        assignment: '[data-testid="live-graph-thread-assignment"]'
       }
-      measurements[name] = measurement
-    }
+      const measurements: Record<string, { clientWidth: number; scrollWidth: number }> = {}
 
-    return measurements
-  })
+      for (const [name, selector] of Object.entries(selectors)) {
+        const element = document.querySelector<HTMLElement>(selector)
+        if (!element && name !== 'launcher') {
+          throw new Error(`${name} is missing at ${width}px`)
+        }
+        if (!element) continue
+        const measurement = { clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }
+        if (measurement.scrollWidth > measurement.clientWidth) {
+          throw new Error(`${name} overflows: ${JSON.stringify(measurement)}`)
+        }
+        measurements[name] = measurement
+      }
+
+      return measurements
+    },
+    { width }
+  )
 }
 
 interface SeedEvidence {
@@ -65,6 +71,7 @@ interface SeedEvidence {
   decoyTask: string
   secondSourceTask: string
   sourceTask: string
+  workflowId: string
   taskRows: Array<{
     body: string | null
     id: string
@@ -107,11 +114,12 @@ from hermes_state import SessionDB
 
 root = Path(os.environ["HERMES_HOME"])
 artifact = root / "report.pdf"
+content = b"q 0 0 200 200 re S Q\n"
 pdf_objects = [
     b"<< /Type /Catalog /Pages 2 0 R >>",
     b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
     b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << >> >>",
-    b"<< /Length 44 >>\nstream\nBT /F1 12 Tf 20 100 Td (Deterministic PDF) Tj ET\nendstream",
+    b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"endstream",
 ]
 pdf = bytearray(b"%PDF-1.4\n")
 offsets = [0]
@@ -127,6 +135,8 @@ for offset in offsets[1:]:
     pdf.extend(f"{offset:010d} 00000 n \n".encode())
 pdf.extend(f"trailer\n<< /Size {len(pdf_objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode())
 artifact.write_bytes(bytes(pdf))
+assert pdf.startswith(b"%PDF-1.4\n") and pdf.endswith(b"%%EOF\n")
+assert pdf_objects[3].startswith(b"<< /Length " + str(len(content)).encode())
 source_description = (
     "IMMUTABLE_SOURCE_DESCRIPTION\n\n"
     "[HTTPS review](https://example.com/review)\n\n"
@@ -269,6 +279,7 @@ try:
         "decoyTask": decoy_task,
         "secondSourceTask": second_source_task,
         "sourceTask": source_task,
+        "workflowId": source_graph["workflow_id"],
         "taskRows": task_rows,
         "threadRows": thread_rows,
     }))
@@ -534,8 +545,6 @@ test.describe('scoped task Messages across profile backends', () => {
     await expect(page.getByRole('button', { name: /Task feed|Tasks/i })).toHaveCount(0)
     await expect(page.getByTestId('live-graph-task-feed')).toHaveCount(0)
     await expect(page.getByTestId('live-graph-selection-inspector')).toHaveCount(0)
-    await assertNoHorizontalOverflow(page, 1440)
-
     const thread = feed.getByTestId('live-graph-message-thread')
     const rootMessages = thread.getByTestId('live-graph-thread-root')
     const replies = thread.getByTestId('live-graph-thread-comment')
@@ -574,7 +583,9 @@ test.describe('scoped task Messages across profile backends', () => {
     await expect(preview).toBeVisible()
     await preview.click()
     await expect(page.getByRole('tab', { name: 'report.pdf' })).toBeVisible()
-    await expect(page.locator('.preview-source-code')).toContainText('%%EOF')
+    await expect(page.locator('[aria-label="Loading preview"]')).toHaveCount(0)
+    await expect(page.locator('.preview-source-code')).toBeVisible()
+    await expect(page.locator('.preview-source-code')).toContainText('q 0 0 200 200 re S Q')
     await expect(page.getByText('Preview unavailable')).toHaveCount(0)
     await page.getByRole('button', { name: 'Close preview pane' }).click()
     await expect(page.getByRole('tab', { name: 'report.pdf' })).toHaveCount(0)
@@ -593,6 +604,16 @@ test.describe('scoped task Messages across profile backends', () => {
       true
     )
 
+    await thread.evaluate(element => {
+      element.scrollTop = 100
+      element.dispatchEvent(new Event('scroll'))
+    })
+    expect(await thread.evaluate(element => element.scrollTop)).toBe(100)
+    const wideAssignedMeasurements = await assertNoHorizontalOverflow(page, 1440)
+    await page.setViewportSize({ width: 640, height: 900 })
+    const narrowAssignedMeasurements = await assertNoHorizontalOverflow(page, 640)
+    expect(Object.keys(wideAssignedMeasurements)).toEqual(expect.arrayContaining(['pane', 'thread', 'assignment']))
+    expect(Object.keys(narrowAssignedMeasurements)).toEqual(expect.arrayContaining(['pane', 'thread', 'assignment']))
     await thread.evaluate(element => {
       element.scrollTop = 100
       element.dispatchEvent(new Event('scroll'))
@@ -644,18 +665,17 @@ test.describe('scoped task Messages across profile backends', () => {
     const initialGraphProofTab = page.getByRole('tab', { name: /Graph proof/ })
     await initialGraphProofTab.click()
     await expect(page.locator('[data-live-graph-canvas]:visible')).toBeVisible({ timeout: 30_000 })
-    const workflowNodes = page.locator('[data-live-graph-node-kind="workflow"]:visible')
-    await expect(workflowNodes.first()).toBeVisible({ timeout: 30_000 })
-    let workflowTaskCard = page.locator('[data-live-graph-task-card]').filter({ hasText: 'First child' })
-    for (let index = 0; index < (await workflowNodes.count()); index += 1) {
-      await workflowNodes.nth(index).click()
-      await expect(page.getByRole('region', { name: 'Workflow task inbox' })).toBeVisible()
-      if (await workflowTaskCard.count()) {
-        break
-      }
-      await page.keyboard.press('Escape')
-    }
-    await expect(workflowTaskCard).toBeVisible()
+    const workflowNodeId = `workflow:${SOURCE_PROFILE}:default:${seed.workflowId}`
+    const workflowNode = page.locator(`[data-live-graph-node-id="${workflowNodeId}"]:visible`)
+    await expect(workflowNode).toBeVisible({ timeout: 30_000 })
+    await workflowNode.click()
+    await expect(workflowNode.locator('[data-live-graph-node-selection]')).toBeVisible()
+    const workflowInbox = page.getByRole('region', { name: 'Workflow task inbox' })
+    await expect(workflowInbox).toBeVisible()
+    const workflowTaskCard = page.locator(
+      `[data-live-graph-task-card="task:${SOURCE_PROFILE}:default:${seed.childTasks[0]}"]`
+    )
+    await expect(workflowTaskCard).toContainText('First child')
     await workflowTaskCard.locator('button').click()
     await expect(page.getByTestId('live-graph-task-activity')).toBeVisible()
     const selectedGraphNode = page
@@ -675,6 +695,7 @@ test.describe('scoped task Messages across profile backends', () => {
     await expect(page.getByRole('tab', { name: /Task feed|Tasks/i })).toHaveCount(0)
     await expect(page.getByRole('button', { name: /Task feed|Tasks/i })).toHaveCount(0)
     await expect(page.getByTestId('live-graph-task-feed')).toHaveCount(0)
+    await expect(page.locator('[data-live-graph-task-card]')).toHaveCount(0)
     await expect(page.locator('[role="complementary"]').filter({ hasText: /Task feed/i })).toHaveCount(0)
     const graphScreenshotPath = testInfo.outputPath('messages-graph-view.png')
     await page.screenshot({ path: graphScreenshotPath, fullPage: true })
