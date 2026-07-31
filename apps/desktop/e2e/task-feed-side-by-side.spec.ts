@@ -33,7 +33,7 @@ async function currentSessionId(page: Page): Promise<string> {
       hermesDesktop: { api: <T>(request: unknown) => Promise<T> }
     }
     const result = await desktopWindow.hermesDesktop.api<{ sessions: Array<{ id: string }> }>({
-      path: '/api/sessions?limit=1&offset=0&min_messages=1&archived=exclude&order=recent',
+      path: '/api/sessions?limit=1&offset=0&min_messages=1&archived=exclude&order=recent'
     })
 
     if (!result.sessions[0]?.id) {
@@ -71,14 +71,14 @@ finally:
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: fixture.sandbox.root,
-    HERMES_HOME: fixture.sandbox.hermesHome,
+    HERMES_HOME: fixture.sandbox.hermesHome
   }
   delete env.HERMES_KANBAN_DB
   delete env.HERMES_KANBAN_BOARD
   const result = spawnSync('uv', ['run', 'python', '-c', script], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
-    env,
+    env
   })
   if (result.status !== 0) {
     throw new Error(`Failed to seed task feed fixture:\n${result.stderr}`)
@@ -116,7 +116,7 @@ async function paneGroupIds(page: Page, paneIds: string[]): Promise<Record<strin
   }, paneIds)
 }
 
-test.describe('task feed composer side-by-side placement', () => {
+test.describe('Messages composer side-by-side placement', () => {
   test.setTimeout(180_000)
 
   let fixture: MockBackendFixture | null = null
@@ -131,7 +131,7 @@ test.describe('task feed composer side-by-side placement', () => {
     fixture = null
   })
 
-  test('keeps chat visible, deduplicates re-clicks, and uses the narrow tab fallback', async ({}, testInfo) => {
+  test('keeps chat visible and deduplicates re-clicks at narrow width', async ({}, testInfo) => {
     const { page } = fixture!
     await page.setViewportSize({ width: 1440, height: 900 })
     await send(page, PROMPT)
@@ -143,13 +143,12 @@ test.describe('task feed composer side-by-side placement', () => {
     await launcher.waitFor({ state: 'visible', timeout: 15_000 })
     await launcher.click()
 
-    const feedTab = page.getByRole('tab', { name: new RegExp(`Task feed.*${MOCK_REPLY}`) })
+    const feedTab = page.getByRole('tab', { name: new RegExp(`Messages.*${MOCK_REPLY}`) })
     await expect(feedTab).toHaveCount(1)
     const feed = page.getByTestId('scoped-task-feed-pane')
     await expect(feed).toBeVisible()
     await expect(page.getByTestId('live-graph-canvas')).toHaveCount(0)
     await expect(page.getByTestId('live-graph-task-feed')).toHaveCount(0)
-    await expect(feed.getByRole('button', { name: 'Tasks' })).toHaveAttribute('aria-pressed', 'true')
     await expect(page.locator(SURFACE).last()).toBeVisible()
 
     const feedPaneId = await feedTab.getAttribute('data-pane-id')
@@ -165,12 +164,9 @@ test.describe('task feed composer side-by-side placement', () => {
     const restoredWideGroups = await paneGroupIds(page, ['workspace', paneId])
     expect(restoredWideGroups.workspace).not.toBe(restoredWideGroups[paneId])
 
-    await feed.getByRole('button', { exact: true, name: 'Messages' }).click()
     await expect(feed.getByText('SIDE_BY_SIDE_COMMENT')).toBeVisible({ timeout: 30_000 })
     await launcher.click()
-    await expect(page.getByRole('tab', { name: /Task feed/ })).toHaveCount(1)
-    await expect(feed.getByRole('button', { exact: true, name: 'Messages' })).toHaveAttribute('aria-pressed', 'true')
-
+    await expect(page.getByRole('tab', { name: /Messages/ })).toHaveCount(1)
     const wideScreenshot = testInfo.outputPath('task-feed-chat-side-by-side.png')
     await page.screenshot({ path: wideScreenshot, fullPage: true })
     await testInfo.attach('task-feed-chat-side-by-side', { path: wideScreenshot, contentType: 'image/png' })
@@ -182,34 +178,27 @@ test.describe('task feed composer side-by-side placement', () => {
     await launcher.click()
     const preservedManualGroups = await paneGroupIds(page, ['workspace', paneId])
     expect(preservedManualGroups).toEqual(manuallyStackedGroups)
-    await expect(page.getByRole('tab', { name: /Task feed/ })).toHaveCount(1)
+    await expect(page.getByRole('tab', { name: /Messages/ })).toHaveCount(1)
 
     await showSessionFromSidebar(page)
     await launcher.click({ modifiers: ['Shift'] })
     const preservedManualCenterGroups = await paneGroupIds(page, ['workspace', paneId])
     expect(preservedManualCenterGroups).toEqual(manuallyStackedGroups)
-    await expect(page.getByRole('tab', { name: /Task feed/ })).toHaveCount(1)
+    await expect(page.getByRole('tab', { name: /Messages/ })).toHaveCount(1)
 
     await page.keyboard.press('Meta+W')
-    await expect(page.getByRole('tab', { name: /Task feed/ })).toHaveCount(0)
+    await expect(page.getByRole('tab', { name: /Messages/ })).toHaveCount(0)
     await expect(page.locator(SURFACE).last()).toBeVisible()
 
     await launcher.click()
-    await expect(page.getByRole('tab', { name: /Task feed/ })).toHaveCount(1)
-    await expect(
-      page.getByTestId('scoped-task-feed-pane').getByRole('button', { exact: true, name: 'Tasks' })
-    ).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    )
-
-    await page.getByRole('button', { name: /Close Task feed/ }).click()
+    await expect(page.getByRole('tab', { name: /Messages/ })).toHaveCount(1)
+    await page.keyboard.press('Meta+W')
     await page.setViewportSize({ width: 1024, height: 900 })
     await launcher.click()
     const narrowGroups = await paneGroupIds(page, ['workspace', paneId])
-    expect(narrowGroups.workspace).toBe(narrowGroups[paneId])
+    expect(narrowGroups.workspace).not.toBe(narrowGroups[paneId])
     await expect(page.locator('[data-composer-target]')).toHaveCount(1)
-    await expect(page.locator(SURFACE)).toHaveCount(0)
+    await expect(page.locator(SURFACE).last()).toBeVisible()
     await expect(page.getByTestId('scoped-task-feed-pane')).toBeVisible()
 
     const narrowScreenshot = testInfo.outputPath('task-feed-narrow-tab-fallback.png')
@@ -232,15 +221,15 @@ test.describe('task feed composer side-by-side placement', () => {
           manuallyStackedGroups,
           preservedManualGroups,
           preservedManualCenterGroups,
-          narrowGroups,
+          narrowGroups
         },
         null,
         2
-      ),
+      )
     )
     await testInfo.attach('task-feed-side-by-side-evidence', {
       path: rawEvidencePath,
-      contentType: 'application/json',
+      contentType: 'application/json'
     })
   })
 })

@@ -9,7 +9,7 @@ import {
   type Sandbox,
   waitForAppReady,
   writeEnvFile,
-  writeMockProviderConfig,
+  writeMockProviderConfig
 } from './fixtures'
 import { type MockServer, startMockServer } from './mock-server'
 import { type ElectronApplication, expect, type Page, test } from './test'
@@ -70,11 +70,19 @@ import json
 import os
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from hermes_cli import kanban_db
 from hermes_state import SessionDB
 
 root = Path(os.environ["HERMES_HOME"])
+artifact = root / "report.pdf"
+artifact.write_bytes(b"%PDF-1.4\n% deterministic E2E artifact\n")
+source_description = (
+    "IMMUTABLE_SOURCE_DESCRIPTION\n\n"
+    "[HTTPS review](https://example.com/review)\n\n"
+    f"[Preview: report.pdf](#preview/{quote(str(artifact), safe='')})"
+)
 for profile, session_id in (("review-source-e2e", "source-session"), ("review-active-e2e", "active-decoy-session")):
     db = SessionDB(root / "profiles" / profile / "state.db")
     try:
@@ -89,7 +97,7 @@ try:
         nodes=[{
             "client_id": "foreground-root",
             "title": "Canonical source request",
-            "context": "IMMUTABLE_SOURCE_DESCRIPTION",
+            "context": source_description,
         }],
         session_id="source-session",
         created_by="foreground",
@@ -105,6 +113,11 @@ try:
         board="default",
     )
     assert child_tasks is not None and len(child_tasks) == 2
+    with kanban_db.write_txn(conn):
+        conn.executemany(
+            "UPDATE tasks SET assignee = 'Builder' WHERE id = ?",
+            [(task_id,) for task_id in child_tasks],
+        )
     late_comment = kanban_db.add_comment(
         conn, child_tasks[0], "First Builder", "CHILD_COMPLETION_LATEST"
     )
@@ -217,7 +230,7 @@ finally:
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: sandbox.root,
-    HERMES_HOME: sandbox.hermesHome,
+    HERMES_HOME: sandbox.hermesHome
   }
   delete env.HERMES_DELEGATED_CHILD_CONTEXT
   delete env.HERMES_KANBAN_DB
@@ -225,7 +238,7 @@ finally:
   const result = spawnSync('uv', ['run', 'python', '-c', script], {
     cwd: REPO_ROOT,
     env,
-    encoding: 'utf8',
+    encoding: 'utf8'
   })
   if (result.status !== 0) {
     throw new Error(`Failed to seed scoped Messages E2E fixture:\n${result.stderr}`)
@@ -245,10 +258,7 @@ async function setupScopedFixture(): Promise<ScopedFixture> {
   writeMockProviderConfig(activeHome, mock.url)
   writeEnvFile(activeHome)
   const seed = seedScopedProfiles(sandbox)
-  fs.writeFileSync(
-    path.join(sandbox.userDataDir, 'active-profile.json'),
-    JSON.stringify({ profile: ACTIVE_PROFILE }),
-  )
+  fs.writeFileSync(path.join(sandbox.userDataDir, 'active-profile.json'), JSON.stringify({ profile: ACTIVE_PROFILE }))
 
   const env = buildAppEnv(sandbox, { HOME: sandbox.root })
   delete env.HERMES_DELEGATED_CHILD_CONTEXT
@@ -272,14 +282,15 @@ async function setupScopedFixture(): Promise<ScopedFixture> {
       await app.close().catch(() => undefined)
       await mock.close().catch(() => undefined)
       sandbox.cleanup()
-    },
+    }
   }
 }
 
 async function api<T>(page: Page, request: Record<string, unknown>): Promise<T> {
   return page.evaluate(
-    options => (window as typeof window & { hermesDesktop: { api: (value: unknown) => Promise<T> } }).hermesDesktop.api(options),
-    request,
+    options =>
+      (window as typeof window & { hermesDesktop: { api: (value: unknown) => Promise<T> } }).hermesDesktop.api(options),
+    request
   )
 }
 
@@ -298,13 +309,38 @@ async function persistFeedPane(page: Page): Promise<void> {
               sourcePaneId: 'workspace',
               sourceProfile,
               sourceSessionId: sourceSession,
-              title: 'Cross profile proof',
-            },
-          ],
-        }),
+              title: 'Cross profile proof'
+            }
+          ]
+        })
       )
     },
-    { activeProfile: ACTIVE_PROFILE, sourceProfile: SOURCE_PROFILE, sourceSession: SOURCE_SESSION },
+    { activeProfile: ACTIVE_PROFILE, sourceProfile: SOURCE_PROFILE, sourceSession: SOURCE_SESSION }
+  )
+}
+
+async function persistGraphPane(page: Page): Promise<void> {
+  await page.evaluate(
+    ({ activeProfile, sourceProfile, sourceSession }) => {
+      localStorage.setItem(
+        'hermes.desktop.liveGraphPanes.v1',
+        JSON.stringify({
+          [activeProfile]: [
+            {
+              cwd: '',
+              dock: 'center',
+              mode: 'graph',
+              sessionRootId: sourceSession,
+              sourcePaneId: 'workspace',
+              sourceProfile,
+              sourceSessionId: sourceSession,
+              title: 'Graph proof'
+            }
+          ]
+        })
+      )
+    },
+    { activeProfile: ACTIVE_PROFILE, sourceProfile: SOURCE_PROFILE, sourceSession: SOURCE_SESSION }
   )
 }
 
@@ -325,9 +361,11 @@ test.describe('scoped task Messages across profile backends', () => {
   test('renders immutable Buzz-style threads and retains a stale snapshot after cold reopen', async ({}, testInfo) => {
     const { app, page, sandbox, seed } = fixture!
     await app.evaluate(({ ipcMain }) => {
-      const handlers = (ipcMain as typeof ipcMain & {
-        _invokeHandlers: Map<string, (event: unknown, request: Record<string, unknown>) => Promise<unknown>>
-      })._invokeHandlers
+      const handlers = (
+        ipcMain as typeof ipcMain & {
+          _invokeHandlers: Map<string, (event: unknown, request: Record<string, unknown>) => Promise<unknown>>
+        }
+      )._invokeHandlers
       const originalApiHandler = handlers.get('hermes:api')
       if (!originalApiHandler) {
         throw new Error('hermes:api IPC handler is unavailable')
@@ -344,7 +382,7 @@ test.describe('scoped task Messages across profile backends', () => {
           scope.__scopedMessageCalls!.push({
             path: String(request.path),
             profile: request.profile ?? null,
-            at: Date.now(),
+            at: Date.now()
           })
           if (scope.__failScopedMessages) {
             throw new Error('forced scoped Messages refresh failure')
@@ -355,25 +393,22 @@ test.describe('scoped task Messages across profile backends', () => {
     })
     await persistFeedPane(page)
     await page.reload()
-    await waitForAppReady(
-      { ...fixture!, cleanup: async () => undefined, mockUrl: fixture!.mock.url },
-      120_000,
-    )
+    await waitForAppReady({ ...fixture!, cleanup: async () => undefined, mockUrl: fixture!.mock.url }, 120_000)
 
     const sourceIdentity = await api<{ current: string }>(page, {
       profile: SOURCE_PROFILE,
-      path: '/api/profiles/active',
+      path: '/api/profiles/active'
     })
     const sessionSource = await api<{ tasks: Array<{ id: string }> }>(page, {
       profile: SOURCE_PROFILE,
-      path: `/api/plugins/kanban/session-source?session_id=${SOURCE_SESSION}&board=default`,
+      path: `/api/plugins/kanban/session-source?session_id=${SOURCE_SESSION}&board=default`
     })
     const sessionThreads = await api<{
       replies: Array<{ body: string; created_at: number; id: number; root_task_id: string }>
       threads: Array<{ description: string; root_task_id: string }>
     }>(page, {
       profile: SOURCE_PROFILE,
-      path: `/api/plugins/kanban/session-threads?session_id=${SOURCE_SESSION}&board=default`,
+      path: `/api/plugins/kanban/session-threads?session_id=${SOURCE_SESSION}&board=default`
     })
     const profileLocalKanbanPaths = [ACTIVE_PROFILE, SOURCE_PROFILE]
       .map(profile => path.join(sandbox.hermesHome, 'profiles', profile, 'kanban.db'))
@@ -383,13 +418,13 @@ test.describe('scoped task Messages across profile backends', () => {
       seed,
       sessionSource,
       sessionThreads,
-      sourceIdentity,
+      sourceIdentity
     }
     const rawEvidencePath = testInfo.outputPath('buzz-thread-raw-evidence.json')
     fs.writeFileSync(rawEvidencePath, JSON.stringify(rawEvidence, null, 2))
     await testInfo.attach('buzz-thread-raw-evidence', {
       path: rawEvidencePath,
-      contentType: 'application/json',
+      contentType: 'application/json'
     })
 
     expect(sourceIdentity.current).toBe(SOURCE_PROFILE)
@@ -397,33 +432,33 @@ test.describe('scoped task Messages across profile backends', () => {
     expect(sessionSource.tasks.map(task => task.id)).not.toContain(seed.decoyTask)
     expect(sessionThreads.threads).toEqual([
       expect.objectContaining({
-        description: 'IMMUTABLE_SOURCE_DESCRIPTION',
-        root_task_id: seed.sourceTask,
+        description: expect.stringContaining('IMMUTABLE_SOURCE_DESCRIPTION'),
+        root_task_id: seed.sourceTask
       }),
       expect.objectContaining({
         description: 'SECOND_SOURCE_DESCRIPTION',
-        root_task_id: seed.secondSourceTask,
-      }),
+        root_task_id: seed.secondSourceTask
+      })
     ])
     const sourceReplies = sessionThreads.replies.filter(reply => reply.root_task_id === seed.sourceTask)
     expect(sourceReplies.map(reply => reply.body)).toEqual([
       expect.stringContaining('Decomposed into First child'),
       'CHILD_COMPLETION_LATEST',
-      'CHILD_COMPLETION_EARLIER',
+      'CHILD_COMPLETION_EARLIER'
     ])
     expect(sourceReplies.slice(1).map(reply => reply.id)).toEqual([2, 10])
     expect(sessionThreads.replies.map(reply => [reply.created_at, reply.id])).toEqual(
       [...sessionThreads.replies]
         .sort((left, right) => left.created_at - right.created_at || left.id - right.id)
-        .map(reply => [reply.created_at, reply.id]),
+        .map(reply => [reply.created_at, reply.id])
     )
     expect(new Set(sessionThreads.replies.map(reply => reply.root_task_id))).toEqual(
-      new Set([seed.sourceTask, seed.secondSourceTask]),
+      new Set([seed.sourceTask, seed.secondSourceTask])
     )
     expect(sessionThreads.replies.map(reply => reply.body)).not.toContain('ACTIVE_DECOY_COMMENT')
     expect(new Set(seed.taskRows.map(task => task.session_id))).toEqual(new Set([DECOY_SESSION, SOURCE_SESSION]))
-    expect(seed.threadRows.find(row => row.root_task_id === seed.sourceTask)?.description).toBe(
-      'IMMUTABLE_SOURCE_DESCRIPTION',
+    expect(seed.threadRows.find(row => row.root_task_id === seed.sourceTask)?.description).toContain(
+      'IMMUTABLE_SOURCE_DESCRIPTION'
     )
     expect(seed.taskRows.find(row => row.id === seed.sourceTask)?.body).toBe('MUTATED_WORKER_SPECIFICATION')
     expect(profileLocalKanbanPaths).toEqual([])
@@ -437,17 +472,15 @@ test.describe('scoped task Messages across profile backends', () => {
       scope.__failScopedMessages = false
     })
 
-    const feedTab = page.getByRole('tab', { name: /Task feed · Cross profile proof/ })
+    const feedTab = page.getByRole('tab', { name: /Messages · Cross profile proof/ })
     await feedTab.click()
     const feed = page.getByTestId('scoped-task-feed-pane')
     await feed.waitFor({ state: 'visible', timeout: 30_000 })
-    await feed.getByRole('button', { exact: true, name: 'Messages' }).click()
     await expect(feed.getByText('IMMUTABLE_SOURCE_DESCRIPTION')).toBeVisible({ timeout: 30_000 })
     await expect(feed.getByText('ACTIVE_DECOY_DESCRIPTION')).toHaveCount(0)
     await expect(feed.getByText('ACTIVE_DECOY_COMMENT')).toHaveCount(0)
     await expect(feed.locator('textarea, [contenteditable="true"]')).toHaveCount(0)
     await expect(feed.locator('[data-live-graph-task-card]')).toHaveCount(0)
-    await expect(feed.getByRole('button', { name: /View task:/i })).toHaveCount(0)
     await expect(page.getByTestId('live-graph-selection-inspector')).toHaveCount(0)
 
     const thread = feed.getByTestId('live-graph-message-thread')
@@ -462,23 +495,34 @@ test.describe('scoped task Messages across profile backends', () => {
     await expect(feed.getByRole('button', { name: /Messages:/ })).toHaveCount(2)
     expect(await feed.getByRole('button', { name: /Messages:/ }).allTextContents()).toEqual([
       expect.stringContaining('Canonical source request'),
-      expect.stringContaining('Second source request'),
+      expect.stringContaining('Second source request')
     ])
-    expect(
-      await thread.evaluate(element =>
-        Array.from(element.querySelectorAll('[data-testid^="live-graph-thread-"]')).map(node =>
-          node.textContent?.trim(),
-        ),
-      ),
-    ).toEqual([
+    const threadEntries = await thread.evaluate(element =>
+      Array.from(element.querySelectorAll('[data-testid^="live-graph-thread-"]')).map(node => node.textContent?.trim())
+    )
+    expect(threadEntries.slice(0, 4)).toEqual([
       expect.stringContaining('IMMUTABLE_SOURCE_DESCRIPTION'),
       expect.stringContaining('Decomposed into First child'),
       expect.stringContaining('CHILD_COMPLETION_LATEST'),
-      expect.stringContaining('CHILD_COMPLETION_EARLIER'),
+      expect.stringContaining('CHILD_COMPLETION_EARLIER')
     ])
-    expect(
-      await thread.evaluate(element => element.scrollTop + element.clientHeight >= element.scrollHeight - 2),
-    ).toBe(true)
+    expect(threadEntries.slice(4)).toEqual(
+      expect.arrayContaining([expect.stringContaining('First child'), expect.stringContaining('Second child')])
+    )
+    expect(await thread.evaluate(element => element.scrollTop + element.clientHeight >= element.scrollHeight - 2)).toBe(
+      true
+    )
+
+    const secondThread = feed.getByRole('button', { name: /Messages: Second source request/ })
+    await secondThread.click()
+    await expect(feed.getByTestId('live-graph-thread-assignment')).toHaveCount(2)
+    await expect(feed.getByRole('link', { name: 'HTTPS review' })).toHaveAttribute('href', 'https://example.com/review')
+    const preview = feed.getByRole('button', { name: /Open preview|Hide preview/ })
+    await expect(preview).toBeVisible()
+    await preview.click()
+    await expect(page.getByRole('tab', { name: 'report.pdf' })).toBeVisible()
+    await page.getByRole('button', { name: 'Close preview pane' }).click()
+    await expect(page.getByRole('tab', { name: 'report.pdf' })).toHaveCount(0)
 
     await api(page, {
       profile: SOURCE_PROFILE,
@@ -486,13 +530,26 @@ test.describe('scoped task Messages across profile backends', () => {
       path: `/api/plugins/kanban/tasks/${seed.childTasks[0]}/comments?board=default`,
       body: {
         author: 'Pinned Builder',
-        body: `PINNED_APPEND\n${'line\n'.repeat(80)}`,
-      },
+        body: `PINNED_APPEND\n${'line\n'.repeat(400)}`
+      }
     })
     await expect(feed.getByText(/PINNED_APPEND/)).toBeVisible({ timeout: 10_000 })
-    expect(
-      await thread.evaluate(element => element.scrollTop + element.clientHeight >= element.scrollHeight - 2),
-    ).toBe(true)
+    expect(await thread.evaluate(element => element.scrollTop + element.clientHeight >= element.scrollHeight - 2)).toBe(
+      true
+    )
+
+    await thread.evaluate(element => {
+      element.scrollTop = 100
+      element.dispatchEvent(new Event('scroll'))
+    })
+    expect(await thread.evaluate(element => element.scrollTop)).toBe(100)
+    const assignment = feed.getByTestId('live-graph-thread-assignment').nth(1)
+    await assignment.getByRole('button').click()
+    await expect(page.getByTestId('live-graph-task-activity')).toBeVisible()
+    await page.getByRole('button', { name: 'Back' }).click()
+    await expect(feed).toBeVisible()
+    await expect(secondThread).toHaveAttribute('aria-expanded', 'true')
+    expect(await thread.evaluate(element => element.scrollTop)).toBe(100)
 
     await thread.evaluate(element => {
       element.scrollTop = 0
@@ -503,41 +560,46 @@ test.describe('scoped task Messages across profile backends', () => {
       profile: SOURCE_PROFILE,
       method: 'POST',
       path: `/api/plugins/kanban/tasks/${seed.childTasks[1]}/comments?board=default`,
-      body: { author: 'Reading Builder', body: 'UNPINNED_APPEND' },
+      body: { author: 'Reading Builder', body: 'UNPINNED_APPEND' }
     })
     await feed.getByText('UNPINNED_APPEND', { exact: true }).waitFor({ state: 'attached', timeout: 10_000 })
     expect(await thread.evaluate(element => element.scrollTop)).toBeLessThanOrEqual(2)
 
     await page.waitForTimeout(2_300)
-    const visibleCalls = await app.evaluate(() =>
-      (globalThis as typeof globalThis & { __scopedMessageCalls?: Array<{ profile: unknown }> })
-        .__scopedMessageCalls ?? [],
+    const visibleCalls = await app.evaluate(
+      () =>
+        (globalThis as typeof globalThis & { __scopedMessageCalls?: Array<{ profile: unknown }> })
+          .__scopedMessageCalls ?? []
     )
     expect(visibleCalls.length).toBeGreaterThanOrEqual(2)
     expect(visibleCalls.every(call => call.profile === SOURCE_PROFILE)).toBe(true)
-    await expect(replies).toHaveCount(5)
+    await expect(replies).toHaveCount(6)
     await expect(feed.getByText('CHILD_COMPLETION_EARLIER', { exact: true })).toHaveCount(1)
     await expect(feed.getByText('CHILD_COMPLETION_LATEST', { exact: true })).toHaveCount(1)
 
-    await feed.getByRole('button', { exact: true, name: 'Tasks' }).click()
-    const callsAtTasks = visibleCalls.length
-    await page.waitForTimeout(2_300)
-    const callsAfterTasks = await app.evaluate(() =>
-      (globalThis as typeof globalThis & { __scopedMessageCalls?: unknown[] }).__scopedMessageCalls?.length ?? 0,
-    )
-    expect(callsAfterTasks).toBe(callsAtTasks)
+    await persistGraphPane(page)
+    await page.reload()
+    await waitForAppReady({ ...fixture!, cleanup: async () => undefined, mockUrl: fixture!.mock.url }, 120_000)
+    const graphTab = page.getByRole('tab', { name: /Graph proof/ })
+    await graphTab.click()
+    await expect(page.locator('[data-live-graph-canvas]')).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByRole('tab', { name: /Task feed/ })).toHaveCount(0)
+    const workflowNode = page.locator('[data-live-graph-node-kind="workflow"]').first()
+    await expect(workflowNode).toBeVisible({ timeout: 30_000 })
+    await workflowNode.click()
+    await expect(page.getByRole('region', { name: 'Workflow task inbox' })).toBeVisible()
+    const workflowTaskCard = page.locator('[data-live-graph-task-card]').first()
+    await expect(workflowTaskCard).toBeVisible()
+    await workflowTaskCard.locator('button').click()
+    await expect(page.getByTestId('live-graph-task-activity')).toBeVisible()
 
     await persistFeedPane(page)
     await page.reload()
-    await waitForAppReady(
-      { ...fixture!, cleanup: async () => undefined, mockUrl: fixture!.mock.url },
-      120_000,
-    )
-    const reopenedFeedTab = page.getByRole('tab', { name: /Task feed · Cross profile proof/ })
+    await waitForAppReady({ ...fixture!, cleanup: async () => undefined, mockUrl: fixture!.mock.url }, 120_000)
+    const reopenedFeedTab = page.getByRole('tab', { name: /Messages · Cross profile proof/ })
     await reopenedFeedTab.click()
     const reopenedFeed = page.getByTestId('scoped-task-feed-pane')
     await reopenedFeed.waitFor({ state: 'visible', timeout: 30_000 })
-    await reopenedFeed.getByRole('button', { exact: true, name: 'Messages' }).click()
     await expect(reopenedFeed.getByText('IMMUTABLE_SOURCE_DESCRIPTION')).toBeVisible({ timeout: 30_000 })
     await expect(reopenedFeed.getByTestId('live-graph-thread-comment')).toHaveCount(5)
     await expect(reopenedFeed.getByText('CHILD_COMPLETION_LATEST', { exact: true })).toHaveCount(1)
@@ -545,17 +607,18 @@ test.describe('scoped task Messages across profile backends', () => {
     await app.evaluate(() => {
       ;(globalThis as typeof globalThis & { __failScopedMessages?: boolean }).__failScopedMessages = true
     })
-    await expect(reopenedFeed.getByText('Showing the last complete thread. Refresh failed.')).toBeVisible({ timeout: 10_000 })
+    await expect(reopenedFeed.getByText('Showing the last complete thread. Refresh failed.')).toBeVisible({
+      timeout: 10_000
+    })
     await expect(reopenedFeed.getByText('IMMUTABLE_SOURCE_DESCRIPTION')).toBeVisible()
     await expect(reopenedFeed.getByText('CHILD_COMPLETION_LATEST', { exact: true })).toHaveCount(1)
-    await expect(reopenedFeed.getByRole('button', { name: /View task:/i })).toHaveCount(0)
     await expect(page.locator('[data-live-graph-node-selection]')).toHaveCount(0)
 
     const staleScreenshotPath = testInfo.outputPath('messages-stale-snapshot.png')
     await page.screenshot({ path: staleScreenshotPath, fullPage: true })
     await testInfo.attach('messages-stale-snapshot', {
       path: staleScreenshotPath,
-      contentType: 'image/png',
+      contentType: 'image/png'
     })
   })
 })
