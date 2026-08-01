@@ -10,28 +10,6 @@ from the original conversation.
 
 https://github.com/user-attachments/assets/48ea333a-3fe8-4a4a-b2e5-66af5b055fee
 
-## Installation
-
-### macOS (Apple silicon)
-
-1. Open the [latest Hermes Loop release](https://github.com/ytheesh96/hermes-loop/releases/latest).
-2. Download the file ending in `mac-arm64.dmg`.
-3. Open the DMG, drag **Hermes** to **Applications**, and launch it.
-
-The first public installer is for Apple-silicon Macs (`arm64`). Windows, Linux,
-and Intel Mac installers have not been published yet.
-
-> [!IMPORTANT]
-> The upstream `install.sh`, `install.ps1`, and `hermes desktop` commands install
-> or launch Nous Research's upstream Hermes Agent. They do **not** install this
-> Hermes Loop fork. Use this repository's [Releases](https://github.com/ytheesh96/hermes-loop/releases)
-> page when you want the Loop desktop experience.
-
-> [!NOTE]
-> The current macOS build does not carry an Apple Developer ID signature and is
-> not Apple-notarized. If macOS blocks the first launch, Control-click **Hermes**
-> in Applications, choose **Open**, then confirm **Open**. You only need to do
-> this once.
 
 ## What this fork adds
 
