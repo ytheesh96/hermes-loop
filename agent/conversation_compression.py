@@ -393,13 +393,15 @@ def compression_skipped_due_to_lock(agent: Any) -> bool:
 
 
 def _append_planning_snapshots(compressed: list[dict[str, Any]], agent: Any) -> None:
-    """Append active planning-state snapshots after context compression.
+    """Restore active planning state in one alternation-safe payload.
 
     The compressor may summarize or prune old tool-result messages, so any
-    active in-memory planning surface must be re-injected explicitly into the
-    compressed conversation just like todo state. Keep this best-effort: missing
-    stores or empty snapshots should never abort compression.
+    active in-memory planning surface must be re-injected explicitly. Todo then
+    work-map ordering is stable, and a trailing user turn absorbs the combined
+    payload rather than creating consecutive synthetic user messages. Keep this
+    best-effort: missing stores or empty snapshots should never abort compression.
     """
+    snapshots: list[str] = []
     for attr in ("_todo_store", "_work_map_store"):
         store = getattr(agent, attr, None)
         if store is None or not hasattr(store, "format_for_injection"):
@@ -410,7 +412,39 @@ def _append_planning_snapshots(compressed: list[dict[str, Any]], agent: Any) -> 
             logger.debug("%s.format_for_injection failed during compression", attr, exc_info=True)
             continue
         if snapshot:
-            compressed.append({"role": "user", "content": snapshot})
+            snapshots.append(snapshot)
+
+    if not snapshots:
+        return
+
+    planning_snapshot = "\n\n".join(snapshots)
+    tail = compressed[-1] if compressed and isinstance(compressed[-1], dict) else None
+    if tail is not None and tail.get("role") == "user":
+        from agent.context_compressor import _append_text_to_content
+
+        stripped = _strip_stale_todo_snapshot(tail.get("content"))
+        probe = {key: value for key, value in tail.items() if key != "content"}
+        probe["content"] = stripped
+        if _is_real_user_message(probe):
+            snapshot_text = (
+                f"\n\n{planning_snapshot}"
+                if isinstance(stripped, str) and stripped
+                else planning_snapshot
+            )
+            tail["content"] = _append_text_to_content(stripped, snapshot_text)
+            return
+        if stripped != tail.get("content") and not _message_text(
+            {"role": "user", "content": stripped}
+        ).strip():
+            tail["content"] = planning_snapshot
+            tail["_todo_snapshot_synthetic"] = True
+            return
+
+    compressed.append({
+        "role": "user",
+        "content": planning_snapshot,
+        "_todo_snapshot_synthetic": True,
+    })
 
 
 def _adopt_live_compression_child(
@@ -1089,7 +1123,7 @@ def _is_real_user_message(message: Any) -> bool:
 
 
 def _strip_stale_todo_snapshot(content: Any) -> Any:
-    """Remove a previously merged todo-snapshot block from message content.
+    """Remove a previously merged planning-snapshot block from message content.
 
     Snapshot merges (see the injection site in ``compress_context``) always
     append the block at the end of the trailing user turn, so a surviving
@@ -1098,12 +1132,17 @@ def _strip_stale_todo_snapshot(content: Any) -> Any:
     accumulating outdated snapshots (#26981).
     """
     from tools.todo_tool import TODO_INJECTION_HEADER
+    from tools.work_map_tool import WORK_MAP_INJECTION_HEADER
 
     if isinstance(content, str):
-        idx = content.find(TODO_INJECTION_HEADER)
-        if idx == -1:
+        indexes = [
+            index
+            for header in (TODO_INJECTION_HEADER, WORK_MAP_INJECTION_HEADER)
+            if (index := content.find(header)) != -1
+        ]
+        if not indexes:
             return content
-        return content[:idx].rstrip()
+        return content[: min(indexes)].rstrip()
     if isinstance(content, list):
         return [
             part
@@ -1111,9 +1150,9 @@ def _strip_stale_todo_snapshot(content: Any) -> Any:
             if not (
                 isinstance(part, dict)
                 and part.get("type") == "text"
-                and str(part.get("text") or "")
-                .lstrip()
-                .startswith(TODO_INJECTION_HEADER)
+                and str(part.get("text") or "").lstrip().startswith(
+                    (TODO_INJECTION_HEADER, WORK_MAP_INJECTION_HEADER)
+                )
             )
         ]
     return content
@@ -1983,56 +2022,7 @@ def compress_context(
                         "check auxiliary.compression.model in config.yaml."
                     )
 
-        todo_snapshot = agent._todo_store.format_for_injection()
-        if todo_snapshot:
-            # Fold the snapshot into a trailing REAL user message so
-            # compression never introduces a synthetic user/user pair. Any
-            # snapshot merged at an earlier boundary is stripped first so
-            # repeated compactions refresh rather than accumulate todo state
-            # (#26981). Scaffolding tails (continuation marker, summary
-            # handoff, a bare stale snapshot row) must never absorb the
-            # snapshot: merging would upgrade them to "real user" evidence
-            # and break zero-user provenance (#69292), so those keep the
-            # flagged standalone append and the real-user preservation pass
-            # continues to see todo scaffolding, not human intent.
-            from agent.context_compressor import _append_text_to_content
-
-            merged = False
-            _tail = (
-                compressed[-1]
-                if compressed and isinstance(compressed[-1], dict)
-                else None
-            )
-            if _tail is not None and _tail.get("role") == "user":
-                _stripped = _strip_stale_todo_snapshot(_tail.get("content"))
-                _probe = {
-                    key: value for key, value in _tail.items() if key != "content"
-                }
-                _probe["content"] = _stripped
-                if _is_real_user_message(_probe):
-                    _snapshot_text = (
-                        f"\n\n{todo_snapshot}"
-                        if isinstance(_stripped, str) and _stripped
-                        else todo_snapshot
-                    )
-                    _tail["content"] = _append_text_to_content(
-                        _stripped, _snapshot_text
-                    )
-                    merged = True
-                elif _stripped != _tail.get("content") and not _message_text(
-                    {"role": "user", "content": _stripped}
-                ).strip():
-                    # The tail was nothing but an earlier snapshot row —
-                    # refresh it in place instead of stacking a duplicate.
-                    _tail["content"] = todo_snapshot
-                    _tail["_todo_snapshot_synthetic"] = True
-                    merged = True
-            if not merged:
-                compressed.append({
-                    "role": "user",
-                    "content": todo_snapshot,
-                    "_todo_snapshot_synthetic": True,
-                })
+        _append_planning_snapshots(compressed, agent)
         _ensure_compressed_has_user_turn(messages, compressed)
 
         cached_system_prompt = agent._cached_system_prompt

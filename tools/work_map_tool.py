@@ -24,6 +24,9 @@ VALID_VERIFICATION_STATES = {"pending", "needs-orchestrator", "approved", "rejec
 MAX_WORK_MAP_CONTENT_CHARS = 4000
 MAX_WORK_MAP_ITEMS = 256
 MAX_EVENTS = 64
+WORK_MAP_INJECTION_HEADER = (
+    "[Your active work map was preserved across context compression]"
+)
 _TRUNCATION_MARKER = "… [truncated]"
 _SNAPSHOT_MARKER = "WORK_MAP_SNAPSHOT"
 _EVENT_MARKER = "WORK_MAP_EVENT"
@@ -122,7 +125,7 @@ class WorkMapStore:
         if not active:
             return None
 
-        lines = ["[Your active work map was preserved across context compression]"]
+        lines = [WORK_MAP_INJECTION_HEADER]
         for item in active:
             bits = [f"[{item.get('kind') or 'session-step'}]", item["content"]]
             if item.get("status"):
