@@ -31,11 +31,20 @@ jobs:
       - name: Apply guarded source patch
         run: python3 .github/codex/apply_bot_activity_patch.py
 
+      - name: Normalize VM array assertion
+        run: sed -i 's/rows\.map(/Array.from(rows, /' apps/desktop/src/plugins/hermes-bots/tests/group-activity-transcript.test.mjs
+
       - name: Parse plugin
         run: node --check apps/desktop/src/plugins/hermes-bots/plugin.js
 
-      - name: Run focused transcript tests
-        run: node --test apps/desktop/src/plugins/hermes-bots/tests/group-activity-transcript.test.mjs
+      - name: Run transcript and group-chat regressions
+        run: |
+          node --test \
+            apps/desktop/src/plugins/hermes-bots/tests/group-activity-transcript.test.mjs \
+            apps/desktop/src/plugins/hermes-bots/tests/group-activity.test.mjs \
+            apps/desktop/src/plugins/hermes-bots/tests/group-chat.test.mjs \
+            apps/desktop/src/plugins/hermes-bots/tests/group-room-ux.test.mjs \
+            apps/desktop/src/plugins/hermes-bots/tests/group-mention-composer.test.mjs
 
       - name: Commit implementation
         shell: bash
