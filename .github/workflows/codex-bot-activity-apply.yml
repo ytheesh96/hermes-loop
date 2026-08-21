@@ -1,0 +1,50 @@
+name: Apply bot-scoped activity transcript patch
+
+on:
+  pull_request:
+    branches:
+      - codex/bot-activity-upstream-base
+    paths:
+      - .github/codex/apply_bot_activity_patch.py
+      - apps/desktop/src/plugins/hermes-bots/plugin.js
+      - apps/desktop/src/plugins/hermes-bots/tests/**
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.head_ref == 'codex/bot-scoped-activity-transcripts'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: codex/bot-scoped-activity-transcripts
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Apply guarded source patch
+        run: python3 .github/codex/apply_bot_activity_patch.py
+
+      - name: Parse plugin
+        run: node --check apps/desktop/src/plugins/hermes-bots/plugin.js
+
+      - name: Run focused transcript tests
+        run: node --test apps/desktop/src/plugins/hermes-bots/tests/group-activity-transcript.test.mjs
+
+      - name: Commit implementation
+        shell: bash
+        run: |
+          rm -f .github/codex/apply_bot_activity_patch.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/desktop/src/plugins/hermes-bots/plugin.js \
+            apps/desktop/src/plugins/hermes-bots/tests/group-activity-transcript.test.mjs \
+            .github/codex/apply_bot_activity_patch.py
+          git commit -m "feat(desktop): add bot-scoped group activity transcripts"
+          git push origin HEAD:codex/bot-scoped-activity-transcripts
